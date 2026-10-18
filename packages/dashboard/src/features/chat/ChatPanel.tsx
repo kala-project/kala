@@ -112,6 +112,7 @@ import { groupConsecutiveToolDots, toolDotNodeWidth, toolDotRailBudget, toolPrev
 import { useIsMobile } from '../../app-logic/use-viewport.js'
 import { nextSearchMatchIndex, searchMatchSnippet, searchTranscript, type TranscriptSearchCategory, type TranscriptSearchMatch } from './transcript-search.js'
 import { normalizeMarkdownEmphasisAdjacency, remarkStripEmphasisAdjacencyMarker } from './normalize-markdown.js'
+import { normalizeThinkingDisplayText } from './normalize-thinking-text.js'
 
 // Keep the Markdown parser out of the initial chat bundle.
 const ChapterReader = lazy(() => import('./ChapterReader.js'))
@@ -2703,7 +2704,7 @@ function ThinkingBlock({
         : Math.min(currentIndex, Math.max(0, count - 1))
     })
   }, [count])
-  const presentations = updates.map((update) => thinkingPresentation(update.text))
+  const presentations = updates.map((update) => thinkingPresentation(normalizeThinkingDisplayText(update.text)))
   const selectedUpdate = updates[activeIndex] ?? updates.at(-1)
   const selectedPresentation = presentations[activeIndex] ?? presentations.at(-1)
   const title = selectedPresentation?.title
@@ -2804,7 +2805,7 @@ function ThinkingBlock({
             <div
               data-testid="thinking-update"
             >
-              <AssistantMarkdown text={selectedPresentation?.title ? selectedPresentation.body : selectedUpdate.text} />
+              <AssistantMarkdown text={selectedPresentation?.body ?? normalizeThinkingDisplayText(selectedUpdate.text)} />
             </div>
           ) : null}
         </div>

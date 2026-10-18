@@ -40,6 +40,7 @@ import {
 } from './grouping.js'
 import { firstLine, pickRenderer, previewValue, truncate, type SummaryRow } from './toolSummaries/index.js'
 import { VirtualTranscript } from './VirtualTranscript.js'
+import { normalizeThinkingDisplayText } from './normalize-thinking-text.js'
 
 type Props = {
   messages: readonly Message[]
@@ -331,7 +332,7 @@ function NestedContent({
   if (content.type === 'thinking') {
     return (
       <div className="text-muted-foreground" data-testid="nested-thinking-markdown">
-        <NestedPreviewText text={content.text} compact={compact} muted />
+        <NestedPreviewText text={normalizeThinkingDisplayText(content.text)} compact={compact} muted />
       </div>
     )
   }

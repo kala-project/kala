@@ -132,6 +132,13 @@ describe('NestedTranscript', () => {
     expect(screen.getByTestId('nested-thinking-markdown').querySelectorAll('li')).toHaveLength(2)
   })
 
+  it('normalizes separated apostrophes only in nested Thinking display', () => {
+    render(<NestedTranscript messages={[{ role: 'assistant', content: [
+      { type: 'thinking', text: 'I’ m investigating John’s report.' },
+    ] }] satisfies Message[]} />)
+    expect(screen.getByTestId('nested-thinking-markdown').textContent).toContain("I'm investigating John’s report.")
+  })
+
   it('preserves delegated prompt line breaks and bounds long prompt height', () => {
     const tail = 'PROMPT-TAIL'
     render(

@@ -401,6 +401,15 @@ describe('ChatPanel', () => {
     expect(screen.queryByText('inspect the implementation')).toBeNull()
   })
 
+  it('shows malformed upstream thinking contractions as readable text without changing ordinary punctuation', () => {
+    render(<ChatPanel messages={[{ role: 'assistant', content: [
+      { type: 'thinking', text: '## I’ m investigating\n\nWe’ re checking John’s report and “quoted text”.' },
+    ] }]} />)
+
+    expect(screen.getByTestId('thinking-title').textContent).toContain("I'm investigating")
+    expect(screen.getByTestId('thinking-update').textContent).toContain("We're checking John’s report and “quoted text”.")
+  })
+
   it('merges visually adjacent thinking updates into one paged block', () => {
     render(
       <ChatPanel
