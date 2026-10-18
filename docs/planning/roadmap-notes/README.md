@@ -16,5 +16,5 @@ Current notes:
 - [pwa-mobile-and-push.md](pwa-mobile-and-push.md) — mobile and push behavior.
 - [what-not-to-do.md](what-not-to-do.md) — explicit non-goals.
 
-Every change follows [../../meta/principles.md](../../meta/principles.md);
-regressions are logged in [../../meta/past-mistakes.md](../../meta/past-mistakes.md).
+Every change follows [../../meta/principles.md](../../standards/engineering/principles.md);
+regressions are logged in [../../meta/past-mistakes.md](../../archive/lessons-learned.md).

@@ -2,7 +2,7 @@
 
 Status: live inline observability implemented; interruption implemented; agent-type registry still planned
 Owner: host + dashboard
-Related: [tools.md](../executor/tools.md), [protocol/wire-protocol.md](../protocol/wire-protocol.md), [ARCHITECTURE.md](../architecture/overview.md), [adr/0014-subagent-approval-mode.md](../meta/adr/0014-subagent-approval-mode.md)
+Related: [tools.md](../reference/executor/tools.md), [protocol/wire-protocol.md](../protocol/wire-protocol.md), [ARCHITECTURE.md](../architecture/overview.md), [adr/0014-subagent-approval-mode.md](../meta/adr/0014-subagent-approval-mode.md)
 
 ## 1. What we already have
 

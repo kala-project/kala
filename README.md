@@ -44,7 +44,7 @@ The result is an Agent Kernel that remains small enough to understand and
 strict enough to act as the common behavioral contract for every deployment.
 See the
 [kernel implementation](packages/kernel/src/core.ts) and
-[pure-reducer design](docs/meta/adr/0001-pure-reducer.md).
+[pure-reducer design](docs/architecture/adr/0001-pure-reducer.md).
 
 ### Agent Runtime
 
@@ -64,7 +64,7 @@ processes, workspaces, machines, and tenants. It provides persistent sessions,
 remote workspace connectivity, concurrent task and subagent coordination,
 recovery, deployment control, and a consistent surface through the Dashboard,
 Desktop client, APIs, and automation. The versioned
-[Product API](docs/api/v1.md) exposes the same durable Session and DAG
+[Product API](docs/reference/api/v1.md) exposes the same durable Session and DAG
 authorities with OpenAPI and a typed client.
 
 For Private Cloud, isolated Tenant Runtime Units share the surrounding

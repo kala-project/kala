@@ -67,12 +67,12 @@ node packages/host/bin/kala-host.js
 
 ## References
 
-- Spec: [`docs/kernel/spec.md`](../../docs/kernel/spec.md) (kernel contract Host consumes)
+- Spec: [`docs/reference/kernel/spec.md`](../../docs/reference/kernel/spec.md) (kernel contract Host consumes)
 - Wire: [`docs/protocol/wire-protocol.md`](../../docs/protocol/wire-protocol.md)
 - Current log: [`docs/protocol/event-log.md`](../../docs/protocol/event-log.md)
-- Target log rewrite: [`docs/host/session-log-context-persistence.md`](../../docs/host/session-log-context-persistence.md)
+- Target log rewrite: [`docs/architecture/host/session-log-context-persistence.md`](../../docs/architecture/host/session-log-context-persistence.md)
 - Architecture: [`docs/architecture/overview.md`](../../docs/architecture/overview.md)
 
 ## Test coverage target
 
-≥80% (per [`docs/meta/testing.md`](../../docs/meta/testing.md) §3). Mock the LLM at the HTTP layer, mock the Executor at the wire layer. **Do not mock the kernel** — call it directly with real state.
+≥80% (per [`docs/standards/release-quality/testing.md`](../../docs/standards/release-quality/testing.md) §3). Mock the LLM at the HTTP layer, mock the Executor at the wire layer. **Do not mock the kernel** — call it directly with real state.

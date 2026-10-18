@@ -1,219 +1,43 @@
-# docs/
+# Kala documentation
 
-Documentation index for `agent-kernel`. If you're new here, start with the project [README](../README.md) — it provides the project overview and primary entry points. This index is grouped by **component** so you can jump straight to whatever you're touching.
+Start with the [project overview](../README.md). This index is organized by what you need to do, rather than by source package. A link to a design, proposal, or historical record does not mean the feature is currently shipped; check its stated status and the [current deployment contract](architecture/deployment-mode-contract.md).
 
----
+## Use Kala
 
-## By component
+- [Guides](guides/README.md) — choose a deployment, connect workspaces, and find the relevant user-facing workflow.
+- [Product API](reference/api/v1.md) — API clients and durable Session/DAG operations.
+- [Current roadmap](roadmap.md) — shipped, deferred, and out-of-scope work; confirm current behavior against the implementation.
 
-### Kernel — the pure-function FSM (`packages/kernel`)
+## Operate a deployment
 
-| File | Purpose |
-|---|---|
-| [kernel/spec.md](kernel/spec.md) | **Normative.** Types, state machine, invariants. The kernel contract. |
-| [kernel/core-protocol-design-review.md](kernel/core-protocol-design-review.md) | Review of the kernel FSM, event/effect schema, wire protocol, and boundary risks |
+- [Operations index](operations/README.md) — install, upgrade, rollback, backup, and troubleshoot Portable, Dedicated, and Private Cloud.
+- [Release support policy](operations/release-support-policy.md) — compatibility and rollback boundaries.
+- [Revision-bound evidence policy](evidence/README.md) — distinguish current proof from historical records.
 
-### Host — Node loop, extensions, HTTP/socket transport (`packages/host`)
+## Change Kala
 
-| File | Purpose |
-|---|---|
-| [host/context-compaction.md](host/context-compaction.md) | Host-driven compaction: triggers, protocol invariants, thresholds, known gaps |
-| [host/session-log-context-persistence.md](host/session-log-context-persistence.md) | **Target design.** Breaking v2 session-log/context persistence rewrite; explains current JSONL growth root cause and reference-agent formats |
-| [host/background-shell-design.md](host/background-shell-design.md) | Long-running shell tasks: registry, output streaming, dashboard control plane |
-| [host/sub-agent-design.md](host/sub-agent-design.md) | `agent` builtin: envelope, control-plane, forced `allow_all` |
-| [host/memory-consolidation.md](host/memory-consolidation.md) | Memory extension: consolidation triggers, storage, tool exposure |
-| [host/tool-output-overflow.md](host/tool-output-overflow.md) | Executor-side large-output spillover and preview pointers |
-| [host/skills.md](host/skills.md) | OpenCode-style `skill({ name })` tool loading |
-| [host/security-control-plane.md](host/security-control-plane.md) | **Normative.** Deployment-boundary credentials, authorization, audit, and security ownership |
-| [host/mcp.md](host/mcp.md) | **Source of truth.** Local stdio MCP client integration, Host catalog/approval ownership, deployment status, and limitations |
+- [Development workflow](development/build-test-deploy.md) and [contributing guide](../CONTRIBUTING.md).
+- [Engineering principles](standards/engineering/principles.md), [UI principles](standards/product-and-ui/ui-principles.md), [supply-chain security](standards/security/supply-chain-security.md), and [testing standards](standards/release-quality/testing.md). These apply across components; a runbook is not a replacement for a standard.
+- [Critical user-action test matrix](development/testing/critical-user-action-matrix.md) and [product E2E guidance](development/testing/product-e2e-harness.md).
 
-### Dashboard — React SPA (`packages/dashboard`)
+## Look up a contract
 
-| File | Purpose |
-|---|---|
-| [design/composer-redesign-sot.md](design/composer-redesign-sot.md) | **Normative.** Composer modes, controls, Context border, responsive geometry, and interaction contract |
-| [dashboard/debugger-design.md](dashboard/debugger-design.md) | Right-sidebar Inspector — debugger, not metrics dashboard |
-| [dashboard/advanced-debugger-features.md](dashboard/advanced-debugger-features.md) | Follow-up features building on the debugger foundation |
-| [dashboard/llm-message-assembly-debugger.md](dashboard/llm-message-assembly-debugger.md) | Explaining how LLM API messages are assembled |
-| [dashboard/derived-ui-enhancements.md](dashboard/derived-ui-enhancements.md) | Higher-level UI features derived from existing state |
-| [dashboard/browser-feature-todo.md](dashboard/browser-feature-todo.md) | Browser (web) feature backlog |
-| [dashboard/browser-core-local-runtime.md](dashboard/browser-core-local-runtime.md) | Browser-core local runtime option — planned |
-| [dashboard/frontend-modernization-plan.md](dashboard/frontend-modernization-plan.md) | Phased modernization: auto-animate, TanStack Query, Motion, typewriter |
-| [dashboard/session-runtime-interaction-sot.md](dashboard/session-runtime-interaction-sot.md) | **Normative.** Running-Session shell responsiveness, hover preview, status UI, overlays, stress testing, and deployment gates |
-| [dashboard/tool-card-mode.md](dashboard/tool-card-mode.md) | **Normative.** Tool Card modes, live/previous Intention Badge semantics, Dot Line de-duplication, details, and responsive verification gates |
+- [Kernel specification](reference/kernel/spec.md), [Executor tool contract](reference/executor/tools.md), and [Product API](reference/api/v1.md).
+- [Wire protocol](protocol/wire-protocol.md) and [event log](protocol/event-log.md). These retain their current paths because source and tests cite them directly.
+- [Deployment modes](architecture/deployment-mode-contract.md) and [security control plane](architecture/host/security-control-plane.md).
 
-### Executor — tool sandbox (`packages/executor`)
+## Understand the design
 
-| File | Purpose |
-|---|---|
-| [executor/tools.md](executor/tools.md) | **Normative.** Tool schemas, outputs, error contracts |
+- [Architecture overview](architecture/overview.md), [core invariants](architecture/core-agent-invariants-and-fault-model.md), and [architecture decisions](architecture/adr/).
+- [Dedicated Runtime](architecture/dedicated-platform-runtime-unit.md), [Private Cloud Runtime](architecture/private-cloud-runtime-units.md), [graceful restart and deployment](architecture/graceful-restart-and-deployment.md), and [browser sessions](architecture/browser-session-store.md).
+- [Visual approval and preview](architecture/visual-approval-loop.md) describes a target design; its presence here does not claim it has shipped.
+- [Dashboard designs](architecture/dashboard/) and [Host designs](architecture/host/) contain component-specific work. Use the document's status to distinguish current contracts from target designs.
 
-### Protocol — wire contracts (shared between all processes)
+## Research and historical records
 
-| File | Purpose |
-|---|---|
-| [protocol/wire-protocol.md](protocol/wire-protocol.md) | **Normative.** Every Socket.IO event between Dashboard, Host, and Executor |
-| [protocol/event-log.md](protocol/event-log.md) | **Implemented v1 format.** JSONL event log format for persistence, replay, fork; see the host session-log document for the breaking v2 target |
+- [Capability designs](capabilities/README.md) track implementation alignment; they are not a blanket claim that every proposal is shipped.
+- [Standalone evaluation](evaluation/README.md) and [RL research](research/rl/) have separate lifecycles from the product Host and Dashboard.
+- [Proposals](research/proposals/) are future or exploratory work, not operating procedures.
+- [Historical reviews and programs](archive/README.md) provide context, not current instructions. [Evidence](evidence/README.md) remains at its revision-bound path; filename alone does not establish current acceptance.
 
-### Evaluation — standalone platform and benchmark references
-
-| File | Purpose |
-|---|---|
-| [architecture/agent-evaluation-platform-refactor.md](architecture/agent-evaluation-platform-refactor.md) | Standalone evaluation architecture and clean-cutover contract |
-| [architecture/agent-evaluation-platform-implementation-ledger.md](architecture/agent-evaluation-platform-implementation-ledger.md) | Atomic implementation and verification ledger |
-| [evaluation/](evaluation/) | Contributor, security, compatibility, and release contracts |
-| [evals/references-comparison.md](evals/references-comparison.md) | Quantitative comparison of Claude Code, Codex, opencode, pi |
-| [evals/domain-knowledge/](evals/domain-knowledge/) | Per-benchmark domain notes (SWE-bench, τ-bench, Terminal-Bench, WebArena) |
-
-### RL — Agentic RL / slime integration
-
-| File | Purpose |
-|---|---|
-| [rl/system-design.md](rl/system-design.md) | **Source of truth.** Architecture, why historical sessions aren't RL samples, artifact families |
-| [rl/implementation.md](rl/implementation.md) | Local implementation gate and acceptance criteria |
-| [rl/training-design.md](rl/training-design.md) | Training methodology, GPU/budget decisions, stop conditions, risks |
-| [rl/shared-runbooks.md](rl/shared-runbooks.md) | Shared E2E smoke tiers + rented GPU host paid runbook; per-run parameters live in `../experiments/rl/<date>-run-<n>/runbook.md` |
-| [../experiments/rl/README.md](../experiments/rl/README.md) | Explains the RL experiment record layout and ignore boundaries |
-
----
-
-## Cross-cutting
-
-### Architecture
-
-| File | Purpose |
-|---|---|
-| [architecture/overview.md](architecture/overview.md) | Three processes and one full turn end-to-end |
-| [architecture/dag-first-agent-work.md](architecture/dag-first-agent-work.md) | **Implemented.** DAG-first planning, normal-Session Task Graph UI, durable recovery, and dedicated DAG execution mode |
-| [architecture/deployment-mode-contract.md](architecture/deployment-mode-contract.md) | **Normative.** Portable/Dedicated/Private Cloud configuration, capabilities, identity boundary, Unit isolation, and required release lanes |
-| [architecture/graceful-restart-and-deployment.md](architecture/graceful-restart-and-deployment.md) | **Normative.** Portable finalizer, Dedicated Supervisor, Dashboard-only activation, restart and rollback invariants |
-| [architecture/dashboard-multiplexed-connection-sot.md](architecture/dashboard-multiplexed-connection-sot.md) | **Normative.** Dashboard multiplexed connection and subscription authority |
-| [architecture/executor-installation-service-update-sot.md](architecture/executor-installation-service-update-sot.md) | **Normative.** Executor install, pairing, service and update lifecycle |
-| [architecture/turn-timing-observability-sot.md](architecture/turn-timing-observability-sot.md) | **Normative.** Turn timing authority and human-readable presentation |
-| [architecture/private-cloud-enterprise-architecture-contract.md](architecture/private-cloud-enterprise-architecture-contract.md) | **Normative.** Private Cloud enterprise composition and adapter boundaries |
-| [architecture/control-plane-postgresql-schema.md](architecture/control-plane-postgresql-schema.md) | **Normative.** Private Cloud control-plane PostgreSQL authority |
-| [architecture/product-hardening-program.md](architecture/product-hardening-program.md) | Historical closed execution program: product foundation, refactors, Docker, Box, quality gate, then LXD |
-| [architecture/private-cloud-enterprise-benchmark-matrix.md](architecture/private-cloud-enterprise-benchmark-matrix.md) | Grafana/GitLab/GitHub/Sentry benchmark matrix and Private Cloud build-vs-integrate decisions |
-| [architecture/commercial-saas-multitenancy-priorities.md](architecture/commercial-saas-multitenancy-priorities.md) | P0/P1/P2 gap breakdown for complete commercial SaaS multitenancy |
-| [architecture/core-agent-invariants-and-fault-model.md](architecture/core-agent-invariants-and-fault-model.md) | Normative cross-component authority map, invariants, fault injections, proofs, and release blockers |
-| [architecture/browser-session-store.md](architecture/browser-session-store.md) | Accepted design for opaque, server-revocable browser Sessions, device lists, refresh, and logout-all |
-| [architecture/observability-contract.md](architecture/observability-contract.md) | Bounded metrics, structured errors, health, SLOs, redaction, alerting, and acceptance |
-| [architecture/data-lifecycle-contract.md](architecture/data-lifecycle-contract.md) | Ownership, deletion, retention, export, quotas, migrations, backup, and recovery semantics |
-| [architecture/external-object-storage-proposal.md](architecture/external-object-storage-proposal.md) | **Deferred proposal.** Tiered S3/MinIO/Azure Blob storage boundaries, consistency protocols, migration phases, and activation criteria |
-| [architecture/strong-isolation-roadmap.md](architecture/strong-isolation-roadmap.md) | Migration from logical Units to worker processes, containers, and remote Runtime pools |
-| [architecture/runtime-naming-migration.md](architecture/runtime-naming-migration.md) | RuntimeIngressGateway/RuntimeHost/RuntimeUnitIngress naming contract and compatibility policy |
-| [architecture/llm-dependency-contract.md](architecture/llm-dependency-contract.md) | Explicit LLM Port/Adapter/Factory/SecretResolver boundaries and lifecycle scopes |
-| [architecture/session-artifact-registry.md](architecture/session-artifact-registry.md) | Durable session-bound `artifact://` image registration and rendering |
-| [architecture/visual-approval-loop.md](architecture/visual-approval-loop.md) | **Normative target.** Read-only Visual Preview, A2UI-compatible Visual IR, Agent-only patching, design confirmation, functional-coverage gates, and Browser Lab verification |
-| [testing/core-hardening-baseline-2026-07-31.md](testing/core-hardening-baseline-2026-07-31.md) | Frozen source/runtime/data baseline and evidence rules for the highest-strength core Agent regression program |
-| [testing/core-change-risk-and-coverage-matrix.md](testing/core-change-risk-and-coverage-matrix.md) | Changed-surface to invariant/test mapping, confirmed gaps, severity, and downstream audit ownership |
-| [testing/session-log-integrity-audit.md](testing/session-log-integrity-audit.md) | Session cursor/append/replay atomicity findings, legacy compatibility policy, fixes, and regression evidence |
-| [architecture/private-cloud-runtime-units.md](architecture/private-cloud-runtime-units.md) | **Accepted architecture and implementation record.** `TenantRuntimeUnit` logical isolation and Private Cloud composition |
-| [architecture/dedicated-platform-runtime-unit.md](architecture/dedicated-platform-runtime-unit.md) | **Normative.** Stable Ingress, Dedicated `local` Unit, external deployment Supervisor, migration, rollback, and final cutover contract |
-
-### Operations
-
-| File | Purpose |
-|---|---|
-| [operations/private-cloud-local-runbook.md](operations/private-cloud-local-runbook.md) | Single Docker Private Cloud stack with mandatory NFS Session storage, bootstrap, verification, backup, upgrade, and rollback |
-| [operations/dedicated-operator-cli.md](operations/dedicated-operator-cli.md) | Source-free Dedicated install, upgrade, rollback, backup, restore, and uninstall contract |
-| [operations/private-cloud-release.md](operations/private-cloud-release.md) | **Normative.** Private Cloud release and Dashboard-only lifecycle |
-| [operations/commercial-saas-tenant-lifecycle.md](operations/commercial-saas-tenant-lifecycle.md) | **Normative.** Shared SaaS tenant lifecycle, close, backup/PITR, retention, and schema gates |
-| [operations/release-evidence-contract.md](operations/release-evidence-contract.md) | **Normative.** Revision-bound release evidence requirements |
-| [operations/release-support-policy.md](operations/release-support-policy.md) | **Normative.** Supported versions, rollback and compatibility boundaries |
-| [operations/public-release-readiness.md](operations/public-release-readiness.md) | **Normative.** Public repository governance, unified version, distribution, supply-chain, operator CLI, and clean-environment release gates |
-| [operations/dedicated-platform-runtime-unit-cutover.md](operations/dedicated-platform-runtime-unit-cutover.md) | External staging, preflight, bounded cutover, verification, observation, and rollback for Dedicated Runtime Unit migration |
-| [operations/scheduled-task-writer-lock.md](operations/scheduled-task-writer-lock.md) | Fail-closed scheduled-task writer lock cutover and manual stale-lock recovery |
-
-### Design
-
-| File | Purpose |
-|---|---|
-| [ui-principles.md](ui-principles.md) | Shared product-interface hierarchy, density, typography, interaction, and responsive principles |
-| [design/human-attention-score.md](design/human-attention-score.md) | Session-scoped human attention indicator and draft risk-matched LLM evaluator |
-| [design/session-slash-commands.md](design/session-slash-commands.md) | Session slash command semantics for `/clear`, `/rename`, `/stop`, and `/delete` |
-| [design/authenticated-product-shell.md](design/authenticated-product-shell.md) | Private Cloud account identity, logout, cache partitioning, and authenticated product-shell behavior |
-| [design/logout-semantics.md](design/logout-semantics.md) | Product logout, logout-all, Provider-wide logout, forced-login, and cross-device behavior |
-| [design/account-center.md](design/account-center.md) | Private Cloud profile, login Sessions/devices, identity links, data/legal/support, and Settings grouping |
-| [design/bang-shell-command.md](design/bang-shell-command.md) | Implemented Bang Shell design and usage: explicit intent, workspace binding, queue semantics, cards, cancellation, and limits |
-| [design/scheduled-tasks.md](design/scheduled-tasks.md) | Implemented Unit-local scheduler design and usage: targets, recurrence/DST, recovery, tenancy, API, and Dashboard |
-
-### Testing
-
-| File | Purpose |
-|---|---|
-| [testing/critical-user-action-matrix.md](testing/critical-user-action-matrix.md) | Mode-aware end-to-end acceptance criteria for every critical visible action |
-| [testing/feature-review-ledger.md](testing/feature-review-ledger.md) | Historical feature-by-feature review snapshot, gaps, and remaining release proof |
-| [testing/current-program-baseline.md](testing/current-program-baseline.md) | Historical frozen LXD boundary and service snapshot, isolated validation environments, and evidence policy |
-| [testing/product-e2e-harness.md](testing/product-e2e-harness.md) | Normative real-action, side-effect, persistence, failure/recovery, evidence, and cleanup contract |
-
-### Development and supply chain
-
-| File | Purpose |
-|---|---|
-| [dev/build-test-deploy.md](dev/build-test-deploy.md) | Local build, test, and deployment workflow |
-| [supply-chain-security.md](supply-chain-security.md) | Exact-version, minimum-release-age, provenance, and release verification policy |
-
-### Capabilities
-
-| File | Purpose |
-|---|---|
-| [capabilities/](capabilities/) | Numbered capability designs (11 items — see the [README](capabilities/README.md)) |
-
-### Planning
-
-| File | Purpose |
-|---|---|
-| [planning/roadmap.md](planning/roadmap.md) | Shipped feature ledger + deferred items |
-| [planning/feature-gaps.md](planning/feature-gaps.md) | Shipped vs. deliberately-out vs. gaps; comparison table (pi / opencode / codex / claude-code) |
-| [planning/production-readiness.md](planning/production-readiness.md) | What still stands between the current build and a production deploy |
-| [planning/roadmap-notes/dashboard-product-readiness.md](planning/roadmap-notes/dashboard-product-readiness.md) | Historical coordinating plan for product maturity, phased implementation, and verification evidence |
-| [planning/roadmap-notes/](planning/roadmap-notes/) | Free-form roadmap essays: streaming, RL, product-polish, and explicit non-goals |
-
-### Evidence and historical records
-
-| File | Purpose |
-|---|---|
-| [evidence/README.md](evidence/README.md) | Authority rules for revision-bound current evidence versus historical snapshots |
-| [operations/dedicated-platform-systemd-external-agent-handoff.md](operations/dedicated-platform-systemd-external-agent-handoff.md) | Historical legacy migration handoff; not a current runbook |
-| [operations/dedicated-platform-systemd-external-agent-prompt.md](operations/dedicated-platform-systemd-external-agent-prompt.md) | Archived pre-migration prompt; do not execute as current procedure |
-
-### Meta — principles, testing, releasing, ADRs
-
-| File | Purpose |
-|---|---|
-| [meta/principles.md](meta/principles.md) | Non-negotiable principles that govern all doc + code decisions |
-| [meta/past-mistakes.md](meta/past-mistakes.md) | Retrospective on decisions that turned out wrong, so we don't repeat them |
-| [meta/authoring-notes.md](meta/authoring-notes.md) | Index of authoring guidance for contributors |
-| [meta/testing.md](meta/testing.md) | Per-layer test strategy + CI configuration |
-| [meta/releasing.md](meta/releasing.md) | npm publish workflow (tag-driven) |
-| [meta/adr/](meta/adr/) | Architecture Decision Records — one file per big call, with alternatives and consequences |
-
----
-
-## When docs disagree
-
-Authority is concern-specific rather than one global linear ranking:
-
-- agent execution semantics: `kernel/spec.md`;
-- cross-process wire messages: `protocol/*.md`;
-- Executor tool contracts: `executor/tools.md`;
-- deployment modes, capabilities, identity ownership, and Unit isolation: `architecture/deployment-mode-contract.md`;
-- verification policy: `meta/testing.md`;
-- user-journey acceptance: `testing/critical-user-action-matrix.md`;
-- runbooks and planning/status ledgers are derived and never override normative contracts.
-
-Each cross-cutting document should declare its status and scope. If documents conflict, fix the derived or stale document rather than selecting whichever was edited most recently.
-
-## When code disagrees with docs
-
-**Applicable, unsuperseded normative contracts win.** Historical snapshots, prompts, handoffs, plans, ledgers, and evidence do not override normative contracts or prove current implementation status. If code and a normative contract disagree, treat the code as buggy or the contract as incomplete and reconcile both explicitly.
-
-## Adding a new doc
-
-- Belongs to one component? Put it under `kernel/`, `host/`, `dashboard/`, `executor/`, `protocol/`, or `evals/`.
-- Cross-component design? Put it under `architecture/`.
-- Capability design? Put it under `capabilities/`.
-- Roadmap or planning note? Put it under `planning/`.
-- Principle, process, ADR, or team-level guidance? Put it under `meta/`.
-- Add a link to this index in the same PR.
+Some documents retain their original component-oriented paths because source code, tests, or numbered capability indexes refer to them. Use this index and the document's status instead of assuming a folder name implies authority.

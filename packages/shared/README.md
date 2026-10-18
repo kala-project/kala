@@ -17,7 +17,7 @@ Three separate packages need to agree on the shape of every event that crosses t
 
 ## What it does NOT contain
 
-- Kernel types like `AgentState`, `AgentEvent`, `Effect`. Those live in [`@agent-kernel/kernel`](../kernel/) and this package **re-exports** them so consumers can import everything from one place. See [ADR 0004](../../docs/meta/adr/0004-config-state-separation.md).
+- Kernel types like `AgentState`, `AgentEvent`, `Effect`. Those live in [`@agent-kernel/kernel`](../kernel/) and this package **re-exports** them so consumers can import everything from one place. See [ADR 0004](../../docs/architecture/adr/0004-config-state-separation.md).
 - Any runtime code. Import-only. No side effects on load.
 
 ## Usage

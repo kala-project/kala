@@ -160,9 +160,9 @@ A rendered page or HTTP 200 alone is never task-chain acceptance.
 - Private Cloud Runtime Units: [`private-cloud-runtime-units.md`](private-cloud-runtime-units.md)
 - Dedicated operator lifecycle: [`../operations/dedicated-operator-cli.md`](../operations/dedicated-operator-cli.md)
 - Dedicated cutover runbook: [`../operations/dedicated-platform-runtime-unit-cutover.md`](../operations/dedicated-platform-runtime-unit-cutover.md)
-- Historical legacy migration handoff: [`../operations/dedicated-platform-systemd-external-agent-handoff.md`](../operations/dedicated-platform-systemd-external-agent-handoff.md)
+- Historical legacy migration handoff: [`../operations/dedicated-platform-systemd-external-agent-handoff.md`](../archive/programs/dedicated-platform-systemd-external-agent-handoff.md)
 - Private Cloud local operations: [`../operations/private-cloud-local-runbook.md`](../operations/private-cloud-local-runbook.md)
-- Authenticated browser shell: [`../design/authenticated-product-shell.md`](../design/authenticated-product-shell.md)
-- Verification policy: [`../meta/testing.md`](../meta/testing.md)
+- Authenticated browser shell: [`../design/authenticated-product-shell.md`](identity-and-security/authenticated-product-shell.md)
+- Verification policy: [`../meta/testing.md`](../standards/release-quality/testing.md)
 
 If a derived document conflicts on product naming, configuration, capability shape, tenancy, or identity ownership, this contract wins.

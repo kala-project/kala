@@ -2,7 +2,7 @@
 
 **Status**: Design approved, unimplemented.
 **Owner**: TBD
-**Prereq reading**: [../../meta/principles.md](../../meta/principles.md), [../../executor/tools.md](../../executor/tools.md), `packages/executor/src/tools/internal.ts` header comment.
+**Prereq reading**: [../../meta/principles.md](../../standards/engineering/principles.md), [../../executor/tools.md](../../reference/executor/tools.md), `packages/executor/src/tools/internal.ts` header comment.
 
 ---
 
@@ -25,7 +25,7 @@ The `__` internal-tool convention (see `internal.ts` header) was introduced to "
 
 ## Non-goals
 
-- No change to the agent-facing tool surface (`read`, `bash`, etc. per [tools.md](../../executor/tools.md)). LLM-visible tools are governed by the "intersection of leading agents" principle and are out of scope.
+- No change to the agent-facing tool surface (`read`, `bash`, etc. per [tools.md](../../reference/executor/tools.md)). LLM-visible tools are governed by the "intersection of leading agents" principle and are out of scope.
 - No change to overflow spill management (`__fs_read_overflow` etc.). Overflow is an executor-owned mechanism, not a generic observation feature.
 - No change to pty/terminal channels (`terminal:create` etc.). PTY needs a dedicated bi-directional channel, not command execution.
 

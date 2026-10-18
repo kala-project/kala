@@ -1,6 +1,6 @@
 # Architecture
 
-**Status**: Normative for topology & responsibilities. Wire-level details live in [protocol/wire-protocol.md](../protocol/wire-protocol.md); kernel-level details in [SPEC.md](../kernel/spec.md).
+**Status**: Normative for topology & responsibilities. Wire-level details live in [protocol/wire-protocol.md](../protocol/wire-protocol.md); kernel-level details in [SPEC.md](../reference/kernel/spec.md).
 
 ---
 
@@ -69,7 +69,7 @@
 
 ### 2.1 Kernel (library, not a process)
 
-Lives inside Host as `@agent-kernel/kernel`. Pure function `step(state, event, config) → { next, effects }`. See [SPEC.md](../kernel/spec.md).
+Lives inside Host as `@agent-kernel/kernel`. Pure function `step(state, event, config) → { next, effects }`. See [SPEC.md](../reference/kernel/spec.md).
 
 **Not a process.** Do not deploy the kernel separately. It is a ~300 LOC pure-function library that Host imports.
 
@@ -332,18 +332,18 @@ Every non-obvious topology choice above has an ADR:
 
 | Choice | ADR |
 |---|---|
-| Kernel as pure reducer | [ADR 0001](../meta/adr/0001-pure-reducer.md) |
-| Executor dials out to Host (reverse-WS) | [ADR 0002](../meta/adr/0002-reverse-websocket.md) |
-| Socket.IO over raw WS / gRPC / SSE | [ADR 0003](../meta/adr/0003-socket-io.md) |
-| Config separated from state | [ADR 0004](../meta/adr/0004-config-state-separation.md) |
-| Planning / memory / subagents outside kernel | [ADR 0005](../meta/adr/0005-kernel-boundary.md) |
-| No independent relay process in v1 | [ADR 0006](../meta/adr/0006-no-relay-process.md) |
-| MCP-compatible tool schemas | [ADR 0007](../meta/adr/0007-mcp-compatible-tools.md) |
-| Dashboard: Vite + React SPA | [ADR 0008](../meta/adr/0008-dashboard-vite-react.md) |
-| Provider adapter strategy (Anthropic / OpenAI compat) | [ADR 0009](../meta/adr/0009-provider-adapter-strategy.md) |
-| FSM dispatch table shape | [ADR 0010](../meta/adr/0010-fsm-dispatch-table.md) |
-| Naming: Host + Kernel (was Server + Core) | [ADR 0011](../meta/adr/0011-rename-host-and-core.md) |
-| Dashboard Finder-style layout + control-plane events | [ADR 0013](../meta/adr/0013-dashboard-finder-layout.md) |
+| Kernel as pure reducer | [ADR 0001](adr/0001-pure-reducer.md) |
+| Executor dials out to Host (reverse-WS) | [ADR 0002](adr/0002-reverse-websocket.md) |
+| Socket.IO over raw WS / gRPC / SSE | [ADR 0003](adr/0003-socket-io.md) |
+| Config separated from state | [ADR 0004](adr/0004-config-state-separation.md) |
+| Planning / memory / subagents outside kernel | [ADR 0005](adr/0005-kernel-boundary.md) |
+| No independent relay process in v1 | [ADR 0006](adr/0006-no-relay-process.md) |
+| MCP-compatible tool schemas | [ADR 0007](adr/0007-mcp-compatible-tools.md) |
+| Dashboard: Vite + React SPA | [ADR 0008](adr/0008-dashboard-vite-react.md) |
+| Provider adapter strategy (Anthropic / OpenAI compat) | [ADR 0009](adr/0009-provider-adapter-strategy.md) |
+| FSM dispatch table shape | [ADR 0010](adr/0010-fsm-dispatch-table.md) |
+| Naming: Host + Kernel (was Server + Core) | [ADR 0011](adr/0011-rename-host-and-core.md) |
+| Dashboard Finder-style layout + control-plane events | [ADR 0013](adr/0013-dashboard-finder-layout.md) |
 
 ## References
 

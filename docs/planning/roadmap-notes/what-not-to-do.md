@@ -1,6 +1,6 @@
 # Roadmap · What NOT to do
 
-The following items are explicitly out of scope, even if they look easy. This list aligns with section F of [../../meta/principles.md](../../meta/principles.md).
+The following items are explicitly out of scope, even if they look easy. This list aligns with section F of [../../meta/principles.md](../../standards/engineering/principles.md).
 
 - **No standalone sandbox-executor layer**: the existing `packages/executor` `runCommand` is sufficient for Terminal-Bench. Extracting a new layer adds complexity without payoff.
 - **No infrastructure-only components (HDFS / K8s / MQ)**: those belong in an infrastructure product; they are outside this project's scope.

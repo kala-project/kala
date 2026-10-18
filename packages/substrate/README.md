@@ -5,7 +5,7 @@ agent's **harness** through a real **auto-evolve** loop — run, judge, propose 
 change, re-run, keep what's better — all **without touching the kernel or the
 host core**.
 
-This is the platform layer of [ADR 0015](../../docs/meta/adr/0015-self-improvement-substrate.md).
+This is the platform layer of [ADR 0015](../../docs/architecture/adr/0015-self-improvement-substrate.md).
 It sits entirely above `@agent-kernel/host`'s public API and reads the JSONL
 event log the system already produces. Delete this package and everything below
 it runs unchanged.
@@ -79,5 +79,5 @@ and `llmMetaAgent(model)` to run the identical loop against a live model.
 
 ## References
 
-- [ADR 0015](../../docs/meta/adr/0015-self-improvement-substrate.md) — the design and its boundaries
-- [ADR 0005](../../docs/meta/adr/0005-kernel-boundary.md) — why planning/memory/self-improvement live outside the kernel
+- [ADR 0015](../../docs/architecture/adr/0015-self-improvement-substrate.md) — the design and its boundaries
+- [ADR 0005](../../docs/architecture/adr/0005-kernel-boundary.md) — why planning/memory/self-improvement live outside the kernel

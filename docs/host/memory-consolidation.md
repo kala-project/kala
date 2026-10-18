@@ -1,7 +1,7 @@
 # Memory consolidation
 
 **Status**: design accepted, implementation in progress.
-**Depends on**: three-tier memory ([`../executor/tools.md`](../executor/tools.md) §2.10, [`../planning/feature-gaps.md`](../planning/feature-gaps.md) §1.22).
+**Depends on**: three-tier memory ([`../executor/tools.md`](../reference/executor/tools.md) §2.10, [`../planning/feature-gaps.md`](../research/proposals/feature-gaps.md) §1.22).
 **Pattern reference**: `references/claude-code-collection/memory/consolidator.py`.
 
 ## 1. Why

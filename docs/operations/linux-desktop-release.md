@@ -1,6 +1,6 @@
 # Linux desktop build, install and signed APT publication
 
-See [the recorded design](../design/linux-desktop-client.md). This is a
+See [the recorded design](../architecture/desktop/linux-desktop-client.md). This is a
 remote-first Tauri client, not a bundled/offline Dashboard or local Runtime.
 Read the [supply-chain assessment and unresolved strict-audit blocker](linux-desktop-supply-chain.md)
 before distributing this unsigned candidate.
@@ -164,7 +164,7 @@ after locating it under your user's XDG data/cache directories.
 ## Signed APT repository: operator inputs required
 
 The proposed hosting, key custody and single-paste installation contract are in
-[the APT infrastructure design](../design/linux-desktop-apt-hosting.md).
+[the APT infrastructure design](../research/proposals/linux-desktop-apt-hosting.md).
 The owner requested a complete Bash block, not manual source-editing steps.
 The implemented generator automatically checks the literal primary fingerprint
 before writing a `Signed-By` source, updating APT and installing the package.

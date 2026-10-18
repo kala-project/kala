@@ -1,7 +1,7 @@
 # Core Agent Invariants and Fault Model
 
 **Status:** normative for the highest-strength hardening program
-**Extends:** [`../kernel/spec.md`](../kernel/spec.md)
+**Extends:** [`../kernel/spec.md`](../reference/kernel/spec.md)
 **Deployment rule:** Dedicated and Private Cloud must satisfy the same core invariants.
 
 ## Authority map

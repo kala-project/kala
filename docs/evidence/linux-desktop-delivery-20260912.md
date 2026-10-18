@@ -328,7 +328,7 @@ The menu references below describe historical rc.1 verification, not the current
 
 Owner requested a single copy/paste Bash block and approved designing, but not
 creating, new HTTPS hosting and signing-key custody. Design:
-`docs/design/linux-desktop-apt-hosting.md`.
+`docs/research/proposals/linux-desktop-apt-hosting.md`.
 
 The installation page now supports approved `apt-install.json` configuration
 and a copy button. The generated block automatically installs distribution
@@ -452,7 +452,7 @@ corrected candidate as documented in operations; it is not an automatic downgrad
 
 ## Design/implementation
 
-Design persisted before code: `docs/design/linux-desktop-client.md`.
+Design persisted before code: `docs/architecture/desktop/linux-desktop-client.md`.
 Official Tauri client source/config/permissions/locked Rust graph under
 `packages/desktop/`. It loads the existing React Dashboard from the chosen Host
 origin, keeping all HTTP/account/Socket.IO behavior same-origin and frontend/

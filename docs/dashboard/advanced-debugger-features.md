@@ -5,8 +5,8 @@ This document defines the next debugger-oriented dashboard features. The goal is
 ## Design Inputs
 
 - `packages/dashboard/STYLE.md`: use surface luminance and soft `ring-border/30-60`, avoid hard panel borders, and keep dense debugger controls visually quiet.
-- `docs/dashboard/debugger-design.md`: the right sidebar is a debugger, not a metrics dashboard. Dense state is exposed through compact rows and detail modals.
-- `docs/dashboard/llm-message-assembly-debugger.md`: LLM inspection must preserve the distinction between kernel `call_llm` effects and captured provider HTTP request/response.
+- `docs/architecture/dashboard/debugger-design.md`: the right sidebar is a debugger, not a metrics dashboard. Dense state is exposed through compact rows and detail modals.
+- `docs/architecture/dashboard/llm-message-assembly-debugger.md`: LLM inspection must preserve the distinction between kernel `call_llm` effects and captured provider HTTP request/response.
 - Existing data sources: `timeline`, `state`, `config`, `llmTrace`, `stateFlow(timeline)`, and pure kernel replay through `foldWithTrace`.
 
 ## Library Decision

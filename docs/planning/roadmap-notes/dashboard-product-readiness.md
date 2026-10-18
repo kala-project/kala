@@ -222,19 +222,19 @@ Run debugger, enhancement-action, real-provider, and tasks-button checks when th
 
 ## References
 
-[1] `docs/meta/principles.md`
+[1] `docs/standards/engineering/principles.md`
 
-[2] `docs/meta/testing.md`
+[2] `docs/standards/release-quality/testing.md`
 
-[3] `docs/dashboard/frontend-modernization-plan.md`
+[3] `docs/research/proposals/frontend-modernization-plan.md`
 
 [4] `docs/protocol/event-log.md`
 
-[5] `docs/design/socketio-reliability-plan.md`
+[5] `docs/research/proposals/socketio-reliability-plan.md`
 
 [6] `docs/planning/roadmap-notes/pwa-mobile-and-push.md`
 
-[7] `docs/design/dashboard-rendering-performance-plan.md`
+[7] `docs/research/proposals/dashboard-rendering-performance-plan.md`
 
 
-[9] `docs/design/codebase-efficiency-review-2026-07.md`
+[9] `docs/archive/reviews/codebase-efficiency-review-2026-07.md`

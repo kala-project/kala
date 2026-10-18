@@ -2,7 +2,7 @@
 
 Status: implementation-in-progress
 Owner: dashboard + executor
-Related: [tools.md](../executor/tools.md), [protocol/wire-protocol.md](../protocol/wire-protocol.md), [ARCHITECTURE.md](../architecture/overview.md)
+Related: [tools.md](../reference/executor/tools.md), [protocol/wire-protocol.md](../protocol/wire-protocol.md), [ARCHITECTURE.md](../architecture/overview.md)
 
 ## 1. What we already have
 

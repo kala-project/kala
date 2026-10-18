@@ -5,7 +5,7 @@
 ## Current code and boundaries
 
 - The Host owns model-facing tool definitions (description, JSON input schema, execution handler and `requiresApproval`) in `packages/host/src/builtin-tools.ts` and the session's `AgentConfig.tools`. The Executor registry holds `name → run`; `executor:announce.mcpTools` now optionally carries third-party schemas and hashes in addition to legacy names. Host validates these and snapshots them into **new** sessions for their owning workspace.
-- The wire `tool:result` contains a **string**, not MCP content blocks. Tool input schemas are JSON Schema-shaped. Kala consumes third-party stdio MCP tools, but is **not** an MCP server. [ADR 0007](../meta/adr/0007-mcp-compatible-tools.md) records this distinction.
+- The wire `tool:result` contains a **string**, not MCP content blocks. Tool input schemas are JSON Schema-shaped. Kala consumes third-party stdio MCP tools, but is **not** an MCP server. [ADR 0007](../architecture/adr/0007-mcp-compatible-tools.md) records this distinction.
 - The Host/Kernel evaluates approvals. `auto` consults `requiresApproval`; `ask` prompts for every call; `deny` rejects calls requiring approval; `allow_all` bypasses prompts under Host policy. Do not assume a `KALA_ALLOW_ALL_OK` guard exists. All discovered third-party MCP tools are marked `requiresApproval: true` by the Host.
 - Executor reconnection re-announces its catalog; a third-party server crash removes its tools and re-announces. Existing sessions keep their original catalog snapshot: deleted or same-name/different-schema tools fail closed on invocation, not hot-refreshed in model context.
 

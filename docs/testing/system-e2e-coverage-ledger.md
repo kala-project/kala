@@ -1,7 +1,7 @@
 # System E2E Coverage Ledger
 
 **Status:** normative migration ledger  
-**Authority:** [`../meta/testing.md`](../meta/testing.md), [`product-e2e-harness.md`](product-e2e-harness.md), and [`critical-user-action-matrix.md`](critical-user-action-matrix.md)  
+**Authority:** [testing standards](../standards/release-quality/testing.md), [product E2E harness](../development/testing/product-e2e-harness.md), and [critical user-action matrix](../development/testing/critical-user-action-matrix.md)<br>
 **Last audited:** 2026-09-08
 
 This ledger prevents a lower-layer test or fixture-driven browser check from being reported as a complete product journey. `Complete` means production artifact, real user entry, real transports/processes/side effects, final visible and authoritative state, persistence/recovery, and cleanup evidence. Public domains and external providers are outside the hermetic boundary unless a separate canary is named.

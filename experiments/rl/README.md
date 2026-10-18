@@ -51,17 +51,17 @@ Typical contents inside a run folder:
   the rented host. Each run keeps its own `artifacts/` next to its
   reports so tarballs from different runs cannot collide.
 
-## How this connects to the rest of docs/rl
+## How this connects to the RL documentation
 
-- `../../docs/rl/system-design.md` — the design source of truth. Explains what a
+- `../../docs/research/rl/system-design.md` — the design source of truth. Explains what a
   training-ready rollout must contain and why product session logs are
   not RL samples.
-- `../../docs/rl/implementation.md` — the local implementation gate and acceptance
+- `../../docs/research/rl/implementation.md` — the local implementation gate and acceptance
   criteria that must be green before any paid experiment starts.
-- `../../docs/rl/training-design.md` — training methodology, execution decisions
+- `../../docs/research/rl/training-design.md` — training methodology, execution decisions
   (GPU/model/budget), stop conditions, and risks. Experiments in this
   directory are attempts to execute that plan.
 
 If you are picking this project up on a new machine and want to
-reproduce results, follow `../../docs/rl/training-design.md`; the files in this
+reproduce results, follow `../../docs/research/rl/training-design.md`; the files in this
 directory are evidence from past runs, not a runbook.

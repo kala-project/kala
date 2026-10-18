@@ -12,7 +12,7 @@ step(state: AgentState, event: AgentEvent, config: AgentConfig): StepResult
 
 That's it. Given the current state, an event, and the immutable session config, return the next state and any side effects the host should perform (call the LLM, run a tool, persist, emit progress, finish).
 
-If you know Redux or Elm, you already have the mental model. The difference is that here the reducer *also* yields effects, so the host can perform them and feed the results back as events. Internally, `step` is a two-dimensional dispatch table indexed by `(status, event.kind)` — a finite state machine that mirrors [SPEC §3](../../docs/kernel/spec.md) row-for-row. See [ADR 0010](../../docs/meta/adr/0010-fsm-dispatch-table.md).
+If you know Redux or Elm, you already have the mental model. The difference is that here the reducer *also* yields effects, so the host can perform them and feed the results back as events. Internally, `step` is a two-dimensional dispatch table indexed by `(status, event.kind)` — a finite state machine that mirrors [SPEC §3](../../docs/reference/kernel/spec.md) row-for-row. See [ADR 0010](../../docs/architecture/adr/0010-fsm-dispatch-table.md).
 
 ## Public API
 
@@ -36,7 +36,7 @@ import {
 } from '@agent-kernel/kernel'
 ```
 
-See [`docs/kernel/spec.md`](../../docs/kernel/spec.md) for the normative contract and [`docs/meta/adr/0001-pure-reducer.md`](../../docs/meta/adr/0001-pure-reducer.md) for why it's shaped this way.
+See [`docs/reference/kernel/spec.md`](../../docs/reference/kernel/spec.md) for the normative contract and [`docs/architecture/adr/0001-pure-reducer.md`](../../docs/architecture/adr/0001-pure-reducer.md) for why it's shaped this way.
 
 ## Non-goals
 
@@ -48,7 +48,7 @@ The kernel deliberately does **not**:
 - Manage timers, retries, or rate limits
 - Track subagents or task lists
 
-All of that is the host's job. See [ADR 0005](../../docs/meta/adr/0005-kernel-boundary.md).
+All of that is the host's job. See [ADR 0005](../../docs/architecture/adr/0005-kernel-boundary.md).
 
 ## Running tests
 
@@ -60,7 +60,7 @@ pnpm build
 
 ## Invariants
 
-Every invariant is enumerated in [`docs/kernel/spec.md`](../../docs/kernel/spec.md) §5 and covered by a test:
+Every invariant is enumerated in [`docs/reference/kernel/spec.md`](../../docs/reference/kernel/spec.md) §5 and covered by a test:
 
 - I1: cursor is monotonic
 - I2: `step` is pure (deep-equal input state before/after)

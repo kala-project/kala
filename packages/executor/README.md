@@ -6,7 +6,7 @@ The **tool runner**. A Node daemon that dials *out* to Host over Socket.IO; no i
 
 ## Why "reverse-WebSocket"?
 
-The Executor runs where the *files* live — usually behind a home router or corporate firewall — while Host lives in the cloud. So the Executor initiates the connection *outward* to Host. See [ADR 0002](../../docs/meta/adr/0002-reverse-websocket.md).
+The Executor runs where the *files* live — usually behind a home router or corporate firewall — while Host lives in the cloud. So the Executor initiates the connection *outward* to Host. See [ADR 0002](../../docs/architecture/adr/0002-reverse-websocket.md).
 
 Consequence: no port forwarding, no ngrok, no VPN. Just:
 
@@ -28,7 +28,7 @@ legacy `~/.kala/` files.
 
 ## Responsibilities
 
-1. **Tool registry** (`src/tools/`) — one file per tool from [`docs/executor/tools.md`](../../docs/executor/tools.md): `read_file`, `read_files`, `ls`, `glob`, `grep`, `write_file`, `replace_in_file`, `replace_many_in_file`, `apply_file_patch`, `bash`, `memory`, `websearch`, `webfetch`, `bash_output`, `kill_shell`.
+1. **Tool registry** (`src/tools/`) — one file per tool from [`docs/reference/executor/tools.md`](../../docs/reference/executor/tools.md): `read_file`, `read_files`, `ls`, `glob`, `grep`, `write_file`, `replace_in_file`, `replace_many_in_file`, `apply_file_patch`, `bash`, `memory`, `websearch`, `webfetch`, `bash_output`, `kill_shell`.
 2. **Sandbox** (`src/sandbox.ts`) — workspace whitelist. Every path is resolved and rechecked to prevent escape via `..`, absolute paths, or symlinks.
 3. **Background shell registry** (`src/background.ts`) — `bash --run-in-background` → `taskId`; `bash_output`; `kill_shell`.
 4. **Socket.IO client** (`src/client.ts`) — dials Host's `/executor` namespace; announces `workspaceId` / `workspaceName` / `os` / `runtime` / `sandboxRoots` / tool names; handles `tool:call` / `fs:list_dirs` / cancel; auto-reconnects and re-announces.
@@ -54,11 +54,11 @@ await startExecutor({
 
 ## References
 
-- Tool contracts: [`docs/executor/tools.md`](../../docs/executor/tools.md)
+- Tool contracts: [`docs/reference/executor/tools.md`](../../docs/reference/executor/tools.md)
 - Wire protocol: [`docs/protocol/wire-protocol.md`](../../docs/protocol/wire-protocol.md)
 - Architecture: [`docs/architecture/overview.md`](../../docs/architecture/overview.md)
-- Spec: [`docs/kernel/spec.md`](../../docs/kernel/spec.md)
+- Spec: [`docs/reference/kernel/spec.md`](../../docs/reference/kernel/spec.md)
 
 ## Test coverage target
 
-≥90% (per [`docs/meta/testing.md`](../../docs/meta/testing.md) §4). Each tool has a test file covering happy path, missing file, permission denied, invalid schema, idempotency where relevant, and tool-specific edge cases. Sandbox has its own dedicated test suite for path-escape attempts.
+≥90% (per [`docs/standards/release-quality/testing.md`](../../docs/standards/release-quality/testing.md) §4). Each tool has a test file covering happy path, missing file, permission denied, invalid schema, idempotency where relevant, and tool-specific edge cases. Sandbox has its own dedicated test suite for path-escape attempts.

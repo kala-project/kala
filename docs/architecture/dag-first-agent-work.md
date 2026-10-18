@@ -38,7 +38,7 @@ Long-running work rarely follows a single straight line. It usually mixes discov
 
 ## Related contracts
 
-- [`todo_graph` and Host-owned tools](../executor/tools.md)
+- [`todo_graph` and Host-owned tools](../reference/executor/tools.md)
 - [DAG wire lifecycle](../protocol/wire-protocol.md)
 - [Sub-agent lifecycle](../host/sub-agent-design.md)
-- [Task Graph recovery incident and contract](../testing/compact-auto-resume-incident-2026-07-31.md)
+- [Task Graph recovery incident and contract](../archive/incidents/compact-auto-resume-incident-2026-07-31.md)

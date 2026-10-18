@@ -4,7 +4,7 @@ Optional capabilities layered on top of the host loop. **Each file here is
 something the kernel does not need to run.** The runtime composes them at
 startup through `ExtensionRegistry`; removing a registration removes that
 capability without adding a tool-name branch to the loop. This is the concrete
-expression of [ADR 0005](../../../../docs/meta/adr/0005-kernel-boundary.md):
+expression of [ADR 0005](../../../../docs/architecture/adr/0005-kernel-boundary.md):
 planning, memory, and subagents live *outside* the kernel, and — by the same
 logic — outside the core host driver too.
 
