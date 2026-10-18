@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { KERNEL_AGENT_RUNTIME_CAPABILITIES, type AttachedExecutor, type DirListResult } from '@agent-kernel/shared'
 
+import { i18n } from '../../i18n/index.js'
 import { NewSessionDialog } from './WorkspacePicker.js'
 
 const wsA: AttachedExecutor = {
@@ -96,14 +97,14 @@ describe('NewSessionDialog', () => {
     expect(screen.getByTestId('directory-picker-finder').querySelector('.w-64')).toBeNull()
   })
 
-  it('keeps session options compact and gives each Finder column independent vertical scrolling', async () => {
+  it('keeps session options readable and gives each Finder column independent vertical scrolling', async () => {
     const harness = makeSocket()
     render(<NewSessionDialog open workspaces={[wsA]} socket={harness.socket as never} onCreate={() => {}} onCreateSimpleChat={() => {}} onCancel={() => {}} />)
 
     const options = screen.getByTestId('new-session-options')
-    expect(options.className).toContain('items-center')
-    expect(screen.getByTestId('new-session-runtime-kernel').className).toContain('h-7')
-    expect(screen.getByTestId('new-session-mode-chat').className).toContain('h-7')
+    expect(options.className).toContain('grid-cols-1')
+    expect(screen.getByTestId('new-session-runtime-kernel').className).toContain('min-h-11')
+    expect(screen.getByTestId('new-session-mode-chat').className).toContain('min-h-[3.25rem]')
 
     await waitFor(() => expect(harness.lastDirRequest()).toBeTruthy())
     act(() => harness.emitDirList({
@@ -141,12 +142,43 @@ describe('NewSessionDialog', () => {
       <NewSessionDialog open workspaces={[wsA]} socket={makeSocket().socket as never} onCreate={() => {}} onCreateSimpleChat={() => {}} onCancel={() => {}} />,
     )
     const dialog = screen.getByTestId('new-session-dialog')
-    expect(dialog.className).toContain('!bottom-0')
+    expect(dialog.className).toContain('!top-[calc(var(--ak-viewport-offset-top,0px)+var(--ak-viewport-h,100dvh))]')
     expect(dialog.className).toContain('w-screen')
     expect(dialog.className).toContain('--ak-viewport-h')
     expect(dialog.className).toContain('grid-rows-[auto_auto_minmax(0,1fr)_auto]')
     expect(dialog.className).toContain('sm:max-w-4xl')
+    expect(screen.getByTestId('new-session-options').className).toContain('overflow-y-auto')
+    expect(screen.getByTestId('new-session-options').className).toContain('grid-cols-1')
+    expect(screen.getByTestId('new-session-mode-chat').className).not.toContain('truncate')
+    expect(screen.getByTestId('new-session-mode-dag').className).toContain('min-h-[3.25rem]')
+    expect(screen.getByTestId('new-session-mode-chat').textContent).toContain('Standard Chat')
+    expect(screen.getByTestId('new-session-mode-chat').textContent).toContain('One turn at a time')
+    expect(screen.getByTestId('new-session-mode-dag').textContent).toContain('DAG-First')
+    expect(screen.getByTestId('new-session-mode-dag').textContent).toContain('Plan dependent tasks')
+    expect(screen.getByTestId('dir-picker-actions').className).toContain('grid-cols-2')
+    for (const id of ['up', 'root', 'refresh', 'new-folder']) {
+      const button = screen.getByTestId(`dir-picker-${id}`)
+      expect(button.className).toContain('h-11')
+      expect(button.querySelector('span')?.textContent).toBeTruthy()
+    }
     expect(screen.getByTestId('new-session-close').className).toContain('h-11 w-11')
+  })
+
+  it('shows complete Chinese mode and directory action labels', async () => {
+    await i18n.changeLanguage('zh')
+    try {
+      render(<NewSessionDialog open workspaces={[wsA]} socket={makeSocket().socket as never} onCreate={() => {}} onCreateSimpleChat={() => {}} onCancel={() => {}} />)
+      expect(screen.getByTestId('new-session-mode-chat').textContent).toContain('标准对话')
+      expect(screen.getByTestId('new-session-mode-chat').textContent).toContain('逐轮交流')
+      expect(screen.getByTestId('new-session-mode-dag').textContent).toContain('DAG-First')
+      expect(screen.getByTestId('new-session-mode-dag').textContent).toContain('规划依赖任务')
+      expect(screen.getByTestId('new-session-mode-chat').className).not.toContain('truncate')
+      for (const [id, label] of [['up', '上一级'], ['root', '根目录'], ['refresh', '刷新'], ['new-folder', '新建文件夹']]) {
+        expect(screen.getByTestId(`dir-picker-${id}`).textContent).toBe(label)
+      }
+    } finally {
+      await i18n.changeLanguage('en')
+    }
   })
 
   it('presents chat and workspace sessions as explicit creation paths', () => {
@@ -305,7 +337,7 @@ describe('NewSessionDialog', () => {
     })
   })
 
-  it('shows compact runtime choices and creates with the selected runtime', () => {
+  it('shows readable runtime choices and creates with the selected runtime', () => {
     const onCreate = vi.fn()
     const harness = makeSocket()
     render(
@@ -339,7 +371,9 @@ describe('NewSessionDialog', () => {
 
     const copilot = screen.getByTestId('new-session-runtime-copilot')
     expect(copilot.getAttribute('role')).toBe('radio')
-    expect(copilot.className).toContain('h-7')
+    expect(copilot.className).toContain('min-h-11')
+    expect(copilot.querySelector('span')?.textContent).toBe('GitHub Copilot')
+    expect(copilot.className).not.toContain('truncate')
     expect(screen.getByText('Kala Kernel')).toBeTruthy()
     expect(screen.getByText('Recommended')).toBeTruthy()
     expect(screen.queryByText(/Requires your own LLM endpoint/u)).toBeNull()

@@ -1547,10 +1547,12 @@ export const resources = {
         executionMode: {
           chat: {
             label: 'Standard Chat',
+            shortDescription: 'One turn at a time',
             description: 'Work conversationally, one turn at a time.',
           },
           dag: {
             label: 'DAG-First',
+            shortDescription: 'Plan dependent tasks',
             description: 'Plan dependent work as a durable graph of child Sessions.',
           },
         },
@@ -1580,6 +1582,9 @@ export const resources = {
       },
       directory: {
         goUp: 'Go up one level',
+        parentShort: 'Parent',
+        rootShort: 'Root',
+        refreshShort: 'Refresh',
         jumpRoot: 'Jump to workspace root {{root}}',
         rootUnknown: 'Workspace root unknown',
         refresh: 'Refresh current directory',
@@ -3531,10 +3536,12 @@ export const resources = {
         executionMode: {
           chat: {
             label: '标准对话',
+            shortDescription: '逐轮交流',
             description: '以对话方式逐轮完成工作。',
           },
           dag: {
             label: 'DAG-First',
+            shortDescription: '规划依赖任务',
             description: '将依赖任务规划为由子会话执行的持久化任务图。',
           },
         },
@@ -3564,6 +3571,9 @@ export const resources = {
       },
       directory: {
         goUp: '返回上一级',
+        parentShort: '上一级',
+        rootShort: '根目录',
+        refreshShort: '刷新',
         jumpRoot: '跳转到工作区根目录 {{root}}',
         rootUnknown: '工作区根目录未知',
         refresh: '刷新当前目录',

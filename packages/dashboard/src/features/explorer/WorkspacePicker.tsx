@@ -139,7 +139,7 @@ export function NewSessionDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next && !submitting) onCancel() }}>
-      <DialogContent className={cn(dialogMobileSheetClassName, 'h-[min(calc(var(--ak-viewport-h,100dvh)-env(safe-area-inset-top)-0.5rem),44rem)] min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_auto_minmax(0,1fr)_auto] overflow-hidden p-0 sm:max-w-4xl')} data-testid="new-session-dialog">
+      <DialogContent className={cn(dialogMobileSheetClassName, 'h-[min(calc(var(--ak-viewport-h,100dvh)-env(safe-area-inset-top)-0.5rem),44rem)] min-w-0 grid-cols-[minmax(0,1fr)] overflow-hidden p-0 sm:max-w-4xl', error ? 'grid-rows-[auto_auto_minmax(0,1fr)_auto_auto]' : 'grid-rows-[auto_auto_minmax(0,1fr)_auto]')} data-testid="new-session-dialog">
         <DialogHeader className="relative border-b border-border/50 px-4 py-2 pr-14 sm:py-3">
           <DialogTitle className="flex items-center gap-1">{t('dialogs.newSession')}<HelpHint label={t('dialogs.newSession')}><span className="block">{t('dialogs.newSessionDescription')}</span><span className="mt-2 block"><strong>{t('dialogs.simpleChat')}</strong><br />{t('dialogs.simpleChatDescription')}</span></HelpHint></DialogTitle>
           <DialogDescription className="sr-only">{t('common.contextualHelp')}</DialogDescription>
@@ -147,13 +147,15 @@ export function NewSessionDialog({
             <X className="h-4 w-4" aria-hidden="true" />
           </DialogClose>
         </DialogHeader>
-        <section className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1.5 overflow-hidden border-b border-border/50 bg-muted/20 px-3 py-1.5" data-testid="new-session-options">
-          <div className="flex min-w-0 flex-1 items-center gap-1.5">
-            <span id="new-session-runtime-label" className="flex-none text-caption font-semibold text-muted-foreground">
-              {t('dialogs.chooseAgentRuntime')}
-            </span>
-            <HelpHint label={t('dialogs.chooseAgentRuntime')} trigger={<span className="inline-flex h-6 w-6 flex-none items-center justify-center rounded text-muted-foreground/70 hover:text-foreground" aria-label={t('dialogs.chooseAgentRuntime')}><Info className="h-3.5 w-3.5" aria-hidden="true" /></span>}>{agentRuntimes.map((runtime) => <span className="mb-2 block last:mb-0" key={runtime.id}><strong>{runtimeDisplayLabel(t, runtime)}</strong><br />{runtimeDisplayDescription(t, runtime)}</span>)}</HelpHint>
-            <div className="flex min-w-0 flex-1 overflow-x-auto rounded-md border border-border bg-card p-0.5" role="radiogroup" aria-labelledby="new-session-runtime-label">
+        <section className="grid min-h-0 min-w-0 max-h-[min(40vh,14rem)] grid-cols-1 gap-3 overflow-y-auto overscroll-contain border-b border-border/50 bg-muted/20 px-3 py-2 sm:grid-cols-2" data-testid="new-session-options">
+          <div className="flex min-w-0 flex-col gap-1">
+            <div className="flex items-center gap-1">
+              <span id="new-session-runtime-label" className="text-caption font-semibold text-muted-foreground">
+                {t('dialogs.chooseAgentRuntime')}
+              </span>
+              <HelpHint label={t('dialogs.chooseAgentRuntime')} trigger={<span className="inline-flex h-6 w-6 flex-none items-center justify-center rounded text-muted-foreground/70 hover:text-foreground" aria-label={t('dialogs.chooseAgentRuntime')}><Info className="h-3.5 w-3.5" aria-hidden="true" /></span>}>{agentRuntimes.map((runtime) => <span className="mb-2 block last:mb-0" key={runtime.id}><strong>{runtimeDisplayLabel(t, runtime)}</strong><br />{runtimeDisplayDescription(t, runtime)}</span>)}</HelpHint>
+            </div>
+            <div className="grid min-w-0 grid-cols-2 gap-1 rounded-md border border-border bg-card p-0.5" role="radiogroup" aria-labelledby="new-session-runtime-label">
               {agentRuntimes.map((runtime) => {
                 const selected = agentRuntime === runtime.id
                 const label = runtimeDisplayLabel(t, runtime)
@@ -169,25 +171,27 @@ export function NewSessionDialog({
                     data-testid={`new-session-runtime-${runtime.id}`}
                     title={runtime.available ? description : runtime.reason}
                     className={cn(
-                      'flex h-7 min-w-0 flex-1 items-center justify-center gap-1 rounded px-2 text-xs font-medium transition-colors',
+                      'flex min-h-11 min-w-0 items-center justify-center gap-1 rounded px-1.5 py-1 text-center text-sm font-medium leading-tight transition-colors',
                       selected ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-muted hover:text-foreground',
                       !runtime.available && 'cursor-not-allowed opacity-55',
                     )}
                   >
                     {runtime.id === 'copilot' ? <GitHubMark className="h-3 w-3 flex-none" /> : <Bot className="h-3 w-3 flex-none" aria-hidden="true" />}
-                    <span className="truncate">{label}</span>
+                    <span className="min-w-0 break-words">{label}</span>
                     {isRecommendedRuntime(runtime) ? <span className="sr-only">{t('dialogs.runtime.recommended')}</span> : null}
                   </button>
                 )
               })}
             </div>
           </div>
-          <div className="flex min-w-0 flex-1 items-center gap-1.5">
-            <span id="new-session-mode-label" className="flex-none text-caption font-semibold text-muted-foreground">
-              {t('dialogs.chooseExecutionMode')}
-            </span>
-            <HelpHint label={t('dialogs.chooseExecutionMode')}>{(['chat', 'dag'] as const).map((mode) => <span className="mb-2 block last:mb-0" key={mode}><strong>{t(`dialogs.executionMode.${mode}.label`)}</strong><br />{t(`dialogs.executionMode.${mode}.description`)}</span>)}</HelpHint>
-            <div className="flex min-w-0 flex-1 rounded-md border border-border bg-card p-0.5" role="radiogroup" aria-labelledby="new-session-mode-label">
+          <div className="flex min-w-0 flex-col gap-1">
+            <div className="flex items-center gap-1">
+              <span id="new-session-mode-label" className="text-caption font-semibold text-muted-foreground">
+                {t('dialogs.chooseExecutionMode')}
+              </span>
+              <HelpHint label={t('dialogs.chooseExecutionMode')}>{(['chat', 'dag'] as const).map((mode) => <span className="mb-2 block last:mb-0" key={mode}><strong>{t(`dialogs.executionMode.${mode}.label`)}</strong><br />{t(`dialogs.executionMode.${mode}.description`)}</span>)}</HelpHint>
+            </div>
+            <div className="grid min-w-0 grid-cols-2 gap-1 rounded-md border border-border bg-card p-0.5" role="radiogroup" aria-labelledby="new-session-mode-label">
               {(['chat', 'dag'] as const).map((mode) => {
                 const selected = executionMode === mode
                 return (
@@ -201,11 +205,12 @@ export function NewSessionDialog({
                     data-testid={`new-session-mode-${mode}`}
                     title={t(`dialogs.executionMode.${mode}.description`)}
                     className={cn(
-                      'h-7 min-w-0 flex-1 truncate rounded px-2 text-xs font-medium transition-colors',
+                      'flex min-h-[3.25rem] min-w-0 flex-col items-center justify-center break-words rounded px-1.5 py-1 text-center text-sm font-medium leading-tight transition-colors',
                       selected ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-muted hover:text-foreground',
                     )}
                   >
-                    {t(`dialogs.executionMode.${mode}.label`)}
+                    <span>{t(`dialogs.executionMode.${mode}.label`)}</span>
+                    <span className="text-[11px] font-normal opacity-80">{t(`dialogs.executionMode.${mode}.shortDescription`)}</span>
                   </button>
                 )
               })}
@@ -304,11 +309,12 @@ export function NewSessionDialog({
             {error}
           </div>
         ) : null}
-        <DialogFooter className="border-t border-border/50 px-3 py-2 sm:px-4 sm:py-3">
-          <Button variant="outline" onClick={onCancel} disabled={submitting} data-testid="workspace-picker-cancel">
+        <DialogFooter className="min-h-0 overflow-y-auto border-t border-border/50 px-3 py-2 sm:px-4 sm:py-3">
+          <Button variant="outline" className="min-h-11" onClick={onCancel} disabled={submitting} data-testid="workspace-picker-cancel">
             {t('common.cancel')}
           </Button>
           <Button
+            className="min-h-11"
             onClick={create}
             disabled={submitting || !selectedWorkspace || cwd.trim().length === 0}
             data-testid="new-session-create"

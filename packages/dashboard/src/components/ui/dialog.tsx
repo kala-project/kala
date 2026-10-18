@@ -11,7 +11,7 @@ export const DialogClose = DialogPrimitive.Close
 // Shared, concrete contracts used by the mobile Settings and Session Settings
 // surfaces. Keep feature-specific grid rows and desktop widths at each caller.
 export const dialogMobileSheetClassName =
-  '!bottom-0 !top-auto max-h-[calc(var(--ak-viewport-h,100dvh)-env(safe-area-inset-top)-0.5rem)] w-screen max-w-none !translate-y-0 gap-0 overflow-hidden rounded-b-none rounded-t-2xl p-0 pb-[env(safe-area-inset-bottom)] sm:!bottom-auto sm:!top-[calc(50%+(env(safe-area-inset-top)-env(safe-area-inset-bottom))/2)] sm:w-[calc(100vw-2rem)] sm:!translate-y-[-50%] sm:rounded-2xl sm:pb-0'
+  '!bottom-auto !top-[calc(var(--ak-viewport-offset-top,0px)+var(--ak-viewport-h,100dvh))] max-h-[calc(var(--ak-viewport-h,100dvh)-env(safe-area-inset-top)-0.5rem)] w-screen max-w-none !translate-y-[-100%] gap-0 overflow-hidden rounded-b-none rounded-t-2xl p-0 pb-[env(safe-area-inset-bottom)] sm:!bottom-auto sm:!top-[calc(50%+(env(safe-area-inset-top)-env(safe-area-inset-bottom))/2)] sm:w-[calc(100vw-2rem)] sm:!translate-y-[-50%] sm:rounded-2xl sm:pb-0'
 
 export const dialogTouchCloseClassName =
   'absolute right-2 top-1/2 inline-flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'

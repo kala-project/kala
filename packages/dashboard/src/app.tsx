@@ -2706,11 +2706,11 @@ export function App(): JSX.Element {
       )}
       <Dialog open={explorerDrawerOpen && !wideLayout} onOpenChange={setExplorerDrawerOpen}>
         <DialogContent
-          className="ak-drawer-left left-0 top-0 h-[var(--ak-viewport-h,100dvh)] max-h-[var(--ak-viewport-h,100dvh)] w-[calc(100vw-1rem)] max-w-none translate-x-0 translate-y-0 gap-0 overflow-hidden border-0 bg-card p-0 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] shadow-2xl sm:w-96 sm:rounded-r-3xl"
+          className="ak-drawer-left left-0 top-[var(--ak-viewport-offset-top,0px)] h-[var(--ak-viewport-h,100dvh)] max-h-[var(--ak-viewport-h,100dvh)] w-[calc(100vw-1rem)] max-w-none translate-x-0 translate-y-0 gap-0 overflow-hidden border-0 bg-card p-0 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] shadow-2xl sm:w-96 sm:rounded-r-3xl"
           data-testid="explorer-drawer"
         >
           <DialogDescription className="sr-only">{t('common.contextualHelp')}</DialogDescription>
-          <div className="flex h-full min-h-0 flex-col bg-card pb-[env(safe-area-inset-bottom)] text-foreground">
+          <div className="flex h-full min-h-0 flex-col bg-card text-foreground">
             <div className="flex flex-none flex-col gap-3 border-b border-border/25 bg-card/35 px-3 pb-3 pt-3">
               <div className="flex h-11 items-center gap-2">
                 <DialogTitle asChild><SidebarBrand connectionStatus={hasSelectedSession ? <ConnectionStatusEntry appearance="brand" triggerId="mobile-drawer" /> : null} /></DialogTitle>

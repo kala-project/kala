@@ -651,10 +651,10 @@ function HiddenItemsBar({
   const workspaceCount = workspaces.length + missingIds.length
   const hiddenCount = workspaceCount + sessions.length
   return (
-    <div className="flex-none border-t border-border/35 bg-card/35 px-1.5 py-1" data-testid="hidden-items-bar">
+    <div className="relative z-10 flex-none border-t border-border/35 bg-card px-1.5 py-1" data-testid="hidden-items-bar">
       <button
         type="button"
-        className="flex h-6 w-full min-w-0 items-center gap-1 rounded-md px-1 text-left text-caption text-muted-foreground hover:bg-muted hover:text-foreground"
+        className="flex min-h-11 w-full min-w-0 items-center gap-1 rounded-md px-1 text-left text-caption text-muted-foreground hover:bg-muted hover:text-foreground"
         onClick={() => setOpen((value) => !value)}
         data-testid="hidden-items-toggle"
         aria-expanded={open}
@@ -666,7 +666,7 @@ function HiddenItemsBar({
         </span>
       </button>
       {open ? (
-        <div className="mt-1 space-y-2 px-1 pb-1" data-testid="hidden-items-list">
+        <div className="mt-1 max-h-[min(40vh,16rem)] space-y-2 overflow-y-auto overscroll-contain px-1 pb-1" data-testid="hidden-items-list">
           {workspaceCount > 0 ? <section data-testid="hidden-workspaces-group">
             <div className="px-1 pb-0.5 text-meta font-semibold uppercase tracking-wider text-muted-foreground">{t('explorer.hiddenWorkspacesGroup', { count: workspaceCount })}</div>
             {workspaces.map((workspace) => workspace.workspaceId === null ? null : (
@@ -701,13 +701,14 @@ function HiddenWorkspaceItem({
       <span className="min-w-0 max-w-[14rem] flex-1 truncate" title={label} data-testid="hidden-workspace-label">{label}</span>
       <button
         type="button"
-        className="flex-none rounded-md p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+        className="inline-flex min-h-11 flex-none items-center gap-1 rounded-md px-2 text-muted-foreground hover:bg-muted hover:text-foreground"
         onClick={() => onUnhide(workspaceId)}
         data-testid={`workspace-unhide-${workspaceId}`}
         title={t('explorer.unhideWorkspace')}
         aria-label={t('explorer.unhideWorkspaceAria', { workspaceId })}
       >
-        <Eye className="h-3 w-3" aria-hidden="true" data-testid="workspace-unhide-icon" />
+        <Eye className="h-4 w-4" aria-hidden="true" data-testid="workspace-unhide-icon" />
+        <span>{t('explorer.unhideWorkspace')}</span>
       </button>
     </div>
   )
@@ -728,13 +729,14 @@ function HiddenSessionItem({
       <span className="min-w-0 max-w-[14rem] flex-1 truncate" title={label} data-testid="hidden-session-label">{label}</span>
       <button
         type="button"
-        className="flex-none rounded-md p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+        className="inline-flex min-h-11 flex-none items-center gap-1 rounded-md px-2 text-muted-foreground hover:bg-muted hover:text-foreground"
         onClick={() => onUnhide(sessionId)}
         data-testid={`session-unhide-${sessionId}`}
         title={t('explorer.unhideSession')}
         aria-label={t('explorer.unhideSessionAria', { sessionId })}
       >
-        <Eye className="h-3 w-3" aria-hidden="true" data-testid="session-unhide-icon" />
+        <Eye className="h-4 w-4" aria-hidden="true" data-testid="session-unhide-icon" />
+        <span>{t('explorer.unhideSession')}</span>
       </button>
     </div>
   )

@@ -160,7 +160,7 @@ describe('SessionMetadataDialog', () => {
     expect(screen.getByTestId('session-metadata-label').className).toContain('text-base')
     fireEvent.click(screen.getByTestId('session-info-statistics-tab'))
     expect(screen.getByTestId('session-statistics').textContent).toContain('1.2 K')
-    expect(dlg.className).toContain('!bottom-0')
+    expect(dlg.className).toContain('!top-[calc(var(--ak-viewport-offset-top,0px)+var(--ak-viewport-h,100dvh))]')
     expect(dlg.className).toContain('grid-rows-[auto_minmax(0,1fr)_auto]')
     expect(screen.getByTestId('session-metadata-body').className).toContain('overflow-y-auto')
     expect(screen.getByTestId('session-metadata-footer').className).toContain('border-t')

@@ -223,48 +223,52 @@ export function DirectoryPicker({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex flex-col gap-2 border-b border-border/50 p-3">
-        <div className="flex items-center gap-1">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <div className="grid grid-cols-2 gap-1 sm:flex sm:flex-none" data-testid="dir-picker-actions">
           <Button
             type="button"
             variant="outline"
             size="sm"
-            className="h-8 px-2"
+            className="h-11 min-w-0 gap-1 px-2 text-xs sm:h-9"
             onClick={goUp}
             disabled={!canGoUp}
             title={t('directory.goUp')}
             data-testid="dir-picker-up"
           >
-            <ArrowUp className="h-3.5 w-3.5" />
+            <ArrowUp className="h-3.5 w-3.5 flex-none" aria-hidden="true" />
+            <span>{t('directory.parentShort')}</span>
           </Button>
           <Button
             type="button"
             variant="outline"
             size="sm"
-            className="h-8 px-2"
+            className="h-11 min-w-0 gap-1 px-2 text-xs sm:h-9"
             onClick={goRoot}
             disabled={!rootPath}
             title={rootPath ? t('directory.jumpRoot', { root: rootPath }) : t('directory.rootUnknown')}
             data-testid="dir-picker-root"
           >
-            <Home className="h-3.5 w-3.5" />
+            <Home className="h-3.5 w-3.5 flex-none" aria-hidden="true" />
+            <span>{t('directory.rootShort')}</span>
           </Button>
           <Button
             type="button"
             variant="outline"
             size="sm"
-            className="h-8 px-2"
+            className="h-11 min-w-0 gap-1 px-2 text-xs sm:h-9"
             onClick={refresh}
             disabled={value.trim().length === 0}
             title={t('directory.refresh')}
             data-testid="dir-picker-refresh"
           >
-            <RefreshCw className="h-3.5 w-3.5" />
+            <RefreshCw className="h-3.5 w-3.5 flex-none" aria-hidden="true" />
+            <span>{t('directory.refreshShort')}</span>
           </Button>
           <Button
             type="button"
             variant="outline"
             size="sm"
-            className="h-8 px-2"
+            className="h-11 min-w-0 gap-1 px-2 text-xs sm:h-9"
             onClick={() => {
               setCreatingFolder((current) => !current)
               setCreateError(null)
@@ -273,8 +277,10 @@ export function DirectoryPicker({
             title={t('directory.newFolder')}
             data-testid="dir-picker-new-folder"
           >
-            <FolderPlus className="h-3.5 w-3.5" />
+            <FolderPlus className="h-3.5 w-3.5 flex-none" aria-hidden="true" />
+            <span>{t('directory.newFolder')}</span>
           </Button>
+          </div>
           <Input
             id={inputId}
             value={value}
@@ -289,7 +295,7 @@ export function DirectoryPicker({
             placeholder={t('directory.placeholder')}
             data-testid={inputTestId}
             title={value}
-            className="min-w-0 flex-1 truncate font-mono"
+            className="h-11 min-w-0 flex-1 truncate font-mono text-base sm:h-9 sm:text-sm"
           />
         </div>
         {creatingFolder ? (
@@ -310,13 +316,13 @@ export function DirectoryPicker({
               placeholder={t('directory.newFolderPlaceholder')}
               aria-label={t('directory.newFolderName')}
               data-testid="dir-picker-new-folder-name"
-              className="h-8 min-w-0 flex-1 text-sm"
+              className="h-11 min-w-0 flex-1 text-base sm:h-9 sm:text-sm"
               autoFocus
             />
-            <Button type="button" size="sm" className="h-8 px-2" onClick={createFolder} disabled={newFolderName.trim().length === 0} data-testid="dir-picker-create-folder">
+            <Button type="button" size="sm" className="h-11 min-w-0 gap-1 px-2 text-xs sm:h-9" onClick={createFolder} disabled={newFolderName.trim().length === 0} data-testid="dir-picker-create-folder">
               {t('directory.createFolder')}
             </Button>
-            <Button type="button" variant="ghost" size="sm" className="h-8 px-2" onClick={() => { setCreatingFolder(false); setNewFolderName(''); setCreateError(null) }} data-testid="dir-picker-cancel-create-folder">
+            <Button type="button" variant="ghost" size="sm" className="h-11 min-w-0 gap-1 px-2 text-xs sm:h-9" onClick={() => { setCreatingFolder(false); setNewFolderName(''); setCreateError(null) }} data-testid="dir-picker-cancel-create-folder">
               {t('common.cancel')}
             </Button>
           </div>

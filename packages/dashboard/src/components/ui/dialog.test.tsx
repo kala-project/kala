@@ -28,7 +28,8 @@ describe('Dialog motion classes', () => {
   it('exports one mobile sheet and touch-close contract for feature dialogs', () => {
     expect(dialogMobileSheetClassName).toContain('var(--ak-viewport-h,100dvh)')
     expect(dialogMobileSheetClassName).toContain('env(safe-area-inset-bottom)')
-    expect(dialogMobileSheetClassName).toContain('!bottom-0')
+    expect(dialogMobileSheetClassName).toContain('!top-[calc(var(--ak-viewport-offset-top,0px)+var(--ak-viewport-h,100dvh))]')
+    expect(dialogMobileSheetClassName).toContain('!translate-y-[-100%]')
     expect(dialogTouchCloseClassName).toContain('h-11 w-11')
   })
 

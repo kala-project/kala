@@ -352,7 +352,7 @@ describe('SettingsDialog', () => {
     await waitForSettingsLoaded()
 
     const dialog = screen.getByTestId('settings-dialog')
-    expect(dialog.className).toContain('!bottom-0')
+    expect(dialog.className).toContain('!top-[calc(var(--ak-viewport-offset-top,0px)+var(--ak-viewport-h,100dvh))]')
     expect(dialog.className).toContain('max-h-[calc(var(--ak-viewport-h,100dvh)-env(safe-area-inset-top)-0.5rem)]')
     expect(dialog.className).toContain('w-screen')
     expect(dialog.className).toContain('rounded-t-2xl')
