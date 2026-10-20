@@ -4,7 +4,7 @@ import { HelpHint } from '../../components/ui/help-hint.js'
 import type { AgentRuntimeDescriptor, AgentRuntimeId, AttachedExecutor, SessionExecutionMode } from '@agent-kernel/shared'
 import { KERNEL_AGENT_RUNTIME_CAPABILITIES } from '@agent-kernel/shared'
 
-import { Bot, Info, X } from 'lucide-react'
+import { Bot, Check, Clipboard, Info, X } from 'lucide-react'
 
 import { Button } from '../../components/ui/button.js'
 import {
@@ -19,6 +19,7 @@ import {
   dialogTouchCloseClassName,
 } from '../../components/ui/dialog.js'
 import { ScrollArea } from '../../components/ui/scroll-area.js'
+import { writeTextToClipboard } from '../../lib/clipboard.js'
 import { cn } from '../../lib/utils.js'
 import { PREF_AGENT_RUNTIME, readStringPref, writeStringPref } from '../../lib/prefs.js'
 import type { DashboardSocket } from '../../session.js'
@@ -43,6 +44,9 @@ type Props = {
   onCreateSimpleChat(agentRuntime: AgentRuntimeId): void
   onCancel(): void
 }
+
+// Run in the Host installation directory, not in the browser or Workspace Executor.
+const COPILOT_SDK_INSTALL_COMMAND = 'npm install --include=optional @github/copilot-sdk@1.0.14'
 
 export function NewSessionDialog({
   open,
@@ -69,6 +73,8 @@ export function NewSessionDialog({
   const [executionMode, setExecutionMode] = useState<SessionExecutionMode>('chat')
   const [cwd, setCwd] = useState('')
   const [missingWorkspaceId, setMissingWorkspaceId] = useState<string | null>(null)
+  const [copilotInstallCopied, setCopilotInstallCopied] = useState(false)
+  const [copilotCopyFailed, setCopilotCopyFailed] = useState(false)
   const initializedOpenRef = useRef(false)
   const selectedWorkspace = useMemo(
     () => workspaces.find((w) => w.workspaceId === workspaceId),
@@ -160,16 +166,15 @@ export function NewSessionDialog({
                 const selected = agentRuntime === runtime.id
                 const label = runtimeDisplayLabel(t, runtime)
                 const description = runtimeDisplayDescription(t, runtime)
-                return (
+                const button = (
                   <button
-                    key={runtime.id}
                     type="button"
                     role="radio"
                     aria-checked={selected}
                     disabled={submitting || !runtime.available}
                     onClick={() => selectAgentRuntime(runtime.id)}
                     data-testid={`new-session-runtime-${runtime.id}`}
-                    title={runtime.available ? description : runtime.reason}
+                    title={runtime.available ? description : undefined}
                     className={cn(
                       'flex min-h-11 min-w-0 items-center justify-center gap-1 rounded px-1.5 py-1 text-center text-sm font-medium leading-tight transition-colors',
                       selected ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-muted hover:text-foreground',
@@ -181,8 +186,40 @@ export function NewSessionDialog({
                     {isRecommendedRuntime(runtime) ? <span className="sr-only">{t('dialogs.runtime.recommended')}</span> : null}
                   </button>
                 )
+                if (runtime.available) return <span key={runtime.id} className="min-w-0">{button}</span>
+                const needsSdk = runtime.id === 'copilot' && runtime.status === 'unavailable'
+                  && /^Copilot (?:SDK|CLI) unavailable:/u.test(runtime.reason ?? '')
+                return (
+                  <HelpHint key={runtime.id} label={label} trigger={
+                    <span role="group" tabIndex={0} aria-label={`${label}: ${runtime.reason ?? t('dialogs.runtime.unavailable')}`}
+                      className="min-w-0 cursor-help [&>button]:pointer-events-none">{button}</span>
+                  }>
+                    <span className="block">{runtime.reason ?? t('dialogs.runtime.unavailable')}</span>
+                    {needsSdk ? <span className="mt-2 block">
+                      <span className="block">{t('dialogs.runtime.githubCopilot.installOnHost')}</span>
+                      <code className="my-2 block select-all rounded bg-muted p-2 font-mono text-xs">{COPILOT_SDK_INSTALL_COMMAND}</code>
+                      <Button type="button" size="sm" variant="outline" data-testid="copy-copilot-install"
+                        onClick={() => {
+                          void writeTextToClipboard(COPILOT_SDK_INSTALL_COMMAND).then(() => {
+                            setCopilotInstallCopied(true)
+                            setCopilotCopyFailed(false)
+                          }).catch(() => { setCopilotInstallCopied(false); setCopilotCopyFailed(true) })
+                        }}>
+                        {copilotInstallCopied ? <Check className="mr-1 h-3.5 w-3.5" /> : <Clipboard className="mr-1 h-3.5 w-3.5" />}
+                        {copilotInstallCopied ? t('common.copied') : t('common.copy')}
+                      </Button>
+                      {copilotCopyFailed ? <span role="alert" className="ml-2 text-destructive">{t('common.copyFailed')}</span> : null}
+                      <span className="mt-2 block">{t('dialogs.runtime.githubCopilot.restartHost')}</span>
+                    </span> : null}
+                  </HelpHint>
+                )
               })}
             </div>
+            {agentRuntimes.filter((runtime) => !runtime.available).map((runtime) => (
+              <p key={runtime.id} className="text-xs text-muted-foreground" data-testid={`new-session-runtime-reason-${runtime.id}`}>
+                {runtimeDisplayLabel(t, runtime)}: {runtime.reason ?? t('dialogs.runtime.unavailable')}
+              </p>
+            ))}
           </div>
           <div className="flex min-w-0 flex-col gap-1">
             <div className="flex items-center gap-1">

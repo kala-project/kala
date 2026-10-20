@@ -91,14 +91,27 @@ directory. A Session `cwd` belongs to its Workspace Executor and is passed only
 through RunLab custom Tool dispatch; it must never be used as the SDK process
 working directory.
 
+Copilot is enabled by default while Kernel remains the recommended runtime for
+new Sessions. Operators can set `KALA_COPILOT_ENABLED=1` to explicitly enable
+Copilot, or turn it off with `KALA_COPILOT_ENABLED=0` (or `false`), or with
+`copilot.enabled: false` when embedding the Host. An enabled Host loads
+`@github/copilot-sdk` at startup; if it is missing, the Host still starts and
+reports `unavailable`. Install SDK
+and its optional platform dependencies **in the Host installation directory**
+using `npm install --include=optional @github/copilot-sdk@1.0.14`, then restart
+the Host. Installing on the browser or Workspace Executor does not help.
+Standalone bundled executables cannot be repaired with this npm command: they
+must be replaced with a complete release containing the Copilot platform assets.
+
 Kala does not select a separately published CLI by default. The official
 `@github/copilot-sdk` first discovers the platform-specific `@github/copilot`
 package installed in its npm dependency tree. Operators may instead set
 `COPILOT_CLI_PATH` to a compatible, executable Copilot CLI. If neither source is
 available, the runtime remains visibly `unavailable` with remediation rather
-than being reported as disabled. The platform package and its license remain
-part of an npm deployment of the SDK; that is distinct from copying its binary
-into a Kala release or container as a separately managed asset.
+than being reported as disabled. Authentication errors are reported separately;
+reinstalling the SDK does not log in to Copilot. The platform package and its
+license remain part of an npm deployment of the SDK; that is distinct from
+copying its binary into a Kala release or container as a separately managed asset.
 
 Copilot must not be implemented through `LLMAdapter.call()`. Doing so would
 create two competing Agent loops and make Tool, approval, replay, and

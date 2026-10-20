@@ -390,6 +390,52 @@ describe('NewSessionDialog', () => {
     }))
   })
 
+  it.each(['Copilot CLI unavailable: not installed', 'Copilot SDK unavailable: not installed'])(
+    'shows and copies the Host SDK install command when the disabled Copilot choice reports %s', async (reason) => {
+      const write = vi.fn().mockResolvedValue(undefined)
+      const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: write } })
+      try {
+        render(<NewSessionDialog open workspaces={[wsA]} socket={makeSocket().socket as never}
+          agentRuntimes={[
+            { id: 'kernel', label: 'Kala', description: 'Kernel', available: true, status: 'ready', capabilities: KERNEL_AGENT_RUNTIME_CAPABILITIES },
+            { id: 'copilot', label: 'GitHub Copilot', description: 'SDK', available: false, status: 'unavailable',
+              reason, capabilities: KERNEL_AGENT_RUNTIME_CAPABILITIES },
+          ]} onCreate={() => {}} onCreateSimpleChat={() => {}} onCancel={() => {}} />)
+        const copilot = screen.getByTestId('new-session-runtime-copilot') as HTMLButtonElement
+        expect(copilot.disabled).toBe(true)
+        expect(screen.getByTestId('new-session-runtime-reason-copilot').textContent).toContain(reason)
+        fireEvent.mouseEnter(copilot.parentElement!)
+        const copy = await screen.findByTestId('copy-copilot-install')
+        expect(screen.getByText('npm install --include=optional @github/copilot-sdk@1.0.14')).toBeTruthy()
+        fireEvent.click(copy)
+        await waitFor(() => expect(write).toHaveBeenCalledWith('npm install --include=optional @github/copilot-sdk@1.0.14'))
+        await waitFor(() => expect(copy.textContent).toContain('Copied'))
+      } finally {
+        if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard)
+        else Reflect.deleteProperty(navigator, 'clipboard')
+      }
+    },
+  )
+
+  it.each([
+    ['disabled', 'Copilot runtime is disabled'],
+    ['unavailable', 'Copilot CLI is not authenticated'],
+  ] as const)('does not suggest reinstalling the SDK for %s Copilot', async (status, reason) => {
+    render(<NewSessionDialog open workspaces={[wsA]} socket={makeSocket().socket as never}
+      agentRuntimes={[
+        { id: 'kernel', label: 'Kala', description: 'Kernel', available: true, status: 'ready', capabilities: KERNEL_AGENT_RUNTIME_CAPABILITIES },
+        { id: 'copilot', label: 'GitHub Copilot', description: 'SDK', available: false, status,
+          reason, capabilities: KERNEL_AGENT_RUNTIME_CAPABILITIES },
+      ]} onCreate={() => {}} onCreateSimpleChat={() => {}} onCancel={() => {}} />)
+    const copilot = screen.getByTestId('new-session-runtime-copilot') as HTMLButtonElement
+    expect(copilot.disabled).toBe(true)
+    fireEvent.mouseEnter(copilot.parentElement!)
+    await screen.findByRole('tooltip')
+    expect(screen.getByText(reason)).toBeTruthy()
+    expect(screen.queryByTestId('copy-copilot-install')).toBeNull()
+  })
+
   it('creates a DAG-First Session when that execution mode is selected', () => {
     const onCreate = vi.fn()
     const harness = makeSocket()

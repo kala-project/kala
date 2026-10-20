@@ -1998,7 +1998,9 @@ export async function startHostServer(
       },
     },
   }, {
-    enabled: options.copilot?.enabled ?? process.env.KALA_COPILOT_ENABLED === '1',
+    // Enabled by default. Operators can explicitly opt out without making an
+    // installed SDK depend on an undocumented per-machine environment variable.
+    enabled: options.copilot?.enabled ?? !['0', 'false'].includes((process.env.KALA_COPILOT_ENABLED ?? '').trim().toLowerCase()),
     sessionsDir: options.sessionsDir,
     ...(options.copilot?.gitHubToken ?? process.env.COPILOT_GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN
       ? { gitHubToken: options.copilot?.gitHubToken ?? process.env.COPILOT_GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN }

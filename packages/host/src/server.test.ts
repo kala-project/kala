@@ -323,6 +323,23 @@ describe('wire protocol', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  it('advertises Copilot as ready by default when the SDK starts successfully', async () => {
+    const dashboard: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(`${url}/dashboard`, {
+      transports: ['websocket'],
+      auth: { sessionId: 'copilot-default', role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+      reconnection: false,
+    })
+    try {
+      const catalog = await new Promise<{ runtimes: readonly { id: string; status: string; available: boolean }[] }>((resolveCatalog, reject) => {
+        dashboard.once('server:agent_runtimes', resolveCatalog)
+        dashboard.once('connect_error', reject)
+      })
+      expect(catalog.runtimes.find((runtime) => runtime.id === 'copilot')).toMatchObject({ status: 'ready', available: true })
+    } finally {
+      dashboard.close()
+    }
+  })
+
   it('schedules newly initialized DAG runs before any host restart', async () => {
     const sessionId = 'dag-initial-schedule'
     const dashboard: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(`${url}/dashboard`, {

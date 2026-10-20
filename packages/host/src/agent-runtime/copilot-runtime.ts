@@ -20,16 +20,14 @@ import {
   type ModelInfo,
   type RuntimeCompactionPolicy,
 } from '@agent-kernel/shared'
-import {
+import type {
   CopilotClient,
-  RuntimeConnection,
-  ToolSet,
-  type ModelInfo as CopilotModelInfo,
-  type MessageOptions,
-  type CopilotSession,
-  type SessionEvent,
-  type Tool,
-  type ToolResultObject,
+  ModelInfo as CopilotModelInfo,
+  MessageOptions,
+  CopilotSession,
+  SessionEvent,
+  Tool,
+  ToolResultObject,
 } from '@github/copilot-sdk'
 
 import type { SessionRecord } from '../store/session.js'
@@ -85,6 +83,7 @@ export type CopilotAgentRuntimeOptions = {
 export class CopilotAgentRuntime implements AgentRuntime {
   readonly id = 'copilot' as const
   private client: CopilotClient | undefined
+  private sdk: typeof import('@github/copilot-sdk') | undefined
   private readonly sessions = new Map<string, CopilotSession>()
   private readonly sessionSystemPrompts = new Map<string, string>()
   private readonly approvals = new Map<string, PendingApproval>()
@@ -128,6 +127,9 @@ export class CopilotAgentRuntime implements AgentRuntime {
   async start(): Promise<void> {
     if (!this.options.enabled) return
     try {
+      // Missing npm/platform dependencies must make the adapter unavailable,
+      // not prevent the entire Host from starting before it can report why.
+      const { CopilotClient, RuntimeConnection } = this.sdk = await import('@github/copilot-sdk')
       const configuredCliPath = process.env.COPILOT_CLI_PATH?.trim()
       const packagedCliPath = configuredCliPath
         ? undefined
@@ -155,6 +157,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
       this.reason = copilotStartupFailureReason(error)
       await this.client?.stop().catch(() => [])
       this.client = undefined
+      this.sdk = undefined
     }
   }
 
@@ -499,7 +502,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
       tools,
       availableTools: [
         ...tools.map((tool) => `custom:${tool.name}`),
-        ...new ToolSet().addBuiltIn('view').toArray(),
+        ...new this.sdk!.ToolSet().addBuiltIn('view').toArray(),
       ],
       excludedTools: ['mcp:*'],
       additionalDirectories: [],
@@ -1590,7 +1593,11 @@ function sameSize(source: string, target: string): boolean {
 }
 
 function copilotStartupFailureReason(error: unknown): string {
-  const detail = error instanceof Error ? error.message : String(error)
+  const detail = error instanceof Error && error.cause instanceof Error
+    ? error.cause.message : error instanceof Error ? error.message : String(error)
+  if (/cannot find package ['"]?@github\/copilot-sdk|cannot find module ['"]?@github\/copilot-sdk/i.test(detail)) {
+    return `Copilot SDK unavailable: ${detail} Install @github/copilot-sdk in the Host installation directory and restart the Host.`
+  }
   if (/could not (?:find|resolve).*@github\/copilot|copilot cli not found|path to copilot cli is required|\bENOENT\b/i.test(detail)) {
     return `Copilot CLI unavailable: ${detail} Install the complete @github/copilot-sdk npm dependencies or set COPILOT_CLI_PATH to a compatible Copilot CLI executable.`
   }
