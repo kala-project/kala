@@ -69,6 +69,7 @@ export const DASHBOARD_PREFERENCES = definePreferenceRegistry({
   appBadgeEnabled: { key: 'ak-app-badge-enabled', type: 'boolean', defaultValue: true },
   keepScreenAwake: { key: 'ak-keep-screen-awake', type: 'boolean', defaultValue: false },
   smoothStreamingText: { key: 'ak-smooth-streaming-text', type: 'boolean', defaultValue: true },
+  expandThinkingByDefault: { key: 'ak-expand-thinking-by-default', type: 'boolean', defaultValue: false },
   messageTimestamps: { key: 'ak-message-timestamps', type: 'string', defaultValue: 'auto' },
   chapterReadingMode: { key: 'ak-chapter-reading-mode', type: 'string', defaultValue: 'chapters' },
   desktopNotificationsEnabled: { key: 'ak-desktop-notifications-enabled', type: 'boolean', defaultValue: false },
@@ -297,6 +298,7 @@ export const PREF_SESSION_SUBSCRIPTION_WARMTH_MINUTES = DASHBOARD_PREFERENCES.se
 export const PREF_APP_BADGE_ENABLED = DASHBOARD_PREFERENCES.appBadgeEnabled.key
 export const PREF_KEEP_SCREEN_AWAKE = DASHBOARD_PREFERENCES.keepScreenAwake.key
 export const PREF_SMOOTH_STREAMING_TEXT = DASHBOARD_PREFERENCES.smoothStreamingText.key
+export const PREF_EXPAND_THINKING_BY_DEFAULT = DASHBOARD_PREFERENCES.expandThinkingByDefault.key
 export const PREF_MESSAGE_TIMESTAMPS = DASHBOARD_PREFERENCES.messageTimestamps.key
 export const PREF_CHAPTER_READING_MODE = DASHBOARD_PREFERENCES.chapterReadingMode.key
 export const PREF_MODEL = DASHBOARD_PREFERENCES.model.key

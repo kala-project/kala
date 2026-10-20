@@ -921,6 +921,19 @@ describe('SettingsDialog', () => {
     expect(localStorage.getItem('ak-show-pinned-message')).toBe('0')
   })
 
+  it('defaults thinking cards to collapsed and persists an explicit expand-by-default choice', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(payload), { status: 200 }))
+    render(<SettingsDialog open onOpenChange={() => {}} />)
+    await waitForSettingsLoaded()
+    fireEvent.click(screen.getByTestId('settings-tab-interface'))
+
+    const toggle = await screen.findByTestId('settings-toggle-expand-thinking-by-default')
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    expect(localStorage.getItem('ak-expand-thinking-by-default')).toBe('1')
+  })
+
   it('stores the session view cache memory limit preference', async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(payload), { status: 200 }))
     render(<SettingsDialog open onOpenChange={() => {}} />)

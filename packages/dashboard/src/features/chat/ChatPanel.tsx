@@ -84,7 +84,7 @@ import { Textarea } from '../../components/ui/textarea.js'
 import { Typewriter } from '../../components/Typewriter.js'
 import { MarkdownTable } from '../../components/MarkdownTable.js'
 import { formatTokens } from '../../lib/format.js'
-import { DEFAULT_LIVE_TOOL_ACTIVITY_TAIL_COUNT, DEFAULT_TOOL_ACTIVITY_ICON_SCALE, PREF_CHAPTER_READING_MODE, PREF_MESSAGE_TIMESTAMPS, PREF_SMOOTH_STREAMING_TEXT, PREF_TOOL_ACTIVITY_ICON_SCALE, useBooleanPref, useNumberPref, useStringPref } from '../../lib/prefs.js'
+import { DEFAULT_LIVE_TOOL_ACTIVITY_TAIL_COUNT, DEFAULT_TOOL_ACTIVITY_ICON_SCALE, PREF_CHAPTER_READING_MODE, PREF_EXPAND_THINKING_BY_DEFAULT, PREF_MESSAGE_TIMESTAMPS, PREF_SMOOTH_STREAMING_TEXT, PREF_TOOL_ACTIVITY_ICON_SCALE, useBooleanPref, useNumberPref, useStringPref } from '../../lib/prefs.js'
 import { useInterfaceScale } from '../../lib/interface-scale.js'
 import { cn } from '../../lib/utils.js'
 import { writeTextToClipboard } from '../../lib/clipboard.js'
@@ -185,6 +185,7 @@ const ArtifactSessionContext = createContext<string | null>(null)
 const AttachmentAccessContext = createContext<{ host?: string; token?: string }>({})
 type MessageTimestampVisibility = 'auto' | 'always' | 'hidden'
 const MessageTimestampContext = createContext<MessageTimestampVisibility>('auto')
+const ThinkingExpandedByDefaultContext = createContext(false)
 
 type RenderTranscriptItem = TranscriptItem | {
   kind: 'compact_feedback'
@@ -282,6 +283,7 @@ export function ChatPanel({
 }: Props): JSX.Element {
   const { t } = useTranslation()
   const [storedTimestampVisibility] = useStringPref(PREF_MESSAGE_TIMESTAMPS, 'auto')
+  const [expandThinkingByDefault] = useBooleanPref(PREF_EXPAND_THINKING_BY_DEFAULT, false)
   const [storedChapterMode] = useStringPref(PREF_CHAPTER_READING_MODE, 'chapters')
   const globalChapterMode: ChapterReadingMode = storedChapterMode === 'continuous' ? 'continuous' : 'chapters'
   const timestampVisibility: MessageTimestampVisibility =
@@ -721,6 +723,7 @@ export function ChatPanel({
   const displayStyle = chatDisplayStyle(displayPrefs)
 
   return (
+    <ThinkingExpandedByDefaultContext.Provider value={expandThinkingByDefault}>
     <MessageTimestampContext.Provider value={timestampVisibility}>
     <ArtifactSessionContext.Provider value={sessionId ?? parentSessionId ?? null}>
     <AttachmentAccessContext.Provider value={{ ...(attachmentHost ? { host: attachmentHost } : {}), ...(attachmentToken ? { token: attachmentToken } : {}) }}>
@@ -810,6 +813,7 @@ export function ChatPanel({
     </AttachmentAccessContext.Provider>
     </ArtifactSessionContext.Provider>
     </MessageTimestampContext.Provider>
+    </ThinkingExpandedByDefaultContext.Provider>
   )
 }
 
@@ -1472,6 +1476,7 @@ function ToolActivityTranscriptRow({
   socket?: DashboardSocket | null
 }): JSX.Element {
   const { t } = useTranslation()
+  const timestampVisibility = useContext(MessageTimestampContext)
   if (parentSessionId && item.group.calls.every((call) => call.name === 'agent')) {
     return (
       <div
@@ -1485,17 +1490,18 @@ function ToolActivityTranscriptRow({
         <AssistantAvatarRail hidden={hideHeader} label={t('chat.transcript.searchCategories.assistant')} />
         <div className="relative min-w-0 flex-1">
           {hideHeader ? null : (
-            <div className="mb-1 text-meta font-medium uppercase tracking-wider text-muted-foreground">
-              {t('chat.transcript.searchCategories.assistant')}
+            <div className="mb-1 flex min-w-0 items-center justify-between gap-2 text-meta font-medium uppercase tracking-wider text-muted-foreground">
+              <span>{t('chat.transcript.searchCategories.assistant')}</span>
+              <InlineTimestamp ts={item.ts} />
             </div>
           )}
-          <InlineTimestamp ts={item.ts} className="absolute right-0 top-0 text-muted-foreground" />
           <SubAgentCard
             parentSessionId={parentSessionId}
             socket={socket ?? null}
             group={item.group}
             approvalByCallId={approvalByCallId}
             toolCardMode={toolCardMode}
+            timestamp={hideHeader && timestampVisibility !== 'hidden' ? item.ts : undefined}
           />
         </div>
       </div>
@@ -1542,11 +1548,11 @@ function ToolActivityTranscriptRow({
       <AssistantAvatarRail hidden={hideHeader} label={t('chat.transcript.searchCategories.assistant')} />
       <div className="relative min-w-0 flex-1">
         {hideHeader ? null : (
-          <div className="mb-1 text-meta font-medium uppercase tracking-wider text-muted-foreground">
-            {t('chat.transcript.searchCategories.assistant')}
+          <div className="mb-1 flex min-w-0 items-center justify-between gap-2 text-meta font-medium uppercase tracking-wider text-muted-foreground">
+            <span>{t('chat.transcript.searchCategories.assistant')}</span>
+            <InlineTimestamp ts={item.ts} />
           </div>
         )}
-        <InlineTimestamp ts={item.ts} className="absolute right-0 top-0 text-muted-foreground" />
         <ToolCallGroupBlock
           group={item.group}
           messageIndex={item.firstMessageIndex}
@@ -1557,6 +1563,7 @@ function ToolActivityTranscriptRow({
           toolCardMode={toolCardMode}
           activeToolCallIds={activeToolCallIds}
         />
+        {hideHeader && item.ts && timestampVisibility !== 'hidden' ? <div className="mt-1 flex justify-end"><InlineTimestamp ts={item.ts} /></div> : null}
       </div>
     </div>
   )
@@ -1913,7 +1920,8 @@ function clusterVisibleThinkingItems(
       if (previous?.kind === 'thinking_cluster') {
         previous.updates.push(...thinkingUpdates)
         previous.lastMessageIndex = messageIndex
-        previous.streaming ||= item.streaming === true
+        // The newest update determines whether the cluster is still live.
+        previous.streaming = item.streaming === true
         if (item.seq !== undefined) previous.seq = item.seq
         if (item.ts !== undefined) previous.ts = item.ts
         if (item.turnTiming !== undefined) previous.turnTiming = item.turnTiming
@@ -2176,6 +2184,15 @@ function MessageRow({
     && groupedItems[0].content.text.length >= 2_000
       ? groupedItems[0].content.text
       : null
+  // A single prose paragraph can carry its actions at the end of the text;
+  // inline layout wraps them only if the remaining line is too narrow.
+  const inlineActionsText = !streaming && !turnTiming && !chapterText && assistantActions && groupedItems.length === 1
+    && groupedItems[0]?.kind === 'single' && groupedItems[0].content.type === 'text'
+    && !/[\r\n]/.test(groupedItems[0].content.text)
+    && !/^\s*(?:#{1,6}\s|>|[-+*]\s|\d+[.)]\s|`{3,}|~{3,})/.test(groupedItems[0].content.text)
+    && !/!\[[^\]]*\]\(/.test(groupedItems[0].content.text)
+      ? groupedItems[0].content.text
+      : null
 
   return (
     <div
@@ -2225,7 +2242,19 @@ function MessageRow({
               )
             }
             if (item.kind === 'thinking_group') {
-              return <ThinkingBlock key={`thinking-${i}`} updates={item.updates} />
+              return <ThinkingBlock key={`thinking-${i}`} updates={item.updates} active={streaming} />
+            }
+            if (inlineActionsText && item.kind === 'single' && item.content.type === 'text') {
+              return <AssistantMarkdown key={i} text={inlineActionsText} trailingAction={<MessageActions
+                align="start"
+                inline
+                copyText={assistantActions!.copyText}
+                tryAgainAction={assistantRerunTarget && onEditAndRerun ? {
+                  label: t('chat.transcript.tryAgain'),
+                  onClick: () => onEditAndRerun(assistantRerunTarget.seq, assistantRerunTarget.text),
+                  testId: `try-again-message-${index}`,
+                } : undefined}
+              />} />
             }
             if (chapterText && item.kind === 'single' && item.content.type === 'text') {
               return <Suspense key={i} fallback={<AssistantMarkdown text={chapterText} />}>
@@ -2254,12 +2283,12 @@ function MessageRow({
               />
             )
           })}
-          {!streaming && (ts || turnTiming || (message.role === 'assistant' && assistantActions)) ? (
+          {!streaming && (ts || turnTiming || (message.role === 'assistant' && assistantActions && !inlineActionsText)) ? (
             <div className={cn(
               'message-metadata-row relative flex min-w-0 max-w-full items-center gap-1 overflow-visible',
-              assistantActions || turnTiming ? 'min-h-7' : 'h-0',
+              (assistantActions && !inlineActionsText) || turnTiming ? 'min-h-7' : 'h-0',
             )} data-testid="assistant-message-footer">
-              {assistantActions ? <MessageActions
+              {assistantActions && !inlineActionsText ? <MessageActions
                 align="start"
                 copyText={assistantActions.copyText}
                 tryAgainAction={assistantRerunTarget && onEditAndRerun ? {
@@ -2271,7 +2300,7 @@ function MessageRow({
               {turnTiming ? <TurnTimingFooter summary={turnTiming} /> : null}
               <InlineTimestamp ts={ts} className={cn(
                 'absolute right-0 rounded bg-background/90 px-1 backdrop-blur-sm sm:right-auto sm:left-full sm:ml-2',
-                assistantActions || turnTiming ? 'bottom-1/2 translate-y-1/2' : 'top-0',
+                (assistantActions && !inlineActionsText) || turnTiming ? 'bottom-1/2 translate-y-1/2' : 'top-0',
               )} />
             </div>
           ) : null}
@@ -2451,18 +2480,20 @@ function ContentBlock({
       />
     )
   }
-  if (content.type === 'thinking') return <ThinkingBlock updates={[content]} />
+  if (content.type === 'thinking') return <ThinkingBlock updates={[content]} active={streaming === true} />
   if (content.type === 'image') return <ImageBlock content={content} />
   return <FileBlock content={content} />
 }
 
 function MessageActions({
   align,
+  inline = false,
   copyText,
   editAction,
   tryAgainAction,
 }: {
   align: 'start' | 'end'
+  inline?: boolean
   copyText: string
   editAction?: { label: string; onClick: () => void; testId: string }
   tryAgainAction?: { label: string; onClick: () => void; testId: string }
@@ -2471,10 +2502,12 @@ function MessageActions({
   const [copied, setCopied] = useState(false)
   const canCopy = copyText.trim().length > 0
   if (!canCopy && !editAction && !tryAgainAction) return null
+  const Container = inline ? 'span' : 'div'
   return (
-    <div
+    <Container
       className={cn(
-        'flex items-center gap-1 text-muted-foreground opacity-70 transition-opacity group-hover:opacity-100 focus-within:opacity-100',
+        'items-center gap-1 text-muted-foreground opacity-70 transition-opacity group-hover:opacity-100 focus-within:opacity-100',
+        inline ? 'inline-flex align-middle' : 'flex',
         align === 'end' ? 'justify-end' : 'justify-start',
       )}
       data-testid={`message-actions-${align}`}
@@ -2483,7 +2516,8 @@ function MessageActions({
         <button
           type="button"
           className={cn(
-            'inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-accent hover:text-foreground focus:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+            'inline-flex items-center justify-center rounded-md transition-colors hover:bg-accent hover:text-foreground focus:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+            inline ? 'h-6 w-6' : 'h-7 w-7',
             copied && 'bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/15 hover:text-emerald-700 dark:text-emerald-400',
           )}
           title={copied ? t('common.copied') : t('common.copy')}
@@ -2506,7 +2540,7 @@ function MessageActions({
       {editAction ? (
         <button
           type="button"
-          className="inline-flex h-7 w-7 items-center justify-center rounded-md hover:bg-accent hover:text-foreground focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className={cn('inline-flex items-center justify-center rounded-md hover:bg-accent hover:text-foreground focus:outline-none focus-visible:ring-1 focus-visible:ring-ring', inline ? 'h-6 w-6' : 'h-7 w-7')}
           title={editAction.label}
           aria-label={editAction.label}
           data-testid={editAction.testId}
@@ -2518,7 +2552,7 @@ function MessageActions({
       {tryAgainAction ? (
         <button
           type="button"
-          className="inline-flex h-7 w-7 items-center justify-center rounded-md hover:bg-accent hover:text-foreground focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className={cn('inline-flex items-center justify-center rounded-md hover:bg-accent hover:text-foreground focus:outline-none focus-visible:ring-1 focus-visible:ring-ring', inline ? 'h-6 w-6' : 'h-7 w-7')}
           title={tryAgainAction.label}
           aria-label={tryAgainAction.label}
           data-testid={tryAgainAction.testId}
@@ -2527,7 +2561,7 @@ function MessageActions({
           <RotateCcw className="h-4 w-4" aria-hidden="true" />
         </button>
       ) : null}
-    </div>
+    </Container>
   )
 }
 
@@ -2691,11 +2725,15 @@ function AttachmentFileChip({ name, mediaType }: { name: string; mediaType: stri
 
 function ThinkingBlock({
   updates,
+  active = false,
 }: {
   updates: readonly ReasoningContent[]
+  active?: boolean
 }): JSX.Element {
   const { t } = useTranslation()
-  const [open, setOpen] = useState(true)
+  const expandByDefault = useContext(ThinkingExpandedByDefaultContext)
+  const [open, setOpen] = useState(expandByDefault)
+  useEffect(() => setOpen(expandByDefault), [expandByDefault])
   const count = updates.length
   const [activeIndex, setActiveIndex] = useState(() => Math.max(0, count - 1))
   const previousCountRef = useRef(count)
@@ -2741,8 +2779,8 @@ function ThinkingBlock({
           <span className="flex min-w-0 items-baseline gap-1.5">
             <span className="flex-none font-medium">
               {count > 1
-                ? t('chat.transcript.thinkingUpdates', { count })
-                : t('chat.transcript.thinking')}
+                ? t(active ? 'chat.transcript.thinkingUpdatesInProgress' : 'chat.transcript.thinkingUpdates', { count })
+                : t(active ? 'chat.transcript.thinkingInProgress' : 'chat.transcript.thinking')}
             </span>
             {title ? (
               <span className="hidden min-w-0 truncate text-foreground/80 sm:block" data-testid="thinking-title">
@@ -2845,21 +2883,21 @@ function localImageFileName(value: string): string {
   return normalized.split('/').at(-1) || 'image'
 }
 
-export const AssistantMarkdown = memo(function AssistantMarkdown({ text, streaming = false }: { text: string; streaming?: boolean }): JSX.Element {
+export const AssistantMarkdown = memo(function AssistantMarkdown({ text, streaming = false, trailingAction }: { text: string; streaming?: boolean; trailingAction?: React.ReactNode }): JSX.Element {
   const [smoothFade] = useBooleanPref(PREF_SMOOTH_STREAMING_TEXT, true)
   // Markdown constructs can span blank lines (continued lists, reference links,
   // and fences), so semantic content must always be parsed as one document.
-  return <MarkdownBlock text={text} streaming={streaming} smoothFade={smoothFade} />
+  return <MarkdownBlock text={text} streaming={streaming} smoothFade={smoothFade} trailingAction={trailingAction} />
 })
 
 // Memoization avoids reparsing unchanged completed messages. Streaming Markdown
 // intentionally reparses the whole document for cross-block semantic correctness.
-const MarkdownBlock = memo(function MarkdownBlock({ text, streaming, smoothFade }: { text: string; streaming: boolean; smoothFade: boolean }): JSX.Element {
+const MarkdownBlock = memo(function MarkdownBlock({ text, streaming, smoothFade, trailingAction }: { text: string; streaming: boolean; smoothFade: boolean; trailingAction?: React.ReactNode }): JSX.Element {
   if (streaming && smoothFade && canFadeRevealTail(text)) return <RevealTail text={text} />
-  return <MarkdownBody text={text} streaming={streaming} />
+  return <MarkdownBody text={text} streaming={streaming} trailingAction={trailingAction} />
 })
 
-const MarkdownBody = memo(function MarkdownBody({ text, streaming = false }: { text: string; streaming?: boolean }): JSX.Element {
+const MarkdownBody = memo(function MarkdownBody({ text, streaming = false, trailingAction }: { text: string; streaming?: boolean; trailingAction?: React.ReactNode }): JSX.Element {
   const onOpenWorkspaceFile = useContext(WorkspaceFileLinkContext)
   const artifactSessionId = useContext(ArtifactSessionContext)
   const markdownText = normalizeMarkdownEmphasisAdjacency(text)
@@ -2926,7 +2964,7 @@ const MarkdownBody = memo(function MarkdownBody({ text, streaming = false }: { t
           },
           p({ children, node: _node, ...rest }) {
             const withCursor = shouldPlaceStreamingCursor(cursorTarget, 'p', _node, cursorEndOffset) ? placeTextCursor(children) : children
-            return <p {...rest}>{withCursor}</p>
+            return <p {...rest}>{withCursor}{trailingAction ? <>{' '}{trailingAction}</> : null}</p>
           },
           li({ children, node: _node, ...rest }) {
             const withCursor = shouldPlaceStreamingCursor(cursorTarget, 'li', _node, cursorEndOffset) ? placeTextCursor(children) : children
@@ -3234,8 +3272,8 @@ function ToolCallBlock({
             <DiffPreview toolName={call.name} input={approval.input} />
           ) : (
             <div className="overflow-hidden rounded-md bg-background/60">
-              <ScrollArea>
-                <pre className="min-w-0 whitespace-pre-wrap break-words px-3 py-2 font-mono text-meta leading-relaxed text-muted-foreground [overflow-wrap:anywhere]">
+              <ScrollArea className="max-h-[min(24rem,50vh)]" viewportClassName="max-h-[min(24rem,50vh)]">
+                <pre className="ak-tool-detail-code min-w-0 whitespace-pre-wrap break-words px-3 py-2 font-mono text-muted-foreground [overflow-wrap:anywhere]">
                   {JSON.stringify(call.input, null, 2)}
                 </pre>
               </ScrollArea>
@@ -3487,8 +3525,8 @@ function ToolResultContentView({
   const structuredResult = parseStructuredToolResult(content)
   if (!structuredResult) {
     return (
-      <ScrollArea>
-        <pre className={cn('min-w-0 whitespace-pre-wrap break-words font-mono text-meta leading-relaxed text-foreground [overflow-wrap:anywhere]', rawClassName ?? 'px-2.5 py-2')}>
+      <ScrollArea className="max-h-[min(24rem,50vh)]" viewportClassName="max-h-[min(24rem,50vh)]">
+        <pre className={cn('ak-tool-detail-code min-w-0 whitespace-pre-wrap break-words font-mono text-foreground [overflow-wrap:anywhere]', rawClassName ?? 'px-2.5 py-2')}>
           {fallback || content || t('chatCommon.noOutput')}
         </pre>
       </ScrollArea>
@@ -3507,8 +3545,8 @@ function ToolResultContentView({
         </button>
       </div>
       {raw ? (
-        <ScrollArea>
-          <pre className={cn('min-w-0 whitespace-pre-wrap break-words font-mono text-meta leading-relaxed text-foreground [overflow-wrap:anywhere]', rawClassName ?? 'px-2.5 py-2')}>
+        <ScrollArea className="max-h-[min(24rem,50vh)]" viewportClassName="max-h-[min(24rem,50vh)]">
+          <pre className={cn('ak-tool-detail-code min-w-0 whitespace-pre-wrap break-words font-mono text-foreground [overflow-wrap:anywhere]', rawClassName ?? 'px-2.5 py-2')}>
             {content || t('chatCommon.noOutput')}
           </pre>
         </ScrollArea>
@@ -3568,7 +3606,7 @@ function ToolResultDiffView({ diff }: { diff: string }): JSX.Element {
   const lines = diff.split('\n')
   return (
     <ScrollArea className="max-h-96 max-w-full">
-      <pre className="min-w-max whitespace-pre py-1 pr-2 font-mono text-meta leading-snug">
+      <pre className="ak-tool-detail-code min-w-max whitespace-pre py-1 pr-2 font-mono">
         {lines.map((line, index) => (
           <span key={index} className={cn('block px-2', resultDiffLineClass(line))}>{line || ' '}</span>
         ))}
@@ -3728,8 +3766,8 @@ function ToolCallInlineDetail({
           ) : summary?.rows?.length ? (
             <ToolCallInputSummaryRows rows={summary.rows} />
           ) : (
-            <ScrollArea className="max-w-full">
-              <pre className="min-w-0 max-w-full whitespace-pre-wrap break-words px-2 py-2 font-mono text-meta leading-relaxed text-muted-foreground [overflow-wrap:anywhere] sm:px-2.5">
+            <ScrollArea className="max-h-[min(24rem,50vh)] max-w-full" viewportClassName="max-h-[min(24rem,50vh)]">
+              <pre className="ak-tool-detail-code min-w-0 max-w-full whitespace-pre-wrap break-words px-2 py-2 font-mono text-muted-foreground [overflow-wrap:anywhere] sm:px-2.5">
                 {JSON.stringify(call.input, null, 2)}
               </pre>
             </ScrollArea>

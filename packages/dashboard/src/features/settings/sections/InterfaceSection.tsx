@@ -45,6 +45,7 @@ import {
   PREF_SHOW_PINNED_MESSAGE,
   PREF_SHOW_TOOL_CALL_TAB,
   PREF_SMOOTH_STREAMING_TEXT,
+  PREF_EXPAND_THINKING_BY_DEFAULT,
   PREF_TOPBAR_OPEN,
   useBooleanPref,
   useNumberPref,
@@ -121,6 +122,7 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
   const [durableCacheEnabled, setDurableCacheEnabled] = useBooleanPref(PREF_DURABLE_SESSION_CACHE_ENABLED, true)
   const [keepScreenAwake, setKeepScreenAwake] = useBooleanPref(PREF_KEEP_SCREEN_AWAKE, false)
   const [smoothStreamingText, setSmoothStreamingText] = useBooleanPref(PREF_SMOOTH_STREAMING_TEXT, true)
+  const [expandThinkingByDefault, setExpandThinkingByDefault] = useBooleanPref(PREF_EXPAND_THINKING_BY_DEFAULT, false)
   const [messageTimestamps, setMessageTimestamps] = useStringPref(PREF_MESSAGE_TIMESTAMPS, 'auto')
   const [chapterReadingMode, setChapterReadingMode] = useStringPref(PREF_CHAPTER_READING_MODE, 'chapters')
   const [theme, , setTheme, effectiveTheme] = useTheme()
@@ -357,6 +359,13 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
           checked={smoothStreamingText}
           onChange={setSmoothStreamingText}
           testId="settings-toggle-smooth-streaming-text"
+        />
+        <InterfaceToggle
+          label={t('settings.interface.expandThinkingByDefault')}
+          description={t('settings.interface.expandThinkingByDefaultDesc')}
+          checked={expandThinkingByDefault}
+          onChange={setExpandThinkingByDefault}
+          testId="settings-toggle-expand-thinking-by-default"
         />
         <InterfaceToggle
           label={t('settings.interface.showPinnedMessage')}

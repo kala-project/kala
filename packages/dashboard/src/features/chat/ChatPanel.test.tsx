@@ -7,6 +7,7 @@ import { createInitialState } from '@agent-kernel/kernel'
 import type { TimelineEntry } from '../../session.js'
 import { visibleTranscript } from '../../transcript.js'
 import { AssistantMarkdown, ChatPanel as DashboardChatPanel } from './ChatPanel.js'
+import { i18n } from '../../i18n/index.js'
 import { InlineStatusRow, useElapsedSeconds } from './InlineStatusRow.js'
 
 function ChatPanel(props: ComponentProps<typeof DashboardChatPanel>): JSX.Element {
@@ -224,8 +225,9 @@ describe('ChatPanel', () => {
     expect(timestamps).toHaveLength(2)
     expect(timestamps.every((timestamp) => timestamp.className.includes('absolute'))).toBe(true)
     expect(screen.getByTestId('user-message-metadata').className).toContain('absolute')
-    expect(screen.getByTestId('assistant-message-footer').className).toContain('min-h-7')
+    expect(screen.getByTestId('assistant-message-footer').className).toContain('h-0')
     expect(screen.getByTestId('assistant-message-footer').querySelector('[data-testid="message-timestamp"]')?.className).toContain('absolute')
+    expect(screen.getByTestId('message-actions-start').parentElement?.tagName).toBe('P')
   })
 
   it('places Dot Line timestamps immediately before the expand control without adding a metadata row', () => {
@@ -382,7 +384,7 @@ describe('ChatPanel', () => {
     expect(container.querySelector('.ak-empty-state-mark')).toBeTruthy()
   })
 
-  it('renders thinking Markdown expanded by default and allows collapsing it', () => {
+  it('starts completed thinking collapsed and allows manually opening it', () => {
     render(
       <ChatPanel
         messages={[{
@@ -395,10 +397,58 @@ describe('ChatPanel', () => {
     const toggle = screen.getByRole('button', { name: /Thinking.*Plan/i })
     expect(screen.getByTestId('thinking-title').textContent).toContain('Plan')
     expect(screen.queryByRole('heading', { name: 'Plan' })).toBeNull()
-    expect(screen.getByText('inspect the implementation')).toBeTruthy()
-    fireEvent.click(toggle)
-    expect(screen.getByTestId('thinking-title').textContent).toContain('Plan')
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
     expect(screen.queryByText('inspect the implementation')).toBeNull()
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(screen.getByTestId('thinking-title').textContent).toContain('Plan')
+    expect(screen.getByText('inspect the implementation')).toBeTruthy()
+  })
+
+  it('updates visible thinking cards when the saved default-expand setting changes', () => {
+    const key = 'ak-expand-thinking-by-default'
+    localStorage.removeItem(key)
+    try {
+      render(<ChatPanel messages={[{ role: 'assistant', content: [{ type: 'thinking', text: 'Review the result.' }] }]} />)
+      const toggle = screen.getByRole('button', { name: 'Thinking' })
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+      localStorage.setItem(key, '1')
+      fireEvent(window, new StorageEvent('storage', { key, newValue: '1' }))
+      expect(toggle.getAttribute('aria-expanded')).toBe('true')
+      fireEvent.click(toggle)
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    } finally {
+      localStorage.removeItem(key)
+    }
+  })
+
+  it('labels finished thinking as 思考 and only streaming thinking as 思考中', async () => {
+    await i18n.changeLanguage('zh')
+    try {
+      render(<ChatPanel messages={[]} items={[
+        { kind: 'message', seq: 1, message: { role: 'assistant', content: [{ type: 'thinking', text: 'Finished reasoning.' }] } },
+        { kind: 'message', seq: 2, message: { role: 'assistant', content: [{ type: 'text', text: 'Visible answer.' }] } },
+        { kind: 'message', seq: 3, streaming: true, message: { role: 'assistant', content: [{ type: 'thinking', text: 'Working now.' }] } },
+      ]} />)
+      expect(screen.getByRole('button', { name: '思考' }).getAttribute('aria-expanded')).toBe('false')
+      expect(screen.getByRole('button', { name: '思考中' }).getAttribute('aria-expanded')).toBe('false')
+    } finally {
+      await i18n.changeLanguage('en')
+    }
+  })
+
+  it('uses the latest update when labeling an aggregated thinking card as running or finished', () => {
+    const items = (latestStreaming: boolean) => [
+      { kind: 'message' as const, seq: 1, streaming: true, message: { role: 'assistant' as const, content: [{ type: 'thinking' as const, text: 'First update.' }] } },
+      { kind: 'message' as const, seq: 2, streaming: latestStreaming, message: { role: 'assistant' as const, content: [{ type: 'thinking' as const, text: 'Last update.' }] } },
+    ]
+    const { rerender } = render(<ChatPanel messages={[]} items={items(false)} />)
+    expect(screen.getByText('2 Thinkings')).toBeTruthy()
+    expect(screen.queryByText(/Thinking…/)).toBeNull()
+    rerender(<ChatPanel messages={[]} items={items(true)} />)
+    expect(screen.getByText('Thinking… · 2 updates')).toBeTruthy()
+    rerender(<ChatPanel messages={[]} items={items(false)} />)
+    expect(screen.getByText('2 Thinkings')).toBeTruthy()
   })
 
   it('shows malformed upstream thinking contractions as readable text without changing ordinary punctuation', () => {
@@ -407,6 +457,7 @@ describe('ChatPanel', () => {
     ] }]} />)
 
     expect(screen.getByTestId('thinking-title').textContent).toContain("I'm investigating")
+    fireEvent.click(screen.getByRole('button', { name: /Thinking.*investigating/i }))
     expect(screen.getByTestId('thinking-update').textContent).toContain("We're checking John’s report and “quoted text”.")
   })
 
@@ -422,8 +473,10 @@ describe('ChatPanel', () => {
     )
 
     expect(screen.getAllByTestId('thinking-block')).toHaveLength(1)
-    expect(screen.getAllByTestId('thinking-update')).toHaveLength(1)
+    expect(screen.queryByTestId('thinking-update')).toBeNull()
     const headerToggle = screen.getByRole('button', { name: /3 Thinkings.*Final checks/ })
+    fireEvent.click(headerToggle)
+    expect(screen.getAllByTestId('thinking-update')).toHaveLength(1)
     expect(screen.getByTestId('thinking-navigation').parentElement).toBe(headerToggle.parentElement)
     expect(screen.getByText('3 / 3')).toBeTruthy()
     expect(screen.queryByText('Inspecting')).toBeNull()
@@ -446,6 +499,7 @@ describe('ChatPanel', () => {
       { type: 'thinking', text: 'Third independent thought.' },
     ] }]} />)
     expect(screen.getAllByTestId('thinking-block')).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: /3 Thinkings/i }))
     expect(screen.getAllByTestId('thinking-update')).toHaveLength(1)
     expect(screen.getByText('3 / 3')).toBeTruthy()
     expect(screen.getByText('Third independent thought.')).toBeTruthy()
@@ -494,6 +548,7 @@ describe('ChatPanel', () => {
       content: [{ type: 'thinking' as const, text }],
     }))
     const { rerender } = render(<ChatPanel messages={makeMessages(['First.', 'Second.'])} />)
+    fireEvent.click(screen.getByRole('button', { name: /2 Thinkings/i }))
 
     expect(screen.getByText('2 / 2')).toBeTruthy()
     rerender(<ChatPanel messages={makeMessages(['First.', 'Second.', 'Third.'])} />)
@@ -516,6 +571,7 @@ describe('ChatPanel', () => {
       />,
     )
 
+    fireEvent.click(screen.getByRole('button', { name: /2 Thinkings/i }))
     const body = screen.getByTestId('thinking-update').parentElement!
     fireEvent.touchStart(body, { changedTouches: [{ clientX: 120, clientY: 20 }] })
     fireEvent.touchEnd(body, { changedTouches: [{ clientX: 180, clientY: 22 }] })
@@ -569,6 +625,28 @@ describe('ChatPanel', () => {
     expect(screen.getByTestId('sub-agent-group-agent-impl')).toBeTruthy()
     expect(screen.getAllByTestId(/^sub-agent-toggle-/)).toHaveLength(2)
     expect(screen.queryByTestId('tool-call-group-agent-impl')).toBeNull()
+  })
+
+  it('shows a full timestamp only after expanding a completed sub-agent card', () => {
+    render(<ChatPanel sessionId="parent-session" messages={[]} items={[
+      { kind: 'message', seq: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'Starting the work.' }] } },
+      { kind: 'message', seq: 2, ts: '2026-10-20T03:55:00.000Z', message: { role: 'assistant', content: [
+        { type: 'tool_call', callId: 'agent-time', name: 'agent', input: { intention: 'Check the status.', agent_type: 'review' } },
+      ] } },
+      { kind: 'message', seq: 3, message: { role: 'tool', content: [
+        { type: 'tool_result', callId: 'agent-time', ok: true, content: '<sub_agent session_id="child-time" agent_type="review" intention="Check the status." status="completed" turns="2" duration_ms="475000"><result>Done.</result></sub_agent>' },
+      ] } },
+    ]} />)
+    const row = screen.getByTestId('sub-agent-row-agent-time')
+    expect(row.textContent).toContain('7m 55s')
+    const message = row.closest('[data-message-index]')!
+    expect(within(message as HTMLElement).queryByTestId('message-timestamp')).toBeNull()
+    expect(screen.queryByTestId('sub-agent-timestamp-agent-time')).toBeNull()
+    fireEvent.click(screen.getByTestId('sub-agent-toggle-agent-time'))
+    const timestamp = screen.getByTestId('sub-agent-timestamp-agent-time')
+    expect(timestamp.tagName).toBe('TIME')
+    expect(timestamp.getAttribute('datetime')).toBe('2026-10-20T03:55:00.000Z')
+    expect(timestamp.textContent).toBe(new Date('2026-10-20T03:55:00.000Z').toLocaleString())
   })
 
   it('renders durable queued rows instead of the empty welcome state', () => {
@@ -930,6 +1008,21 @@ describe('ChatPanel', () => {
     const resultDetail = screen.getByRole('region', { name: 'Result' })
     expect(within(resultDetail).getByRole('heading', { name: 'Result' })).toBeTruthy()
     expect(within(resultDetail).getByText('succeeded')).toBeTruthy()
+  })
+
+  it('uses one code scale and bounded viewports for tool input and long file output', () => {
+    render(<ChatPanel messages={[
+      { role: 'assistant', content: [{ type: 'tool_call', callId: 'read-sized', name: 'read_file', input: { path: '/repo/ChatPanel.test.tsx', offset: 600, limit: 55 } }] },
+      { role: 'tool', content: [{ type: 'tool_result', callId: 'read-sized', ok: true, content: Array.from({ length: 57 }, (_, i) => `${601 + i}  sample code`).join('\n') }] },
+    ]} />)
+    fireEvent.click(screen.getByTestId('grouped-tool-row-read-sized'))
+    const input = screen.getByTestId('tool-call-detail-read-sized').querySelector('pre')!
+    const output = screen.getByTestId('tool-result-detail-read-sized').querySelector('pre')!
+    expect(input.classList.contains('ak-tool-detail-code')).toBe(true)
+    expect(output.classList.contains('ak-tool-detail-code')).toBe(true)
+    expect(input.closest('[class*="max-h-"]')).not.toBeNull()
+    expect(output.closest('[class*="max-h-"]')).not.toBeNull()
+    expect(output.textContent).toContain('657  sample code')
   })
 
   it('previews intent and tool summary on hover or click without expanding the group', () => {
@@ -2328,6 +2421,23 @@ describe('ChatPanel', () => {
     const actions = screen.getByTestId('message-actions-end')
     expect(actions.contains(screen.getByTestId('copy-message'))).toBe(true)
     expect(actions.contains(screen.getByTestId('edit-message-0'))).toBe(true)
+  })
+
+  it('keeps a short prose answer copy action in the final text flow instead of adding a footer row', () => {
+    render(<ChatPanel messages={[{ role: 'assistant', content: [{ type: 'text', text: '这张图我看到了：输入和输出应该统一尺度。' }] }]} />)
+    const paragraph = screen.getByText(/这张图我看到了/)
+    const action = screen.getByTestId('message-actions-start')
+    expect(paragraph.tagName).toBe('P')
+    expect(action.parentElement).toBe(paragraph)
+    expect(paragraph.lastElementChild).toBe(action)
+    expect(action.tagName).toBe('SPAN')
+    expect(action.className).toContain('inline-flex')
+    expect(screen.queryByTestId('assistant-message-footer')).toBeNull()
+  })
+
+  it('keeps the footer for block Markdown whose actions cannot safely follow a paragraph', () => {
+    render(<ChatPanel messages={[{ role: 'assistant', content: [{ type: 'text', text: '## Title\n\nSome answer.' }] }]} />)
+    expect(screen.getByTestId('assistant-message-footer').contains(screen.getByTestId('copy-message'))).toBe(true)
   })
 
   it('copies message text from message actions', async () => {

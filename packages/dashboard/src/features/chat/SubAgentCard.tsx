@@ -55,6 +55,7 @@ type Props = {
   group: ToolCallGroup
   approvalByCallId: ReadonlyMap<string, ApprovalRequiredEvent>
   toolCardMode?: ToolCardMode
+  timestamp?: string
 }
 
 export function SubAgentCard(props: Props): JSX.Element {
@@ -85,6 +86,7 @@ export function SubAgentCard(props: Props): JSX.Element {
               socket={props.socket}
               result={props.group.results.get(call.callId) ?? null}
               approval={props.approvalByCallId.get(call.callId) ?? null}
+              timestamp={props.timestamp}
             />
           ))}
         </div>
@@ -101,6 +103,7 @@ export function SubAgentCard(props: Props): JSX.Element {
           socket={props.socket}
           result={props.group.results.get(call.callId) ?? null}
           approval={props.approvalByCallId.get(call.callId) ?? null}
+          timestamp={props.timestamp}
         />
       ))}
     </div>
@@ -115,6 +118,7 @@ type RowProps = {
     | import('@agent-kernel/kernel').ToolResultContent
     | null
   approval: ApprovalRequiredEvent | null
+  timestamp?: string
   /**
    * Matrix mode: shrink the nested transcript and default-collapse
    * completed rows so a grid of 4 stays readable.
@@ -128,6 +132,7 @@ const SubAgentRow = memo(function SubAgentRow({
   parentSessionId,
   socket,
   result,
+  timestamp,
   compact = false,
   grouped = false,
 }: RowProps): JSX.Element {
@@ -343,6 +348,13 @@ const SubAgentRow = memo(function SubAgentRow({
 
       {open ? (
         <div className="border-t border-border/50 bg-background/45 px-2 pb-2 pt-1.5">
+          {timestamp && Number.isFinite(Date.parse(timestamp)) ? (
+            <div className="mb-1 flex justify-end px-1 text-caption tabular-nums text-muted-foreground">
+              <time dateTime={timestamp} data-testid={`sub-agent-timestamp-${call.callId}`}>
+                {new Date(timestamp).toLocaleString()}
+              </time>
+            </div>
+          ) : null}
           {intentionTruncated ? <div
             className="mb-1.5 min-w-0 rounded-lg border border-border/45 bg-muted/25 px-3 py-2"
             data-testid={`sub-agent-task-${call.callId}`}

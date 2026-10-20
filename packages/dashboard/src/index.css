@@ -1181,6 +1181,15 @@ textarea,
   background: hsl(var(--muted) / 0.18);
   backdrop-filter: blur(8px);
 }
+/* Tool payloads share the same compact type scale, even when a browser would
+   otherwise inflate long output while leaving short JSON input untouched. */
+.ak-tool-detail-code {
+  font-size: var(--ak-type-meta-size);
+  line-height: 1.5;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 .ak-code-lines {
   font-size: var(--ak-code-font-size, 0.9375rem);
   line-height: 1.5;
