@@ -44,9 +44,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04, target: linux-x64, asset: kala-dashboard-with-runtime.cjs }
-          - { os: macos-15-intel, target: darwin-x64, asset: kala-dashboard-with-runtime.cjs }
-          - { os: macos-15, target: darwin-arm64, asset: kala-dashboard-with-runtime.cjs }
+          - { os: ubuntu-24.04, target: linux-x64, asset: kala-dashboard-with-runtime.cjs, executor: kala-executor-linux-x64 }
+          - { os: macos-15-intel, target: darwin-x64, asset: kala-dashboard-with-runtime.cjs, executor: kala-executor-darwin-x64 }
+          - { os: macos-15, target: darwin-arm64, asset: kala-dashboard-with-runtime.cjs, executor: kala-executor-darwin-arm64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -62,17 +62,21 @@ jobs:
           set -euo pipefail
           mkdir -p acceptance/candidate acceptance/evidence
           gh release download '${{ inputs.tag }}' --pattern "$ASSET" --dir acceptance/candidate
+          gh release download '${{ inputs.tag }}' --pattern '${{ matrix.executor }}' --dir acceptance/candidate
           gh release download '${{ inputs.tag }}' --pattern SHA256SUMS --dir acceptance/candidate
           gh release download '${{ inputs.tag }}' --pattern manifest.json --dir acceptance/candidate
           gh attestation verify "acceptance/candidate/$ASSET" --repo "$GITHUB_REPOSITORY"
+          gh attestation verify 'acceptance/candidate/${{ matrix.executor }}' --repo "$GITHUB_REPOSITORY"
           gh attestation verify acceptance/candidate/manifest.json --repo "$GITHUB_REPOSITORY"
           gh attestation verify acceptance/candidate/SHA256SUMS --repo "$GITHUB_REPOSITORY"
           node scripts/release/verify-checksum-index.mjs --index acceptance/candidate/SHA256SUMS --asset "acceptance/candidate/$ASSET" --manifest acceptance/candidate/manifest.json --revision '${{ needs.resolve.outputs.revision }}'
-      - name: Prove clean install, state continuity, and same-version reinstall
+          node scripts/release/verify-checksum-index.mjs --index acceptance/candidate/SHA256SUMS --asset 'acceptance/candidate/${{ matrix.executor }}' --manifest acceptance/candidate/manifest.json --revision '${{ needs.resolve.outputs.revision }}'
+      - name: Prove native message/tools, restart recovery, and same-version reinstall
         shell: bash
         run: |
           node scripts/release/verify-portable-native.mjs \
             --asset 'acceptance/candidate/${{ matrix.asset }}' \
+            --executor-asset 'acceptance/candidate/${{ matrix.executor }}' \
             --target '${{ matrix.target }}' --tag '${{ inputs.tag }}' \
             --revision '${{ needs.resolve.outputs.revision }}' \
             --output 'acceptance/evidence/portable-${{ matrix.target }}.rc-evidence.json'

@@ -151,7 +151,7 @@ Settings. Never commit provider credentials or local configuration.
 
 GitHub Releases distribute Kala's portable Host and Dashboard. No GitHub CLI
 is needed: on Linux or macOS, use the latest published release (requires `curl`,
-`bash`, `wget`, and `sha256sum` or `shasum`):
+`bash`, `wget`, `cosign`, and `sha256sum` or `shasum`):
 
 ```bash
 set -o pipefail; curl --proto '=https' --tlsv1.2 -fsSL https://github.com/xingsy97/kala/releases/latest/download/run.sh | bash
@@ -159,10 +159,11 @@ set -o pipefail; curl --proto '=https' --tlsv1.2 -fsSL https://github.com/xingsy
 
 Run this from Bash or another shell supporting `pipefail`, so download errors
 are not hidden by the pipe. Review the download source before running network
-code. The bootstrapper checks release assets against `SHA256SUMS`; checksums do
-not establish publisher identity. The command requires a published Kala
-release and fails if none exists. Do not run it with `sudo`. Configure a model
-provider and connect a workspace Executor after the Host starts.
+code. For public HTTPS releases, the bootstrapper verifies the Sigstore bundle
+for `SHA256SUMS` with `cosign` and checks release assets against those checksums.
+The command requires a published Kala release and fails if none exists. Do not
+run it with `sudo`. Configure a model provider and connect a workspace Executor
+after the Host starts.
 
 For the **Linux Desktop client** connecting to an existing trusted Kala server,
 open that server's `/downloads/desktop/index.html` and copy its one-command

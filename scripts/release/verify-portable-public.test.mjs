@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { verifyPortablePublic } from './verify-portable-public.mjs'
 
-const tag = 'v0.3.0-beta.18'
+const tag = 'v0.3.0-beta.19'
 const revision = '0123456789abcdef0123456789abcdef01234567'
 const digest = 'sha256:' + 'a'.repeat(64)
 const image = `ghcr.io/xingsy97/kala-portable@${digest}`

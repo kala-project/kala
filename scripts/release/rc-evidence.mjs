@@ -6,7 +6,11 @@ export const RC_EVIDENCE_SCHEMA_VERSION = 1
 export const requiredReleaseEvidence = Object.freeze({
   portable: Object.freeze({
     targets: Object.freeze(['linux-x64', 'darwin-x64', 'darwin-arm64', 'win32-x64']),
-    checks: Object.freeze(['assetIntegrity', 'cleanInstall', 'boot', 'capabilities', 'dashboard', 'statePersistence', 'cleanStop', 'reinstall']),
+    checks: Object.freeze([
+      'assetIntegrity', 'cleanInstall', 'boot', 'capabilities', 'dashboard', 'nativeExecutor',
+      'operatorCommandAccepted', 'fileRead', 'fileWrite', 'localShell', 'nativeTerminal',
+      'statePersistence', 'restartRecovery', 'cleanStop', 'reinstall',
+    ]),
     targetChecks: Object.freeze({
       'win32-x64': Object.freeze(['assetIntegrity', 'cleanInstall', 'boot', 'capabilities', 'dashboard', 'cleanStop', 'hostNode22', 'nativeExecutor', 'temporaryConptyLifecycle', 'serviceConptyLifecycle']),
     }),

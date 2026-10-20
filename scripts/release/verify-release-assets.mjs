@@ -9,6 +9,7 @@ import { inspectDedicatedSupportBundle, DEDICATED_SUPPORT_ARCHIVE } from './dedi
 import { dashboardArchiveName, releaseMetadataArchiveName, verifyDashboardArchive, verifyReleaseMetadataArchive } from './release-archives.mjs'
 import { verifyWindowsNodePtyCompanion } from './windows-executor-packager.mjs'
 import { verifyWindowsServiceHost, WINDOWS_SERVICE_HOST, windowsServiceHostManifestMetadata } from './windows-service-host.mjs'
+import { POSIX_PORTABLE_MANAGER, WINDOWS_PORTABLE_MANAGER } from './portable-manager.mjs'
 
 const root = fileURLToPath(new URL('../..', import.meta.url))
 const releaseDir = join(root, 'release')
@@ -94,6 +95,8 @@ const expectedManifestAssets = [
   DEDICATED_SUPPORT_ARCHIVE,
   releaseMetadataArchiveName,
   'run.sh',
+  POSIX_PORTABLE_MANAGER,
+  WINDOWS_PORTABLE_MANAGER,
   'kala-dedicated.mjs',
   'kala-model-catalog-seed.json',
 ].sort()
@@ -134,6 +137,9 @@ if (actualReleaseEntries.some((entry) => !entry.isFile())
 }
 const includesHost = manifest.component === 'all' || manifest.component === 'host'
 if (includesHost) {
+  for (const asset of [POSIX_PORTABLE_MANAGER, WINDOWS_PORTABLE_MANAGER]) {
+    if (!manifest.assets.includes(asset)) fail(`manifest missing Portable manager asset ${asset}`)
+  }
   for (const asset of [
     'kala-dedicated-ingress.cjs',
     'kala-runtime.cjs',
@@ -234,6 +240,21 @@ for (const asset of manifest.assets) {
   }
   if (isNativeAsset(asset)) {
     accessSync(path, constants.X_OK)
+  }
+  if (asset === POSIX_PORTABLE_MANAGER) {
+    const text = readFileSync(path, 'utf8')
+    accessSync(path, constants.X_OK)
+    if (!text.startsWith('#!/usr/bin/env bash\n') || !text.includes('KALA_BIND_HOST="$bind"') || !text.includes('cosign verify-blob') || !text.includes('--purge-data')) {
+      fail(`${asset} is missing the verified lifecycle, loopback bind, or retention contract`)
+    }
+    const syntax = spawnSync('bash', ['-n', path], { stdio: 'inherit' })
+    if (syntax.status !== 0) fail(`${asset} failed bash syntax check`)
+  }
+  if (asset === WINDOWS_PORTABLE_MANAGER) {
+    const text = readFileSync(path, 'utf8')
+    if (!text.startsWith('#requires -Version 5.1\n') || !text.includes("'127.0.0.1'") || !text.includes('cosign verify-blob') || !text.includes('not a Windows Service installer')) {
+      fail(`${asset} is missing the verified lifecycle, loopback bind, or Windows service distinction`)
+    }
   }
   if (asset === 'run.sh') {
     const text = readFileSync(path, 'utf8')

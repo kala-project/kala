@@ -35,9 +35,15 @@ test('fresh Private Cloud evidence requires candidate-first and digest-pinning c
   }
 })
 
-test('rejects missing checks, duplicate targets, and mismatched revisions', () => {
+test('requires native message, filesystem, terminal, restart, and reinstall contracts', () => {
   const portable = create('portable', 'linux-x64')
-  assert.throws(() => validateRcEvidence({ ...portable, checks: { ...portable.checks, reinstall: false } }), /did not prove reinstall/u)
+  for (const check of ['nativeExecutor', 'operatorCommandAccepted', 'fileRead', 'fileWrite', 'localShell', 'nativeTerminal', 'restartRecovery', 'reinstall']) {
+    assert.throws(() => validateRcEvidence({ ...portable, checks: { ...portable.checks, [check]: false } }), new RegExp(`did not prove ${check}`, 'u'))
+  }
+})
+
+test('rejects duplicate targets and mismatched revisions', () => {
+  const portable = create('portable', 'linux-x64')
   assert.throws(() => verifyRcEvidenceSet([portable, portable], { tag, revision }), /duplicate/u)
   assert.throws(() => validateRcEvidence(portable, { tag, revision: 'b'.repeat(40) }), /revision mismatch/u)
 })

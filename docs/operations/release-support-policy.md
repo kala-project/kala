@@ -34,7 +34,7 @@ candidate without that evidence. See the [Private Cloud first-install guide](./p
 for the operator-assisted onboarding path. Browser support targets
 the current and previous major Chromium releases.
 
-## Unreleased v0.3.0-beta.18 candidate policy
+## Unreleased v0.3.0-beta.19 candidate policy
 
 The immutable `v0.3.0-beta.1` tag remains a failed candidate: its hosted Windows
 version-policy check failed before a public GitHub Release. The immutable
@@ -122,10 +122,12 @@ cursor, completed model reply and recovered DAG query, but stopped before the
 final evidence assertions on a test-harness mistake: it expected
 HTTP 200 for Bob's successful attachment creation, while the product correctly
 returns HTTP 201. The final quota report and backup/restore gate were not
-accepted, so beta.17 remains an unpublished, unsupported draft. The
-`v0.3.0-beta.18` candidate is not yet a supported public release. Its proposed default
-asset contract is Linux x64 and macOS x64/arm64 OS-native Executor plus Node.js
-22+ CJS Portable Host and Dedicated components. Host and Dedicated
+accepted, so beta.17 remains an unpublished, unsupported draft. The `v0.3.0-beta.18` record is retained as an unsupported historical candidate;
+its existence or built assets do not establish acceptance or support. Canonical
+package metadata and the exact-tag Portable OCI workflow now identify
+`v0.3.0-beta.19` as the active candidate. Beta.19 is not yet a supported public
+release. Its proposed default asset contract is Linux x64 and macOS x64/arm64
+OS-native Executor plus Node.js 22+ CJS Portable Host and Dedicated components. Host and Dedicated
 self-contained native binaries are only manual qualification artifacts, not
 part of the signed default inventory. The Private Cloud signed bundle defaults
 to a JS Operator (Node.js 22+ on the installation host) and single-host
@@ -147,9 +149,49 @@ terminal lifecycles using the downloaded release assets, not merely a
 source checkout.
 
 Earlier candidates passed signed Portable OCI scanning and hosted Docker
-acceptance, but beta.18 must independently pass its exact-digest gates and
+acceptance, but beta.19 must independently pass its exact-digest gates and
 anonymous full pulls before public promotion. None of these candidate policies
 retroactively alters the `v0.2.0` support claim above.
+
+### Release-state and acceptance contract
+
+These states are deliberately separate:
+
+- **Built** means a workflow produced an asset. It makes no install, runtime,
+  publication, or support claim.
+- **Accepted** means the exact checksummed and attested candidate assets passed
+  the matching clean-runner contract. Acceptance evidence is target-specific and
+  does not transfer between Linux, macOS, Windows, or OCI.
+- **Publicly available** means an immutable asset or image can be fetched without
+  release-author credentials. Availability is not acceptance.
+- **Supported** means this policy names the release and platform in the supported
+  matrix. A draft, prerelease, experimental option, or manually qualified asset
+  remains unsupported even if it was built or accepted.
+
+For Linux x64 and macOS x64/arm64 Portable, `rc-acceptance.yml` now requires the
+exact CJS Host and matching OS-native Executor from the candidate release. On the
+matching hosted runner it submits a real Dashboard protocol message to the native
+Executor, runs a local terminal command, writes and reads a workspace file,
+checks the persisted terminal result, gracefully checkpoints the Host, replaces
+and restarts the CJS and Executor, reloads the Session, reads
+the pre-restart file in a second terminal command, and then performs a clean
+stop. With no distinct `--predecessor-asset`, this proves a **same-version
+reinstall**, not a predecessor-to-candidate upgrade. A real upgrade claim still
+requires a separately supplied, verified predecessor asset and explicit
+migration/rollback evidence.
+
+Windows acceptance is a separate real `windows-latest` gate over the downloaded
+Node.js 22 CJS Host, native Executor, ConPTY companion, installer, service Host,
+and Copilot runtime companions. It covers temporary and service terminal
+lifecycles. A Linux run cannot substitute for that evidence. The acceptance
+message intentionally uses the explicit shell intent and no model provider, so it
+proves local product messaging and native execution without claiming Anthropic,
+Copilot, or other external provider authentication. Portable OCI remains a
+separate exact-digest isolated-VM and anonymous-pull contract.
+
+Local NFS, self-contained native Host qualification artifacts, and any platform
+not named in the supported matrix are experimental or manual qualification
+surfaces, not supported defaults.
 
 Report vulnerabilities privately through `SECURITY.md`. General defects use the
 public issue templates and must contain synthetic, redacted evidence. Release assets use the repository, issue tracker, and documentation links

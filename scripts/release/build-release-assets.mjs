@@ -30,6 +30,12 @@ import {
   WINDOWS_SERVICE_HOST,
   windowsServiceHostManifestMetadata,
 } from './windows-service-host.mjs'
+import {
+  generatePosixPortableManager,
+  generateWindowsPortableManager,
+  POSIX_PORTABLE_MANAGER,
+  WINDOWS_PORTABLE_MANAGER,
+} from './portable-manager.mjs'
 
 const root = fileURLToPath(new URL('../..', import.meta.url))
 const outDir = join(root, 'release')
@@ -409,6 +415,13 @@ function prepareBootstrapAssets() {
   writeFileSync(runPath, unifiedBootstrap({ repo, tag, component }))
   chmodSync(runPath, 0o755)
   bootstrapAssets.push('run.sh')
+  if (component === 'all' || component === 'host') {
+    const posixManagerPath = join(outDir, POSIX_PORTABLE_MANAGER)
+    writeFileSync(posixManagerPath, generatePosixPortableManager({ repo, tag }))
+    chmodSync(posixManagerPath, 0o755)
+    writeFileSync(join(outDir, WINDOWS_PORTABLE_MANAGER), generateWindowsPortableManager({ repo, tag }))
+    bootstrapAssets.push(POSIX_PORTABLE_MANAGER, WINDOWS_PORTABLE_MANAGER)
+  }
   if (component === 'all' || component === 'executor') {
     const windowsExecutable = executorNativeAssetName(WINDOWS_EXECUTOR_TARGET)
     const windowsCompanion = windowsNodePtyCompanionAssetName(WINDOWS_EXECUTOR_TARGET)
