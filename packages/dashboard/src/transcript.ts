@@ -47,6 +47,15 @@ export type TranscriptItem =
   | CompactProgress
   | CompactBoundary
 
+export function transcriptViewStartForItems(start: number, itemCount: number, historyAuthoritative: boolean): number {
+  if (!Number.isSafeInteger(start) || start <= 0 || itemCount <= 0) return 0
+  // /clear stores an array index. If a later history reset makes the transcript
+  // shorter, clamping to the last item would hide every new message until the
+  // transcript grows past the old index. Wait for Host history before repairing.
+  if (historyAuthoritative && start >= itemCount) return 0
+  return Math.min(start, itemCount - 1)
+}
+
 export function lastUserTranscriptIndex(items: readonly TranscriptItem[]): number {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index]

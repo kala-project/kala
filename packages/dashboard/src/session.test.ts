@@ -1,8 +1,10 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { SessionSummary } from '@agent-kernel/shared'
 import type { TimelineEntry } from './session.js'
-import { acceptsSessionTokenDelta, createSessionWithAck, deleteSession, deriveHumanAttentionTimeline, deriveToolExecutionStartedAt, mergeBySeq, mergeSessionSummaries } from './session.js'
+import { acceptsSessionTokenDelta, createSessionWithAck, deleteSession, deriveHumanAttentionTimeline, deriveToolExecutionStartedAt, mergeBySeq, mergeSessionSummaries, requestSessionRouteTicket, sessionRouteTicketSocketOptions } from './session.js'
+
+afterEach(() => { vi.unstubAllGlobals() })
 
 function entry(seq: number, kind: TimelineEntry['event']['kind']): TimelineEntry {
   if (kind === 'llm_response') {
@@ -23,6 +25,60 @@ function entry(seq: number, kind: TimelineEntry['event']['kind']): TimelineEntry
     effects: [{ kind: 'call_llm', messages: [], tools: [] }],
   }
 }
+
+describe('Session route tickets', () => {
+  it('requests a same-origin cookie ticket without putting it in auth storage', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ ticket: 'ticket-1' }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(requestSessionRouteTicket({ host: window.location.origin, sessionId: 'session-1' }))
+      .resolves.toEqual({ kind: 'ticket', ticket: 'ticket-1' })
+    expect(fetchMock).toHaveBeenCalledWith(`${window.location.origin}/runtime/route-ticket`, expect.objectContaining({
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'session-1' }),
+    }))
+  })
+
+  it('rejects a cross-origin routing endpoint without sending cookies or contacting it', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(requestSessionRouteTicket({ host: 'https://other.example/', sessionId: 'session-1' }))
+      .rejects.toThrow('same-origin Gateway')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('allows legacy fallback only for the exact unavailable response', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ error: 'route_ticket_unavailable' }), { status: 404 }),
+    ))
+    await expect(requestSessionRouteTicket({ host: '', sessionId: 'session-1' }))
+      .resolves.toEqual({ kind: 'unavailable' })
+  })
+
+  it('fails closed when the Session owner is unavailable', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ error: 'session_owner_unavailable' }), { status: 404 }),
+    ))
+    await expect(requestSessionRouteTicket({ host: '', sessionId: 'session-1' }))
+      .rejects.toThrow('session_owner_unavailable')
+  })
+
+  it('creates a fresh websocket-only Manager with the ticket only in Engine.IO query', () => {
+    const options = sessionRouteTicketSocketOptions({ sessionId: 'session-1', ticket: 'ticket-1', token: 'bootstrap' })
+
+    expect(options).toMatchObject({
+      forceNew: true,
+      autoConnect: false,
+      reconnection: false,
+      transports: ['websocket'],
+      query: { runtimeRouteTicket: 'ticket-1' },
+      auth: { sessionId: 'session-1', role: 'dashboard', token: 'bootstrap' },
+    })
+    expect(options.auth).not.toHaveProperty('runtimeRouteTicket')
+  })
+})
 
 describe('acceptsSessionTokenDelta', () => {
   it('rejects deltas after the authoritative turn leaves thinking state', () => {

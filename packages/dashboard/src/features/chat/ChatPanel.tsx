@@ -1066,7 +1066,7 @@ function PendingUserMessageRow({
     : t('chat.transcript.sendingMessage')
   const shellState = item.shell?.state
   const effectiveStatusLabel = shellState
-    ? `Shell command ${shellState === 'nonzero' ? 'completed with a nonzero exit' : shellState}`
+    ? item.shell?.error ?? `Shell command ${shellState === 'nonzero' ? 'completed with a nonzero exit' : shellState}`
     : statusLabel
   return (
     <div className="group relative flex min-w-0 max-w-full justify-end" data-testid={`pending-user-message-${item.id}`} data-status={item.status}>
@@ -1095,6 +1095,11 @@ function PendingUserMessageRow({
             <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide opacity-80" data-testid={`shell-command-status-${item.id}`}>
               {shellState === 'running' ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> : <Terminal className="h-3 w-3" aria-hidden="true" />}
               {shellState === 'nonzero' ? 'nonzero exit' : shellState}
+            </div>
+          ) : null}
+          {item.shell?.error ? (
+            <div className="text-xs leading-relaxed opacity-90" role="alert" data-testid={`shell-command-error-${item.id}`}>
+              {item.shell.error}
             </div>
           ) : null}
         </div>

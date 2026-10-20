@@ -4,6 +4,7 @@
 **Normative mode contract:** [`deployment-mode-contract.md`](deployment-mode-contract.md)
 **Decision:** the canonical name is `TenantRuntimeUnit`
 **Scope:** Host-internal multi-tenant isolation and the user-operated Private Cloud control plane; the same Platform architecture supports Dedicated through `single-tenant` configuration
+**Multi-node end state:** target architecture only; not implemented by the current composition or the completed phases recorded below
 
 ## 1. Goal
 
@@ -388,7 +389,472 @@ Rules:
 - Global process caches may contain only immutable shared assets or entries explicitly keyed by Unit ID.
 - Backups, retention, export, and deletion operate on a Unit root, with deletion requiring a drained Unit.
 
-### 9.1 Existing data migration
+### 9.1 Final multi-node target (not current behavior)
+
+The final Private Cloud target changes the physical realization of a Unit without
+changing its logical isolation contract. `TenantRuntimeUnit` becomes a logical
+identity, authorization/policy namespace, and state namespace; it is not pinned
+to one Runtime process, Pod, Kubernetes node, local directory, or persistent
+volume. Session and Task work for that Unit may be placed on any eligible
+Runtime replica, subject to the ownership rules below.
+
+This is an explicit future target, not a description of the repository today.
+The current Private Cloud Compose `runtime-host` mounts `tenant-data`, and the
+Runtime service creates a directory for each Unit beneath its configured data
+root. The production composition remains local and single-node. The opt-in
+experiment below adds transactional PostgreSQL state, S3 objects, Gateway live
+Unit placement and database-level fencing; the operator-gated `parallel-v1`
+variant has demonstrated simultaneous **different-Session** work on two real
+Runtime processes in isolated Docker. This limited test is not general Task
+placement, Kubernetes node-loss recovery, browser reconnect continuity or
+storage-independent production failover. Each remaining indirect write path
+and external side effect must be audited before claiming that goal.
+
+#### Current implementation progress and experimental acceptance (2026-10-19)
+
+The repository now contains an **experimental, opt-in** slice toward this target:
+
+- PostgreSQL stores a Session latest projection and an append-only audit trail.
+  New audit rows contain replayable deltas rather than another whole Session
+  document, and old snapshot rows remain readable. The latest projection is
+  still rewritten as a whole on mutation, so its PostgreSQL WAL/TOAST write
+  amplification has **not** been shown to scale linearly with Session length.
+- PostgreSQL also stores the Runtime materialization catalog and a Unit ownership
+  lease. Queue claim has a durable `unknown` shell for work whose outcome cannot
+  yet be established safely after an interruption. Experimental HotState SQL
+  runs inside transactions that check the active Unit placement token and
+  generation under a row lock, so a stale owner cannot commit a PostgreSQL
+  mutation after another owner takes over; this does **not** fence already
+  dispatched external tool calls or S3 effects. Experimental Unit assembly
+  uses PostgreSQL for DAGs, scheduled tasks, workspace aliases, Executor
+  installations, hashed Executor pairing identities/invites, encrypted Push
+  subscriptions, Memo and provider credentials. The opt-in PG/S3 Unit does not
+  launch a loopback Executor: a durable external Executor and workspace are
+  required for filesystem tools, and its own receipt store remains that
+  Executor's responsibility. Without one attached, those tools cannot run.
+  Push requires externally provisioned VAPID keys; without a complete key pair,
+  the experimental Runtime explicitly disables Push instead of generating a
+  local private key. Subscription mutations serialize across Runtime clients.
+- Attachments and Artifacts can use S3-compatible object storage. Their
+  uploads now record a tenant-scoped PostgreSQL intent before the S3 write;
+  metadata publication atomically consumes that intent. Bounded startup
+  reconciliation and periodic Unit-local passes can fence and delete known
+  orphaned objects. Operator migration v6 persists an upload-intent lease and
+  exact Session owner generation: pending uploads remain protected while the
+  owner is live and stale generations become eligible for cleanup. Ambiguous
+  late S3 puts require durable deleting tombstones; those tombstones cannot yet
+  be garbage-collected
+  without resolving late-upload races. A tenant-scoped PostgreSQL capacity
+  ledger atomically reserves Artifact and attachment bytes before S3 upload;
+  usage persists across Runtime replacement. Ambiguous upload failures retain
+  conservative allocations until safe operator reconciliation, so the quota
+  may temporarily block further uploads rather than undercount S3 objects.
+  Session deletion first persists a `delete_requested` tombstone; the Session
+  becomes unavailable for new work while failed S3 cleanup can be retried on
+  restart. Object registration is
+  fenced once deletion starts. Reusing the same Session ID after deletion is
+  intentionally unsupported until old writers can be proven terminated.
+  The Runtime in this mode does not start its local-file restart coordinator;
+  the external orchestrator must replace Pods and retry safe work.
+- The Gateway has a Unit-origin resolver and requires explicit Runtime
+  bootstrap; a Runtime is not selected merely because its process is reachable.
+  PostgreSQL v3 primitives support multiple live replica memberships per Unit
+  and fenced Session/Task owners. The experimental Runtime now registers,
+  renews, and releases its own replica membership after acquiring Unit placement.
+  The default placement remains exclusive; operator-migrated schema v5 additionally
+  permits a separately gated experimental `parallel-v1` barrier that excludes
+  old exclusive writers. Membership loss closes the affected Runtime Unit;
+  replica presence alone authorizes no Session/Task execution.
+  With `KALA_RUNTIME_EXPERIMENTAL_SESSION_OWNERSHIP=1` and an operator-migrated
+  PostgreSQL schema, the Runtime now obtains/renews trusted Session owners on
+  demand before SessionAuthority mutations, missing-projection repairs or PG
+  queue operations; read-only Session listings do not acquire owners. It checks
+  the owner inside the associated write/queue transaction and releases owners
+  on Unit close. Lost owner renewal closes that Unit; stale membership hides
+  its owner immediately. The in-process Session/Task owner manager has acquire,
+  renew, fail-closed loss callback, and release tests. Operator gate v5 uses a
+  permanent placement barrier and a feature-version row writable only by the
+  schema operator; Runtime credentials can read but cannot enable it. Legacy
+  exclusive writers cannot acquire or take over the permanent barrier. Only
+  the operator-gated `parallel-v1` path allows multiple members to load a Unit;
+  the default remains exclusive. The gate row and barrier are immutable even to
+  normal schema-operator DML after activation: never `UPDATE`, `DELETE` or
+  `TRUNCATE` either table to roll back live replicas. Drain all replicas, preserve
+  backups, and use a separately reviewed schema migration for any protocol
+  transition; direct owner-level DDL/superuser changes bypass these triggers and
+  are outside this safety guarantee. SQL takeover regressions reject stale Session
+  owner generations while unrelated Sessions remain owned by different replicas.
+  These owner primitives alone still do not make every Session RPC or external
+  execution safe for multi-node production.
+  HotState event/projection writes now accept an **optional**, exact
+  Session/Task owner lease and check it in the same PG
+  transaction before appending, including idempotent retries; isolated PG
+  tests reject stale owner writes. SessionAuthority can now optionally obtain
+  the live owner from a server-side provider and fence audit/projection writes,
+  idempotent retries, and projection repair. In the same opt-in mode its
+  PostgreSQL message queue fences reads, enqueue, claim, confirm, renew,
+  complete, release, and migration imports within Session owner transactions;
+  an isolated
+  PostgreSQL takeover test rejects old Session and queue writes even while the
+  old in-memory owner TTL remains unexpired. The opt-in Runtime also configures
+  this owner provider for its shared Artifact/attachment object metadata and
+  capacity ledger. Object intent creation, deletion tombstones, metadata
+  append (including idempotent replay), intent cleanup, and byte reservations
+  now check the live Session owner inside their respective PostgreSQL
+  transactions. The object HotState event retains its task-like `object:<id>`
+  scope and adds a separate Session owner check; it must not confuse the two
+  leases. Background orphan reconciliation remains tenant-wide and uses
+  claim/tombstone rules rather than asserting one Session owner before S3
+  deletion. Lost-owner compensation can still leave conservative allocations
+  or ambiguous S3 effects, so this is **not** an exactly-once external-effect
+  guarantee. With opt-in enabled, Kernel model/tool dispatch, compaction,
+  Dashboard cancellation RPCs and Copilot SDK model send / Host-dispatched
+  tools check owner, live membership and Unit placement before new effects.
+  Unit closure aborts active cancellable model/tool calls before queue shutdown.
+  Distributed owner takeover does not automatically replay model/tool work
+  with an unknown outcome: a model becomes `[interrupted]` and a pending tool
+  awaits explicit reconciliation. A remote destination may ignore cancellation
+  or already have performed an effect; only external receipts/idempotency can
+  make that effect exactly-once.
+  DAG mutation and idempotent replay now check the parent Session owner inside
+  the locked Unit JSONB row transaction. Scheduled tasks check affected Session
+  owner on writes, claim and recovery. In `parallel-v1`, scheduled state can be
+  shared by replicas; a single scheduler leader tries to assign unowned work,
+  while effects run only for locally owned Sessions and ambiguous outcomes are
+  retained for review. The Unit-wide JSONB rows remain serialization hot spots.
+  Dashboard and Public API Session-tree deletion precheck every descendant's
+  owner before doing external cleanup; this precheck cannot fence a remote
+  effect already started or make an entire multi-Session deletion atomic.
+  Other indirect RPCs and non-transactional side effects still require audit.
+  This optional mode requires a trusted Unit ID and an operator-migrated schema;
+  v5 adds the mixed-version barrier and v6 adds upload-intent leases, but neither
+  proves every-write owner
+  enforcement or production-safe external effect recovery. Operator migration
+  v4 also adds a unique index on
+  `(organization_id, resource_type, resource_id)` in resource ownerships:
+  Session/Task hot-state and queue keys omit Unit ID, so two Units in one
+  organization must never independently own the same resource ID. The index
+  also applies to the development-only table bootstrap. When upgrading v3,
+  first inspect any historical duplicate `(organization_id, resource_type,
+  resource_id)` owner rows (for example, `SELECT organization_id, resource_type,
+  resource_id, array_agg(unit_id ORDER BY unit_id) AS units FROM
+  tenant_runtime_resource_ownerships GROUP BY organization_id, resource_type,
+  resource_id HAVING count(*) > 1`) and reconcile their Unit assignment and
+  associated data under a maintenance window/backup; v4 intentionally fails atomically
+  on duplicates and **does not** pick a winner or erase rows. The unique row
+  persists when a lease expires, so moving an ID to another Unit requires an
+  explicit, fenced operator migration, not a silent lease retry. This does not
+  remove the default exclusive placement; only operator-gated `parallel-v1`
+  replaces it with the permanent barrier and owner-checked experimental path.
+  Replica records from retired Pod identities are not yet garbage-collected;
+  any retention job must preserve resource fencing generations and foreign-key
+  constraints before a high-churn Kubernetes rollout.
+  A read-only Gateway resolver can find trusted resource-owner origins.
+  Opt-in Gateway WebSocket Upgrade now accepts short-lived signed v2 Session
+  route tickets only for a currently authenticated, authorized organization
+  member whose canonical principal, Unit and organization match the ticket;
+  it rechecks the live owner and fails closed on invalid tickets. Gateway
+  strips client-supplied routing headers and forwards the verified Session
+  identity to Host, which rejects a different Socket.IO handshake Session,
+  multiplexed control socket, explicit
+  cross-Session RPC, or cross-Session channel subscription. This does not yet
+  replace a full Session-scoped execution fence for every indirect RPC or tool
+  side effect. The Gateway additionally exposes opt-in `POST /runtime/route-ticket`
+  for a cookie-authenticated, active-organization member with `runtime:write`:
+  same-origin JSON containing only `sessionId` yields a no-store ticket valid
+  for at most 15 seconds (Upgrade verification tolerates at most two seconds
+  of verifier clock lag; clocks still require synchronization), **only if** a
+  live Session owner and replica already exist in the organization's Unit and
+  its PostgreSQL latest Session projection
+  exists, belongs to that organization, and is not deletion-tombstoned. Both
+  issuance and Upgrade re-check these conditions. Unknown owners fail closed;
+  clients cannot supply the principal, Unit or owner binding. The Gateway
+  origin and resource owner readers require the separate, startup-audited
+  `KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING` when tickets
+  are enabled; the legacy Runtime placement credential must not remain in the
+  Gateway environment. The operator CLI can grant a pre-created role SELECT
+  on exactly five Runtime tables with `--gateway-runtime-reader-role`, but
+  creation of that role, credentials and cross-database privilege hardening
+  remain deployment responsibilities. The control-plane PG credential is
+  separate and still has legitimate organization write access. The Host issuer
+  remains an internal helper, not an authenticated Host endpoint. The opt-in
+  experimental Runtime can now create a live owner for an accessed Session,
+  which is a prerequisite for issuing its ticket; Task owner acquisition is not
+  connected. An opt-in Dashboard client now requests a short-lived ticket for
+  authenticated Private Cloud Sessions, connects a fresh WebSocket-only Session
+  socket with the ticket in the Engine.IO query, and requests a new ticket after
+  disconnection. Only an explicit `route_ticket_unavailable` response uses the
+  legacy shared Unit socket; owner and authorization failures fail closed.
+  If a pre-existing Session has no live owner, the client asks the authenticated
+  Unit-affine control socket to validate and prepare its owner once, then retries
+  ticket issuance. The server requires an existing authorized Session, a trusted
+  organization-bearing control connection, and the opt-in owner check; failures
+  never downgrade to the Unit socket. In default mode this acquires owners on
+  the exclusive Unit leader; under the operator-gated `parallel-v1` protocol,
+  the Gateway instead chooses a live allowlisted replica for Unit-affine control
+  traffic while Session tickets still resolve to their exact live owner. Each
+  new Session uses a fresh control socket and the least-loaded eligible replica
+  by live Session/Task owners. An isolated real-Gateway acceptance with a
+  browser-like Socket.IO client and actual cookie, Origin, HTTP ticket and
+  WebSocket boundaries verifies automatic X/Y spread, exact owner proxying,
+  SIGKILL reconnect and PG network-partition recovery. A single real external
+  Executor, authenticated through Gateway and connected to both owners, also
+  executed X/Y `read_file` calls with persistent workspace and receipts in
+  the isolated Docker acceptance. An opt-in real headless Chromium check also
+  verifies browser Cookie, Gateway ticket, routed WebSocket and X/Y PG-backed
+  tool history. It exercises the browser transport, not the built Dashboard UI.
+
+A Docker PostgreSQL + Silo acceptance experiment starts **two real Runtime
+processes** and proves sequential takeover of the same Unit: only one Runtime
+holds the Unit ownership lease at a time, the successor takes ownership after
+release/expiry, and neither Runtime publishes a Host port. An additional
+isolated SIGKILL drill verifies the successor waits for both the Unit placement
+TTL and the independent PostgreSQL scheduled-task writer lease to expire before
+restoring the Session and S3 attachment. A separate Docker network-partition
+drill keeps A's process alive, disconnects it from PG, lets B take over, then
+reconnects A and verifies that its stale Session write RPC is rejected. In
+both drills the successor is the only live registered replica for this Unit.
+The opt-in, versioned-schema variant has also passed graceful, SIGKILL and
+network-partition drills with a real Session owner: the owner generation moves
+from A's replica to B's, and the Session and S3 attachment recover. These
+sequential-takeover results alone do not demonstrate simultaneous Session
+placement, fencing of all possible external side effects, or automatic
+Kubernetes node-failure recovery.
+The isolated Runtime/PG/Silo acceptance drivers (the parallel driver also
+starts a real Gateway; none publish Host ports) can be run from `packages/host` with:
+
+```sh
+KALA_RUN_PRIVATE_CLOUD_STORAGE_INTEGRATION=1 ./node_modules/.bin/vitest run src/tenant-runtime/private-cloud-storage.integration.test.ts
+KALA_RUN_PRIVATE_CLOUD_STORAGE_INTEGRATION=1 KALA_TEST_PRIVATE_CLOUD_FORCE_KILL=1 KALA_TEST_PRIVATE_CLOUD_VERSIONED_SCHEMA=1 ./node_modules/.bin/vitest run src/tenant-runtime/private-cloud-storage.integration.test.ts
+KALA_RUN_PRIVATE_CLOUD_STORAGE_INTEGRATION=1 KALA_TEST_PRIVATE_CLOUD_NETWORK_PARTITION=1 KALA_TEST_PRIVATE_CLOUD_VERSIONED_SCHEMA=1 ./node_modules/.bin/vitest run src/tenant-runtime/private-cloud-storage.integration.test.ts
+# Operator-gated parallel-v1: real Gateway, two Runtimes, browser-like client,
+# automatic X/Y placement, real external Executor read_file + receipts,
+# SIGKILL reconnect and PostgreSQL network partition.
+KALA_RUN_PRIVATE_CLOUD_STORAGE_INTEGRATION=1 ./node_modules/.bin/vitest run src/tenant-runtime/private-cloud-parallel-v1.integration.test.ts
+# Additional real headless Chromium browser-engine check (pinned Puppeteer image):
+KALA_RUN_PRIVATE_CLOUD_STORAGE_INTEGRATION=1 KALA_RUN_REAL_BROWSER_INTEGRATION=1 ./node_modules/.bin/vitest run src/tenant-runtime/private-cloud-parallel-v1.integration.test.ts
+# Add both KALA_TEST_PRIVATE_CLOUD_VERSIONED_SCHEMA=1 and
+# KALA_TEST_PRIVATE_CLOUD_SESSION_OWNERSHIP=1 to repeat any mode with Session owner acquisition.
+```
+
+Each invocation creates and removes its own UUID-labeled Docker containers,
+internal network, tmpfs and test secrets; it requires `sudo -n docker` locally.
+The separate earlier Compose experiment can be run from its Compose directory
+with:
+
+```sh
+# Supply only disposable experiment values through its environment; no real
+# production credentials are required or should be written into this document.
+docker compose up --build --abort-on-container-exit
+docker compose down --volumes --remove-orphans
+```
+
+The temporary resource model is one isolated Docker network, one disposable
+PostgreSQL database, one disposable Silo service and bucket, one Gateway, and
+two Runtime identities contending for one test Unit. Database/object-store
+credentials are experiment-only environment values; Docker volumes, the bucket,
+and all test rows are disposable and are removed by teardown. Only the Gateway
+or the acceptance driver may publish a test-facing port; the two Runtime
+containers remain reachable solely on the experiment network.
+
+The older sequential takeover driver proves one Unit's **exclusive** owner
+transition. Separately, the operator-gated `parallel-v1` acceptance starts two
+real Runtime containers and a real Gateway on one internal Docker network.
+A browser-like client creates X/Y via independent Gateway control sockets;
+least-owner-loaded placement distributes them across replicas, and ticketed
+WebSockets target the exact PG owner. After SIGKILLing X's owner, the client
+reconnects through Gateway and writes X at owner generation 2. The dead replica
+restarts, the surviving replica is disconnected from PostgreSQL, and Gateway
+reroutes Y to the new owner at generation 2; when network access returns,
+the stale replica rejects a **valid** preference write. A single external
+Executor connects to both Runtime owners through authenticated Gateway
+discovery, reads the shared persistent workspace in both Sessions, and retains
+two tool receipts across Runtime SIGKILL; it does not require an Executor inside
+either Runtime. Earlier direct-Runtime tests also verified concurrent X/Y S3
+attachments. All UUID Docker resources
+are checked for cleanup. The additional real headless Chromium check verifies
+same-origin browser Cookie, ticketed WebSocket and X/Y history from PG through
+the Gateway; it is not a rendered Dashboard PWA/browser-UI test. This proves
+the **tested Session slice** can run on separate nodes; it does not prove every
+Session/Task operation, remote executors that ignore cancellation, K8s
+autoscaling, or exactly-once in-flight external effects.
+
+The Runtime is therefore **not fully stateless**. The PG/S3 experiment keeps
+no embedded Executor or its physical workspace, but not every Host path has
+been proven free of local durable state: local trace/message-assembly capture
+is disabled in the PG/S3 experiment, while export paths, capacity/accounting
+and other filesystem or process-local state still need explicit migration or
+fail-closed isolation. Dashboard history now reads authoritative PG events and
+Host metadata; PG-mode fork and local trace artifacts explicitly fail closed
+because the initial fork state and trace files are not yet durable across
+replicas. Export/profile HTTP paths also still assume a local JSONL and are
+not supported as Private Cloud cross-node operations. External Executors must retain
+workspace data and execution receipts outside Runtime Pods. A VAPID key pair,
+if Push is enabled, needs a stable externally managed secret across all eligible
+nodes. The production Private Cloud Compose still mounts `tenant-data`; the PostgreSQL/S3
+and multi-Runtime experiment switches are not enabled in production. An opt-in
+versioned PostgreSQL schema mode and separate operator migration command exist.
+The optional `--runtime-role EXISTING_ROLE` flag grants DML only on migrated
+Kala Runtime tables and SELECT on migration history; it rejects roles with
+schema/database DDL, object ownership, or migration-history write privileges.
+The operator must separately create and manage that role and its secret; an
+operator Job, backup/restore workflow, and production cutover plan are not
+wired into Compose or Kubernetes manifests. There is
+also no end-to-end interruption-recovery proof across Gateway routing,
+Session/Task continuation, Executor/provider effects, receipts, and client
+cursor resume. These gaps keep this work below the final multi-node gate even
+though the isolated experiment passes.
+
+The target topology is:
+
+```text
+Browser / Executor
+        |
+        v
+Gateway / connection and resume boundary
+        |
+        v
+placement + lease resolution
+        |
+        +------> stateless Runtime replica on Kubernetes node A
+        +------> stateless Runtime replica on Kubernetes node B
+        +------> stateless Runtime replica on Kubernetes node N
+                         |                 |
+                         v                 v
+              transactional Runtime     S3-compatible
+              state store               object store
+              (hot authority)           (object bytes)
+```
+
+Runtime replicas have no persistent volume in this target. Their local
+filesystem contains only bounded disposable cache, spool, and scratch data;
+losing it must not lose an acknowledged transition or change ownership.
+Kubernetes may add, remove, reschedule, and spread replicas across nodes. A
+replica becomes eligible to execute work only after acquiring the relevant
+lease; Pod readiness or node placement alone never grants write authority.
+
+#### Transactional hot state and object bytes
+
+The transactional Runtime state store is authoritative for active Session
+events, Queue entries, Approval and Pending Call state, Task state, dedupe keys,
+snapshots/cursors, continuation and effect receipts, lease generations, and the
+metadata references needed to resume. Mutations that establish one logical
+transition commit atomically, with compare-and-set or serializable conflict
+handling where concurrent ownership matters. A Runtime acknowledges acceptance
+only after the authoritative transaction commits.
+
+S3-compatible storage is authoritative only for immutable or explicitly
+versioned object bytes such as Attachments, large Tool/trace Artifacts, exports,
+backups, and sealed historical segments. The transactional state store records
+the object key, size, digest, lifecycle state, and owning Unit. Bucket listing is
+not product-state authority, and S3 is not mounted as a Runtime filesystem.
+Object publication and deletion use transactional intent/outbox records,
+idempotent workers, verification, and orphan reconciliation because a database
+transaction cannot atomically include an S3 or external-provider side effect.
+
+The deferred
+[`external-object-storage-proposal.md`](../research/proposals/external-object-storage-proposal.md)
+describes an earlier object-tier-only proposal that deliberately leaves active
+state on a durable filesystem. It remains useful for object integrity and
+commit-protocol constraints, but it does not define or deliver this
+transactional hot-state or multi-node target. Likewise, a Silo Docker setup is
+only a test fixture for S3-compatible object behavior. It does not validate hot
+state, leases, fencing, Kubernetes placement, node loss, or end-to-end failover.
+
+#### Session/Task leases and fencing
+
+Ownership is leased at the smallest write domain that can move independently:
+at least each active Session and dispatched Task. A coarse Unit placement record
+may guide routing, but it cannot replace Session/Task ownership. Every lease has
+a monotonically increasing generation (fencing token), holder identity, and
+bounded expiry. Every authoritative write, Task dispatch, completion receipt,
+and externally visible publish carries that generation and is conditionally
+accepted only while it is current.
+
+Lease renewal extends ownership; it does not create a new generation. Transfer
+or reacquisition increments the generation before a replacement resumes work.
+An expired, partitioned, drained, or superseded replica may still run briefly,
+but the state store rejects its stale writes and completion receipts. Timeouts,
+Pod termination, and process-local locks are therefore cleanup mechanisms, not
+the fencing boundary.
+
+#### Persistence, side effects, and interruption recovery
+
+These are separate guarantees and must not be collapsed into a claim of generic
+"exactly once" execution:
+
+1. **Transactional persistence:** an uncommitted transition is absent; a
+   committed transition and its next recovery position survive Runtime loss.
+2. **External side effects:** an LLM/provider request, Executor Tool call, or S3
+   operation is outside the state transaction. Durable intent, an idempotency
+   key when the provider supports one, and a durable receipt are required.
+3. **Interruption recovery:** a new fenced owner resumes from committed state.
+   If interruption occurred before dispatch, it may dispatch. If a receipt is
+   committed, it must not dispatch again. If dispatch may have happened but no
+   authoritative receipt exists, recovery reconciles by idempotency key or
+   exposes an explicit `unknown`/operator-recovery state; it must not invent a
+   success result or promise exactly-once effects.
+
+Streaming output is a projection of committed Session progress. A disconnected
+client resumes from an authenticated committed cursor and may receive
+duplicates, which it deduplicates by stable event identity. Process memory,
+Socket.IO recovery buffers, and an open TCP connection are never recovery
+authority.
+
+#### Gateway connection, resume, and failure semantics
+
+The Gateway resolves the authenticated Unit plus Session/Task route through
+current placement and lease state. All Engine.IO polling requests and the
+WebSocket upgrade for one live connection remain sticky to the selected Runtime
+holder; an existing Engine.IO session is not transparently moved between Pods.
+The Gateway must reject stale route generations and must not keep forwarding to
+a replica after its ownership is superseded.
+
+On planned drain, the old holder stops admitting new work, commits recoverable
+progress, and closes connections with a bounded retry signal. On process, Pod,
+or node loss, the connection drops; after lease expiry or explicit revocation, a
+replacement acquires a higher fencing generation. The client reconnects through
+the Gateway, reauthenticates/revalidates authorization, resolves the new holder,
+and resumes from its last committed cursor. During the ownership gap, the
+Gateway returns an explicit retryable unavailable/relocating response rather
+than routing to two holders or presenting an infinite loading state. Suspension,
+revocation, deletion, or non-recoverable Session failure is terminal and must
+not be presented as retryable failover.
+
+Autoscaling is therefore safe only when placement, lease acquisition, Gateway
+route convergence, cursor resume, backpressure, and stale-writer rejection are
+all proven together across multiple Kubernetes nodes.
+
+#### Progressive migration to the target
+
+Migration must preserve one explicit authority for each data class at every
+step and remain restartable:
+
+1. Keep the current single-node filesystem composition as the declared source
+   of truth while introducing versioned state-store schemas and adapters.
+2. Exercise S3-compatible object protocols independently. Silo Docker may test
+   this object layer only; passing it is not a Runtime failover gate.
+3. Backfill and shadow-verify transactional Runtime records under one existing
+   writer. Do not acknowledge from both filesystem and database authorities.
+4. Cut over one Unit/cohort at an explicit generation boundary after quiesce,
+   checksum/count verification, and a durable migration marker. Rollback is
+   allowed only to a fully verified authority and must fence the abandoned
+   generation.
+5. Enable Session/Task leases and fencing with one Runtime replica first, then
+   prove lease expiry, stale-write rejection, side-effect reconciliation, and
+   cursor resume under injected interruption.
+6. Canary stateless Runtime replicas across multiple Kubernetes nodes, then
+   enable dynamic scale-out/scale-in and node-loss relocation for bounded
+   cohorts.
+7. Remove Runtime persistent-volume requirements only after every acknowledged
+   hot-state path, object reference, migration, backup/restore, drain, and
+   Gateway reconnect test passes without the Unit directory as an authority.
+
+No phase may infer completion from object-store availability, a second Pod
+starting successfully, or a connection reconnecting without committed-state
+verification.
+
+### 9.2 Existing data migration
 
 Migration must be non-destructive and restart-safe.
 
@@ -625,7 +1091,7 @@ The implementation is unacceptable unless all of these hold:
 
 ## 18. Implementation record and remaining gates
 
-Phases 0–6 below describe the delivered local single-node composition. Checked items and implementation tests are current-state evidence; unchecked items and Phase 7 remain release work. This section does not override the normative deployment-mode contract.
+Phases 0–6 below describe the delivered local single-node composition. Checked items and implementation tests are current-state evidence; unchecked items and Phase 7 remain release work. The opt-in PostgreSQL/Silo two-Runtime experiment recorded in section 9.1 is additional narrow evidence, not a completed implementation phase or production enablement. This section does not override the normative deployment-mode contract.
 
 ### Phase 0 — transport and composition spike
 
@@ -779,7 +1245,7 @@ The stated Private Cloud requirement disables Benchmark/Evaluation, not every op
 
 ### 20.7 Horizontal scaling is deferred, not solved
 
-One Unit currently lives on one Host process. Multi-node placement, migration, and distributed Socket.IO adapters are later control-plane problems. The catalog and APIs should not make them impossible, but Phase 1 must not implement them.
+In the production composition, one Unit currently lives on one Host process. Section 9.1 now also records an operator-gated isolated test where two real Runtime processes concurrently run different Sessions in one Unit and recover one after SIGKILL. This is not general Session/Task multi-node production readiness: dynamic placement, migrations, fencing across every indirect write and external effect, and distributed Socket.IO browser reconnect remain later control-plane and operations problems. The completed single-node phases must not be described as implementing them.
 
 ### 20.8 LLM configuration and catalog authority need explicit owners
 

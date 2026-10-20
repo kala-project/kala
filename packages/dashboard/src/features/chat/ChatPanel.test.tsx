@@ -610,6 +610,12 @@ describe('ChatPanel', () => {
     rerender(<ChatPanel messages={[]} items={[{ ...queuedItem, shell: { ...queuedItem.shell, state: 'running' as const } }]} />)
     expect(screen.getByTestId('shell-command-status-shell-operation').textContent).toContain('running')
 
+    const unknownError = 'Shell execution result is unknown. Inspect the workspace, delete/cancel this item, and retry with a new operation ID.'
+    rerender(<ChatPanel messages={[]} items={[{ ...queuedItem, shell: { ...queuedItem.shell, state: 'unknown' as const, error: unknownError } }]} />)
+    expect(screen.getByTestId('shell-command-status-shell-operation').textContent).toContain('unknown')
+    expect(screen.getByTestId('shell-command-error-shell-operation').textContent).toBe(unknownError)
+    expect(screen.getByTestId('pending-user-message-status-shell-operation').getAttribute('aria-label')).toBe(unknownError)
+
     const result = [
       'Shell command result (explicit operator request; command execution can modify the workspace):',
       'Command identity: sha256:test',

@@ -52,6 +52,8 @@ export type SessionProjection = {
   selectedModel: string | null
   hydratedSessionId: string | null
   historyLoadedSessionId: string | null
+  /** Only set by a Host history response, never by a cached transcript. */
+  historyAuthoritativeSessionId: string | null
 }
 
 type Scoped = { generation: number; sessionId: string }
@@ -59,7 +61,7 @@ export type SessionProjectionEvent =
   | { kind: 'select'; generation: number; sessionId: string | null; cached?: CachedSessionView | null }
   | ({ kind: 'hydrate'; cached: CachedSessionView } & Scoped)
   | ({ kind: 'ready'; payload: SessionReadyEvent } & Scoped)
-  | ({ kind: 'history'; entries: readonly TimelineEntry[]; reset?: boolean } & Scoped)
+  | ({ kind: 'history'; entries: readonly TimelineEntry[]; reset?: boolean; authoritative?: boolean } & Scoped)
   | ({ kind: 'authoritative'; payload: StateChangedEvent } & Scoped)
   | ({ kind: 'appended'; payload: EventAppendedEvent } & Scoped)
   | ({ kind: 'queue'; items: readonly QueuedMessagePreview[] } & Scoped)
@@ -74,7 +76,7 @@ export const EMPTY_SESSION_PROJECTION: SessionProjection = {
   contextSnapshot: null, runtimeCompactionPolicy: kernelRuntimeCompactionPolicy(), turnStartedAt: null, turnStartedAtCursor: null,
   compactStatus: null, timeline: [], queuedMessages: [],
   lastError: null, parentSessionId: null, parentCursor: null, selectedModel: null,
-  hydratedSessionId: null, historyLoadedSessionId: null,
+  hydratedSessionId: null, historyLoadedSessionId: null, historyAuthoritativeSessionId: null,
 }
 
 export function reduceSessionProjectionBatch(
@@ -117,7 +119,7 @@ export function reduceSessionProjection(
         turnStartedAt: p.turnStartedAt ?? null, turnStartedAtCursor: p.turnStartedAt ? p.cursor : null,
         parentSessionId: p.parentSessionId ?? null,
         parentCursor: p.parentCursor ?? null, selectedModel: p.selectedModel ?? null,
-        hydratedSessionId: p.sessionId, lastError: null,
+        hydratedSessionId: p.sessionId, historyAuthoritativeSessionId: null, lastError: null,
       }
     }
     case 'history':
@@ -129,6 +131,7 @@ export function reduceSessionProjection(
           ? authoritativeTimeline(event.entries)
           : mergeBySeq(current.timeline, event.entries),
         historyLoadedSessionId: event.sessionId,
+        historyAuthoritativeSessionId: event.authoritative === false ? current.historyAuthoritativeSessionId : event.sessionId,
       }
     case 'authoritative': {
       const p = event.payload
@@ -164,7 +167,7 @@ export function reduceSessionProjection(
       if (event.compactStatus.scope?.kind === 'subagent') return current
       return { ...current, compactStatus: event.compactStatus }
     case 'model': return { ...current, selectedModel: event.selectedModel }
-    case 'reset_timeline': return { ...current, timeline: [], historyLoadedSessionId: null }
+    case 'reset_timeline': return { ...current, timeline: [], historyLoadedSessionId: null, historyAuthoritativeSessionId: null }
   }
 }
 

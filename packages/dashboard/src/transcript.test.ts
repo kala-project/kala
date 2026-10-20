@@ -3,12 +3,29 @@ import { describe, expect, it } from 'vitest'
 import type { Message } from '@agent-kernel/kernel'
 
 import type { TimelineEntry } from './session.js'
-import { appendLiveTranscriptItems, appendTranscriptBaseItems, lastUserTranscriptIndex, reconcilePendingUserMessages, transcriptBaseItems, transcriptTimelineForRuntime, visibleMessages, visibleTranscript } from './transcript.js'
+import { appendLiveTranscriptItems, appendTranscriptBaseItems, lastUserTranscriptIndex, reconcilePendingUserMessages, transcriptBaseItems, transcriptTimelineForRuntime, transcriptViewStartForItems, visibleMessages, visibleTranscript } from './transcript.js'
 
 const system: Message = {
   role: 'system',
   content: [{ type: 'text', text: 'sys' }],
 }
+
+describe('transcriptViewStartForItems', () => {
+  it('preserves a valid /clear boundary on the latest user turn', () => {
+    expect(transcriptViewStartForItems(2, 4, true)).toBe(2)
+  })
+
+  it('restores the entire authoritative transcript when a reset invalidates the old index', () => {
+    expect(transcriptViewStartForItems(120, 1, true)).toBe(0)
+    expect(transcriptViewStartForItems(120, 3, true)).toBe(0)
+    expect(transcriptViewStartForItems(120, 121, true)).toBe(120)
+  })
+
+  it('does not repair a partial cached transcript before the Host confirms its history', () => {
+    expect(transcriptViewStartForItems(120, 1, false)).toBe(0)
+    expect(transcriptViewStartForItems(-1, 2, true)).toBe(0)
+  })
+})
 
 describe('transcriptTimelineForRuntime', () => {
   it('keeps external Runtime state authoritative over Kernel event timelines', () => {

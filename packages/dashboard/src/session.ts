@@ -7,7 +7,7 @@
  * local mutation.
  */
 
-import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 
 import type {
   AgentConfig,
@@ -104,7 +104,9 @@ export type SessionView = {
   toolExecutionStartedAt: number | null
   hydratedSessionId: string | null
   historyLoadedSessionId: string | null
+  historyAuthoritativeSessionId?: string | null
   socket: DashboardSocket | null
+  reconnect: () => void
 }
 
 type BoundDashboardSocket = {
@@ -116,6 +118,7 @@ export type UseSessionOptions = {
   host: string
   sessionId: string | null
   socket?: DashboardSocket | null
+  sessionRouteTickets?: boolean
   token?: string
   cache?: SessionViewCache & { hydrate?(sessionId: string): Promise<CachedSessionView | null> }
   onForked?: (payload: SessionReadyEvent) => void
@@ -152,6 +155,56 @@ function openDashboardSocket(url: string, options: Parameters<typeof socketIo>[1
   return socketIo(url, options) as DashboardSocket
 }
 
+export type SessionRouteTicketResult =
+  | { kind: 'ticket'; ticket: string }
+  | { kind: 'unavailable' }
+
+export async function requestSessionRouteTicket(input: {
+  host: string
+  sessionId: string
+  signal?: AbortSignal
+}): Promise<SessionRouteTicketResult> {
+  const origin = new URL(input.host || window.location.origin, window.location.origin).origin
+  if (origin !== window.location.origin) throw new Error('Session routing requires a same-origin Gateway')
+  const response = await fetch(`${origin}/runtime/route-ticket`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: input.sessionId }),
+    ...(input.signal ? { signal: input.signal } : {}),
+  })
+  const body = await response.json().catch(() => ({})) as { ticket?: unknown; error?: unknown }
+  if (response.status === 404 && body.error === 'route_ticket_unavailable') return { kind: 'unavailable' }
+  if (!response.ok) {
+    const code = typeof body.error === 'string' ? body.error : `http_${response.status}`
+    throw new Error(`Session route ticket request failed: ${code}`)
+  }
+  if (typeof body.ticket !== 'string' || body.ticket.length === 0) {
+    throw new Error('Session route ticket response was invalid')
+  }
+  return { kind: 'ticket', ticket: body.ticket }
+}
+
+export function sessionRouteTicketSocketOptions(input: {
+  sessionId: string
+  ticket: string
+  token?: string
+}): NonNullable<Parameters<typeof socketIo>[1]> {
+  return {
+    auth: {
+      sessionId: input.sessionId,
+      role: 'dashboard',
+      clientVersion: PROTOCOL_VERSION,
+      ...(input.token !== undefined ? { token: input.token } : {}),
+    },
+    query: { runtimeRouteTicket: input.ticket },
+    forceNew: true,
+    autoConnect: false,
+    reconnection: false,
+    transports: ['websocket'],
+  }
+}
+
 export function acceptsSessionTokenDelta(status: AgentState['status']): boolean {
   return status === 'thinking'
 }
@@ -160,6 +213,7 @@ export function useSession({
   host,
   sessionId,
   socket: sharedSocket,
+  sessionRouteTickets = false,
   token,
   cache,
   onForked,
@@ -174,6 +228,8 @@ export function useSession({
   const [streamingAnchor, setStreamingAnchor] = useState<StreamedDraftAnchor | null>(null)
   const [retainedDrafts, setRetainedDrafts] = useState<readonly RetainedStreamedDraft[]>([])
   const [boundSocket, setBoundSocket] = useState<BoundDashboardSocket | null>(null)
+  const [reconnectGeneration, setReconnectGeneration] = useState(0)
+  const reconnect = useCallback(() => setReconnectGeneration((generation) => generation + 1), [])
   const socketRef = useRef<DashboardSocket | null>(null)
   const generationRef = useRef(0)
   // Streaming smoother: token_delta events land in `streamBufferRef`, and a
@@ -443,25 +499,51 @@ export function useSession({
         dispatchProjectionEvent({ kind: 'hydrate', generation, sessionId, cached: hydrated })
       })
     }
-    const connect = (): void => {
-      if (sharedSocket !== undefined) {
-        if (sharedSocket === null) return
-        socket = sharedSocket
-        socketRef.current = socket
-        bindSocket(socket)
-        setBoundSocket({ sessionId, socket })
-        const cursor = cached?.timeline.at(-1)?.seq
-        const releaseChannel = dashboardConnectionManager(socket).acquire(`session:${sessionId}`, cursor, {
-          freshBaseline: true,
-          onError: (code) => {
-            if (disposed) return
-            dispatchStatus('error')
-            dispatchProjectionEvent({ kind: 'error', generation, sessionId, error: { sessionId, scope: 'host', message: `Unable to subscribe to this Session: ${code}` } })
-          },
-        })
-        reconnectCleanup = releaseChannel
-        return
+    let ticketAbortController: AbortController | null = null
+    let routeReconnectTimer: number | null = null
+    let routeConnectGeneration = 0
+    let routeReconnectAttempts = 0
+    let routeTicketFallback = false
+    let routeReconnectBlocked = false
+    let routePreparationAttempted = false
+
+    const closeOwnedSocket = (): void => {
+      socketListenerCleanup?.()
+      socketListenerCleanup = null
+      if (historyRequestTimer !== null) window.clearTimeout(historyRequestTimer)
+      historyRequestTimer = null
+      latestHistoryRequest = null
+      historyRequestAttempts = 0
+      const previous = socket
+      socket = null
+      if (previous && previous !== sharedSocket) previous.close()
+      if (socketRef.current === previous) socketRef.current = null
+      setBoundSocket((current) => current?.socket === previous ? null : current)
+    }
+
+    const connectSharedSocket = (): void => {
+      if (sharedSocket == null) return
+      socket = sharedSocket
+      socketRef.current = socket
+      bindSocket(socket)
+      setBoundSocket({ sessionId, socket })
+      const cursor = cached?.timeline.at(-1)?.seq
+      const releaseChannel = dashboardConnectionManager(socket).acquire(`session:${sessionId}`, cursor, {
+        freshBaseline: true,
+        onError: (code) => {
+          if (disposed) return
+          dispatchStatus('error')
+          dispatchProjectionEvent({ kind: 'error', generation, sessionId, error: { sessionId, scope: 'host', message: `Unable to subscribe to this Session: ${code}` } })
+        },
+      })
+      const previousCleanup = reconnectCleanup
+      reconnectCleanup = () => {
+        previousCleanup?.()
+        releaseChannel()
       }
+    }
+
+    const connectLegacySocket = (): void => {
       socket = openDashboardSocket(`${host}/dashboard`, {
         auth: {
           sessionId,
@@ -480,15 +562,100 @@ export function useSession({
       socketRef.current = socket
       bindSocket(socket)
       setBoundSocket({ sessionId, socket })
-      const reconnectNow = (): void => {
-        if (!disposed && socket && !socket.connected) socket.connect()
+    }
+
+    const connectRoutedSocket = async (): Promise<void> => {
+      const connectGeneration = ++routeConnectGeneration
+      ticketAbortController?.abort()
+      ticketAbortController = new AbortController()
+      closeOwnedSocket()
+      dispatchStatus('connecting')
+      try {
+        const result = await requestSessionRouteTicket({
+          host,
+          sessionId,
+          signal: ticketAbortController.signal,
+        })
+        if (disposed || connectGeneration !== routeConnectGeneration) return
+        ticketAbortController = null
+        if (result.kind === 'unavailable') {
+          routeTicketFallback = true
+          connectSharedSocket()
+          return
+        }
+        socket = openDashboardSocket(
+          `${host}/dashboard`,
+          sessionRouteTicketSocketOptions({ sessionId, ticket: result.ticket, ...(token !== undefined ? { token } : {}) }),
+        )
+        socketRef.current = socket
+        bindSocket(socket)
+        setBoundSocket({ sessionId, socket })
+        socket.connect()
+      } catch (error) {
+        if (disposed || connectGeneration !== routeConnectGeneration || (error instanceof DOMException && error.name === 'AbortError')) return
+        ticketAbortController = null
+        dispatchStatus('error')
+        dispatchProjectionEvent({
+          kind: 'error',
+          generation,
+          sessionId,
+          error: {
+            sessionId,
+            scope: 'host',
+            message: error instanceof Error ? error.message : 'Session route ticket request failed',
+          },
+        })
+        // A newly created Session may not have a published owner yet; retry
+        // transient ownership and transport failures, never auth/permission errors.
+        const ownerUnavailable = error instanceof Error && error.message.endsWith(': session_owner_unavailable')
+        if (ownerUnavailable && !routePreparationAttempted && sharedSocket?.connected) {
+          routePreparationAttempted = true
+          try {
+            const prepared = await sharedSocket.timeout(3_000).emitWithAck('client:prepare_session_route', { sessionId })
+            if (disposed || connectGeneration !== routeConnectGeneration) return
+            if (prepared.ok) { void connectRoutedSocket(); return }
+          } catch {
+            // Rolling upgrades may not support owner preparation yet; never
+            // bypass the Gateway ticket on a failed or timed-out RPC.
+          }
+        }
+        if (error instanceof TypeError || ownerUnavailable) scheduleRoutedReconnect()
       }
-      window.addEventListener('online', reconnectNow)
-      document.addEventListener('visibilitychange', reconnectNow)
-      reconnectCleanup = () => {
-        window.removeEventListener('online', reconnectNow)
-        document.removeEventListener('visibilitychange', reconnectNow)
+    }
+
+    const scheduleRoutedReconnect = (): void => {
+      if (disposed || routeTicketFallback || routeReconnectBlocked || routeReconnectTimer !== null || routeReconnectAttempts >= 8) return
+      const delay = Math.min(500 * 2 ** routeReconnectAttempts, 30_000)
+      routeReconnectAttempts += 1
+      routeReconnectTimer = window.setTimeout(() => {
+        routeReconnectTimer = null
+        void connectRoutedSocket()
+      }, delay)
+    }
+
+    const connect = (): void => {
+      if (sessionRouteTickets) {
+        void connectRoutedSocket()
+        return
       }
+      if (sharedSocket !== undefined) connectSharedSocket()
+      else connectLegacySocket()
+    }
+
+    const reconnectNow = (): void => {
+      if (disposed || socket?.connected) return
+      if (sessionRouteTickets && !routeTicketFallback) {
+        if (routeReconnectTimer !== null) window.clearTimeout(routeReconnectTimer)
+        routeReconnectTimer = null
+        routeReconnectAttempts = 0
+        void connectRoutedSocket()
+      } else socket?.connect()
+    }
+    window.addEventListener('online', reconnectNow)
+    document.addEventListener('visibilitychange', reconnectNow)
+    reconnectCleanup = () => {
+      window.removeEventListener('online', reconnectNow)
+      document.removeEventListener('visibilitychange', reconnectNow)
     }
 
     const requestHistory = (socket: DashboardSocket, payload: { sessionId: string; sinceCursor?: number }): void => {
@@ -500,7 +667,7 @@ export function useSession({
         if (disposed || !latestHistoryRequest) return
         if (historyRequestAttempts < 3) { requestHistory(socket, latestHistoryRequest); return }
         latestHistoryRequest = null
-        dispatchProjectionEvent({ kind: 'history', generation, sessionId, entries: [] })
+        dispatchProjectionEvent({ kind: 'history', generation, sessionId, entries: [], authoritative: false })
         dispatchProjectionEvent({ kind: 'error', generation, sessionId, error: { sessionId, scope: 'host', message: 'Conversation history request timed out. Reconnect or retry this Session.' } })
       }, 10_000)
     }
@@ -669,7 +836,7 @@ export function useSession({
       if (latestHistoryRequest) {
         latestHistoryRequest = null
         if (historyRequestTimer !== null) { window.clearTimeout(historyRequestTimer); historyRequestTimer = null }
-        dispatchProjectionEvent({ kind: 'history', generation, sessionId, entries: [] })
+        dispatchProjectionEvent({ kind: 'history', generation, sessionId, entries: [], authoritative: false })
       }
       finishStream()
       acceptStreamDeltas = false
@@ -688,7 +855,12 @@ export function useSession({
       }
     })
     bind('connect', () => {
-      if (isCurrentSocket()) dispatchStatus('connecting')
+      if (!isCurrentSocket()) return
+      routeReconnectAttempts = 0
+      // A later owner loss may require the newly selected control Runtime to
+      // prepare the same Session again before the Gateway can issue a ticket.
+      routePreparationAttempted = false
+      dispatchStatus('connecting')
     })
     bind('connect_error', (err: Error) => {
       if (!isCurrentSocket()) return
@@ -697,13 +869,15 @@ export function useSession({
       // user sees an actionable banner instead of a hot-looping toast.
       const msg = (err as Error | undefined)?.message ?? ''
       if (msg === 'version_incompatible' || msg === 'auth_failed') {
+        routeReconnectBlocked = true
         socket.disconnect()
         dispatchStatus('error')
         return
       }
       dispatchStatus(liveConnectionStatus === 'ready' || liveConnectionStatus === 'disconnected' ? 'disconnected' : 'connecting')
+      if (sessionRouteTickets && !routeTicketFallback) scheduleRoutedReconnect()
     })
-    if (!sharedSocket) socket.io.on('reconnect_failed', () => {
+    if (socket !== sharedSocket) socket.io.on('reconnect_failed', () => {
       if (!isCurrentSocket()) return
       dispatchStatus('error')
     })
@@ -711,6 +885,11 @@ export function useSession({
       if (!isCurrentSocket()) return
       finishStream()
       acceptStreamDeltas = false
+      if (sessionRouteTickets && !routeTicketFallback) {
+        dispatchStatus('disconnected')
+        scheduleRoutedReconnect()
+        return
+      }
       // Server-initiated disconnect (e.g. workspaceId conflict analogue on
       // dashboard side, or host shutdown) is terminal — don't let socket.io
       // keep dialing.
@@ -735,6 +914,11 @@ export function useSession({
 
     return () => {
       disposed = true
+      routeConnectGeneration += 1
+      ticketAbortController?.abort()
+      ticketAbortController = null
+      if (routeReconnectTimer !== null) window.clearTimeout(routeReconnectTimer)
+      routeReconnectTimer = null
       if (streamRafRef.current !== null) {
         cancelAnimationFrame(streamRafRef.current)
         streamRafRef.current = null
@@ -755,11 +939,11 @@ export function useSession({
       reconnectCleanup?.()
       socketListenerCleanup?.()
       socketListenerCleanup = null
-      if (!sharedSocket) socket?.close()
+      if (socket && socket !== sharedSocket) socket.close()
       if (socketRef.current === socket) socketRef.current = null
       setBoundSocket((current) => current?.socket === socket ? null : current)
     }
-  }, [host, sessionId, token, cache, sharedSocket])
+  }, [host, sessionId, token, cache, sharedSocket, sessionRouteTickets, reconnectGeneration])
 
   const selectionCurrent = projection.sessionId === sessionId
   const selectedProjection = selectionCurrent
@@ -774,7 +958,7 @@ export function useSession({
   const {
     status, agentRuntime, executionMode, state, config, contextSnapshot, runtimeCompactionPolicy, compactStatus: remoteCompactStatus, timeline,
     queuedMessages, lastError, parentSessionId, parentCursor, selectedModel, turnStartedAt,
-    hydratedSessionId, historyLoadedSessionId,
+    hydratedSessionId, historyLoadedSessionId, historyAuthoritativeSessionId,
   } = selectedProjection
 
   const pendingApprovals = useMemo<readonly ApprovalRequiredEvent[]>(() => {
@@ -850,7 +1034,9 @@ export function useSession({
       toolExecutionStartedAt,
       hydratedSessionId,
       historyLoadedSessionId,
-      socket: sessionId && sharedSocket ? sharedSocket : boundSocket?.sessionId === sessionId ? boundSocket.socket : null,
+      historyAuthoritativeSessionId,
+      socket: !sessionRouteTickets && sessionId && sharedSocket ? sharedSocket : boundSocket?.sessionId === sessionId ? boundSocket.socket : null,
+      reconnect,
     }),
     [
       status,
@@ -878,10 +1064,13 @@ export function useSession({
       toolExecutionStartedAt,
       hydratedSessionId,
       historyLoadedSessionId,
+      historyAuthoritativeSessionId,
       selectionCurrent,
       boundSocket,
       sharedSocket,
       sessionId,
+      sessionRouteTickets,
+      reconnect,
     ],
   )
 }
@@ -1092,7 +1281,7 @@ export function createSession(
   })
 }
 
-export function createSessionWithAck(
+export async function createSessionWithAck(
   socket: DashboardSocket,
   input: {
     sessionId: string
@@ -1105,8 +1294,54 @@ export function createSessionWithAck(
     selectedModel?: string
   },
   timeoutMs = 10_000,
+  placement?: { host: string; token?: string },
 ): Promise<void> {
-  return emitRpc(socket, 'client:create_session', {
+  let target = socket
+  if (placement) {
+    target = openDashboardSocket(`${placement.host}/dashboard`, {
+      auth: {
+        clientId: `dashboard-session-placement-${input.sessionId}`,
+        role: 'dashboard',
+        clientVersion: PROTOCOL_VERSION,
+        ...(placement.token !== undefined ? { token: placement.token } : {}),
+      },
+      forceNew: true,
+      autoConnect: false,
+      reconnection: false,
+      transports: ['websocket'],
+      withCredentials: true,
+    })
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = window.setTimeout(() => reject(new Error('Session placement connection timed out')), timeoutMs)
+        const finish = (operation: () => void) => {
+          window.clearTimeout(timer)
+          target.off('connect', connected)
+          target.off('connect_error', failed)
+          operation()
+        }
+        const connected = () => finish(resolve)
+        const failed = (error: Error) => finish(() => reject(error))
+        target.on('connect', connected)
+        target.on('connect_error', failed)
+        target.connect()
+      })
+      await emitRpc(target, 'client:create_session', {
+        sessionId: input.sessionId,
+        ...(input.agentRuntime ? { agentRuntime: input.agentRuntime } : {}),
+        ...(input.executionMode ? { executionMode: input.executionMode } : {}),
+        ...(input.workspaceId !== undefined ? { workspaceId: input.workspaceId } : {}),
+        ...(input.workspaceName !== undefined ? { workspaceName: input.workspaceName } : {}),
+        ...(input.cwd !== undefined && input.cwd.length > 0 ? { cwd: input.cwd } : {}),
+        ...(input.tools !== undefined ? { tools: input.tools } : {}),
+        ...(input.selectedModel !== undefined && input.selectedModel.length > 0 ? { selectedModel: input.selectedModel } : {}),
+      }, { timeoutMs })
+      return
+    } finally {
+      target.close()
+    }
+  }
+  await emitRpc(target, 'client:create_session', {
     sessionId: input.sessionId,
     ...(input.agentRuntime ? { agentRuntime: input.agentRuntime } : {}),
     ...(input.executionMode ? { executionMode: input.executionMode } : {}),

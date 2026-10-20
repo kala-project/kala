@@ -157,7 +157,7 @@ import { resolveWorkspaceExplorerBinding } from './workspace-explorer-binding.js
 import { workspaceReadBinary } from './lib/workspace-exec.js'
 import { emitRpc } from './socket-rpc.js'
 import { AdmissionDeliveryFailedError, AdmissionDeliveryPendingError, admitUserMessage, releaseMessageAttachments, uploadMessageAttachment } from './admission-client.js'
-import { appendLiveTranscriptItems, appendTranscriptBaseItems, lastUserTranscriptIndex, reconcilePendingUserMessages, transcriptBaseItems, transcriptTimelineForRuntime, type TranscriptItem } from './transcript.js'
+import { appendLiveTranscriptItems, appendTranscriptBaseItems, lastUserTranscriptIndex, reconcilePendingUserMessages, transcriptBaseItems, transcriptTimelineForRuntime, transcriptViewStartForItems, type TranscriptItem } from './transcript.js'
 import { compactFailureMessage, compactReasonMessage, hasCompactableContent, isCompactionSuccess, isCompactTerminalEvent, shouldShowQueuedAutoCompact } from './app-logic/compaction.js'
 import { addQueuedMessageTombstone, mergeOptimisticQueuedMessages, nextSessionSelection, reconcileOptimisticQueuedMessages, removeQueuedMessageTombstone, removedSessionIds, sessionDisplayLabel, sessionExists, sessionIdsForCacheInvalidation } from './app-logic/session-selectors.js'
 import { coarseStatusForIndicator, deriveSelectedSessionActivity, isRunningSessionActivity } from './app-logic/session-activity.js'
@@ -484,9 +484,11 @@ export function App(): JSX.Element {
   }, [])
 
   const controlSocket = useDashboardControlSocket(hostEndpoint.url, config.token, productAccessReady)
+  const sessionRouteTickets = privateCloudMode && authSession.session?.authenticated === true
   const session = useSession({
     host: hostEndpoint.url,
     socket: controlSocket,
+    sessionRouteTickets,
     sessionId: productAccessReady ? config.sessionId : null,
     cache: sessionViewCache,
     ...(config.token !== undefined ? { token: config.token } : {}),
@@ -495,11 +497,13 @@ export function App(): JSX.Element {
       setConfig((prev) => ({ ...prev, sessionId: p.sessionId, explicit: true }))
     },
   })
-  // Session hydration may say "connecting" while the shared Socket.IO transport
-  // remains connected. Keep the connection indicator tied to the transport.
+  // Legacy sessions share the control transport. Private Cloud sessions instead
+  // report the owner-routed socket so a healthy control plane cannot mask a
+  // route-ticket or Session owner failure.
+  const transportSocket = sessionRouteTickets ? session.socket : controlSocket
   const connectedSocketRef = useRef<DashboardSocket | null>(null)
-  if (controlSocket?.connected) connectedSocketRef.current = controlSocket
-  const transportStatus = connectionStatusForTransport(controlSocket, session.status, connectedSocketRef.current === controlSocket)
+  if (transportSocket?.connected) connectedSocketRef.current = transportSocket
+  const transportStatus = connectionStatusForTransport(transportSocket, session.status, connectedSocketRef.current === transportSocket)
   useEffect(() => previewStore.connect(controlSocket, sessionViewCache), [controlSocket, previewStore, sessionViewCache])
   const control = useControlPlane(controlSocket)
   const controlSessionsRef = useRef<readonly SessionSummary[]>([])
@@ -1152,7 +1156,10 @@ export function App(): JSX.Element {
         ...(workspaceName !== undefined ? { workspaceName } : {}),
         cwd,
         ...(agentRuntime === 'kernel' ? { selectedModel: preferredModel } : {}),
-      })
+      }, 10_000, sessionRouteTickets ? {
+        host: hostEndpoint.url,
+        ...(config.token !== undefined ? { token: config.token } : {}),
+      } : undefined)
       selectCreatedSession(sessionId)
       setPendingWorkspacePick(null)
     } catch (err) {
@@ -1472,10 +1479,26 @@ export function App(): JSX.Element {
   const transcriptViewStart = activeSessionId
     ? transcriptViewStartOverrides[activeSessionId] ?? currentSession?.preferences?.transcriptViewStart ?? 0
     : 0
+  const historyAuthoritative = Boolean(activeSessionId
+    && session.hydratedSessionId === activeSessionId
+    && session.historyAuthoritativeSessionId === activeSessionId)
+  const visibleStart = transcriptViewStartForItems(transcriptViewStart, chatItems.length, historyAuthoritative)
   const visibleChatItems = useMemo(
-    () => chatItems.slice(Math.min(transcriptViewStart, Math.max(0, chatItems.length - 1))),
-    [chatItems, transcriptViewStart],
+    () => chatItems.slice(visibleStart),
+    [chatItems, visibleStart],
   )
+  const staleTranscriptViewStart = historyAuthoritative && transcriptViewStart > 0
+    && chatItems.length > 0 && transcriptViewStart >= chatItems.length
+  useEffect(() => {
+    if (!staleTranscriptViewStart || !activeSessionId || !controlSocket) return
+    const sessionId = activeSessionId
+    // A prior /clear index can outlive the transcript it indexed. Restore the
+    // full current history and persist the repair so later messages stay visible.
+    setTranscriptViewStartOverrides((current) => ({ ...current, [sessionId]: 0 }))
+    void updateSessionPreferences(controlSocket, sessionId, { transcriptViewStart: 0 }).catch((error) => {
+      notify.error('Unable to restore the conversation view', { description: error instanceof Error ? error.message : String(error) })
+    })
+  }, [activeSessionId, controlSocket, notify, staleTranscriptViewStart])
   const clearTranscriptView = useCallback((): void => {
     if (!activeSessionId || !controlSocket) {
       notify.error('Unable to clear the conversation view', { description: 'No active Session connection.' })
@@ -1510,12 +1533,15 @@ export function App(): JSX.Element {
         ...(currentSession.workspaceName ? { workspaceName: currentSession.workspaceName } : {}),
         ...(currentCwd ? { cwd: currentCwd } : {}),
         ...(agentRuntime === 'kernel' ? { selectedModel: session.selectedModel || preferredModel } : {}),
-      })
+      }, 10_000, sessionRouteTickets ? {
+        host: hostEndpoint.url,
+        ...(config.token !== undefined ? { token: config.token } : {}),
+      } : undefined)
       selectCreatedSession(sessionId)
     } catch (error) {
       notify.error(error instanceof Error ? error.message : String(error))
     }
-  }, [controlSocket, currentCwd, currentSession, notify, preferredModel, selectCreatedSession, session.agentRuntime, session.selectedModel, t])
+  }, [config.token, controlSocket, currentCwd, currentSession, hostEndpoint.url, notify, preferredModel, selectCreatedSession, session.agentRuntime, session.selectedModel, sessionRouteTickets, t])
   // The header only needs the *count* of visible messages; derive it from the
   // already-built transcript instead of building a second full transcript.
   const chatMessagesCount = useMemo(
@@ -1586,13 +1612,13 @@ export function App(): JSX.Element {
       (e) => e.workspaceId === currentSession.workspaceId,
     )
   }, [currentSession?.workspaceId, control.executors])
-  const reconnectSession = useCallback(() => {
-    session.socket?.disconnect()
-    session.socket?.connect()
-  }, [session.socket])
   const resyncSession = useCallback(() => {
+    if (sessionRouteTickets) {
+      session.reconnect()
+      return
+    }
     if (session.socket && activeSessionId) dashboardConnectionManager(session.socket).refresh(`session:${activeSessionId}`)
-  }, [activeSessionId, session.socket])
+  }, [activeSessionId, session, sessionRouteTickets])
   const sessionWorkspaceKnownOffline = Boolean(
     runtimeCapabilities.workspace &&
       hasSelectedSession &&

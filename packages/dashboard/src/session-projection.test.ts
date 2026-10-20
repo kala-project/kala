@@ -42,6 +42,24 @@ function selected(sessionId: string, generation = 1) {
 }
 
 describe('session projection reducer', () => {
+  it('marks only a real Host history response as authoritative for /clear recovery', () => {
+    const sessionId = 'session-clear-reset'
+    const current = selected(sessionId)
+    const failedReplay = reduceSessionProjection(current, {
+      kind: 'history', generation: 1, sessionId, entries: [], authoritative: false,
+    })
+    expect(failedReplay.historyLoadedSessionId).toBe(sessionId)
+    expect(failedReplay.historyAuthoritativeSessionId).toBeNull()
+    const replayed = reduceSessionProjection(failedReplay, {
+      kind: 'history', generation: 1, sessionId, entries: [], reset: true,
+    })
+    expect(replayed.historyAuthoritativeSessionId).toBe(sessionId)
+    expect(reduceSessionProjection(replayed, { kind: 'ready', generation: 1, sessionId, payload: ready(sessionId) })
+      .historyAuthoritativeSessionId).toBeNull()
+    expect(reduceSessionProjection(replayed, { kind: 'reset_timeline', generation: 1, sessionId })
+      .historyAuthoritativeSessionId).toBeNull()
+  })
+
   it('derives a compatible compaction policy when an older Host omits it', () => {
     const payload = ready('legacy-ready')
     delete payload.runtimeCompactionPolicy
