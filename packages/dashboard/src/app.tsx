@@ -3911,60 +3911,87 @@ function compactSegmentState(state: string): string {
 }
 
 function ConnectionHealthCurve({ samples, executorRequired, now, t }: { samples: readonly ConnectionHealthSample[]; executorRequired: boolean; now: number; t: ReturnType<typeof useTranslation>['t'] }): JSX.Element {
-  const [hovered, setHovered] = useState<{ sample: ConnectionHealthSample; x: number } | null>(null)
+  const [hovered, setHovered] = useState<{ sample: ConnectionHealthSample; index: number; x: number } | null>(null)
   const width = 320
-  const height = 72
+  const height = 112
+  const plot = { left: 34, right: 8, top: 8, bottom: 86 }
+  const plotWidth = width - plot.left - plot.right
+  const plotHeight = plot.bottom - plot.top
   const windowStart = now - CONNECTION_HEALTH_WINDOW_MS
   const recent = samples.filter((sample) => sample.at >= windowStart)
   const domainStart = recent.length > 0 ? Math.max(windowStart, recent[0]!.at) : windowStart
   const domainMs = Math.max(1, now - domainStart)
-  const hostMax = latencyMax(recent, (sample) => sample.hostRttMs)
-  const executorMax = latencyMax(recent, (sample) => sample.executorRttMs)
-  const hostPoints = sparklinePoints(recent, (sample) => sample.hostRttMs, domainStart, domainMs, hostMax, width, height)
-  const executorPoints = sparklinePoints(recent, (sample) => sample.executorRttMs, domainStart, domainMs, executorMax, width, height)
+  const latencyCeiling = chartLatencyCeiling(recent, executorRequired)
+  const hostPoints = sparklinePoints(recent, (sample) => sample.hostRttMs, domainStart, domainMs, latencyCeiling, plot)
+  const executorPoints = sparklinePoints(recent, (sample) => sample.executorRttMs, domainStart, domainMs, latencyCeiling, plot)
   const failures = recent.filter((sample) => !sample.hostOk || sample.executorRequired && !sample.executorOk)
+  const startLabel = formatChartTime(domainStart)
+  const endLabel = formatChartTime(now)
 
   return (
-    <div className="relative mt-3 rounded-2xl border border-border/35 bg-muted/10 p-3" data-testid="connection-health-curve" data-sample-count={recent.length}>
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <div>
-          <p className="text-xs font-medium text-foreground">{t('connectionHealth.historyTitle')}</p>
+    <div className="relative mt-3 overflow-hidden rounded-2xl border border-border/45 bg-gradient-to-b from-muted/25 to-background/40 p-3 shadow-sm" data-testid="connection-health-curve" data-sample-count={recent.length}>
+      <div className="mb-1 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-xs font-semibold text-foreground">{t('connectionHealth.historyTitle')}</p>
+          <p className="mt-0.5 text-caption text-muted-foreground">{recent.length === 1 ? formatHealthSampleTimestamp(recent[0]!.at) : `${startLabel} – ${endLabel}`}</p>
         </div>
-        <div className="flex flex-none items-center gap-2 text-caption text-muted-foreground">
-          <span className="inline-flex items-center gap-1"><span className="h-1.5 w-3 rounded-full bg-primary" />{t('connectionHealth.hostLegend')}</span>
-          {executorRequired ? <span className="inline-flex items-center gap-1"><span className="h-1.5 w-3 rounded-full bg-sky-400" />{t('connectionHealth.executorLegend')}</span> : null}
+        <div className="flex flex-none flex-wrap items-center justify-end gap-x-2.5 gap-y-1 text-caption text-muted-foreground" aria-label={t('connectionHealth.legendAria')}>
+          <span className="inline-flex items-center gap-1.5"><span className="relative h-2 w-3.5" aria-hidden><span className="absolute left-0 right-0 top-1/2 h-0.5 -translate-y-1/2 rounded-full bg-primary" /><span className="absolute left-1/2 top-1/2 h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary ring-2 ring-background" /></span>{t('connectionHealth.hostLegend')}</span>
+          {executorRequired ? <span className="inline-flex items-center gap-1.5"><span className="relative h-2 w-3.5" aria-hidden><span className="absolute left-0 right-0 top-1/2 h-0.5 -translate-y-1/2 rounded-full bg-sky-400" /><span className="absolute left-1/2 top-1/2 h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-sky-400 ring-2 ring-background" /></span>{t('connectionHealth.executorLegend')}</span> : null}
         </div>
       </div>
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={t('connectionHealth.historyAria')} className="h-20 w-full overflow-visible">
-        <line x1="0" y1={height - 8} x2={width} y2={height - 8} className="stroke-border" strokeWidth="1" />
-        {hostPoints ? <polyline points={hostPoints} fill="none" className="stroke-primary" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" data-testid="connection-health-host-line" /> : null}
-        {executorRequired && executorPoints ? <polyline points={executorPoints} fill="none" className="stroke-sky-400" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" data-testid="connection-health-executor-line" /> : null}
+      <svg viewBox={`0 0 ${width} ${height}`} role="group" aria-label={t('connectionHealth.historyAria')} className="h-[7rem] w-full overflow-visible" data-testid="connection-health-chart">
+        {[0, 0.5, 1].map((ratio) => {
+          const y = plot.top + ratio * plotHeight
+          const value = Math.round(latencyCeiling * (1 - ratio))
+          return <g key={ratio} aria-hidden><line x1={plot.left} y1={y} x2={width - plot.right} y2={y} className="stroke-border/60" strokeWidth="1" strokeDasharray={ratio === 1 ? undefined : '2 3'} /><text x={plot.left - 5} y={y + 3} textAnchor="end" className="fill-muted-foreground text-[8px] tabular-nums">{value}</text></g>
+        })}
+        <text x="2" y="7" className="fill-muted-foreground text-[7px] font-medium" aria-hidden>ms</text>
+        <text x={plot.left} y="104" textAnchor="start" className="fill-muted-foreground text-[8px] tabular-nums" aria-hidden>{startLabel}</text>
+        <text x={width - plot.right} y="104" textAnchor="end" className="fill-muted-foreground text-[8px] tabular-nums" aria-hidden>{endLabel}</text>
+        {recent.length === 0 ? <text x={(plot.left + width - plot.right) / 2} y={(plot.top + plot.bottom) / 2} textAnchor="middle" className="fill-muted-foreground text-[10px]" data-testid="connection-health-empty">{t('connectionHealth.historyEmpty')}</text> : null}
+        {hostPoints ? <polyline points={hostPoints} fill="none" className="stroke-primary" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" data-testid="connection-health-host-line" /> : null}
+        {executorRequired && executorPoints ? <polyline points={executorPoints} fill="none" className="stroke-sky-400" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" data-testid="connection-health-executor-line" /> : null}
+        {recent.flatMap((sample, index) => {
+          const x = scaleHealthX(sample.at, domainStart, domainMs, plot.left, plotWidth)
+          const markers: JSX.Element[] = []
+          if (sample.hostRttMs !== null) markers.push(<circle key={`host:${sample.at}:${index}`} cx={x} cy={scaleHealthY(sample.hostRttMs, latencyCeiling, plot.top, plotHeight)} r="3" className="fill-primary stroke-background" strokeWidth="1.5" aria-hidden data-testid="connection-health-host-marker" />)
+          if (executorRequired && sample.executorRttMs !== null) markers.push(<circle key={`executor:${sample.at}:${index}`} cx={x} cy={scaleHealthY(sample.executorRttMs, latencyCeiling, plot.top, plotHeight)} r="3" className="fill-sky-400 stroke-background" strokeWidth="1.5" aria-hidden data-testid="connection-health-executor-marker" />)
+          return markers
+        })}
         {failures.map((sample, index) => (
-          <circle key={`${sample.at}:${index}`} cx={scaleHealthX(sample.at, domainStart, domainMs, width)} cy={height - 8} r="3" className="fill-rose-500" />
+          <path key={`${sample.at}:${index}`} d={`M ${scaleHealthX(sample.at, domainStart, domainMs, plot.left, plotWidth)} ${plot.bottom - 4} l 4 4 l -4 4 l -4 -4 z`} className="fill-rose-500 stroke-background" strokeWidth="1" aria-hidden />
         ))}
         {recent.map((sample, index) => {
-          const x = scaleHealthX(sample.at, domainStart, domainMs, width)
+          const x = scaleHealthX(sample.at, domainStart, domainMs, plot.left, plotWidth)
+          const previous = index > 0 ? scaleHealthX(recent[index - 1]!.at, domainStart, domainMs, plot.left, plotWidth) : plot.left
+          const next = index < recent.length - 1 ? scaleHealthX(recent[index + 1]!.at, domainStart, domainMs, plot.left, plotWidth) : plot.left + plotWidth
+          const left = index > 0 ? (previous + x) / 2 : plot.left
+          const right = index < recent.length - 1 ? (x + next) / 2 : plot.left + plotWidth
+          const active = hovered?.index === index
           return (
             <rect
               key={`hit:${sample.at}:${index}`}
-              x={Math.max(0, x - 6)}
-              y="0"
-              width="12"
-              height={height}
+              x={left}
+              y={plot.top}
+              width={Math.max(0, right - left)}
+              height={plotHeight}
               fill="transparent"
               tabIndex={0}
               aria-label={formatHealthSampleTitle(sample, t).replace(/\n/gu, ', ')}
+              aria-describedby={active ? 'connection-health-tooltip' : undefined}
               data-testid="connection-health-sample-hit"
-              onFocus={() => setHovered({ sample, x })}
+              onFocus={() => setHovered({ sample, index, x })}
               onBlur={() => setHovered(null)}
-              onMouseEnter={() => setHovered({ sample, x })}
+              onMouseEnter={() => setHovered({ sample, index, x })}
               onMouseLeave={() => setHovered(null)}
+              onTouchStart={() => setHovered({ sample, index, x })}
             />
           )
         })}
       </svg>
       {hovered ? (
-        <div className="pointer-events-none absolute top-12 z-10 min-w-32 -translate-x-1/2 rounded-lg bg-popover px-2.5 py-2 text-caption shadow-lg ring-1 ring-border/40" style={{ left: `calc(0.75rem + ${hovered.x / width * 100}%)` }} data-testid="connection-health-tooltip">
+        <div id="connection-health-tooltip" role="tooltip" className="pointer-events-none absolute top-14 z-10 min-w-36 -translate-x-1/2 rounded-lg bg-popover px-2.5 py-2 text-caption text-popover-foreground shadow-xl ring-1 ring-border/60" style={{ left: `clamp(5rem, calc(0.75rem + ${hovered.x / width * 100}%), calc(100% - 5rem))` }} data-testid="connection-health-tooltip">
           {formatHealthSampleTitle(hovered.sample, t).split('\n').map((line) => <div key={line}>{line}</div>)}
         </div>
       ) : null}
@@ -3973,12 +4000,19 @@ function ConnectionHealthCurve({ samples, executorRequired, now, t }: { samples:
 }
 
 function formatHealthSampleTitle(sample: ConnectionHealthSample, t: ReturnType<typeof useTranslation>['t']): string {
-  const time = new Date(sample.at).toLocaleTimeString()
   return [
-    time,
+    formatHealthSampleTimestamp(sample.at),
     `${t('connectionHealth.hostLegend')}: ${formatSampleLatency(sample.hostRttMs, sample.hostOk, t)}`,
     ...(sample.executorRequired ? [`${t('connectionHealth.executorLegend')}: ${formatSampleLatency(sample.executorRttMs, sample.executorOk, t)}`] : []),
   ].join('\n')
+}
+
+function formatHealthSampleTimestamp(at: number): string {
+  return new Date(at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'medium' })
+}
+
+function formatChartTime(at: number): string {
+  return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
 function formatSampleLatency(value: number | null, ok: boolean, t: ReturnType<typeof useTranslation>['t']): string {
@@ -3986,16 +4020,20 @@ function formatSampleLatency(value: number | null, ok: boolean, t: ReturnType<ty
   return ok ? t('connectionHealth.notMeasured') : t('connectionHealth.timedOut')
 }
 
-function latencyMax(samples: readonly ConnectionHealthSample[], select: (sample: ConnectionHealthSample) => number | null): number {
-  return Math.max(50, ...samples.map(select).filter((value): value is number => typeof value === 'number'))
+function chartLatencyCeiling(samples: readonly ConnectionHealthSample[], executorRequired: boolean): number {
+  const values = samples.flatMap((sample) => [sample.hostRttMs, ...(executorRequired ? [sample.executorRttMs] : [])]).filter((value): value is number => typeof value === 'number')
+  const maximum = Math.max(50, ...values)
+  return Math.ceil(maximum / 50) * 50
 }
 
-function sparklinePoints(samples: readonly ConnectionHealthSample[], select: (sample: ConnectionHealthSample) => number | null, start: number, domainMs: number, max: number, width: number, height: number): string | null {
+function sparklinePoints(samples: readonly ConnectionHealthSample[], select: (sample: ConnectionHealthSample) => number | null, start: number, domainMs: number, max: number, plot: { left: number; top: number; bottom: number; right: number }): string | null {
+  const plotWidth = 320 - plot.left - plot.right
+  const plotHeight = plot.bottom - plot.top
   const points = samples.flatMap((sample) => {
     const value = select(sample)
     if (value === null) return []
-    const x = scaleHealthX(sample.at, start, domainMs, width)
-    const y = height - 8 - value / max * (height - 16)
+    const x = scaleHealthX(sample.at, start, domainMs, plot.left, plotWidth)
+    const y = scaleHealthY(value, max, plot.top, plotHeight)
     return [`${x.toFixed(1)},${y.toFixed(1)}`]
   })
   if (points.length === 0) return null
@@ -4003,8 +4041,12 @@ function sparklinePoints(samples: readonly ConnectionHealthSample[], select: (sa
   return points.join(' ')
 }
 
-function scaleHealthX(at: number, start: number, domainMs: number, width: number): number {
-  return Math.max(0, Math.min(width, (at - start) / domainMs * width))
+function scaleHealthX(at: number, start: number, domainMs: number, left: number, width: number): number {
+  return left + Math.max(0, Math.min(width, (at - start) / domainMs * width))
+}
+
+function scaleHealthY(value: number, max: number, top: number, height: number): number {
+  return top + height - value / max * height
 }
 
 function HealthRow({ label, state, tone, latency, measuring = false, measuringLabel }: { label: string; state: string; tone: 'healthy' | 'failed' | 'pending'; latency?: number | null; measuring?: boolean; measuringLabel: string }): JSX.Element {

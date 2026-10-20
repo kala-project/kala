@@ -97,7 +97,8 @@ describe('ConnectionStatus', () => {
     expect(screen.queryByTestId('connection-segment-service-executor')).toBeNull()
     expect(screen.queryByTestId('connection-health-executor-line')).toBeNull()
     expect(screen.queryByText('Executor')).toBeNull()
-    expect(screen.getByTestId('connection-health-curve').querySelectorAll('circle')).toHaveLength(0)
+    expect(screen.getAllByTestId('connection-health-host-marker').length).toBeGreaterThanOrEqual(1)
+    expect(screen.queryByTestId('connection-health-executor-marker')).toBeNull()
     expect(screen.getAllByTestId('connection-health-sample-hit')[0]?.getAttribute('aria-label')).not.toContain('Executor')
     expect(socket.timeout.mock.calls.every(([timeout]) => timeout === 3000)).toBe(true)
     fireEvent.click(screen.getByText('Copy'))
@@ -140,7 +141,8 @@ describe('ConnectionStatus', () => {
     fireEvent.click(screen.getByTestId('connection-status'))
     act(() => pending.splice(0).forEach((callback) => callback(null)))
     expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('ready')
-    expect(screen.getByTestId('connection-health-curve').querySelectorAll('circle')).toHaveLength(0)
+    expect(screen.getAllByTestId('connection-health-host-marker').length).toBeGreaterThanOrEqual(1)
+    expect(screen.queryByTestId('connection-health-executor-marker')).toBeNull()
     expect(screen.queryByTestId('connection-segment-service-executor')).toBeNull()
   })
 
@@ -317,7 +319,7 @@ describe('ConnectionStatus', () => {
     await waitFor(() => expect(screen.getByTestId('connection-health-curve').getAttribute('data-sample-count')).toBe('1'))
   })
 
-  it('normalizes host and executor curves independently', async () => {
+  it('plots host and executor latency against the same millisecond axis', async () => {
     let wallClock = 0
     vi.spyOn(Date, 'now').mockImplementation(() => wallClock)
     const socket = socketWithRttSeries([100, 200, 300], [1000, 2000, 3000])
@@ -336,7 +338,17 @@ describe('ConnectionStatus', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Measure again' }))
     await waitFor(() => expect(Number(screen.getByTestId('connection-health-curve').getAttribute('data-sample-count'))).toBe(initialSampleCount + 1))
 
-    expect(screen.getByTestId('connection-health-host-line').getAttribute('points')).toBe(screen.getByTestId('connection-health-executor-line').getAttribute('points'))
+    expect(screen.getByTestId('connection-health-host-line').getAttribute('points')).not.toBe(screen.getByTestId('connection-health-executor-line').getAttribute('points'))
+    expect(screen.getByTestId('connection-health-chart').textContent).toContain('2000')
+    expect(screen.getByTestId('connection-health-chart').textContent).toContain('ms')
+    const hits = screen.getAllByTestId('connection-health-sample-hit')
+    expect(hits).toHaveLength(2)
+    const firstRight = Number(hits[0]!.getAttribute('x')) + Number(hits[0]!.getAttribute('width'))
+    expect(firstRight).toBeCloseTo(Number(hits[1]!.getAttribute('x')))
+    fireEvent.mouseEnter(hits[0]!)
+    expect(screen.getByRole('tooltip').textContent).toContain('Host: 100 ms')
+    fireEvent.mouseEnter(hits[1]!)
+    expect(screen.getByRole('tooltip').textContent).toContain('Host: 200 ms')
   })
 
   it('uses the full chart width before the 10 minute window is full', async () => {
@@ -351,7 +363,7 @@ describe('ConnectionStatus', () => {
     wallClock = 30_000
     fireEvent.click(screen.getByRole('button', { name: 'Measure again' }))
 
-    await waitFor(() => expect(screen.getByTestId('connection-health-host-line').getAttribute('points')).toContain('320.0,'))
+    await waitFor(() => expect(screen.getByTestId('connection-health-host-line').getAttribute('points')).toContain('312.0,'))
   })
 
   it('exposes per-sample hover details with time and latency', async () => {
@@ -371,8 +383,36 @@ describe('ConnectionStatus', () => {
       return match!
     })
 
+    const sampleCount = Number(screen.getByTestId('connection-health-curve').getAttribute('data-sample-count'))
+    expect(screen.getAllByTestId('connection-health-host-marker')).toHaveLength(sampleCount)
+    expect(screen.getAllByTestId('connection-health-executor-marker')).toHaveLength(sampleCount)
+    expect(hit.getAttribute('aria-label')).toContain('2026')
+
     fireEvent.mouseEnter(hit)
-    expect(screen.getByTestId('connection-health-tooltip').textContent).toContain('Host: 89 ms')
-    expect(screen.getByTestId('connection-health-tooltip').textContent).toContain('Executor: 85 ms')
+    expect(screen.getByRole('tooltip').textContent).toContain('Host: 89 ms')
+    expect(screen.getByRole('tooltip').textContent).toContain('Executor: 85 ms')
+    fireEvent.mouseLeave(hit)
+
+    fireEvent.focus(hit)
+    expect(screen.getByRole('tooltip').textContent).toContain('2026')
+    expect(hit.getAttribute('aria-describedby')).toBe('connection-health-tooltip')
+    fireEvent.blur(hit)
+
+    fireEvent.touchStart(hit)
+    expect(screen.getByRole('tooltip').textContent).toContain('Host: 89 ms')
+  })
+
+  it('shows a labeled empty chart while the first measurement is pending', () => {
+    const socket = {
+      connected: true,
+      timeout: vi.fn(() => ({ emit: vi.fn() })),
+    }
+
+    render(<ConnectionStatus socket={socket as never} status="ready" cursor={0} executorConnected={false} onResync={() => {}} />)
+    fireEvent.click(screen.getByTestId('connection-status'))
+
+    expect(screen.getByTestId('connection-health-empty').textContent).toBe('Waiting for the first measurement…')
+    expect(screen.getByRole('group', { name: 'Last 10 minutes connection health chart' })).toBeTruthy()
+    expect(screen.queryByTestId('connection-health-sample-hit')).toBeNull()
   })
 })
