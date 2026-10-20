@@ -324,11 +324,15 @@ async function writeSnapshotSidecar(logPath: string, entry: SnapshotEntry): Prom
     await handle.close()
     handle = undefined
     await rename(temporary, path)
-    const directoryHandle = await open(directory, 'r')
-    try {
-      await directoryHandle.sync()
-    } finally {
-      await directoryHandle.close()
+    // Windows cannot fsync a directory handle. The file itself was flushed
+    // before the atomic replace; retain the directory flush on POSIX only.
+    if (process.platform !== 'win32') {
+      const directoryHandle = await open(directory, 'r')
+      try {
+        await directoryHandle.sync()
+      } finally {
+        await directoryHandle.close()
+      }
     }
   } catch (error) {
     await handle?.close().catch(() => undefined)

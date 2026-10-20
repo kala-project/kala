@@ -520,7 +520,9 @@ export class SessionStore {
       payload: input.payload,
     })
     if (options.durable) {
-      const handle = await open(record.logPath, 'r')
+      // Windows cannot FlushFileBuffers on a read-only file handle. This log
+      // must already be writable for the append above; keep fsync failures fatal.
+      const handle = await open(record.logPath, 'r+')
       try {
         await handle.sync()
       } finally {
