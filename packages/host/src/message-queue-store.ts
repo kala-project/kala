@@ -1,10 +1,7 @@
-import { open } from 'node:fs/promises'
-
 import type { MessageContent } from '@agent-kernel/kernel'
 import { schema, type RuntimeMetadataEntry } from '@agent-kernel/shared'
 
 import type { SessionStore } from './store/session.js'
-import { appendRuntimeMetadataEntry, findLatestRuntimeMetadata } from './store/log.js'
 import type { QueuedUserMessage } from './connection/dashboard-ns.js'
 
 const ACTION = 'message_queue_snapshot'
@@ -32,8 +29,7 @@ export async function loadPersistedMessageQueueState(
   // crash recovery ownership: using the Store default here would synthesize a
   // failed Tool result for a valid before_tool_dispatch checkpoint and advance
   // Session JSONL before planned continuation can verify its frozen cursor.
-  const record = store.get(sessionId) ?? await store.load(sessionId, { recoverDangling: false })
-  const entry = await findLatestRuntimeMetadata(record.logPath, ACTION, { maxScanBytes: 64 * 1024 * 1024 })
+  const entry = await store.findLatestRuntimeMetadata(sessionId, ACTION, { maxScanBytes: 64 * 1024 * 1024 })
   return entry ? normalizeQueueSnapshot(entry) : { items: [], cancelledOperationIds: [] }
 }
 
@@ -49,25 +45,14 @@ export async function persistMessageQueueSnapshot(
   }
   // Persisting host-owned queue metadata must likewise never claim recovery
   // ownership for an unloaded planned-restart participant.
-  const record = store.get(sessionId) ?? await store.load(sessionId, { recoverDangling: false })
-  await appendRuntimeMetadataEntry(record.logPath, {
-    sessionId,
+  await store.appendRuntimeMetadata(sessionId, {
     action: ACTION,
     payload: {
       schemaVersion: SCHEMA_VERSION,
       items: items.map(serializeQueuedMessage),
       cancelledOperationIds: uniqueCancelledOperationIds,
     },
-  })
-  // Queue acceptance and cancellation are externally acknowledged durability
-  // boundaries. appendFile alone may still be resident in the page cache, so
-  // flush the Session JSONL before returning to ingress or the dashboard.
-  const handle = await open(record.logPath, 'r')
-  try {
-    await handle.sync()
-  } finally {
-    await handle.close()
-  }
+  }, { durable: true })
 }
 
 function normalizeQueueSnapshot(entry: RuntimeMetadataEntry): PersistedMessageQueueState {
@@ -112,7 +97,7 @@ function normalizeCancelledOperationIds(raw: unknown): string[] {
   return out
 }
 
-function normalizeQueuedMessage(raw: unknown): QueuedUserMessage | undefined {
+export function normalizeQueuedMessage(raw: unknown): QueuedUserMessage | undefined {
   if (!raw || typeof raw !== 'object') return undefined
   const record = raw as Record<string, unknown>
   const id = stringValue(record.id)
@@ -136,7 +121,7 @@ function normalizeQueuedMessage(raw: unknown): QueuedUserMessage | undefined {
   }
 }
 
-function serializeQueuedMessage(item: QueuedUserMessage): Record<string, unknown> {
+export function serializeQueuedMessage(item: QueuedUserMessage): Record<string, unknown> {
   return {
     id: item.id,
     operationId: item.operationId,
@@ -154,16 +139,18 @@ function normalizeShell(raw: unknown): QueuedUserMessage['shell'] | undefined {
   if (!raw || typeof raw !== 'object') throw new Error('invalid persisted shell queue item')
   const value = raw as Record<string, unknown>
   const command = stringValue(value.command)
-  const state = value.state === 'queued' || value.state === 'running' || value.state === 'completed' || value.state === 'nonzero' || value.state === 'failed'
+  const state = value.state === 'queued' || value.state === 'running' || value.state === 'completed' || value.state === 'nonzero' || value.state === 'failed' || value.state === 'unknown'
     ? value.state
     : value.state === undefined ? undefined : null
-  if (!command || state === null || (value.result !== undefined && typeof value.result !== 'string')) {
+  if (!command || state === null || (value.result !== undefined && typeof value.result !== 'string')
+    || (value.error !== undefined && typeof value.error !== 'string')) {
     throw new Error('invalid persisted shell queue item')
   }
   return {
     command,
     ...(state ? { state } : {}),
     ...(typeof value.result === 'string' ? { result: value.result } : {}),
+    ...(typeof value.error === 'string' ? { error: value.error } : {}),
   }
 }
 

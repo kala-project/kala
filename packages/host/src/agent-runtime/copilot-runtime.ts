@@ -888,10 +888,9 @@ export class CopilotAgentRuntime implements AgentRuntime {
     }
     this.turnCaptures.set(record.sessionId, capture)
     try {
-      const response = await sendAndWaitWithActivityTimeout(
-        session,
-        await copilotMessageOptions(this.context, record, input, requestId),
-      )
+      const message = await copilotMessageOptions(this.context, record, input, requestId)
+      await this.context.assertSessionEffectOwner?.(record.sessionId)
+      const response = await sendAndWaitWithActivityTimeout(session, message)
       if (!this.isCurrentTurn(record.sessionId, generation)) return
       await Promise.all(capture.projections)
       if (capture.projectionError) throw capture.projectionError
@@ -1456,7 +1455,7 @@ async function copilotMessageOptions(
       if (!context.messageAttachments) {
         throw new Error(`Attachment "${block.name}" cannot be resolved because Host attachment storage is unavailable`)
       }
-      const data = await context.messageAttachments.resolve(record.sessionId, block).read()
+      const data = await (await context.messageAttachments.resolve(record.sessionId, block)).read()
       attachments.push({
         type: 'blob',
         data: data.toString('base64'),

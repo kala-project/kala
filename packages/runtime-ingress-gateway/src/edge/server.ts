@@ -16,8 +16,15 @@ import { ServiceAccountInputError, type ServiceAccountService, type ServiceAccou
 import { enterpriseManagementOpenApi } from '../api/openapi.js'
 import type { RateLimiter } from '../governance/rate-limit.js'
 import { isOwnerBootstrapToken, ownerBootstrapHash, type OwnerBootstrapGateway } from '../organizations/owner-bootstrap.js'
+import type { RuntimeOriginResolver } from '../runtime-origin/postgres-runtime-origin-resolver.js'
+import type { RuntimeRoutingTicketResolver } from '../runtime-origin/runtime-routing-ticket-resolver.js'
 
 export type RuntimeIngressGateway = { readonly http: HttpServer; readonly port: number; close(): Promise<void> }
+export type { RuntimeOriginResolver } from '../runtime-origin/postgres-runtime-origin-resolver.js'
+
+class RuntimeOriginUnavailableError extends Error {
+  constructor() { super('runtime_origin_unavailable') }
+}
 
 function publicProfile(session: AuthenticatedIdentity): { displayName: string; email?: string; initials: string } {
   const displayName = session.displayName?.trim() || session.email?.split('@')[0] || 'Kala user'
@@ -76,9 +83,15 @@ function enforceRateLimit(response: ServerResponse, limiter: RateLimiter | undef
   return false
 }
 
-async function readRequestBody(request: IncomingMessage): Promise<Buffer> {
+async function readRequestBody(request: IncomingMessage, maxBytes = Number.POSITIVE_INFINITY): Promise<Buffer> {
   const chunks: Buffer[] = []
-  for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+  let bytes = 0
+  for await (const chunk of request) {
+    const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    bytes += data.length
+    if (bytes > maxBytes) throw new Error('request_body_too_large')
+    chunks.push(data)
+  }
   return Buffer.concat(chunks)
 }
 
@@ -116,6 +129,8 @@ export async function startRuntimeIngressGateway(options: {
   enterpriseSso?: EnterpriseSsoResolver
   loginStates: LoginStateStore
   hostOrigin: string
+  runtimeOriginResolver?: RuntimeOriginResolver
+  runtimeRoutingTicketResolver?: RuntimeRoutingTicketResolver
   dashboardOrigin?: string
   sessions: BrowserSessionStore
   cacheNamespaceSecret: string
@@ -152,6 +167,19 @@ export async function startRuntimeIngressGateway(options: {
   const dashboardProxy = options.dashboardOrigin ? httpProxy.createProxyServer({ target: options.dashboardOrigin }) : undefined
   proxy.on('error', () => {})
   dashboardProxy?.on('error', () => {})
+  const resolveRuntimeOrigin = async (unitId: string): Promise<string> => {
+    if (!options.runtimeOriginResolver) return options.hostOrigin
+    let resolved: string | undefined
+    try { resolved = await options.runtimeOriginResolver.resolve(unitId) } catch { throw new RuntimeOriginUnavailableError() }
+    if (!resolved) throw new RuntimeOriginUnavailableError()
+    try {
+      const parsed = new URL(resolved)
+      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) throw new Error('invalid origin')
+      return parsed.origin
+    } catch {
+      throw new RuntimeOriginUnavailableError()
+    }
+  }
   const authenticate = async (request: IncomingMessage): Promise<BrowserSession | undefined> => {
     const token = cookies(request).ak_session
     if (!token || token.length < 32 || token.length > 128) return undefined
@@ -391,6 +419,60 @@ export async function startRuntimeIngressGateway(options: {
     const session = await authenticate(request)
     const identity = session?.identity
     const organizationAccess = identity && options.organizations ? await options.organizations.findAccess(identity) : undefined
+    if (url.pathname === '/.well-known/kala/executor-replicas') {
+      const deny = (status: number, error: string) => {
+        response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        response.end(JSON.stringify({ error }))
+      }
+      if (request.method !== 'GET') { response.setHeader('allow', 'GET'); deny(405, 'method_not_allowed'); return }
+      if (request.headers.cookie || request.headers.authorization || !options.runtimeOriginResolver?.listReplicas) { deny(404, 'replica_discovery_unavailable'); return }
+      const executorInvite = typeof request.headers['x-kala-executor-invite'] === 'string' ? request.headers['x-kala-executor-invite'] : undefined
+      const routeHint = typeof request.headers['x-kala-executor-route'] === 'string' && /^[A-Za-z0-9_-]{43}$/u.test(request.headers['x-kala-executor-route']) ? request.headers['x-kala-executor-route'] : undefined
+      const unitId = executorInvite
+        ? await options.directory.findUnitByExecutorInvite(executorInvite)
+        : routeHint ? await options.directory.findUnitByExecutorRouteHint(routeHint) : undefined
+      if (!unitId) { deny(401, 'executor_route_unauthorized'); return }
+      const replicas = await options.runtimeOriginResolver.listReplicas(unitId)
+      if (replicas === undefined) { deny(404, 'parallel_replicas_unavailable'); return }
+      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      response.end(JSON.stringify({ replicas }))
+      return
+    }
+    if (url.pathname === '/runtime/route-ticket') {
+      const deny = (status: number, error: string) => {
+        response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        response.end(JSON.stringify({ error }))
+      }
+      if (request.method !== 'POST') { response.setHeader('allow', 'POST'); deny(405, 'method_not_allowed'); return }
+      if (!options.runtimeRoutingTicketResolver) { deny(404, 'route_ticket_unavailable'); return }
+      if (!session || !organizationAccess || request.headers.authorization) { deny(401, 'authentication_required'); return }
+      if (organizationAccess.organization.status !== 'active'
+        || !permits(organizationAccess.membership.role, 'runtime:write')) { deny(403, 'forbidden'); return }
+      if (request.headers.origin !== requestPublicOrigin(request)) { deny(403, 'same_origin_required'); return }
+      if (!enforceRateLimit(response, options.rateLimiter,
+        `${organizationAccess.organization.id}:${identity!.issuer}:${identity!.subject}:route-ticket`)) return
+      if (request.headers['content-type']?.split(';', 1)[0]?.trim() !== 'application/json'
+        || Number(request.headers['content-length'] ?? 0) > 4_096) { deny(400, 'invalid_request'); return }
+      let sessionId: string
+      try {
+        const body = JSON.parse((await readRequestBody(request, 4_096)).toString('utf8')) as unknown
+        if (typeof body !== 'object' || body === null || Array.isArray(body)
+          || Object.keys(body).length !== 1 || !('sessionId' in body)
+          || typeof body.sessionId !== 'string') throw new Error('invalid body')
+        sessionId = body.sessionId
+      } catch { deny(400, 'invalid_request'); return }
+      try {
+        const ticket = await options.runtimeRoutingTicketResolver.issueSessionTicketForOrganization(sessionId, {
+          principalId: Buffer.from(`${identity!.issuer}\0${identity!.subject}`, 'utf8').toString('base64url'),
+          organizationId: organizationAccess.organization.id,
+          unitId: organizationAccess.organization.unitId,
+        })
+        if (!ticket) { deny(404, 'session_owner_unavailable'); return }
+        response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' })
+        response.end(JSON.stringify({ ticket }))
+      } catch { deny(503, 'session_owner_unavailable') }
+      return
+    }
     if (url.pathname === '/api/v1/openapi.json') {
       if (request.method !== 'GET' && request.method !== 'HEAD') {
         response.setHeader('allow', 'GET, HEAD')
@@ -531,7 +613,8 @@ export async function startRuntimeIngressGateway(options: {
         ? (write ? 'member' : 'viewer')
         : organizationAccess!.membership.role
       request.headers['x-agent-runlab-principal'] = principal
-      proxy.web(request, response, { target: options.hostOrigin }, () => {
+      const runtimeOrigin = await resolveRuntimeOrigin(unitId)
+      proxy.web(request, response, { target: runtimeOrigin }, () => {
         if (!response.headersSent) apiGatewayError(response, 502, 'internal_error', 'Runtime API is unavailable')
       })
       return
@@ -645,7 +728,8 @@ export async function startRuntimeIngressGateway(options: {
       if (!enforceRateLimit(response, options.rateLimiter, `${organizationAccess.organization.id}:${session.identity.issuer}:${session.identity.subject}`)) return
       request.headers['x-agent-runlab-principal'] = Buffer.from(`${session.identity.issuer}\0${session.identity.subject}`, 'utf8').toString('base64url')
       request.headers['x-agent-runlab-organization-id'] = organizationAccess.organization.id
-      proxy.web(request, response, { target: options.hostOrigin }, () => { if (!response.headersSent) response.writeHead(502); response.end() })
+      const runtimeOrigin = await resolveRuntimeOrigin(organizationAccess.organization.unitId)
+      proxy.web(request, response, { target: runtimeOrigin }, () => { if (!response.headersSent) response.writeHead(502); response.end() })
       return
     }
     if (organizationAccess && organizationAccess.organization.status !== 'active') {
@@ -658,6 +742,14 @@ export async function startRuntimeIngressGateway(options: {
       if (isDocumentNavigation(request)) response.writeHead(303, { location: '/auth/login', 'cache-control': 'no-store' })
       else { response.writeHead(401, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ error: 'authentication_required' })); return }
       response.end(); return
+    }
+    if (options.runtimeOriginResolver && url.pathname.startsWith('/socket.io/') && url.searchParams.get('transport') === 'polling') {
+      // Engine.IO's sid is assigned in the upstream response, so this stateless
+      // Gateway cannot prove that later polling requests remain on the same Pod.
+      // Never fall back to another origin: require a direct WebSocket transport.
+      response.writeHead(409, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      response.end(JSON.stringify({ error: 'runtime_origin_stickiness_required', message: 'Engine.IO polling is unavailable with Unit runtime routing; use WebSocket transport.' }))
+      return
     }
     if (dashboardProxy && options.dashboardOrigin && isDashboardRequest(request, url.pathname)) {
       delete request.headers.cookie
@@ -687,18 +779,19 @@ export async function startRuntimeIngressGateway(options: {
       request.headers['x-agent-runlab-organization-role'] = organizationAccess.membership.role
       request.headers['x-agent-runlab-principal'] = Buffer.from(`${identity.issuer}\0${identity.subject}`, 'utf8').toString('base64url')
     }
+    const runtimeOrigin = await resolveRuntimeOrigin(assignment.unitId)
     if (url.pathname.startsWith('/auth/executor-pairings')) {
       const decision = /^\/auth\/executor-pairings\/[^/]+\/(approve|reject)$/u.test(url.pathname)
       if (decision && (!organizationAccess || !permits(organizationAccess.membership.role, 'workspace:manage'))) { response.writeHead(403, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: 'forbidden', requiredPermission: 'workspace:manage' })); return }
       const body = request.method === 'POST' ? await readRequestBody(request) : undefined
-      const upstream = await requestRuntime(options.hostOrigin, url.pathname, request.method, { 'content-type': request.headers['content-type'] ?? 'application/json', ...(organizationAccess ? { 'x-agent-runlab-runtime-unit': assignment.unitId, 'x-agent-runlab-ingress-secret': options.ingressSecret } : {}) }, body, options.runtimeTls)
+      const upstream = await requestRuntime(runtimeOrigin, url.pathname, request.method, { 'content-type': request.headers['content-type'] ?? 'application/json', ...(organizationAccess ? { 'x-agent-runlab-runtime-unit': assignment.unitId, 'x-agent-runlab-ingress-secret': options.ingressSecret } : {}) }, body, options.runtimeTls)
       response.writeHead(upstream.status, { 'content-type': upstream.contentType, 'cache-control': 'no-store' });response.end(upstream.body);return
     }
     if (url.pathname === '/auth/executor-invites' && request.method === 'POST') {
       if (!requireSameOriginWhenPresent(request, response)) return
       if (organizationAccess && !permits(organizationAccess.membership.role, 'workspace:manage')) { response.writeHead(403, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ error: 'forbidden', requiredPermission: 'workspace:manage' })); return }
       const body = await readRequestBody(request)
-      const upstream = await requestRuntime(options.hostOrigin, url.pathname, 'POST', {
+      const upstream = await requestRuntime(runtimeOrigin, url.pathname, 'POST', {
           'content-type': request.headers['content-type'] ?? 'application/json',
           'x-agent-runlab-runtime-unit': assignment.unitId,
           'x-agent-runlab-ingress-secret': options.ingressSecret,
@@ -718,7 +811,7 @@ export async function startRuntimeIngressGateway(options: {
       return
     }
 
-    proxy.web(request, response, { target: options.hostOrigin }, () => { if (!response.headersSent) response.writeHead(502); response.end() })
+    proxy.web(request, response, { target: runtimeOrigin }, () => { if (!response.headersSent) response.writeHead(502); response.end() })
   }
   const http = createServer((request, response) => {
     const access = validatePublicRequest(publicUrls!, request.headers.host, typeof request.headers.origin === 'string' ? request.headers.origin : undefined)
@@ -732,9 +825,11 @@ export async function startRuntimeIngressGateway(options: {
     const message = error instanceof Error ? error.message : String(error)
     process.stderr.write(`${JSON.stringify({ event: 'runtime_ingress_request_failed', method: request.method, path: request.url?.split('?')[0], error: message })}\n`)
     const organizationMissing = message === 'organization_not_provisioned'
-    if (!response.headersSent) response.writeHead(organizationMissing ? 403 : 500, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+    const runtimeOriginUnavailable = error instanceof RuntimeOriginUnavailableError
+    if (!response.headersSent) response.writeHead(organizationMissing ? 403 : runtimeOriginUnavailable ? 503 : 500, { 'content-type': 'application/json', 'cache-control': 'no-store' })
     response.end(JSON.stringify(organizationMissing
       ? { error: 'organization_not_provisioned', message: 'Your identity is valid, but this account has not been enabled for an Kala organization.' }
+      : runtimeOriginUnavailable ? { error: 'runtime_origin_unavailable' }
       : { error: 'internal_server_error' }))
     })
   })
@@ -745,6 +840,8 @@ export async function startRuntimeIngressGateway(options: {
       return
     }
     request.headers['x-kala-public-origin'] = access.origin
+    const requestUrl = new URL(request.url ?? '/', access.origin)
+    const runtimeRouteTickets = requestUrl.searchParams.getAll('runtimeRouteTicket')
     const session = await authenticate(request)
     const identity = session?.identity
     const organizationAccess = identity && options.organizations ? await options.organizations.findAccess(identity) : undefined
@@ -752,6 +849,7 @@ export async function startRuntimeIngressGateway(options: {
     const assignment = organizationAccess ? { unitId: organizationAccess.organization.unitId, identity: identity! } : identity ? await options.directory.findByIdentity(identity) : undefined
     const executorInvite = typeof request.headers['x-kala-executor-invite'] === 'string' ? request.headers['x-kala-executor-invite'] : undefined
     const routeHint = typeof request.headers['x-kala-executor-route'] === 'string' && /^[A-Za-z0-9_-]{43}$/u.test(request.headers['x-kala-executor-route']) ? request.headers['x-kala-executor-route'] : undefined
+    const executorReplica = typeof request.headers['x-kala-executor-replica'] === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(request.headers['x-kala-executor-replica']) ? request.headers['x-kala-executor-replica'] : undefined
     const inviteUnitId = !assignment && executorInvite ? await options.directory.findUnitByExecutorInvite(executorInvite) : undefined
     const routeUnitId = !assignment && !inviteUnitId && routeHint ? await options.directory.findUnitByExecutorRouteHint(routeHint) : undefined
     const executorEnrollment = !assignment && (inviteUnitId !== undefined || routeUnitId !== undefined)
@@ -761,6 +859,44 @@ export async function startRuntimeIngressGateway(options: {
     // Executor enrollment uses a separate invite-authenticated path.
     const requiredPermission = executorEnrollment ? undefined : 'runtime:write'
     if (!unitId || (organizationAccess && requiredPermission && !permits(organizationAccess.membership.role, requiredPermission)) || (assignment && (!identity || identity.issuer !== assignment.identity.issuer || identity.subject !== assignment.identity.subject))) { socket.destroy(); return }
+    let runtimeOrigin: string
+    let routeSessionId: string | undefined
+    if (runtimeRouteTickets.length > 0) {
+      // Explicit resource routing is browser-only and never falls back to a Unit
+      // origin. The organization and Unit come from current cookie authority, not
+      // from ticket claims or Socket.IO auth payloads that arrive after upgrade.
+      if (runtimeRouteTickets.length !== 1 || !options.runtimeRoutingTicketResolver || !session || !organizationAccess
+        || !assignment || request.headers['x-kala-executor-invite'] !== undefined || request.headers['x-kala-executor-route'] !== undefined || executorEnrollment
+        || !permits(organizationAccess.membership.role, 'runtime:write')) { socket.destroy(); return }
+      let resolved: { origin: string; sessionId: string } | undefined
+      try {
+        const principalId = Buffer.from(`${identity!.issuer}\0${identity!.subject}`, 'utf8').toString('base64url')
+        resolved = await options.runtimeRoutingTicketResolver.resolveSessionBindingForOrganization(runtimeRouteTickets[0], {
+          principalId,
+          organizationId: organizationAccess.organization.id,
+          unitId: organizationAccess.organization.unitId,
+        })
+      } catch { socket.destroy(); return }
+      if (!resolved) { socket.destroy(); return }
+      try {
+        const parsed = new URL(resolved.origin)
+        if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) throw new Error('invalid origin')
+        runtimeOrigin = parsed.origin
+        routeSessionId = resolved.sessionId
+      } catch { socket.destroy(); return }
+      requestUrl.searchParams.delete('runtimeRouteTicket')
+      request.url = `${requestUrl.pathname}${requestUrl.search}`
+    } else if (executorReplica) {
+      // Replica ids are opaque selectors. The route capability fixes the Unit,
+      // and current PostgreSQL membership must resolve the exact member; stale
+      // ids never fall back to the Unit's least-loaded control origin.
+      if (!executorEnrollment || !options.runtimeOriginResolver?.resolveReplica) { socket.destroy(); return }
+      const resolved = await options.runtimeOriginResolver.resolveReplica(unitId, executorReplica)
+      if (!resolved) { socket.destroy(); return }
+      runtimeOrigin = resolved
+    } else {
+      runtimeOrigin = await resolveRuntimeOrigin(unitId)
+    }
     delete request.headers.cookie
     delete request.headers.authorization
     delete request.headers['x-agent-runlab-runtime-unit']
@@ -768,7 +904,10 @@ export async function startRuntimeIngressGateway(options: {
     delete request.headers['x-agent-runlab-organization-id']
     delete request.headers['x-agent-runlab-organization-role']
     delete request.headers['x-agent-runlab-principal']
+    delete request.headers['x-agent-runlab-route-session-id']
+    if (routeSessionId) request.headers['x-agent-runlab-route-session-id'] = routeSessionId
     delete request.headers['x-kala-executor-route']
+    delete request.headers['x-kala-executor-replica']
     if (!executorEnrollment) delete request.headers['x-kala-executor-invite']
     request.headers['x-agent-runlab-runtime-unit'] = unitId
     request.headers['x-agent-runlab-ingress-secret'] = options.ingressSecret
@@ -777,7 +916,7 @@ export async function startRuntimeIngressGateway(options: {
       request.headers['x-agent-runlab-organization-role'] = organizationAccess.membership.role
       request.headers['x-agent-runlab-principal'] = Buffer.from(`${identity!.issuer}\0${identity!.subject}`, 'utf8').toString('base64url')
     }
-    proxy.ws(request, socket, head, { target: options.hostOrigin }, () => socket.destroy())
+    proxy.ws(request, socket, head, { target: runtimeOrigin }, () => socket.destroy())
   })().catch(() => socket.destroy()) })
   await new Promise<void>((resolve) => http.listen(options.port, options.listenHost ?? '127.0.0.1', resolve))
   const address = http.address(); const port = typeof address === 'object' && address ? address.port : options.port

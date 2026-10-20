@@ -919,6 +919,9 @@ importers:
       p-retry:
         specifier: 8.0.0
         version: 8.0.0
+      pg:
+        specifier: 8.22.0
+        version: 8.22.0
       socket.io:
         specifier: 4.8.4
         version: 4.8.4

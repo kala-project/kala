@@ -5,14 +5,14 @@ import { join } from 'node:path'
 import type { RuntimeCapabilities } from '@agent-kernel/shared'
 
 import { parseTenantRuntimeUnitId } from './unit.js'
-import type { RuntimeUnitMaterializationStore } from './materialization-store.js'
+import type { RuntimeUnitMaterializationCatalog } from './materialization-store.js'
 import type { TenantRuntimeService } from './service.js'
 
 export function attachTenantRuntimeControlApi(options: {
   http: HttpServer
   serviceSecret: string
   service: TenantRuntimeService
-  store: RuntimeUnitMaterializationStore
+  store: RuntimeUnitMaterializationCatalog
   dataRoot: string
   capabilities: RuntimeCapabilities
 }): void {
@@ -45,7 +45,7 @@ async function applyCommand(path: string, raw: string, oversized: boolean, optio
     if (!input.unitId || !input.organizationId || !input.before) throw new Error('invalid retention request')
     const unitId = parseTenantRuntimeUnitId(input.unitId)
     const organizationId = parseOrganizationId(input.organizationId)
-    const materialization = options.store.get(unitId)
+    const materialization = await options.store.refresh(unitId)
     if (!materialization || materialization.desiredState === 'deleted') throw new Error('runtime unit not found')
     if (!materialization.organizationId || materialization.organizationId !== organizationId) {
       throw new Error('runtime unit organization mismatch')
@@ -59,7 +59,7 @@ async function applyCommand(path: string, raw: string, oversized: boolean, optio
   const input = JSON.parse(raw) as { unitId: string; organizationId?: string; operationId: string; generation: number; action?: 'provision' | 'suspend' | 'resume' | 'delete' | 'bind-organization'; desiredState?: 'ready' | 'suspended' | 'deleted' }
   if (!input.operationId || input.operationId.length > 200 || !Number.isSafeInteger(input.generation) || input.generation < 1) throw new Error('invalid provisioning request')
   const unitId = parseTenantRuntimeUnitId(input.unitId); const action = input.action ?? 'provision'
-  const existing = options.store.get(unitId)
+  const existing = await options.store.refresh(unitId)
   const requestedOrganizationId = input.organizationId === undefined ? undefined : parseOrganizationId(input.organizationId)
   if (existing?.organizationId && requestedOrganizationId && existing.organizationId !== requestedOrganizationId) {
     throw new Error('runtime unit organization binding cannot change')
@@ -76,13 +76,17 @@ async function applyCommand(path: string, raw: string, oversized: boolean, optio
   const organizationId = requestedOrganizationId ?? existing?.organizationId
   const requestedState = action === 'bind-organization' ? input.desiredState : undefined
   if (action === 'delete' || requestedState === 'deleted') {
-    await options.service.suspendUnit(unitId)
     await options.store.tombstone({ schemaVersion: 1, unitId, ...(organizationId ? { organizationId } : {}), routingKeyDigest: '', routingKeyVersion: 1, generation: input.generation, desiredState: 'deleted', dataRoot: join(options.dataRoot, 'tenant-runtime-units', unitId), capabilities: options.capabilities, lastOperationId: input.operationId, updatedAt: new Date().toISOString() })
+    await options.service.suspendUnit(unitId)
   }
   else {
     const desiredState = requestedState ?? (action === 'suspend' ? 'suspended' : 'ready')
     await options.store.apply({ schemaVersion: 1, unitId, ...(organizationId ? { organizationId } : {}), routingKeyDigest: '', routingKeyVersion: 1, generation: input.generation, desiredState, dataRoot: join(options.dataRoot, 'tenant-runtime-units', unitId), capabilities: options.capabilities, lastOperationId: input.operationId, updatedAt: new Date().toISOString() })
-    if (desiredState === 'ready') options.service.markRoutable(unitId); else await options.service.suspendUnit(unitId)
+    if (desiredState === 'ready') {
+      try { await options.service.markRoutable(unitId, organizationId) } catch (error) {
+        throw new ControlApiError(503, 'runtime_unit_placement_unavailable', error instanceof Error ? error.message : String(error))
+      }
+    } else await options.service.suspendUnit(unitId)
   }
   return { ok: true, unitId, action }
 }

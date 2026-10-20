@@ -103,8 +103,11 @@ export async function dispatchRuntimeTool(
   const memoryPolicyBlock = guardMemoryPolicy(deps, sessionId, effect)
   if (memoryPolicyBlock) return { ok: false, content: memoryPolicyBlock }
 
+  await deps.assertSessionEffectOwner?.(sessionId)
   const blocked = await extensions.beforeToolDispatch(context)
   if (blocked) return blocked
+  // Extension hooks may await network work while another replica takes over.
+  await deps.assertSessionEffectOwner?.(sessionId)
 
   const result = await dispatchConfiguredTool(
     deps,
@@ -147,6 +150,7 @@ export function runHostLoop(deps: HostLoopDeps): LoopHandle {
   // graph must advance before another terminal reply can be auto-resumed,
   // preventing a broken model from hot-looping forever.
   const graphContinuationRevision = new Map<string, number>()
+  let effectsStopped = false
   let drainMode: LoopDrainMode = 'none'
   // Per-session "stop at next safe boundary" flags (steer's polite interrupt).
   // A flagged session lets its in-flight LLM response + tools finish, then the
@@ -192,7 +196,7 @@ export function runHostLoop(deps: HostLoopDeps): LoopHandle {
         loopGuard,
         drain: () => drainMode,
         steerStop: () => steerStopSessions.has(sessionId),
-            stopRequested: () => explicitStopSessions.has(sessionId),
+        stopRequested: () => effectsStopped || explicitStopSessions.has(sessionId),
         toolStarted: markToolStarted,
         toolSettled: markToolSettled,
       }, notifyCheckpoint)
@@ -200,7 +204,18 @@ export function runHostLoop(deps: HostLoopDeps): LoopHandle {
   }
 
   const handle: LoopHandle = {
+    abortActiveEffects() {
+      // Cancel immediately before shutdown waits on queues. A destination that
+      // ignores cancellation must independently deduplicate external effects.
+      if (effectsStopped) return
+      effectsStopped = true
+      for (const controller of inFlightAborts.values()) controller.abort()
+      for (const sessionId of inFlightTools.keys()) {
+        try { void Promise.resolve(deps.tools.cancelPending(sessionId)).catch(() => undefined) } catch { /* closing */ }
+      }
+    },
     async dispatch(sessionId, event, options) {
+      if (effectsStopped && event.kind !== 'cancel') throw new Error('Unit is closing; effects are stopped')
       if (event.kind === 'user_message' || event.kind === 'clear') explicitStopSessions.delete(sessionId)
       if (event.kind === 'cancel' && !options?.internalBoundaryCancel) explicitStopSessions.add(sessionId)
       if (drainMode !== 'none' && event.kind !== 'cancel') {
@@ -258,7 +273,7 @@ export function runHostLoop(deps: HostLoopDeps): LoopHandle {
             ...(options?.onCommitted ? { onCommitted: options.onCommitted } : {}),
             drain: () => drainMode,
             steerStop: () => steerStopSessions.has(sessionId),
-            stopRequested: () => explicitStopSessions.has(sessionId),
+            stopRequested: () => effectsStopped || explicitStopSessions.has(sessionId),
             toolStarted: markToolStarted,
             toolSettled: markToolSettled,
           }, notifyCheckpoint)
@@ -321,7 +336,7 @@ export function runHostLoop(deps: HostLoopDeps): LoopHandle {
             loopGuard,
             drain: () => drainMode,
             steerStop: () => steerStopSessions.has(sessionId),
-            stopRequested: () => explicitStopSessions.has(sessionId),
+            stopRequested: () => effectsStopped || explicitStopSessions.has(sessionId),
             toolStarted: markToolStarted,
             toolSettled: markToolSettled,
           }, notifyCheckpoint)
@@ -330,6 +345,10 @@ export function runHostLoop(deps: HostLoopDeps): LoopHandle {
         if (record.state.status !== 'executing_tools' || record.state.pendingCalls.length === 0) {
           return await (deps.extensions ?? createBuiltinExtensionRegistry()).recoverSession({ deps, sessionId, loop: handle })
         }
+        // An owner takeover cannot distinguish an accepted external tool from
+        // one that merely lost its result. Never replay either on another node;
+        // the user/operator must reconcile and explicitly cancel or retry.
+        if (deps.assertSessionEffectOwner) return false
         const effects = record.state.pendingCalls
           .filter((call) => call.status === 'approved' || call.status === 'dispatched')
           .map((call) => ({
@@ -383,6 +402,9 @@ export function runHostLoop(deps: HostLoopDeps): LoopHandle {
       })
     },
     async resumeSession(sessionId, options) {
+      // Local checkpoint resume is safe only for exclusive process ownership.
+      // Another node may have already issued a model call or external tool.
+      if (deps.assertSessionEffectOwner) return await handle.ensureSessionResumed(sessionId)
       const existing = recoveries.get(sessionId)
       if (existing) return await existing
       const recovery = (async (): Promise<boolean> => {
@@ -395,7 +417,7 @@ export function runHostLoop(deps: HostLoopDeps): LoopHandle {
           plannedContinuation: true,
           drain: () => drainMode,
           steerStop: () => steerStopSessions.has(sessionId),
-            stopRequested: () => explicitStopSessions.has(sessionId),
+          stopRequested: () => effectsStopped || explicitStopSessions.has(sessionId),
           toolStarted: markToolStarted,
           toolSettled: markToolSettled,
         }
@@ -535,8 +557,8 @@ async function commitTransition(
     let timingTracker = timingTrackers.get(deps.store)
     if (!timingTracker) { timingTracker = new TurnTimingTracker(); timingTrackers.set(deps.store, timingTracker) }
     if (!timingTracker.has(sessionId) && event.kind !== 'user_message' && (prior.status === 'thinking' || prior.status === 'executing_tools' || prior.status === 'awaiting_approval')) {
-      const parsed = await import('./store/log.js').then(({ readSessionLog }) => readSessionLog(record.logPath)).catch(() => undefined)
-      if (parsed) timingTracker.recover(sessionId, parsed.events)
+      const events = await deps.store.readEventEntries(sessionId).catch(() => undefined)
+      if (events) timingTracker.recover(sessionId, events)
     }
     const timing = extras?.timing ?? timingTracker.observe({ sessionId, event: committedEvent, prior, next, effects, ...(extras?.timingSpan ? { span: extras.timingSpan } : {}) })
     const usageChanged =
@@ -726,7 +748,7 @@ async function performCallLlm(
     : undefined
   try {
     const messages = await resolveKernelMessageAttachments(deps.messageAttachments, sessionId, persistedMessages)
-    const activeTools = config.toolDisclosureMode === 'progressive' ? await activeToolsFor(live) : new Set<string>()
+    const activeTools = config.toolDisclosureMode === 'progressive' ? await activeToolsFor(live, deps.store) : new Set<string>()
     for (const name of intentActivatedTools(effect.tools, messages)) activeTools.add(name)
     const disclosedTools = visibleTools(effect.tools, config.toolDisclosureMode ?? 'legacy_full', activeTools)
     await maybeRecordToolDisclosure(deps, live, effect.tools, disclosedTools)
@@ -862,6 +884,7 @@ async function callLlmWithQuota(
   sessionId: string,
   model: string | undefined,
 ): Promise<Awaited<ReturnType<typeof callLlmOnce>>> {
+  await input.deps.assertSessionEffectOwner?.(sessionId)
   const quota = input.deps.llmQuota
   const modelPolicy = input.deps.modelPolicy
   const record = input.deps.store.get(sessionId)
@@ -883,6 +906,9 @@ async function callLlmWithQuota(
       requestedTokens: estimateMessageTokens(messages) + estimateToolSchemaTokens(input.tools),
     })
   }
+  // Policy and quota checks may suspend while the Session moves to another Runtime.
+  await input.deps.assertSessionEffectOwner?.(sessionId)
+  if (input.signal.aborted) throw new DOMException('Unit effects stopped', 'AbortError')
   const res = await callLlmOnce(input, messages)
   if (quota?.recordUsage && res.usage) {
     if (!record?.organizationId) throw new Error('missing organization attribution for usage recording')
@@ -910,9 +936,7 @@ async function maybeRecordToolDisclosure(
   visible: readonly import('@agent-kernel/kernel').ToolSchema[],
 ): Promise<void> {
   try {
-    const { appendRuntimeMetadataEntry } = await import('./store/log.js')
-    await appendRuntimeMetadataEntry(record.logPath, {
-      sessionId: record.sessionId,
+    await deps.store.appendRuntimeMetadata(record.sessionId, {
       action: 'tool_disclosure_snapshot',
       payload: {
         mode: record.config.toolDisclosureMode ?? 'legacy_full',
@@ -944,9 +968,7 @@ async function maybeRecordTokenUsageObservation(
     const requestBodyEstimatedTokens = traceBody === undefined ? undefined : estimateStringTokens(JSON.stringify(traceBody))
     const record = deps.store.get(sessionId)
     if (!record) return
-    const { appendRuntimeMetadataEntry } = await import('./store/log.js')
-    await appendRuntimeMetadataEntry(record.logPath, {
-      sessionId,
+    await deps.store.appendRuntimeMetadata(sessionId, {
       action: 'token_usage_observed',
       payload: {
         trigger,

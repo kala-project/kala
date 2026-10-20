@@ -2,7 +2,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
 import type { HandshakeAuth } from '@agent-kernel/shared'
-import type { ExecutorIdentityStore } from './store/executor-identity.js'
+import { ExecutorIdentityStore, type ExecutorIdentityStorage } from './store/executor-identity.js'
 
 export type GithubOAuthConfig = {
   required: boolean
@@ -23,7 +23,7 @@ export type AuthConfig = {
   sharedToken?: string
   github?: GithubOAuthConfig
   executorTokens?: readonly ExecutorTokenScope[]
-  executorIdentityStore?: ExecutorIdentityStore
+  executorIdentityStore?: ExecutorIdentityStorage
 }
 
 export type DashboardActor =
@@ -74,14 +74,14 @@ export function authenticateDashboardHandshake(
   return { ok: false, reason: 'auth_failed' }
 }
 
-export function authenticateExecutorToken(
+export async function authenticateExecutorToken(
   auth: HandshakeAuth | undefined,
   config: AuthConfig | undefined,
-): ExecutorIdentity {
+): Promise<ExecutorIdentity> {
   const token = auth?.token
   // After initial enrollment the Executor retains its route hint, but its
   // durable device credential must take precedence over an expired invite.
-  const stored = config?.executorIdentityStore?.resolveToken(token)
+  const stored = await config?.executorIdentityStore?.resolveToken(token)
   if (stored) return { accepted: true, workspaceId: stored.workspaceId, ...(stored.installId ? { installId: stored.installId } : {}), ...(stored.label ? { label: stored.label } : {}), ...(token ? { token } : {}) }
   if (auth?.invite) return { accepted: true, inviteToken: auth.invite }
   const scoped = config?.executorTokens ?? []
@@ -184,8 +184,12 @@ export function authSettings(config: AuthConfig | undefined): {
   const github = config?.github
   const whitelist = github?.usernameWhitelist ?? []
   const tokens = config?.executorTokens ?? []
-  const persisted = config?.executorIdentityStore?.snapshot() ?? []
-  const invites = config?.executorIdentityStore?.inviteSnapshot() ?? []
+  // Settings construction is a synchronous compatibility API. Remote stores
+  // are reported as configured without issuing unawaited queries; authoritative
+  // management routes query their state asynchronously.
+  const localStore = config?.executorIdentityStore instanceof ExecutorIdentityStore ? config.executorIdentityStore : undefined
+  const persisted = localStore?.snapshot() ?? []
+  const invites = localStore?.inviteSnapshot() ?? []
   return {
     dashboardAuthRequired: dashboardAuthRequired(config),
     githubOAuth: {
@@ -195,7 +199,7 @@ export function authSettings(config: AuthConfig | undefined): {
       usernameWhitelist: whitelist,
     },
     executorIdentity: {
-      tokenScoped: tokens.some((t) => t.workspaceId !== undefined) || persisted.length > 0,
+      tokenScoped: tokens.some((t) => t.workspaceId !== undefined) || persisted.length > 0 || Boolean(config?.executorIdentityStore),
       tokenCount: tokens.length + persisted.length,
       inviteCount: invites.filter((invite) => !invite.revoked).length,
     },

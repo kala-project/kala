@@ -35,7 +35,19 @@ export type PushSubscriptionRecord = {
   enabled?: boolean
 }
 
-export class PushSubscriptionStore {
+export type PushStorageResult<T> = T | Promise<T>
+
+/** Storage authority used by push routes and dispatch. Implementations may be local/sync or remote/async. */
+export interface PushSubscriptionStorage {
+  list(): PushStorageResult<readonly PushSubscriptionRecord[]>
+  upsert(record: PushSubscriptionRecord): PushStorageResult<void>
+  remove(endpoint: string): PushStorageResult<boolean>
+  updateDevice(deviceId: string, update: { enabled?: boolean; name?: string }): PushStorageResult<boolean>
+  removeDevice(deviceId: string): PushStorageResult<boolean>
+  size(): PushStorageResult<number>
+}
+
+export class PushSubscriptionStore implements PushSubscriptionStorage {
   private readonly byEndpoint = new Map<string, PushSubscriptionRecord>()
 
   constructor(private readonly filePath: string) {}
@@ -49,12 +61,7 @@ export class PushSubscriptionStore {
       try {
         const parsed = JSON.parse(line) as PushSubscriptionRecord
         if (typeof parsed.endpoint === 'string' && parsed.keys?.p256dh && parsed.keys?.auth) {
-          this.byEndpoint.set(parsed.endpoint, {
-            ...parsed,
-            deviceId: parsed.deviceId ?? pushDeviceIdForEndpoint(parsed.endpoint),
-            deviceName: parsed.deviceName ?? deviceNameFromUserAgent(parsed.userAgent),
-            enabled: parsed.enabled ?? true,
-          })
+          this.byEndpoint.set(parsed.endpoint, normalizePushSubscriptionRecord(parsed))
         }
       } catch {
         // Skip corrupt line — see class comment.
@@ -71,12 +78,7 @@ export class PushSubscriptionStore {
    * PATCH so the store always reflects the browser's current preferences.
    */
   upsert(record: PushSubscriptionRecord): void {
-    this.byEndpoint.set(record.endpoint, {
-      ...record,
-      deviceId: record.deviceId ?? pushDeviceIdForEndpoint(record.endpoint),
-      deviceName: record.deviceName ?? deviceNameFromUserAgent(record.userAgent),
-      enabled: record.enabled ?? true,
-    })
+    this.byEndpoint.set(record.endpoint, normalizePushSubscriptionRecord(record))
     this.flush()
   }
 
@@ -127,6 +129,15 @@ export class PushSubscriptionStore {
       .map((record) => JSON.stringify(record))
       .join('\n')
     writeFileSync(this.filePath, body ? `${body}\n` : '', 'utf8')
+  }
+}
+
+export function normalizePushSubscriptionRecord(record: PushSubscriptionRecord): PushSubscriptionRecord {
+  return {
+    ...record,
+    deviceId: record.deviceId ?? pushDeviceIdForEndpoint(record.endpoint),
+    deviceName: record.deviceName ?? deviceNameFromUserAgent(record.userAgent),
+    enabled: record.enabled ?? true,
   }
 }
 

@@ -11,8 +11,11 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
+import { mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
-import { startExecutor } from './client.js'
+import { createExecutorSharedExecution, startExecutor } from './client.js'
 import type { Tool } from './tools/registry.js'
 
 type Handler = (...args: unknown[]) => void
@@ -206,6 +209,42 @@ describe('executor idempotency', () => {
     expect(ack1).toHaveBeenCalledWith(expected)
     expect(ack2).toHaveBeenCalledWith(expected)
     expect(runs).toHaveBeenCalledTimes(1) // never re-ran
+  })
+
+  it('coalesces the same durable call across two Runtime replica sockets', async () => {
+    let finish!: (value: string) => void
+    const runs = vi.fn(() => new Promise<string>((resolve) => { finish = resolve }))
+    const first = makeMockSocket()
+    const second = makeMockSocket()
+    const dir = await mkdtemp(join(tmpdir(), 'kala-replica-receipts-'))
+    const sharedExecution = createExecutorSharedExecution(join(dir, 'receipts.json'))
+    const common = {
+      host: 'http://localhost', workspaceId: 'ws-replicas', workspaceName: 'replicas', executorId: 'executor-one',
+      tools: [{ name: 'effect', run: runs } satisfies Tool], sharedExecution,
+    }
+    startExecutor({ ...common, replicaId: 'runtime-x', ioFactory: (() => first) as never })
+    startExecutor({ ...common, replicaId: 'runtime-y', ioFactory: (() => second) as never })
+    first.__trigger('connect')
+    second.__trigger('connect')
+
+    const ackX = vi.fn()
+    const ackY = vi.fn()
+    const call = { sessionId: 'session-takeover', callId: 'same-call', name: 'effect', input: {} }
+    first.__trigger('tool:call', call, ackX)
+    second.__trigger('tool:call', call, ackY)
+    await vi.waitFor(() => expect(runs).toHaveBeenCalledTimes(1))
+    finish('one-effect')
+    await vi.waitFor(() => expect(ackY).toHaveBeenCalled())
+
+    expect(ackX).toHaveBeenCalledWith(expect.objectContaining({ ok: true, content: 'one-effect' }))
+    expect(ackY).toHaveBeenCalledWith(expect.objectContaining({ ok: true, content: 'one-effect' }))
+    expect(runs).toHaveBeenCalledTimes(1)
+
+    const replay = vi.fn()
+    second.__trigger('tool:call', call, replay)
+    await vi.waitFor(() => expect(replay).toHaveBeenCalled())
+    expect(runs).toHaveBeenCalledTimes(1)
+    await sharedExecution.receiptStore?.flush()
   })
 
   it('resolves permanentError on executor:host_reject', async () => {

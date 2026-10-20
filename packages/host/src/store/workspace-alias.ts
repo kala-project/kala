@@ -5,7 +5,14 @@ type AliasFile = {
   workspaces?: Record<string, string>
 }
 
-export class WorkspaceAliasStore {
+export interface WorkspaceAliasStorage {
+  load(): Promise<void>
+  get(workspaceId: string): string | undefined
+  apply<T extends { workspaceId: string; workspaceName: string }>(item: T): T
+  rename(workspaceId: string, workspaceName: string): Promise<string>
+}
+
+export class WorkspaceAliasStore implements WorkspaceAliasStorage {
   private aliases = new Map<string, string>()
   private loaded = false
 

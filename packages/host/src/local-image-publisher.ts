@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 
 import type { Message } from '@agent-kernel/kernel'
 import type { SessionRecord } from './store/session.js'
-import type { SessionArtifactRegistry } from './session-artifact-registry.js'
+import type { SessionArtifactStorage } from './session-artifact-registry.js'
 
 export type LocalImageReadResult = { base64?: string; mediaType?: string; size?: number; error?: string }
 export type LocalImageReader = (input: { requestId: string; workspaceId: string; path: string; cwd?: string }) => Promise<LocalImageReadResult>
@@ -12,14 +12,14 @@ const MAX_IMAGES_PER_MESSAGE = 8
 
 type LocalImagePublisherDeps = {
   reader: LocalImageReader
-  artifacts: SessionArtifactRegistry
+  artifacts: SessionArtifactStorage
   assertCanStore?: (record: SessionRecord, bytes: number) => Promise<void>
 }
 
 export function createLocalImagePublisher(deps: LocalImagePublisherDeps) {
   return async (sessionId: string, record: SessionRecord, message: Message): Promise<Message> => {
     if (message.role !== 'assistant' || !record.workspaceId) return message
-    const published = new Map<string, Promise<Awaited<ReturnType<SessionArtifactRegistry['registerImage']>> | null>>()
+    const published = new Map<string, Promise<Awaited<ReturnType<SessionArtifactStorage['registerImage']>> | null>>()
     const content = await Promise.all(message.content.map(async (part) => part.type === 'text'
       ? { ...part, text: await publishMarkdownImages(part.text, async (path, alt) => {
           const unavailable = `[Image unavailable: ${alt || basename(path) || 'image'}]`

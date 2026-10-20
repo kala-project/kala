@@ -17,6 +17,7 @@
   "bin": {
     "kala-host": "./dist/bin/kala-host.js",
     "kala-runtime-service": "./dist/bin/kala-runtime-service.js",
+    "kala-postgres-migrate": "./dist/bin/kala-postgres-migrate.js",
     "kala-dedicated-ingress": "./dist/bin/kala-dedicated-ingress.js",
     "kala-dedicated-deploy-supervisor": "./dist/bin/kala-dedicated-deploy-supervisor.js"
   },
@@ -49,6 +50,7 @@
     "http-proxy": "1.18.1",
     "jsonc-parser": "3.3.1",
     "p-retry": "8.0.0",
+    "pg": "8.22.0",
     "socket.io": "4.8.4",
     "ulid": "2.3.0",
     "web-push": "3.6.7",

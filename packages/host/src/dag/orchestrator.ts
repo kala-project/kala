@@ -4,7 +4,7 @@ import type { DagNode, DagRun, DagToolActivity, DagToolActivityCategory } from '
 
 import type { HostLoopDeps, LoopHandle } from '../loop-types.js'
 import { runAgentTool, type SubAgentRuntimeController } from '../extensions/agent-tool.js'
-import type { DagStore } from './store.js'
+import type { DagStorage } from './storage.js'
 import { bindDagWorkerSession, unbindDagWorkerSession } from './worker-tool.js'
 
 const DEFAULT_CONCURRENCY = 4
@@ -18,7 +18,7 @@ export class DagOrchestrator {
   private closing = false
 
   constructor(
-    private readonly store: DagStore,
+    private readonly store: DagStorage,
     private readonly deps: HostLoopDeps,
     private readonly loop: LoopHandle,
     private readonly runtimeController?: SubAgentRuntimeController,
@@ -27,7 +27,13 @@ export class DagOrchestrator {
 
   schedule(parentSessionId: string): void {
     if (this.closing) return
-    for (const run of this.store.runsForSession(parentSessionId)) {
+    void this.scheduleAsync(parentSessionId).catch((error: unknown) => {
+      this.deps.broadcast.onError(parentSessionId, error instanceof Error ? error.message : String(error))
+    })
+  }
+
+  private async scheduleAsync(parentSessionId: string): Promise<void> {
+    for (const run of await this.store.runsForSession(parentSessionId)) {
       if (
         run.status !== 'running'
         || !run.nodes.some((node) => node.status === 'ready' || node.status === 'running')
@@ -52,9 +58,9 @@ export class DagOrchestrator {
   private async run(parentSessionId: string, runId: string): Promise<void> {
     await this.deps.store.load(parentSessionId, { recoverDangling: false }).catch(() => undefined)
     while (!this.closing) {
-      const run = this.store.getRun(runId)
+      const run = await this.store.getRun(runId)
       if (!run || run.status !== 'running') return
-      const nodes = this.store.claimReadyNodes(run.id, this.workerId, DEFAULT_CONCURRENCY, LEASE_MS)
+      const nodes = await this.store.claimReadyNodes(run.id, this.workerId, DEFAULT_CONCURRENCY, LEASE_MS)
       if (nodes.length === 0) {
         if (!run.nodes.some((node) => node.status === 'running')) return
         await new Promise<void>((resolve) => setTimeout(resolve, RECOVERY_POLL_MS))
@@ -64,11 +70,9 @@ export class DagOrchestrator {
       await Promise.all(nodes.map(async (node) => {
         const callId = `dag:${run.id}:${node.id}:${node.attempt}`
         const renewal = setInterval(() => {
-          try {
-            this.store.renewLease(run.id, node.id, this.workerId, LEASE_MS)
-          } catch {
+          void Promise.resolve(this.store.renewLease(run.id, node.id, this.workerId, LEASE_MS, new Date(), node.leaseGeneration)).catch(() => {
             clearInterval(renewal)
-          }
+          })
         }, LEASE_MS / 3)
         renewal.unref?.()
         const effect: CallToolEffect = {
@@ -96,22 +100,23 @@ export class DagOrchestrator {
               configOverride: workerConfig,
               onChildCreated: async (child) => {
                 childSessionId = child.sessionId
-                this.store.attachChildSession(run.id, node.id, this.workerId, child.sessionId)
+                await this.store.attachChildSession(run.id, node.id, this.workerId, child.sessionId, new Date().toISOString(), node.leaseGeneration)
                 bindDagWorkerSession(child.sessionId, {
                   parentSessionId,
                   runId: run.id,
                   nodeId: node.id,
                   attempt: node.attempt,
                   workerId: this.workerId,
+                  leaseGeneration: node.leaseGeneration,
                 })
                 this.deps.publishDagRun?.(parentSessionId)
               },
             },
           )
-          const current = this.store.getRun(run.id)?.nodes.find((candidate) => candidate.id === node.id)
+          const current = (await this.store.getRun(run.id))?.nodes.find((candidate) => candidate.id === node.id)
           if (!current || current.status === 'waiting_user' || current.status === 'replaced') return
           if (current.status !== 'running') return
-          this.store.completeNode(
+          await this.store.completeNode(
             run.id,
             node.id,
             this.workerId,
@@ -127,11 +132,13 @@ export class DagOrchestrator {
                   toolActivity: workerToolActivity(childSessionId ? this.deps.store.get(childSessionId)?.state.messages : undefined),
                 },
             `${callId}:complete`,
+            new Date().toISOString(),
+            node.leaseGeneration,
           )
         } catch (error) {
-          const current = this.store.getRun(run.id)?.nodes.find((candidate) => candidate.id === node.id)
+          const current = (await this.store.getRun(run.id))?.nodes.find((candidate) => candidate.id === node.id)
           if (current?.status === 'running') {
-            this.store.completeNode(
+            await this.store.completeNode(
               run.id,
               node.id,
               this.workerId,
@@ -141,6 +148,8 @@ export class DagOrchestrator {
                 toolActivity: workerToolActivity(childSessionId ? this.deps.store.get(childSessionId)?.state.messages : undefined),
               },
               `${callId}:failed`,
+              new Date().toISOString(),
+              node.leaseGeneration,
             )
           }
 

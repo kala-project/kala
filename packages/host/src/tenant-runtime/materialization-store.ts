@@ -21,7 +21,19 @@ export type RuntimeUnitMaterialization = {
 type PersistedRuntimeUnitMaterialization = Omit<RuntimeUnitMaterialization, 'desiredState'> & { desiredState: RuntimeUnitMaterialization['desiredState'] | 'closed' }
 type CatalogFile = { schemaVersion: 1; units: PersistedRuntimeUnitMaterialization[] }
 
-export class RuntimeUnitMaterializationStore {
+export interface RuntimeUnitMaterializationCatalog {
+  load(): Promise<void>
+  get(id: TenantRuntimeUnitId): RuntimeUnitMaterialization | undefined
+  /** Refresh one entry from the authoritative backend before an authorization or lifecycle decision. */
+  refresh(id: TenantRuntimeUnitId): Promise<RuntimeUnitMaterialization | undefined>
+  list(): readonly RuntimeUnitMaterialization[]
+  apply(entry: RuntimeUnitMaterialization): Promise<RuntimeUnitMaterialization>
+  tombstone(entry: RuntimeUnitMaterialization): Promise<RuntimeUnitMaterialization>
+  remove(id: TenantRuntimeUnitId, operationId: string, generation: number): Promise<void>
+  close(): Promise<void>
+}
+
+export class RuntimeUnitMaterializationStore implements RuntimeUnitMaterializationCatalog {
   private readonly entries = new Map<TenantRuntimeUnitId, RuntimeUnitMaterialization>()
   private mutation = Promise.resolve()
 
@@ -41,6 +53,10 @@ export class RuntimeUnitMaterializationStore {
 
   get(id: TenantRuntimeUnitId): RuntimeUnitMaterialization | undefined {
     return this.entries.get(id)
+  }
+
+  async refresh(id: TenantRuntimeUnitId): Promise<RuntimeUnitMaterialization | undefined> {
+    return this.get(id)
   }
 
   list(): readonly RuntimeUnitMaterialization[] {
@@ -88,6 +104,8 @@ export class RuntimeUnitMaterializationStore {
       try { await this.persist() } catch (error) { this.entries.set(id, existing); throw error }
     })
   }
+
+  async close(): Promise<void> {}
 
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.mutation.then(operation, operation)

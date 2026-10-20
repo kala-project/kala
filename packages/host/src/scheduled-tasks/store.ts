@@ -19,7 +19,29 @@ type InboxReceipt = { ownerKey: string; principal: string; occurrenceIds: string
 type State = { schemaVersion: 1; revision: number; tasks: ScheduledTask[]; runs: ScheduledRun[]; inboxReceipts?: InboxReceipt[] }
 const MAX_RUNS = 10_000
 
-export class ScheduledTaskStore {
+/** Complete persistence contract consumed by the API and Unit scheduler. */
+export interface ScheduledTaskStorage {
+  start(unitId: string): Promise<void>
+  close(): Promise<void>
+  listTasks(ownerKey: string): Promise<ScheduledTask[]>
+  getTask(ownerKey: string, taskId: string): Promise<ScheduledTask | undefined>
+  getTaskById(taskId: string): Promise<ScheduledTask | undefined>
+  history(ownerKey: string, taskId: string): Promise<ScheduledRun[] | undefined>
+  origins(ownerKey: string, sessionId: string): Promise<Record<string, string>>
+  inbox(ownerKey: string, principal: string): Promise<ScheduledInbox>
+  markInboxSeen(ownerKey: string, principal: string, occurrenceIds: readonly string[]): Promise<ScheduledInboxSeenResult>
+  create(input: CreateScheduledTask): Promise<ScheduledTask>
+  update(ownerKey: string, taskId: string, patch: UpdateScheduledTask): Promise<ScheduledTask>
+  setPaused(ownerKey: string, taskId: string, paused: boolean): Promise<ScheduledTask>
+  pauseSessionTargets(ownerKey: string, sessionIds: ReadonlySet<string>): Promise<number>
+  delete(ownerKey: string, taskId: string): Promise<boolean>
+  due(limit: number): Promise<ScheduledTask[]>
+  claim(taskId: string, scheduledFor: string): Promise<ScheduledRun | undefined>
+  claimedRuns(): Promise<ScheduledRun[]>
+  finish(occurrenceId: string, status: Exclude<ScheduledRun['status'], 'claimed'>, detail?: { sessionId?: string; error?: string }): Promise<ScheduledRun>
+}
+
+export class ScheduledTaskStore implements ScheduledTaskStorage {
   private readonly statePath: string
   private readonly leasePath: string
   private mutation = Promise.resolve()

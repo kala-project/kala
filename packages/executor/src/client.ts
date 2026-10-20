@@ -129,6 +129,10 @@ export type ExecutorOptions = {
   invite?: string
   /** One-way invite hash used only to route an already enrolled device. */
   routeHint?: string
+  /** Opaque active Runtime replica selected through the Gateway. */
+  replicaId?: string
+  /** Shared by every replica socket in one Executor process. */
+  sharedExecution?: ExecutorSharedExecution
   executorId?: string
   installId?: string
   onToken?(token: string): void
@@ -148,6 +152,25 @@ export type ExecutorOptions = {
   }
   mcpInitializeTimeoutMs?: number
   mcpCallTimeoutMs?: number
+}
+
+export type ExecutorSharedExecution = {
+  readonly receiptStore: ExecutionReceiptStore | null
+  readonly receiptStoreReady: Promise<void>
+  readonly completedCalls: Map<string, ToolResultAck>
+  readonly inFlight: Map<string, AbortController>
+  readonly inFlightAcks: Map<string, Array<(result: ToolResultAck) => void>>
+}
+
+export function createExecutorSharedExecution(receiptStorePath: string | false): ExecutorSharedExecution {
+  const receiptStore = receiptStorePath === false ? null : new ExecutionReceiptStore(receiptStorePath)
+  return {
+    receiptStore,
+    receiptStoreReady: receiptStore?.load() ?? Promise.resolve(),
+    completedCalls: new Map(),
+    inFlight: new Map(),
+    inFlightAcks: new Map(),
+  }
 }
 
 export type PermanentError = {
@@ -209,10 +232,10 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
   const overflowConfig = overflowConfigFromEnv(
     join(workspaceRoot, '.kala', 'overflow'),
   )
-  const receiptStore = options.receiptStorePath === false
-    ? null
-    : new ExecutionReceiptStore(options.receiptStorePath ?? join(workspaceRoot, '.kala', 'execution-receipts.json'))
-  const receiptStoreReady = receiptStore?.load() ?? Promise.resolve()
+  const sharedExecution = options.sharedExecution ?? createExecutorSharedExecution(
+    options.receiptStorePath === false ? false : options.receiptStorePath ?? join(workspaceRoot, '.kala', 'execution-receipts.json'),
+  )
+  const { receiptStore, receiptStoreReady, completedCalls, inFlight, inFlightAcks } = sharedExecution
 
   const factory = options.ioFactory ?? clientIO
   const socket = factory(`${options.host}/executor`, {
@@ -228,21 +251,14 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
     reconnectionDelayMax: 60_000,   // keep recovery bounded while retaining jitter
     reconnectionAttempts: Infinity,
     randomizationFactor: 0.5,       // +/-50% jitter, avoid thundering-herd reconnect
-    ...(options.invite || options.routeHint ? { extraHeaders: { ...(options.invite ? { 'x-kala-executor-invite': options.invite } : {}), ...(options.routeHint ? { 'x-kala-executor-route': options.routeHint } : {}) } } : {})
+    ...(options.invite || options.routeHint || options.replicaId ? { extraHeaders: { ...(options.invite ? { 'x-kala-executor-invite': options.invite } : {}), ...(options.routeHint ? { 'x-kala-executor-route': options.routeHint } : {}), ...(options.replicaId ? { 'x-kala-executor-replica': options.replicaId } : {}) } } : {})
   }) as Socket<ExecutorServerToClientEvents, ExecutorClientToServerEvents>
 
-  const inFlight = new Map<string, AbortController>()
+  const localInFlight = new Set<string>()
   let drainRequested = false
-  // A reconnect can redispatch a callId while the original invocation is still
-  // running. Keep every socket ACK callback so completion reaches whichever
-  // socket the host currently tracks instead of being stranded on the old one.
-  const inFlightAcks = new Map<string, Array<(result: ToolResultAck) => void>>()
-  // Idempotency cache: remember the last N completed tool calls so a
-  // duplicate `tool:call` (from `redispatchPending` on the host after a
-  // reconnect) does not re-run a tool that already succeeded. LRU-lite:
-  // insertion order via Map; when full, drop the oldest entry.
+  // A reconnect or owner handoff can redispatch through a different replica
+  // socket. Shared maps coalesce it inside this one Executor process.
   const COMPLETED_CALL_CACHE_MAX = 500
-  const completedCalls = new Map<string, ToolResultAck>()
   const receiptKey = (sessionId: string, callId: string): string => `${sessionId}:${callId}`
   const rememberCompleted = (key: string, ack: ToolResultAck): void => {
     completedCalls.set(key, ack)
@@ -422,6 +438,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
 
     const controller = new AbortController()
     inFlight.set(key, controller)
+    localInFlight.add(key)
     inFlightAcks.set(key, [ack])
     const started = performance.now()
     logger.info({ sessionId: payload.sessionId, callId: payload.callId, tool: payload.name, internal, ...(!knownMcpToolNames.has(payload.name) ? { input: safeToolInput(payload.input) } : {}), ...(payload.cwd ? { cwd: payload.cwd } : {}) }, 'tool execution started')
@@ -444,6 +461,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
       rememberCompleted(key, replyResult)
     } finally {
       inFlight.delete(key)
+      localInFlight.delete(key)
       const waiters = inFlightAcks.get(key) ?? []
       inFlightAcks.delete(key)
       logger.info({ sessionId: payload.sessionId, callId: payload.callId, tool: payload.name, internal, ok: replyResult.ok, durationMs: result.durationMs, resultBytes: Buffer.byteLength(replyResult.content, 'utf8') }, 'tool execution completed')
@@ -621,8 +639,11 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
       executorClosing = true
       unsubscribeBg()
       terminals.closeAll()
-      for (const c of inFlight.values()) c.abort()
-      inFlight.clear()
+      for (const key of localInFlight) {
+        inFlight.get(key)?.abort()
+        inFlight.delete(key)
+      }
+      localInFlight.clear()
       socket.disconnect()
       await mcpConfigQueue
       await Promise.allSettled([...allMcpManagers].map((manager) => manager.close()))

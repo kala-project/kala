@@ -44,6 +44,8 @@ import { messageOperationFingerprint } from './message-operation-fingerprint.js'
 import { ExecutorIdentityStore } from './store/executor-identity.js'
 import { UnitResourceGovernor } from './tenant-runtime/resource-governor.js'
 import { bangShellResultOperationId } from './bang-shell.js'
+import { SessionArtifactRegistry } from './session-artifact-registry.js'
+import { MessageAttachmentStore } from './message-attachment-store.js'
 
 type HostCopilotTool = {
   name: string
@@ -352,6 +354,103 @@ describe('wire protocol', () => {
       expect(leaseObserved).toBe(true)
     } finally {
       dashboard.close()
+    }
+  })
+
+  it('binds a routed Session Upgrade to the later dashboard handshake and RPC target', async () => {
+    const routedSessionId = 'ticket-session-a'
+    await server.store.ensure({ sessionId: routedSessionId, defaultConfig: config })
+    const connect = (auth: { sessionId?: string; clientId?: string }) => clientIO(`${url}/dashboard`, {
+      transports: ['websocket'] as const,
+      auth: { ...auth, role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+      extraHeaders: { 'x-agent-runlab-route-session-id': routedSessionId },
+      reconnection: false,
+    })
+    for (const auth of [{ sessionId: 'ticket-session-b' }, { clientId: 'multiplexed-control' }]) {
+      const invalid = connect(auth)
+      try {
+        await expect(new Promise<void>((resolve, reject) => {
+          invalid.once('connect', resolve)
+          invalid.once('connect_error', reject)
+        })).rejects.toThrow('session_route_mismatch')
+      } finally { invalid.close() }
+    }
+    const dashboard = connect({ sessionId: routedSessionId })
+    try {
+      await new Promise<SessionReadyEvent>((resolve, reject) => {
+        dashboard.once('session:ready', resolve)
+        dashboard.once('connect_error', reject)
+      })
+      const denied = await dashboard.timeout(2_000).emitWithAck('client:update_preferences', {
+        sessionId: 'ticket-session-b', operationId: 'wrong-routed-session', preferences: { chapterReadingMode: 'continuous' },
+      })
+      expect(denied).toMatchObject({ ok: false, error: 'session_route_mismatch' })
+      const deniedChannels = await dashboard.timeout(2_000).emitWithAck('client:subscribe_channels', {
+        requestId: 'cross-session-subscription', generation: 1, channels: ['session:ticket-session-b'],
+      })
+      expect(deniedChannels).toMatchObject({ ok: false, error: 'session_route_mismatch' })
+    } finally { dashboard.close() }
+  })
+
+  it('rejects Session owner preparation when the Runtime has no owner provider or the socket is Session-routed', async () => {
+    const sessionId = 'route-preparation-fail-closed'
+    await server.store.ensure({ sessionId, defaultConfig: config })
+    const control: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(`${url}/dashboard`, {
+      transports: ['websocket'],
+      auth: { clientId: 'route-preparation-control', role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+      reconnection: false,
+    })
+    try {
+      await new Promise<void>((resolve, reject) => { control.once('connect', resolve); control.once('connect_error', reject) })
+      expect(await control.timeout(2_000).emitWithAck('client:prepare_session_route', { sessionId }))
+        .toEqual({ ok: false, error: 'session route preparation unavailable' })
+    } finally { control.close() }
+    const routed = clientIO(`${url}/dashboard`, {
+      transports: ['websocket'] as const,
+      auth: { sessionId, role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+      extraHeaders: { 'x-agent-runlab-route-session-id': sessionId },
+      reconnection: false,
+    })
+    try {
+      await new Promise<void>((resolve, reject) => { routed.once('connect', resolve); routed.once('connect_error', reject) })
+      expect(await routed.timeout(2_000).emitWithAck('client:prepare_session_route', { sessionId }))
+        .toEqual({ ok: false, error: 'session route preparation unavailable' })
+    } finally { routed.close() }
+  })
+
+  it('prepares owner only for an existing Session in the authenticated control connection organization', async () => {
+    const localSessionsDir = mkdtempSync(join(tmpdir(), 'kala-owner-preparation-'))
+    const acquired: string[] = []
+    const localServer = await startHostServer({
+      port: 0, sessionsDir: localSessionsDir, llm: scriptedLlm(),
+      deployment: PRIVATE_CLOUD_DEPLOYMENT, defaultConfig: config,
+      assertSessionEffectOwner: async (sessionId) => { acquired.push(sessionId) },
+    })
+    try {
+      await localServer.store.create({ sessionId: 'route-org-a', config, organizationId: 'org_a' })
+      await localServer.store.create({ sessionId: 'route-org-b', config, organizationId: 'org_b' })
+      const control: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(`http://localhost:${localServer.port}/dashboard`, {
+        transports: ['websocket'], reconnection: false,
+        auth: { clientId: 'owner-preparation-test', role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+        extraHeaders: {
+          'x-agent-runlab-principal': 'member-test',
+          'x-agent-runlab-organization-id': 'org_a',
+          'x-agent-runlab-organization-role': 'member',
+        },
+      })
+      try {
+        await new Promise<void>((resolve, reject) => { control.once('connect', resolve); control.once('connect_error', reject) })
+        expect(await control.timeout(2_000).emitWithAck('client:prepare_session_route', { sessionId: 'route-org-a' }))
+          .toEqual({ ok: true })
+        expect(await control.timeout(2_000).emitWithAck('client:prepare_session_route', { sessionId: 'route-org-b' }))
+          .toEqual({ ok: false, error: 'session unavailable' })
+        expect(await control.timeout(2_000).emitWithAck('client:prepare_session_route', { sessionId: 'route-missing' }))
+          .toEqual({ ok: false, error: 'session owner unavailable' })
+        expect(acquired).toEqual(['route-org-a'])
+      } finally { control.close() }
+    } finally {
+      await localServer.close()
+      rmSync(localSessionsDir, { recursive: true, force: true })
     }
   })
 
@@ -798,6 +897,86 @@ describe('wire protocol', () => {
     expect(allowed.headers.get('x-content-type-options')).toBe('nosniff')
     expect(allowed.headers.get('content-security-policy')).toContain("default-src 'none'")
     await expect(allowed.text()).resolves.toBe(svg.toString())
+  })
+
+  it('loads injected object stores and awaits attachment validation before queue admission', async () => {
+    await server.close()
+    const sessionArtifacts = new SessionArtifactRegistry(join(dir, 'silo-session-artifacts'))
+    const messageAttachments = new MessageAttachmentStore(join(dir, 'silo-message-attachments'))
+    const artifactLoad = vi.spyOn(sessionArtifacts, 'load')
+    const attachmentLoad = vi.spyOn(messageAttachments, 'load')
+    server = await startHostServer({
+      port: 0,
+      sessionsDir: dir,
+      llm: scriptedLlm(),
+      defaultConfig: config,
+      objectStorage: { sessionArtifacts, messageAttachments },
+    })
+    url = `http://localhost:${server.port}`
+    expect(artifactLoad).toHaveBeenCalledOnce()
+    expect(attachmentLoad).toHaveBeenCalledOnce()
+
+    const sessionId = 'injected-object-storage'
+    await server.store.ensure({ sessionId, defaultConfig: config })
+    const attachment = await messageAttachments.register({
+      sessionId,
+      name: 'delayed.txt',
+      mediaType: 'text/plain',
+      data: Buffer.from('validated asynchronously'),
+    })
+    let releaseValidation: () => void = () => {}
+    const validationGate = new Promise<void>((resolveGate) => { releaseValidation = resolveGate })
+    const originalResolve = messageAttachments.resolve.bind(messageAttachments)
+    const resolveSpy = vi.spyOn(messageAttachments, 'resolve').mockImplementation(async (...args) => {
+      await validationGate
+      return originalResolve(...args)
+    })
+    const dashboard: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(`${url}/dashboard`, {
+      transports: ['websocket'],
+      auth: { sessionId, role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+      reconnection: false,
+    })
+    try {
+      await new Promise<SessionReadyEvent>((resolveReady, reject) => {
+        dashboard.once('session:ready', resolveReady)
+        dashboard.once('connect_error', reject)
+      })
+      await expect(dashboard.timeout(1000).emitWithAck('client:get_global_storage', { refresh: true }))
+        .resolves.toMatchObject({ ok: false, error: 'storage inventory unavailable' })
+      let admitted = false
+      const ackPromise = dashboard.timeout(2000).emitWithAck('client:user_message', {
+        intent: 'text', sessionId, text: 'use attachment', mode: 'queue',
+        operationId: 'injected-object-storage-message', content: [attachment],
+      }).then((ack) => {
+        admitted = true
+        return ack
+      })
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25))
+      expect(resolveSpy).toHaveBeenCalledWith(sessionId, attachment)
+      expect(admitted).toBe(false)
+      releaseValidation()
+      await expect(ackPromise).resolves.toMatchObject({ ok: true })
+    } finally {
+      releaseValidation()
+      dashboard.close()
+    }
+  })
+
+  it('fails startup closed when an injected object store cannot load', async () => {
+    await server.close()
+    const sessionArtifacts = new SessionArtifactRegistry(join(dir, 'unavailable-session-artifacts'))
+    const messageAttachments = new MessageAttachmentStore(join(dir, 'unavailable-message-attachments'))
+    vi.spyOn(sessionArtifacts, 'load').mockRejectedValueOnce(new Error('object storage unavailable'))
+    await expect(startHostServer({
+      port: 0,
+      sessionsDir: dir,
+      llm: scriptedLlm(),
+      defaultConfig: config,
+      objectStorage: { sessionArtifacts, messageAttachments },
+    })).rejects.toThrow('object storage unavailable')
+    // Preserve afterEach ownership after the intentionally failed startup.
+    server = await startHostServer({ port: 0, sessionsDir: dir, llm: scriptedLlm(), defaultConfig: config })
+    url = `http://localhost:${server.port}`
   })
 
   it('enforces tenant storage quota before registering HTTP message attachments', async () => {
@@ -4289,6 +4468,43 @@ describe('wire protocol', () => {
     dashboard.close()
   })
 
+  it('refuses to clean up a Session tree when a descendant belongs to another Runtime', async () => {
+    const isolatedDir = mkdtempSync(join(tmpdir(), 'kala-tree-owner-'))
+    const checked: string[] = []
+    const isolated = await startHostServer({
+      port: 0, sessionsDir: isolatedDir, defaultConfig: config, llm: scriptedLlm(),
+      assertSessionEffectOwner: async (sessionId) => {
+        checked.push(sessionId)
+        if (sessionId === 'remote-owned-child') throw new Error('Session owner held by another replica')
+      },
+    })
+    try {
+      await isolated.store.create({ sessionId: 'local-owned-parent', config })
+      await isolated.store.create({ sessionId: 'remote-owned-child', config, parentSessionId: 'local-owned-parent' })
+      const deleted = vi.spyOn(isolated.store, 'delete')
+      const dashboard: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(
+        `http://localhost:${isolated.port}/dashboard`, {
+          transports: ['websocket'], reconnection: false,
+          auth: { sessionId: 'local-owned-parent', role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+        },
+      )
+      try {
+        await new Promise<SessionReadyEvent>((resolve) => dashboard.on('session:ready', resolve))
+        const result = await dashboard.timeout(2_000).emitWithAck('client:delete_session', {
+          operationId: 'remote-descendant-delete', sessionId: 'local-owned-parent',
+        })
+        expect(result).toMatchObject({ ok: false, error: expect.stringContaining('owner held') })
+        expect(checked).toContain('remote-owned-child')
+        expect(deleted).not.toHaveBeenCalled()
+        expect((await isolated.store.listSummaries()).map((s) => s.sessionId).sort())
+          .toEqual(['local-owned-parent', 'remote-owned-child'])
+      } finally { dashboard.close() }
+    } finally {
+      await isolated.close()
+      rmSync(isolatedDir, { recursive: true, force: true })
+    }
+  })
+
   it('forwards client:cancel to the executor as tool:cancel for pending calls', async () => {
     // Regression for reviewer R1: previously the loop dropped kernel
     // pendingCalls but never told the executor. A hanging bash / long
@@ -6305,7 +6521,9 @@ describe('wire protocol', () => {
     expect(seenPrompts).toEqual(['first', 'first|second'])
     expect(seenModels).toEqual(['provider:model-a', 'provider:model-a'])
     expect(server.store.get(sessionId)?.preferences.selectedModel).toBe('provider:model-b')
-    expect(governor.snapshot('unit-a')).toMatchObject({ concurrentTurns: 0, queuedMessages: 0 })
+    // The final 'done' event is broadcast before the permit is released in
+    // the turn's finally block; wait for cleanup rather than racing the event.
+    await vi.waitFor(() => expect(governor.snapshot('unit-a')).toMatchObject({ concurrentTurns: 0, queuedMessages: 0 }))
 
     dashboard.close()
   })

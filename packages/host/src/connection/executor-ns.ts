@@ -31,7 +31,7 @@ import type { AuditLogger } from '../audit-log.js'
 import { parseWire } from '../wire-validation.js'
 import { sessionRoom, terminalOwnerSessionId, terminalSessionRoom } from './rooms.js'
 import { executorAnnouncedConnectionMeta, executorPendingConnectionMeta, type ConnectionMeta } from './socket-metadata.js'
-import type { ExecutorInstallationStore } from '../store/executor-installation.js'
+import type { ExecutorInstallationStorage } from '../store/executor-installation.js'
 import { validateMcpToolDescriptors } from '../mcp-tools.js'
 
 export type ExecutorNs = Namespace<
@@ -44,7 +44,7 @@ export type ExecutorDeps = {
   executors: ReturnType<typeof createExecutorRegistry>
   defaultConfig: AgentConfig | (() => AgentConfig)
   auth?: AuthConfig
-  installations?: ExecutorInstallationStore
+  installations?: ExecutorInstallationStorage
   executorQuota?: TenantExecutorQuotaEnforcer
   audit?: AuditLogger
   broadcastError(
@@ -95,18 +95,22 @@ export function configureExecutorNamespace(
       nextFn(new Error('version_incompatible'))
       return
     }
-    const identity = authenticateExecutorToken(auth, deps.auth)
-    if (!identity.accepted) {
-      deps.audit?.log({ action: 'executor.socket_reject', actor: { kind: 'anonymous' }, outcome: 'denied', error: identity.reason ?? 'auth_failed' })
-      nextFn(new Error(identity.reason ?? 'auth_failed'))
-      return
-    }
-    executorIdentities.set(socket, identity)
-    socket.data.executorIdentity = publicExecutorIdentity(identity)
-    const connectionMeta = executorPendingConnectionMeta({ clientVersion: auth.clientVersion })
-    socket.data.connectionMeta = connectionMeta
-    deps.audit?.log({ action: 'executor.socket_accept', actor: { kind: 'token', ...(identity.label ? { label: identity.label } : {}) }, outcome: 'ok', metadata: { ...auditConnectionMeta(connectionMeta), scopedWorkspaceId: identity.workspaceId } })
-    nextFn()
+    void authenticateExecutorToken(auth, deps.auth).then((identity) => {
+      if (!identity.accepted) {
+        deps.audit?.log({ action: 'executor.socket_reject', actor: { kind: 'anonymous' }, outcome: 'denied', error: identity.reason ?? 'auth_failed' })
+        nextFn(new Error(identity.reason ?? 'auth_failed'))
+        return
+      }
+      executorIdentities.set(socket, identity)
+      socket.data.executorIdentity = publicExecutorIdentity(identity)
+      const connectionMeta = executorPendingConnectionMeta({ clientVersion: auth.clientVersion })
+      socket.data.connectionMeta = connectionMeta
+      deps.audit?.log({ action: 'executor.socket_accept', actor: { kind: 'token', ...(identity.label ? { label: identity.label } : {}) }, outcome: 'ok', metadata: { ...auditConnectionMeta(connectionMeta), scopedWorkspaceId: identity.workspaceId } })
+      nextFn()
+    }).catch((error: unknown) => {
+      deps.audit?.log({ action: 'executor.socket_reject', actor: { kind: 'anonymous' }, outcome: 'denied', error: error instanceof Error ? error.message : String(error) })
+      nextFn(new Error('auth_failed'))
+    })
   })
 
   ns.on('connection', (socket) => {
@@ -146,7 +150,7 @@ export function configureExecutorNamespace(
         return
       }
       if (identity?.inviteToken) {
-        const bound = deps.auth?.executorIdentityStore?.consumeInvite(identity.inviteToken, payload.workspaceId, payload.workspaceName)
+        const bound = await deps.auth?.executorIdentityStore?.consumeInvite(identity.inviteToken, payload.workspaceId, payload.workspaceName)
         if (!bound?.ok) {
           const reason = bound?.reason ?? 'invalid_invite'
           deps.audit?.log({ action: 'executor.invite_reject', actor: { kind: 'executor', executorId: payload.executorId, workspaceId: payload.workspaceId }, target: { workspaceId: payload.workspaceId }, outcome: 'denied', error: reason })
@@ -160,11 +164,11 @@ export function configureExecutorNamespace(
         socket.data.executorIdentity = publicExecutorIdentity(nextIdentity)
         deps.audit?.log({ action: 'executor.invite_bound', actor: { kind: 'executor', executorId: payload.executorId, workspaceId: payload.workspaceId }, target: { workspaceId: payload.workspaceId }, outcome: 'ok' })
       } else if (identity?.token) {
-        deps.auth?.executorIdentityStore?.markSeen(identity.token)
+        await deps.auth?.executorIdentityStore?.markSeen(identity.token)
       }
       const installId = payload.installId ?? auth.installId
       const trustedInstallId = identity?.installId === installId ? installId : undefined
-      const installSnapshot = installId ? deps.installations?.get(installId) : undefined
+      const installSnapshot = installId ? await deps.installations?.get(installId) : undefined
       if (deps.executorQuota) {
         if (!installSnapshot?.organizationId) {
           const reason = 'tenant_attribution_missing'
@@ -206,7 +210,7 @@ export function configureExecutorNamespace(
       executorAnnouncements.set(socket, payload)
       deps.executors.attach(socket, payload, auth.clientVersion)
       if (trustedInstallId && identity?.token) {
-        const completed = deps.installations?.markOnline(trustedInstallId, payload.workspaceId, {
+        const completed = await deps.installations?.markOnline(trustedInstallId, payload.workspaceId, {
           executorId: payload.executorId,
           ...(payload.executorVersion ? { executorVersion: payload.executorVersion } : {}),
           workspaceName: payload.workspaceName,

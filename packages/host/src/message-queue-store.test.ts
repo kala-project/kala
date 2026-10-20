@@ -84,6 +84,29 @@ describe('durable message queue metadata', () => {
     await expect(loadPersistedMessageQueue(new SessionStore(root), record.sessionId)).resolves.toEqual([item])
   })
 
+  it('restores an unknown shell result and its operator recovery guidance', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'message-queue-shell-unknown-'))
+    roots.push(root)
+    const store = new SessionStore(root)
+    const record = await store.create({ sessionId: 'shell-queue-unknown', config: createConfig({ tools: [] }) })
+    const item = {
+      id: 'shell-unknown-item',
+      operationId: 'shell-unknown-operation',
+      text: '!printf maybe',
+      mode: 'queue' as const,
+      createdAt: new Date().toISOString(),
+      shell: {
+        command: 'printf maybe',
+        state: 'unknown' as const,
+        error: 'Inspect the workspace, delete/cancel this item, and retry with a new operation ID.',
+      },
+    }
+
+    await persistMessageQueueSnapshot(store, record.sessionId, [item])
+
+    await expect(loadPersistedMessageQueue(new SessionStore(root), record.sessionId)).resolves.toEqual([item])
+  })
+
   it('rejects a new cancellation beyond the cap without dropping existing tombstones', async () => {
     const root = mkdtempSync(join(tmpdir(), 'message-queue-cancellation-cap-'))
     roots.push(root)

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 
-import { ScheduledTaskStore } from './store.js'
+import type { ScheduledTaskStorage } from './store.js'
 import type { OccurrenceReceipt, ScheduledRun, ScheduledTaskSnapshot } from './types.js'
 
 export type ScheduledTaskExecutor = {
@@ -16,7 +16,7 @@ export class UnitScheduler {
   private stopped = true
 
   constructor(
-    readonly store: ScheduledTaskStore,
+    readonly store: ScheduledTaskStorage,
     private readonly executor: ScheduledTaskExecutor,
     private readonly options: { unitId: string; pollMs?: number; catchupLimit?: number; reportError?(error: unknown): void } ,
   ) {}

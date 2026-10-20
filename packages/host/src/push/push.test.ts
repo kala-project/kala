@@ -132,7 +132,7 @@ describe('createPushDispatcher', () => {
     })
     expect(delivered).toBe(0)
     expect(webpush.sendNotification).not.toHaveBeenCalled()
-    expect(dispatcher.status()).toEqual({ configured: false })
+    expect(await dispatcher.status()).toEqual({ configured: false })
   })
 
   it('only sends to subscribers whose kinds match', async () => {

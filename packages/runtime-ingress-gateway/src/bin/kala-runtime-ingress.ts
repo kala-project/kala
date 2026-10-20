@@ -7,7 +7,7 @@ import { parsePublicUrls } from '@agent-kernel/shared'
 
 import { JsonOrganizationStore } from '../organizations/json-store.js'
 import { PostgresOrganizationStore } from '../organizations/postgres-store.js'
-import { requestRuntime, startRuntimeIngressGateway } from '../edge/server.js'
+import { startRuntimeIngressGateway } from '../edge/server.js'
 import { createOidcClient } from '../auth/oidc-client.js'
 import { readRequiredSecretEnv } from '../config/secret-env.js'
 import { FileLoginStateStore } from '../auth/login-state-store.js'
@@ -21,7 +21,15 @@ import { resolveRuntimeIngressControlPlaneMode } from '../config/control-plane.j
 import { ServiceAccountService } from '../api/service-accounts.js'
 import { createRuntimeHostRetentionClient, RetentionService, startRetentionScheduler } from '../governance/retention.js'
 import { OwnerBootstrapService } from '../organizations/owner-bootstrap.js'
-import { RuntimeUnitProvisioner } from '../organizations/runtime-unit-provisioner.js'
+import { createRuntimeHostProvisioningClient, RuntimeUnitProvisioner } from '../organizations/runtime-unit-provisioner.js'
+import {
+  auditPostgresRuntimeReaderConnection,
+  createPostgresRuntimeOriginResolver,
+  readExperimentalRuntimePlacementConfig,
+  runtimeReaderConnectionString,
+} from '../runtime-origin/postgres-runtime-origin-resolver.js'
+import { createPostgresRuntimeResourceOwnerResolver } from '../runtime-origin/postgres-runtime-resource-owner-resolver.js'
+import { RuntimeRoutingTicketResolver } from '../runtime-origin/runtime-routing-ticket-resolver.js'
 
 async function main(): Promise<void> {
   const port = Number(process.env.KALA_INGRESS_PORT ?? 13001)
@@ -58,6 +66,53 @@ async function main(): Promise<void> {
     ? await loadEnterpriseSsoResolver(resolve(process.env.KALA_INGRESS_ENTERPRISE_SSO_CONFIG))
     : undefined
   const hostOrigin = await readRequiredSecretEnv('KALA_RUNTIME_HOST_ORIGIN')
+  const runtimePlacementConfig = readExperimentalRuntimePlacementConfig(process.env)
+  if (runtimePlacementConfig && !database) {
+    throw new Error('KALA_INGRESS_EXPERIMENTAL_DOCKER_STORAGE=1 requires the PostgreSQL control plane so organization placement can be verified')
+  }
+  const routingTicketConfigured = [
+    process.env.KALA_INGRESS_RUNTIME_ROUTING_TICKET_KEY,
+    process.env.KALA_INGRESS_RUNTIME_ROUTING_TICKET_KEY_FILE,
+    process.env.KALA_INGRESS_RUNTIME_ROUTING_TICKET_AUDIENCE,
+    process.env.KALA_INGRESS_RUNTIME_ROUTING_TICKET_MAX_TTL_MS,
+  ].some((value) => Boolean(value?.trim()))
+  if (routingTicketConfigured && (!runtimePlacementConfig || !database)) {
+    throw new Error('Runtime routing tickets require experimental PostgreSQL Runtime placement and the PostgreSQL control plane')
+  }
+  const runtimeReader = runtimePlacementConfig
+    ? runtimeReaderConnectionString(runtimePlacementConfig, routingTicketConfigured)
+    : undefined
+  if (runtimeReader?.audit) await auditPostgresRuntimeReaderConnection(runtimeReader.connectionString)
+  const runtimeOriginResolver = runtimePlacementConfig && runtimeReader
+    ? createPostgresRuntimeOriginResolver({
+        connectionString: runtimeReader.connectionString,
+        allowedOrigins: runtimePlacementConfig.allowedOrigins,
+        ...(runtimePlacementConfig.bootstrapOrigin ? { bootstrapOrigin: runtimePlacementConfig.bootstrapOrigin } : {}),
+        controlPlane: database!,
+      })
+    : undefined
+  let runtimeResourceOwnerResolver: ReturnType<typeof createPostgresRuntimeResourceOwnerResolver> | undefined
+  let runtimeRoutingTicketResolver: RuntimeRoutingTicketResolver | undefined
+  if (routingTicketConfigured) {
+    const encodedKey = await readRequiredSecretEnv('KALA_INGRESS_RUNTIME_ROUTING_TICKET_KEY')
+    const key = Buffer.from(encodedKey, 'base64url')
+    if (key.length !== 32 || key.toString('base64url') !== encodedKey) {
+      throw new Error('KALA_INGRESS_RUNTIME_ROUTING_TICKET_KEY must be canonical base64url encoding of exactly 32 bytes')
+    }
+    const audience = process.env.KALA_INGRESS_RUNTIME_ROUTING_TICKET_AUDIENCE?.trim()
+    if (!audience) throw new Error('KALA_INGRESS_RUNTIME_ROUTING_TICKET_AUDIENCE is required when Runtime routing tickets are configured')
+    runtimeResourceOwnerResolver = createPostgresRuntimeResourceOwnerResolver({
+      connectionString: runtimeReader!.connectionString,
+      allowedOrigins: runtimePlacementConfig!.allowedOrigins,
+      controlPlane: database!,
+    })
+    runtimeRoutingTicketResolver = new RuntimeRoutingTicketResolver({
+      key,
+      audience,
+      maxTtlMs: numberEnv('KALA_INGRESS_RUNTIME_ROUTING_TICKET_MAX_TTL_MS'),
+      ownerResolver: runtimeResourceOwnerResolver,
+    })
+  }
   const runtimeTlsPaths = [
     process.env.KALA_INGRESS_RUNTIME_TLS_KEY_FILE,
     process.env.KALA_INGRESS_RUNTIME_TLS_CERT_FILE,
@@ -80,14 +135,12 @@ async function main(): Promise<void> {
       windowMs: numberEnv('KALA_INGRESS_RATE_LIMIT_WINDOW_MS', 60_000),
     })
     : undefined
-  const requestHostProvisioning = async (body: unknown) => await requestRuntime(
-    hostOrigin,
-    '/internal/runtime-units',
-    'POST',
-    { 'content-type': 'application/json', 'x-agent-runlab-ingress-secret': ingressSecret },
-    Buffer.from(JSON.stringify(body)),
-    runtimeTls,
-  )
+  const requestHostProvisioning = createRuntimeHostProvisioningClient({
+    origin: hostOrigin,
+    ...(runtimeOriginResolver ? { runtimeProvisioningOriginResolver: runtimeOriginResolver } : {}),
+    ingressSecret,
+    ...(runtimeTls ? { tls: runtimeTls } : {}),
+  })
   const postgresProvisioner = database ? new RuntimeUnitProvisioner(database, requestHostProvisioning) : undefined
   const gateway = await startRuntimeIngressGateway({
     port,
@@ -106,6 +159,8 @@ async function main(): Promise<void> {
     loginStates,
     sessions,
     hostOrigin,
+    ...(runtimeOriginResolver ? { runtimeOriginResolver } : {}),
+    ...(runtimeRoutingTicketResolver ? { runtimeRoutingTicketResolver } : {}),
     ...(runtimeTls ? { runtimeTls } : {}),
     ...(process.env.KALA_INGRESS_DASHBOARD_ORIGIN ? { dashboardOrigin: await readRequiredSecretEnv('KALA_INGRESS_DASHBOARD_ORIGIN') } : {}),
     publicOrigin,
@@ -130,6 +185,7 @@ async function main(): Promise<void> {
   const retentionScheduler = database && process.env.KALA_INGRESS_RETENTION_ENABLED !== '0' ? startRetentionScheduler({
     service: new RetentionService(database, createRuntimeHostRetentionClient({
       origin: hostOrigin,
+      ...(runtimeOriginResolver ? { runtimeOriginResolver } : {}),
       ingressSecret,
       ...(runtimeTls ? { tls: runtimeTls } : {}),
     })),
@@ -143,7 +199,7 @@ async function main(): Promise<void> {
   }) : undefined
   if (database && !retentionScheduler) process.stdout.write(`${JSON.stringify({ event: 'retention_scheduler_disabled' })}\n`)
   process.stdout.write(`${JSON.stringify({ event: 'private_cloud_gateway_ready', port: gateway.port })}\n`)
-  const close = async (): Promise<void> => { retentionScheduler?.stop(); await gateway.close(); await database?.close(); process.exit(0) }
+  const close = async (): Promise<void> => { retentionScheduler?.stop(); await gateway.close(); await runtimeResourceOwnerResolver?.close(); await runtimeOriginResolver?.close(); await database?.close(); process.exit(0) }
   process.on('SIGTERM', () => { void close() }); process.on('SIGINT', () => { void close() })
 }
 

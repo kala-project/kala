@@ -1557,6 +1557,8 @@ export type ClientLoadHistory = {
   sinceCursor?: number
 }
 
+export type ClientPrepareSessionRoute = { sessionId: string }
+
 export type ClientDeleteSession = {
   operationId?: string
   sessionId: string
@@ -2045,6 +2047,7 @@ export type DashboardClientToServerEvents = {
   'client:list_executors': (payload: ClientListExecutors) => void
   'client:list_sessions': (payload: ClientListSessions) => void
   'client:load_history': (payload: ClientLoadHistory) => void
+  'client:prepare_session_route': (payload: ClientPrepareSessionRoute, ack: (result: RpcAck) => void) => void
   'client:load_log_artifact': (payload: ClientLoadLogArtifact) => void
   'client:get_session_storage': (payload: ClientGetSessionStorage, ack: (result: RpcAck<SessionStorageSnapshot>) => void) => void
   'client:get_global_storage': (payload: ClientGetGlobalStorage, ack: (result: RpcAck<GlobalStorageSnapshot>) => void) => void
@@ -2154,8 +2157,9 @@ export type QueuedMessagePreview = {
   /** Host-owned shell lifecycle, keyed by this item's original operation id. */
   shell?: {
     command: string
-    state: 'queued' | 'running' | 'completed' | 'nonzero' | 'failed'
+    state: 'queued' | 'running' | 'completed' | 'nonzero' | 'failed' | 'unknown'
     result?: string
+    error?: string
   }
 }
 

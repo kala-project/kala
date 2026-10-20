@@ -37,6 +37,34 @@ export type ExecutorInviteSummary = Omit<ExecutorInvite, 'inviteToken'> & {
   revoked: boolean
 }
 
+export type MaybePromise<T> = T | Promise<T>
+
+/**
+ * Identity authority used by Host authentication and enrollment. The local
+ * implementation intentionally remains synchronous; remote authorities may
+ * return promises and consumers must await them.
+ */
+export interface ExecutorIdentityStorage {
+  load(): MaybePromise<void>
+  snapshot(): MaybePromise<readonly StoredExecutorIdentity[]>
+  provisionWorkspace(workspaceId: string, label?: string, installId?: string): MaybePromise<string>
+  inviteSnapshot(): MaybePromise<readonly ExecutorInviteSummary[]>
+  createInvite(input?: { label?: string; workspaceId?: string }): MaybePromise<ExecutorInvite>
+  createPairing(input: { workspaceId: string; label?: string }): MaybePromise<ExecutorPairingSummary & { claimSecret: string }>
+  pairingSnapshot(): MaybePromise<readonly ExecutorPairingSummary[]>
+  decidePairing(id: string, approved: boolean): MaybePromise<ExecutorPairingSummary | undefined>
+  claimPairing(id: string, secret: string): MaybePromise<{ status: ExecutorPairingSummary['status']; token?: string } | undefined>
+  consumeInvite(inviteToken: string | undefined, workspaceId: string, label?: string): MaybePromise<{ ok: true; token: string } | { ok: false; reason: string }>
+  updateInvite(id: string, input: { label?: string; workspaceId?: string | null }): MaybePromise<ExecutorInviteSummary | undefined>
+  revokeInvite(id: string): MaybePromise<boolean>
+  deleteInvite(id: string): MaybePromise<boolean>
+  regenerateInvite(id: string): MaybePromise<ExecutorInvite | undefined>
+  resolveToken(token: string | undefined): MaybePromise<StoredExecutorIdentity | undefined>
+  rotateWorkspaceCredential(workspaceId: string): MaybePromise<string>
+  markSeen(token: string | undefined): MaybePromise<void>
+  revokeWorkspace(workspaceId: string): MaybePromise<boolean>
+}
+
 type InviteRecord = ExecutorInviteSummary & {
   inviteHash: string
 }
@@ -48,7 +76,7 @@ type StoredExecutorInvite = InviteRecord & {
   used?: boolean
 }
 
-export class ExecutorIdentityStore {
+export class ExecutorIdentityStore implements ExecutorIdentityStorage {
   private identities: StoredExecutorIdentity[] = []
   private invites = new Map<string, InviteRecord>()
   private pairings = new Map<string, ExecutorPairingRecord>()

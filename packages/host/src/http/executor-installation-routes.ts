@@ -5,21 +5,21 @@ import { schema, type ExecutorInstallStatus, type PlatformTenancy } from '@agent
 
 import { authenticateDashboardHandshake, type AuthConfig, type DashboardActor } from '../auth-control.js'
 import type { AuditLogger } from '../audit-log.js'
-import { ExecutorInstallationError, type ExecutorInstallationStore } from '../store/executor-installation.js'
-import type { ExecutorIdentityStore } from '../store/executor-identity.js'
+import { ExecutorInstallationError, type ExecutorInstallationStorage } from '../store/executor-installation.js'
+import type { ExecutorIdentityStorage } from '../store/executor-identity.js'
 import { claimRoute } from './routes.js'
 import { validatedPublicOrigin } from './public-access-gate.js'
 
 export function attachExecutorInstallationRoutes(server: HttpServer, options: {
-  store: ExecutorInstallationStore
-  identities?: ExecutorIdentityStore
+  store: ExecutorInstallationStorage
+  identities?: ExecutorIdentityStorage
   auth?: AuthConfig
   tenancy: PlatformTenancy
   audit?: AuditLogger
   windowsReleaseAssetsReady?: () => boolean
 }): void {
   const claimAttempts = new Map<string, { count: number; resetAt: number }>()
-  server.on('request', (req, res) => {
+  server.on('request', async (req, res) => {
     if (res.headersSent || res.writableEnded) return
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname
@@ -91,9 +91,9 @@ export function attachExecutorInstallationRoutes(server: HttpServer, options: {
       if (!isSecureInstallRequest(req, origin)) { sendError(res, 400, 'https_required'); return }
       const claimKey = clientAddress(req)
       if (!allowClaimAttempt(claimAttempts, claimKey)) { sendError(res, 429, 'setup_code_rate_limited'); return }
-      void readJson(req).then((body) => {
+      void readJson(req).then(async (body) => {
         const setupCode = typeof (body as { setupCode?: unknown }).setupCode === 'string' ? (body as { setupCode: string }).setupCode : ''
-        const claimed = options.store.claim(setupCode)
+        const claimed = await options.store.claim(setupCode)
         if (!claimed) { sendError(res, 401, 'invalid_or_consumed_setup_code'); return }
         claimAttempts.delete(claimKey)
         const env = bootstrapEnvironment(origin, claimed.install, claimed.bootstrap)
@@ -116,11 +116,13 @@ export function attachExecutorInstallationRoutes(server: HttpServer, options: {
       return
     }
     if (id && action === 'status' && req.method === 'GET') {
-      const bootstrap = bearer(req) ?? url.searchParams.get('bootstrap') ?? undefined
-      if (!options.store.authenticate(id, bootstrap)) { sendError(res, 401, 'invalid_installation_credential'); return }
-      const snapshot = options.store.get(id)
-      if (!snapshot) { sendError(res, 404, 'installation_not_found'); return }
-      sendJson(res, 200, snapshot)
+      try {
+        const bootstrap = bearer(req) ?? url.searchParams.get('bootstrap') ?? undefined
+        if (!await options.store.authenticate(id, bootstrap)) { sendError(res, 401, 'invalid_installation_credential'); return }
+        const snapshot = await options.store.get(id)
+        if (!snapshot) { sendError(res, 404, 'installation_not_found'); return }
+        sendJson(res, 200, snapshot)
+      } catch (error) { handleError(res, error) }
       return
     }
 
@@ -129,10 +131,10 @@ export function attachExecutorInstallationRoutes(server: HttpServer, options: {
 
     try {
       if (!id && req.method === 'POST') {
-        void readJson(req).then((body) => {
+        void readJson(req).then(async (body) => {
           const input = schema.CreateExecutorInstallSchema.parse(body)
           if (input.platform === 'windows' && !options.windowsReleaseAssetsReady?.()) { sendError(res, 422, 'windows_release_assets_unavailable'); return }
-          const created = options.store.create(input, scopedIdempotencyKey(header(req, 'idempotency-key'), authorization.actor), tenantAttribution(authorization.actor))
+          const created = await options.store.create(input, scopedIdempotencyKey(header(req, 'idempotency-key'), authorization.actor), tenantAttribution(authorization.actor))
           const origin = requestOrigin(req)
           const command = installCommand(origin, input.platform, input.mode, created.setupCode)
           options.audit?.log({ action: 'executor_install.create', actor: authorization.actor, outcome: 'ok', metadata: { id: created.install.id } })
@@ -142,47 +144,47 @@ export function attachExecutorInstallationRoutes(server: HttpServer, options: {
       }
       if (!id) { sendError(res, 405, 'method_not_allowed'); return }
       if (!action && req.method === 'GET') {
-        const snapshot = options.store.get(id)
+        const snapshot = await options.store.get(id)
         if (!snapshot) { sendError(res, 404, 'installation_not_found'); return }
         const accessError = executorInstallAccessError(authorization.actor, snapshot)
         if (accessError) { sendError(res, 403, accessError); return }
         sendJson(res, 200, snapshot); return
       }
       if (!action && req.method === 'PATCH') {
-        void readJson(req).then((body) => {
-          const snapshot = options.store.get(id)
+        void readJson(req).then(async (body) => {
+          const snapshot = await options.store.get(id)
           if (!snapshot) { sendError(res, 404, 'installation_not_found'); return }
           const accessError = executorInstallAccessError(authorization.actor, snapshot)
           if (accessError) { sendError(res, 403, accessError); return }
-          const updated = options.store.update(id, schema.UpdateExecutorInstallSchema.parse(body))
+          const updated = await options.store.update(id, schema.UpdateExecutorInstallSchema.parse(body))
           if (!updated) { sendError(res, 409, 'installation_not_editable'); return }
           sendJson(res, 200, updated)
         }).catch((error) => handleError(res, error)); return
       }
       if (!action && req.method === 'DELETE') {
-        const snapshot = options.store.get(id)
+        const snapshot = await options.store.get(id)
         if (!snapshot) { sendError(res, 404, 'installation_not_found'); return }
         const accessError = executorInstallAccessError(authorization.actor, snapshot)
         if (accessError) { sendError(res, 403, accessError); return }
-        sendJson(res, 200, { ok: true, id, deleted: options.store.delete(id) }); return
+        sendJson(res, 200, { ok: true, id, deleted: await options.store.delete(id) }); return
       }
       if ((action === 'approve' || action === 'reject') && req.method === 'POST') {
-        const snapshot = options.store.get(id)
+        const snapshot = await options.store.get(id)
         if (!snapshot) { sendError(res, 404, 'installation_not_found'); return }
         const accessError = executorInstallAccessError(authorization.actor, snapshot)
         if (accessError) { sendError(res, 403, accessError); return }
-        const updated = action === 'approve' ? options.store.approve(id) : options.store.reject(id)
+        const updated = action === 'approve' ? await options.store.approve(id) : await options.store.reject(id)
         if (!updated) { sendError(res, 409, 'installation_not_pending'); return }
         options.audit?.log({ action: `executor_install.${action}`, actor: authorization.actor, outcome: 'ok', metadata: { id } })
         sendJson(res, 200, updated); return
       }
       if (action === 'events' && req.method === 'GET') {
-        const snapshot = options.store.get(id)
+        const snapshot = await options.store.get(id)
         if (!snapshot) { sendError(res, 404, 'installation_not_found'); return }
         const accessError = executorInstallAccessError(authorization.actor, snapshot)
         if (accessError) { sendError(res, 403, accessError); return }
         const after = Number(header(req, 'last-event-id') ?? url.searchParams.get('after') ?? -1)
-        const events = options.store.events(id, Number.isSafeInteger(after) ? after : -1)
+        const events = await options.store.events(id, Number.isSafeInteger(after) ? after : -1)
         sendJson(res, 200, { events }); return
       }
       sendError(res, 405, 'method_not_allowed')
@@ -207,26 +209,26 @@ function executorInstallAccessError(actor: DashboardActor, snapshot: { organizat
   return snapshot.organizationId === actor.organizationId ? undefined : 'tenant_forbidden'
 }
 
-async function handleClientEvent(req: IncomingMessage, res: ServerResponse, store: ExecutorInstallationStore, id: string): Promise<void> {
+async function handleClientEvent(req: IncomingMessage, res: ServerResponse, store: ExecutorInstallationStorage, id: string): Promise<void> {
   try {
     const body = await readJson(req) as { bootstrap?: unknown; status?: unknown; errorCode?: unknown; metadata?: unknown }
     const bootstrap = typeof body.bootstrap === 'string' ? body.bootstrap : bearer(req)
     if (!bootstrap) { sendError(res, 401, 'installation_credential_required'); return }
     const status = schema.ExecutorInstallStatusSchema.parse(body.status) as ExecutorInstallStatus
     const event = schema.ExecutorInstallEventSchema.pick({ errorCode: true, metadata: true }).partial().parse({ errorCode: body.errorCode, metadata: body.metadata })
-    sendJson(res, 200, store.reportClient(id, bootstrap, status, event.errorCode, event.metadata))
+    sendJson(res, 200, await store.reportClient(id, bootstrap, status, event.errorCode, event.metadata))
   } catch (error) { handleError(res, error) }
 }
 
-async function handleRedeem(req: IncomingMessage, res: ServerResponse, store: ExecutorInstallationStore, identities: ExecutorIdentityStore | undefined, id: string): Promise<void> {
+async function handleRedeem(req: IncomingMessage, res: ServerResponse, store: ExecutorInstallationStorage, identities: ExecutorIdentityStorage | undefined, id: string): Promise<void> {
   try {
     if (!identities) throw new ExecutorInstallationError('executor_identity_store_not_configured', 503)
     const body = await readJson(req) as { bootstrap?: unknown; workspaceId?: unknown; label?: unknown }
     const bootstrap = typeof body.bootstrap === 'string' ? body.bootstrap : bearer(req)
     const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId.trim() : ''
     if (!bootstrap || !workspaceId) throw new ExecutorInstallationError('invalid_redeem_request', 400)
-    const snapshot = store.redeem(id, bootstrap, workspaceId)
-    const token = identities.provisionWorkspace(workspaceId, typeof body.label === 'string' ? body.label.trim() : undefined, snapshot.id)
+    const snapshot = await store.redeem(id, bootstrap, workspaceId)
+    const token = await identities.provisionWorkspace(workspaceId, typeof body.label === 'string' ? body.label.trim() : undefined, snapshot.id)
     sendJson(res, 200, { installationId: snapshot.id, workspaceId, token })
   } catch (error) { handleError(res, error) }
 }

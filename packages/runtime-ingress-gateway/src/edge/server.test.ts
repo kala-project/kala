@@ -1,14 +1,16 @@
 import { createServer, request as httpRequest } from 'node:http'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { issueRuntimeRoutingTicket } from '@agent-kernel/shared'
 
 import { inviteKey, MemoryRuntimeAssignmentStore, type AuthenticatedIdentity } from '../assignments/store.js'
 import type { LoginState, LoginStateStore } from '../auth/login-state-store.js'
-import { startRuntimeIngressGateway, type RuntimeIngressGateway } from './server.js'
+import { startRuntimeIngressGateway, type RuntimeIngressGateway, type RuntimeOriginResolver } from './server.js'
 import { FileBrowserSessionStore } from '../auth/browser-session-store.js'
 import { createSessionSecretBox } from '../auth/session-secret-box.js'
 import { MemoryEnterpriseSsoResolver } from '../auth/enterprise-sso.js'
 import { MemoryOrganizationStore, type OrganizationStore, type OrganizationStatus } from '../organizations/store.js'
 import { SlidingWindowRateLimiter } from '../governance/rate-limit.js'
+import { RuntimeRoutingTicketResolver } from '../runtime-origin/runtime-routing-ticket-resolver.js'
 import { ServiceAccountService, type ServiceAccountScope } from '../api/service-accounts.js'
 import type { SqlExecutor, SqlQueryResult } from '../persistence/postgres.js'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -499,6 +501,268 @@ describe('Private Cloud edge request path', () => {
     expect(upgrades).toHaveLength(3)
   })
 
+  it('discovers opaque active replicas and routes an Executor to the exact current member', async () => {
+    const upgrades: Array<{ pod: string; replicaHeader?: string }> = []
+    const startRuntime = async (pod: string) => {
+      const runtime = createServer()
+      runtime.on('upgrade', (request, socket) => {
+        upgrades.push({ pod, replicaHeader: request.headers['x-kala-executor-replica'] as string | undefined })
+        socket.end('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
+      })
+      await new Promise<void>((resolve) => runtime.listen(0, '127.0.0.1', resolve))
+      running.push({ close: () => new Promise<void>((resolve) => runtime.close(() => resolve())) })
+      const address = runtime.address()
+      return `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`
+    }
+    const [originX, originY] = await Promise.all([startRuntime('x'), startRuntime('y')])
+    const directory = new MemoryRuntimeAssignmentStore()
+    await directory.bindExecutorInvite('executor-invite', 'tenant_executor')
+    const runtimeOriginResolver: RuntimeOriginResolver = {
+      async resolve() { return originX },
+      async listReplicas(unitId) { return unitId === 'tenant_executor' ? ['runtime-x', 'runtime-y'] : undefined },
+      async resolveReplica(unitId, replicaId) {
+        if (unitId !== 'tenant_executor') return undefined
+        return replicaId === 'runtime-x' ? originX : replicaId === 'runtime-y' ? originY : undefined
+      },
+    }
+    const gateway = await createGateway('http://127.0.0.1:9', undefined, { directory, runtimeOriginResolver })
+    const endpoint = `http://127.0.0.1:${gateway.port}`
+    const route = inviteKey('executor-invite')
+
+    const membership = await fetch(`${endpoint}/.well-known/kala/executor-replicas`, { headers: { 'x-kala-executor-route': route } })
+    expect(membership.status).toBe(200)
+    await expect(membership.json()).resolves.toEqual({ replicas: ['runtime-x', 'runtime-y'] })
+    const unauthorized = await fetch(`${endpoint}/.well-known/kala/executor-replicas`)
+    expect(unauthorized.status).toBe(401)
+
+    await openWebSocket(gateway.port, { 'x-kala-executor-route': route, 'x-kala-executor-replica': 'runtime-y' })
+    expect(upgrades).toEqual([{ pod: 'y', replicaHeader: undefined }])
+    await expect(openWebSocket(gateway.port, { 'x-kala-executor-route': route, 'x-kala-executor-replica': 'stale-runtime' })).rejects.toThrow()
+    expect(upgrades).toHaveLength(1)
+  })
+
+  it('routes browser HTTP and browser or Executor upgrades by trusted Unit and fails closed without a route', async () => {
+    const httpRequests: Array<{ pod: string; path?: string; unit?: string }> = []
+    const upgrades: Array<{ pod: string; unit?: string }> = []
+    const startRuntime = async (pod: string) => {
+      const runtime = createServer((request, response) => {
+        httpRequests.push({ pod, path: request.url, unit: request.headers['x-agent-runlab-runtime-unit'] as string | undefined })
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(request.url === '/auth/executor-invites' ? JSON.stringify({ inviteToken: 'issued-executor-invite' }) : JSON.stringify({ pod }))
+      })
+      runtime.on('upgrade', (request, socket) => {
+        upgrades.push({ pod, unit: request.headers['x-agent-runlab-runtime-unit'] as string | undefined })
+        socket.end('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
+      })
+      await new Promise<void>((resolve) => runtime.listen(0, '127.0.0.1', resolve))
+      running.push({ close: () => new Promise<void>((resolve) => runtime.close(() => resolve())) })
+      const address = runtime.address()
+      return `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`
+    }
+    const [browserOrigin, executorOrigin] = await Promise.all([startRuntime('browser'), startRuntime('executor')])
+
+    const organizations = new TestOrganizationStore()
+    const access = await organizations.getOrCreateForIdentity({ issuer: 'http://identity.example', subject: 'alice' })
+    const directory = new MemoryRuntimeAssignmentStore()
+    await directory.bindExecutorInvite('executor-invite', 'tenant_executor')
+    const origins = new Map([[access.organization.unitId, browserOrigin], ['tenant_executor', executorOrigin]])
+    const resolvedUnits: string[] = []
+    const runtimeOriginResolver: RuntimeOriginResolver = {
+      async resolve(unitId) { resolvedUnits.push(unitId); return origins.get(unitId) },
+    }
+    const gateway = await createGateway('http://127.0.0.1:9', undefined, { organizations, directory, runtimeOriginResolver })
+    const login = await fetch(`http://127.0.0.1:${gateway.port}/auth/login`, { redirect: 'manual' })
+    const callback = await fetch(`http://127.0.0.1:${gateway.port}/auth/callback?code=ok`, {
+      headers: { cookie: `ak_login=${cookieValue(login.headers.getSetCookie(), 'ak_login')}` }, redirect: 'manual',
+    })
+    const session = cookieValue(callback.headers.getSetCookie(), 'ak_session')
+    const endpoint = `http://127.0.0.1:${gateway.port}`
+
+    const browserHttp = await fetch(`${endpoint}/runtime/capabilities`, { headers: { cookie: `ak_session=${session}`, 'x-agent-runlab-runtime-unit': 'tenant_executor' } })
+    expect(await browserHttp.json()).toEqual({ pod: 'browser' })
+    const internalApi = await fetch(`${endpoint}/auth/executor-invites`, {
+      method: 'POST', headers: { cookie: `ak_session=${session}`, origin: endpoint, 'content-type': 'application/json' }, body: '{}',
+    })
+    expect(internalApi.status).toBe(200)
+    await openWebSocket(gateway.port, { cookie: `ak_session=${session}` })
+    await openWebSocket(gateway.port, { 'x-kala-executor-invite': 'executor-invite' })
+
+    expect(httpRequests).toEqual([
+      { pod: 'browser', path: '/runtime/capabilities', unit: access.organization.unitId },
+      { pod: 'browser', path: '/auth/executor-invites', unit: access.organization.unitId },
+    ])
+    expect(upgrades).toEqual([
+      { pod: 'browser', unit: access.organization.unitId },
+      { pod: 'executor', unit: 'tenant_executor' },
+    ])
+    expect(resolvedUnits).toContain(access.organization.unitId)
+    expect(resolvedUnits).toContain('tenant_executor')
+
+    const polling = await fetch(`${endpoint}/socket.io/?EIO=4&transport=polling`, { headers: { cookie: `ak_session=${session}` } })
+    expect(polling.status).toBe(409)
+    await expect(polling.json()).resolves.toMatchObject({ error: 'runtime_origin_stickiness_required' })
+    expect(httpRequests).toHaveLength(2)
+
+    const unavailable = await createGateway(browserOrigin, undefined, {
+      organizations,
+      directory,
+      runtimeOriginResolver: { async resolve() { return undefined } },
+    })
+    const unavailableLogin = await fetch(`http://127.0.0.1:${unavailable.port}/auth/login`, { redirect: 'manual' })
+    const unavailableCallback = await fetch(`http://127.0.0.1:${unavailable.port}/auth/callback?code=ok`, {
+      headers: { cookie: `ak_login=${cookieValue(unavailableLogin.headers.getSetCookie(), 'ak_login')}` }, redirect: 'manual',
+    })
+    const unavailableSession = cookieValue(unavailableCallback.headers.getSetCookie(), 'ak_session')
+    const denied = await fetch(`http://127.0.0.1:${unavailable.port}/runtime/capabilities`, {
+      headers: { cookie: `ak_session=${unavailableSession}`, 'x-agent-runlab-runtime-unit': 'tenant_executor', 'x-kala-runtime-origin': executorOrigin },
+    })
+    expect(denied.status).toBe(503)
+    await expect(denied.json()).resolves.toEqual({ error: 'runtime_origin_unavailable' })
+    expect(httpRequests).toHaveLength(2)
+  })
+
+  it('routes only authorized single WS tickets to live Session owners and never falls back to the Unit origin', async () => {
+    const upgrades: Array<{ target: string; path: string; unit?: string; cookie?: string; routedSession?: string }> = []
+    const startRuntime = async (target: string) => {
+      const runtime = createServer()
+      runtime.on('upgrade', (request, socket) => {
+        upgrades.push({
+          target,
+          path: request.url ?? '',
+          unit: request.headers['x-agent-runlab-runtime-unit'] as string | undefined,
+          cookie: request.headers.cookie,
+          routedSession: request.headers['x-agent-runlab-route-session-id'] as string | undefined,
+        })
+        socket.end('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
+      })
+      await new Promise<void>((resolve) => runtime.listen(0, '127.0.0.1', resolve))
+      running.push({ close: () => new Promise<void>((resolve) => runtime.close(() => resolve())) })
+      const address = runtime.address()
+      return `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`
+    }
+    const [unitOrigin, sessionAOrigin, sessionBOrigin] = await Promise.all([
+      startRuntime('unit'), startRuntime('session-a'), startRuntime('session-b'),
+    ])
+
+    const organizations = new TestOrganizationStore()
+    const owner = await organizations.getOrCreateForIdentity({ issuer: 'http://identity.example', subject: 'owner' })
+    const alice = { issuer: 'http://identity.example', subject: 'alice' }
+    await organizations.addMember(owner.organization.id, alice, 'member')
+    const directory = new MemoryRuntimeAssignmentStore()
+    await directory.bindExecutorInvite('executor-invite', 'tenant_executor')
+    const key = new Uint8Array(32).fill(9)
+    const nowMs = 1_900_000_000_000
+    const owners = new Map([
+      ['session_a', { origin: sessionAOrigin, replicaId: 'replica_a', generation: 3n }],
+      ['session_b', { origin: sessionBOrigin, replicaId: 'replica_b', generation: 7n }],
+    ])
+    const resolveResourceOwnerBinding = vi.fn(async (input: { resourceId: string }) => owners.get(input.resourceId))
+    const runtimeRoutingTicketResolver = new RuntimeRoutingTicketResolver({
+      key,
+      audience: 'gateway.internal',
+      maxTtlMs: 10_000,
+      ownerResolver: { resolveResourceOwnerBinding },
+      now: () => nowMs + 1,
+    })
+    const runtimeOriginResolver: RuntimeOriginResolver = { async resolve() { return unitOrigin } }
+    const gateway = await createGateway('http://127.0.0.1:9', undefined, {
+      organizations, directory, runtimeOriginResolver, runtimeRoutingTicketResolver,
+    })
+    const loginSession = async (targetGateway: RuntimeIngressGateway): Promise<string> => {
+      const login = await fetch(`http://127.0.0.1:${targetGateway.port}/auth/login`, { redirect: 'manual' })
+      const callback = await fetch(`http://127.0.0.1:${targetGateway.port}/auth/callback?code=ok`, {
+        headers: { cookie: `ak_login=${cookieValue(login.headers.getSetCookie(), 'ak_login')}` }, redirect: 'manual',
+      })
+      return cookieValue(callback.headers.getSetCookie(), 'ak_session')
+    }
+    const sessionCookie = await loginSession(gateway)
+    const alicePrincipalId = Buffer.from(`${alice.issuer}\0${alice.subject}`, 'utf8').toString('base64url')
+    const issueTicket = (resourceId: string, overrides: Partial<{
+      principalId: string; organizationId: string; unitId: string; resourceKind: 'session' | 'task'
+      ownerReplicaId: string; ownerGeneration: bigint; ttlMs: number; issuedAt: number
+    }> = {}) => issueRuntimeRoutingTicket({
+      audience: 'gateway.internal',
+      principalId: overrides.principalId ?? alicePrincipalId,
+      organizationId: overrides.organizationId ?? owner.organization.id,
+      unitId: overrides.unitId ?? owner.organization.unitId,
+      resourceKind: overrides.resourceKind ?? 'session',
+      resourceId,
+      ownerReplicaId: overrides.ownerReplicaId ?? (resourceId === 'session_b' ? 'replica_b' : 'replica_a'),
+      ownerGeneration: overrides.ownerGeneration ?? (resourceId === 'session_b' ? 7n : 3n),
+      ttlMs: overrides.ttlMs ?? 5_000,
+    }, { key, maxTtlMs: 10_000, nowMs: overrides.issuedAt ?? nowMs })
+    const ticketPath = (ticket: string) => `/socket.io/?EIO=4&transport=websocket&runtimeRouteTicket=${encodeURIComponent(ticket)}`
+    const endpoint = `http://127.0.0.1:${gateway.port}`
+    const postTicket = (sessionId: string, headers: Record<string, string> = {}) => fetch(`${endpoint}/runtime/route-ticket`, {
+      method: 'POST',
+      headers: { cookie: `ak_session=${sessionCookie}`, origin: endpoint, 'content-type': 'application/json', ...headers },
+      body: JSON.stringify({ sessionId }),
+    })
+    const issued = await postTicket('session_a')
+    expect(issued.status).toBe(200)
+    expect(issued.headers.get('cache-control')).toBe('no-store')
+    const ticketA = (await issued.json() as { ticket: string }).ticket
+    const ticketB = issueTicket('session_b')
+    expect(resolveResourceOwnerBinding).toHaveBeenCalledWith({
+      organizationId: owner.organization.id, unitId: owner.organization.unitId,
+      resourceType: 'session', resourceId: 'session_a',
+    })
+    expect((await postTicket('missing')).status).toBe(404)
+    expect((await postTicket('session_a', { origin: 'https://evil.example' })).status).toBe(403)
+    expect((await postTicket('session_a', { authorization: 'Bearer forged' })).status).toBe(401)
+    expect((await fetch(`${endpoint}/runtime/route-ticket`, { method: 'POST', headers: { origin: endpoint, 'content-type': 'application/json' }, body: '{"sessionId":"session_a"}' })).status).toBe(401)
+    expect((await fetch(`${endpoint}/runtime/route-ticket`, { method: 'GET', headers: { cookie: `ak_session=${sessionCookie}` } })).status).toBe(405)
+    expect((await postTicket('../session_a')).status).toBe(404)
+    expect((await fetch(`${endpoint}/runtime/route-ticket`, {
+      method: 'POST', headers: { cookie: `ak_session=${sessionCookie}`, origin: endpoint, 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'session_a', organizationId: 'org_other', principalId: 'forged' }),
+    })).status).toBe(400)
+    resolveResourceOwnerBinding.mockRejectedValueOnce(new Error('postgres unavailable'))
+    expect((await postTicket('session_a')).status).toBe(503)
+
+    await openWebSocket(gateway.port, { cookie: `ak_session=${sessionCookie}` }, ticketPath(ticketA))
+    await openWebSocket(gateway.port, { cookie: `ak_session=${sessionCookie}` }, ticketPath(ticketB))
+    await openWebSocket(gateway.port, { cookie: `ak_session=${sessionCookie}`, 'x-agent-runlab-route-session-id': 'forged_session' })
+    expect(upgrades).toEqual([
+      { target: 'session-a', path: '/socket.io/?EIO=4&transport=websocket', unit: owner.organization.unitId, cookie: undefined, routedSession: 'session_a' },
+      { target: 'session-b', path: '/socket.io/?EIO=4&transport=websocket', unit: owner.organization.unitId, cookie: undefined, routedSession: 'session_b' },
+      { target: 'unit', path: '/socket.io/?EIO=4&transport=websocket', unit: owner.organization.unitId, cookie: undefined, routedSession: undefined },
+    ])
+
+    const expectDenied = async (ticket: string, headers: Record<string, string> = { cookie: `ak_session=${sessionCookie}` }, path = ticketPath(ticket)) => {
+      await expect(openWebSocket(gateway.port, headers, path)).rejects.toThrow()
+      expect(upgrades).toHaveLength(3)
+    }
+    await expectDenied(`${ticketA.slice(0, -1)}${ticketA.endsWith('a') ? 'b' : 'a'}`)
+    await expectDenied(issueTicket('session_a', { ownerGeneration: 2n }))
+    await expectDenied(issueTicket('session_a', { issuedAt: nowMs - 10_000 }))
+    await expectDenied(issueTicket('session_a', { organizationId: 'org_other', unitId: 'unit_other' }))
+    await expectDenied(issueTicket('session_a', { principalId: 'another_principal' }))
+    await expectDenied(issueTicket('session_a', { resourceKind: 'task' }))
+    await expectDenied(ticketA, { cookie: `ak_session=${sessionCookie}` }, `${ticketPath(ticketA)}&runtimeRouteTicket=${encodeURIComponent(ticketB)}`)
+    await expectDenied(ticketA, {})
+    await expectDenied(ticketA, { 'x-kala-executor-invite': 'executor-invite' })
+    await expectDenied(ticketA, { 'x-kala-executor-route': inviteKey('executor-invite') })
+
+    await organizations.updateMemberRole(owner.organization.id, alice, 'viewer')
+    expect((await postTicket('session_a')).status).toBe(403)
+    await expectDenied(ticketA)
+    await organizations.updateMemberRole(owner.organization.id, alice, 'member')
+    await organizations.removeMember(owner.organization.id, alice)
+    expect((await postTicket('session_a')).status).toBe(401)
+    await expectDenied(ticketA)
+    await organizations.addMember(owner.organization.id, alice, 'member')
+
+    const disabledGateway = await createGateway(unitOrigin, undefined, { organizations, directory, runtimeOriginResolver })
+    const disabledCookie = await loginSession(disabledGateway)
+    expect((await fetch(`http://127.0.0.1:${disabledGateway.port}/runtime/route-ticket`, {
+      method: 'POST', headers: { cookie: `ak_session=${disabledCookie}`, origin: `http://127.0.0.1:${disabledGateway.port}`, 'content-type': 'application/json' },
+      body: '{"sessionId":"session_a"}',
+    })).status).toBe(404)
+    await expect(openWebSocket(disabledGateway.port, { cookie: `ak_session=${disabledCookie}` }, ticketPath(ticketA))).rejects.toThrow()
+    expect(upgrades).toHaveLength(3)
+  })
+
   it('requires same-origin browser organization writes while preserving origin-less clients', async () => {
     const organizations = new TestOrganizationStore()
     const gateway = await createGateway('http://127.0.0.1:9', undefined, { organizations })
@@ -703,6 +967,8 @@ async function createGateway(
     rateLimiter?: SlidingWindowRateLimiter
     serviceAccounts?: ServiceAccountService
     directory?: MemoryRuntimeAssignmentStore
+    runtimeOriginResolver?: RuntimeOriginResolver
+    runtimeRoutingTicketResolver?: RuntimeRoutingTicketResolver
   },
 ): Promise<RuntimeIngressGateway> {
   const dir = mkdtempSync(join(tmpdir(), 'gateway-sessions-'))
@@ -712,6 +978,8 @@ async function createGateway(
     port: 0,
     listenHost: '127.0.0.1',
     hostOrigin,
+    ...(auth?.runtimeOriginResolver ? { runtimeOriginResolver: auth.runtimeOriginResolver } : {}),
+    ...(auth?.runtimeRoutingTicketResolver ? { runtimeRoutingTicketResolver: auth.runtimeRoutingTicketResolver } : {}),
     ...(auth?.dashboardOrigin ? { dashboardOrigin: auth.dashboardOrigin } : {}),
     publicOrigin: 'http://127.0.0.1:0',
     sessions,
@@ -839,12 +1107,12 @@ function sqlResult<Row extends Record<string, unknown>>(rows: Row[], rowCount = 
   return { rows, rowCount, command: '', oid: 0, fields: [] }
 }
 
-function openWebSocket(port: number, headers: Record<string, string>): Promise<void> {
+function openWebSocket(port: number, headers: Record<string, string>, path = '/socket.io/?EIO=4&transport=websocket'): Promise<void> {
   return new Promise((resolve, reject) => {
     const request = httpRequest({
       host: '127.0.0.1',
       port,
-      path: '/socket.io/?EIO=4&transport=websocket',
+      path,
       headers: { connection: 'Upgrade', upgrade: 'websocket', ...headers },
     })
     request.once('upgrade', (_response, socket) => { socket.destroy(); resolve() })

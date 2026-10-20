@@ -21,7 +21,7 @@ import webpush from 'web-push'
 
 import type { PushEventPayload, DesktopNotificationKind } from '@agent-kernel/shared/push'
 
-import type { PushSubscriptionStore } from './store.js'
+import type { PushSubscriptionStorage } from './store.js'
 import type { VapidKeys } from './vapid.js'
 
 export type PushSendOutcome = {
@@ -51,11 +51,11 @@ export type PushDispatcher = {
   sendRawDetailed: (payload: PushEventPayload) => Promise<PushSendOutcome[]>
   sendToDevice: (deviceId: string, payload: PushEventPayload) => Promise<PushSendOutcome[]>
   /** Diagnostic surface for the settings page. */
-  status: () => { configured: true; subscribers: number } | { configured: false }
+  status: () => Promise<{ configured: true; subscribers: number } | { configured: false }>
 }
 
 export function createPushDispatcher(input: {
-  store: PushSubscriptionStore
+  store: PushSubscriptionStorage
   vapid: VapidKeys | null
   /** Product notifications are skipped while any dashboard is actively used. */
   shouldSuppress?: () => boolean
@@ -77,25 +77,25 @@ export function createPushDispatcher(input: {
   }
 
   return {
-    status: () => vapid ? { configured: true, subscribers: store.size() } : { configured: false },
+    status: async () => vapid ? { configured: true, subscribers: await store.size() } : { configured: false },
     send: async (payload: PushEventPayload): Promise<number> => {
       if (!vapid || input.shouldSuppress?.()) return 0
-      const targets = store.list().filter((sub) => sub.enabled !== false && matchesKind(sub.kinds, payload.kind))
+      const targets = (await store.list()).filter((sub) => sub.enabled !== false && matchesKind(sub.kinds, payload.kind))
       const outcomes = await fanout(targets, payload)
       return outcomes.filter((o) => o.ok).length
     },
     sendRaw: async (payload: PushEventPayload): Promise<number> => {
       if (!vapid) return 0
-      const outcomes = await fanout(store.list(), payload)
+      const outcomes = await fanout(await store.list(), payload)
       return outcomes.filter((o) => o.ok).length
     },
     sendRawDetailed: async (payload: PushEventPayload): Promise<PushSendOutcome[]> => {
       if (!vapid) return []
-      return fanout(store.list(), payload)
+      return fanout(await store.list(), payload)
     },
     sendToDevice: async (deviceId, payload) => {
       if (!vapid) return []
-      return fanout(store.list().filter((sub) => sub.deviceId === deviceId && sub.enabled !== false), payload)
+      return fanout((await store.list()).filter((sub) => sub.deviceId === deviceId && sub.enabled !== false), payload)
     },
   }
 
@@ -118,16 +118,16 @@ export function createPushDispatcher(input: {
         ),
       )
       const outcomes: PushSendOutcome[] = []
-      results.forEach((outcome, index) => {
+      for (const [index, outcome] of results.entries()) {
         const subscription = targets[index]!
         if (outcome.status === 'fulfilled') {
           outcomes.push({ endpoint: subscription.endpoint, ok: true })
-          return
+          continue
         }
         const err = outcome.reason as (Error & { statusCode?: number; body?: string }) | undefined
         const status = err?.statusCode
         if (status === 404 || status === 410) {
-          store.remove(subscription.endpoint)
+          await store.remove(subscription.endpoint)
           log('dropped dead subscription', { endpoint: subscription.endpoint, statusCode: status })
         } else {
           log('push send failed', {
@@ -142,7 +142,7 @@ export function createPushDispatcher(input: {
           ...(status !== undefined ? { statusCode: status } : {}),
           ...(err?.message ? { message: err.message } : {}),
         })
-      })
+      }
       return outcomes
   }
 }

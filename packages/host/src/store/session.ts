@@ -5,7 +5,7 @@
  */
 
 import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
-import { readFile, rm } from 'node:fs/promises'
+import { open, readFile, rm } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 
 import type {
@@ -23,9 +23,11 @@ import type {
   EventEntry,
   LLMTrace,
   MetadataEntry,
+  RuntimeMetadataEntry,
   SessionMemoryPolicy,
   SessionExecutionMode,
   SessionPreferences,
+  SessionPreferencesPatch,
   SnapshotEntry,
 } from '@agent-kernel/shared'
 import { createInitialState, fold } from '@agent-kernel/kernel'
@@ -39,17 +41,22 @@ import {
   appendSnapshotEntry,
   findLatestEventEntry,
   findLatestRuntimeMetadata,
+  findPersistedToolResult,
+  findSessionOperation,
   readLastSessionSnapshot,
   readRecentSessionMetadata,
   readSessionHeader,
+  readSessionHistory,
   readSessionLog,
   readSessionState,
   snapshotSidecarPath,
   writeHeader,
+  type SessionOperationMatch,
 } from './log.js'
 import { step } from '@agent-kernel/kernel'
 import { toolLockFor } from '../tool-version.js'
 import { writeJsonFile } from '../tenant-runtime/atomic-json-file.js'
+import type { PersistedSessionDocument, PostgresSessionAuthority } from './postgres-session-authority.js'
 
 export type SessionRecord = {
   readonly sessionId: string
@@ -385,6 +392,8 @@ export type SessionStoreOptions = {
   deleteRegisteredArtifacts?(sessionId: string): Promise<void>
   /** Marks lazily cached storage measurements stale without doing filesystem I/O. */
   onStorageChanged?(sessionId: string): void
+  /** Private Cloud only. When present, Session state is authoritative in PostgreSQL and JSONL is never used. */
+  authority?: PostgresSessionAuthority
 }
 
 export class SessionNotFoundError extends Error {
@@ -434,13 +443,143 @@ export class SessionStore {
   private readonly auxiliaryStorageWriteTails = new Map<string, Promise<unknown>>()
   private readonly storageCleanupLeases = new Set<string>()
   private readonly pendingStorageMutations = new Map<string, Set<Promise<void>>>()
+  private readonly authorityReady: Promise<void> | undefined
 
   constructor(private readonly sessionsDir: string, private readonly options: SessionStoreOptions = {}) {
-    mkdirSync(this.sessionsDir, { recursive: true })
+    if (options.authority) {
+      this.authorityReady = options.authority.initialize().then(async () => {
+        for (const document of await options.authority!.listDeleting()) {
+          try {
+            await this.finishPostgresDeletion(document.sessionId)
+          } catch (error) {
+            process.emitWarning(
+              `Session deletion recovery remains pending for ${document.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+              { code: 'KALA_SESSION_DELETION_RECOVERY' },
+            )
+          }
+        }
+      })
+    } else mkdirSync(this.sessionsDir, { recursive: true })
+  }
+
+  /** Finish authority initialization and pending deletion recovery before closing its pool. */
+  async initialize(): Promise<void> {
+    await this.authorityReady
   }
 
   get dir(): string {
     return this.sessionsDir
+  }
+
+  /** Backend-independent idempotency lookup used by HTTP and ingress paths. */
+  async findOperation(
+    sessionId: string,
+    operationId: string,
+    options: { maxScanBytes?: number } = {},
+  ): Promise<SessionOperationMatch | undefined> {
+    const record = this.get(sessionId) ?? await this.load(sessionId, { recoverDangling: false })
+    if (this.options.authority) {
+      await this.authorityReady
+      return this.options.authority.findOperation(sessionId, operationId)
+    }
+    return findSessionOperation(record.logPath, operationId, options)
+  }
+
+  /** Append Host-owned metadata to the selected authority and return its durable envelope. */
+  async appendRuntimeMetadata(
+    sessionId: string,
+    input: { action: string; payload: Record<string, unknown> },
+    options: { durable?: boolean } = {},
+  ): Promise<RuntimeMetadataEntry> {
+    this.assertStorageWritable(sessionId)
+    const record = this.get(sessionId) ?? await this.load(sessionId, { recoverDangling: false })
+    const entry: RuntimeMetadataEntry = {
+      kind: 'runtime_metadata',
+      ts: new Date().toISOString(),
+      sessionId,
+      action: input.action,
+      payload: input.payload,
+    }
+    if (this.options.authority) {
+      await this.authorityReady
+      const persisted = await this.options.authority.mutate(sessionId, {
+        mutationId: `runtime.metadata:${input.action}:${randomMutationId()}`,
+        eventType: `runtime.metadata.${input.action}`,
+        entry,
+        apply(current) {
+          if (!current) throw new SessionNotFoundError(sessionId)
+          return current
+        },
+      })
+      if (!persisted) throw new SessionNotFoundError(sessionId)
+      return entry
+    }
+    const appended = await appendRuntimeMetadataEntry(record.logPath, {
+      sessionId,
+      action: input.action,
+      payload: input.payload,
+    })
+    if (options.durable) {
+      const handle = await open(record.logPath, 'r')
+      try {
+        await handle.sync()
+      } finally {
+        await handle.close()
+      }
+    }
+    return appended
+  }
+
+  /** Read the latest Host metadata without exposing a JSONL path to callers. */
+  async findLatestRuntimeMetadata(
+    sessionId: string,
+    action: string,
+    options: { maxScanBytes?: number; committedProjection?: { cursor: number; ts: string } } = {},
+  ): Promise<RuntimeMetadataEntry | undefined> {
+    const record = this.get(sessionId) ?? await this.load(sessionId, { recoverDangling: false })
+    if (this.options.authority) {
+      await this.authorityReady
+      return this.options.authority.findLatestRuntimeMetadata(sessionId, action)
+    }
+    return findLatestRuntimeMetadata(record.logPath, action, options)
+  }
+
+  /** Event timing history used to rebuild TurnTimingTracker after restart. */
+  async readEventEntries(sessionId: string): Promise<readonly EventEntry[]> {
+    const record = this.get(sessionId) ?? await this.load(sessionId, { recoverDangling: false })
+    if (this.options.authority) {
+      await this.authorityReady
+      return this.options.authority.readEventEntries(sessionId)
+    }
+    return (await readSessionLog(record.logPath)).events
+  }
+
+  get usesPostgresAuthority(): boolean { return this.options.authority !== undefined }
+
+  /** Full event history and Host metadata from the selected durable authority. */
+  async readHistory(sessionId: string): ReturnType<typeof readSessionHistory> {
+    const record = this.get(sessionId) ?? await this.load(sessionId, { recoverDangling: false })
+    if (this.options.authority) {
+      await this.authorityReady
+      return this.options.authority.readHistory(sessionId)
+    }
+    return readSessionHistory(record.logPath)
+  }
+
+  /** Check a kernel Tool result in the selected durable authority without requiring a local JSONL projection. */
+  async findPersistedKernelToolResult(sessionId: string, callId: string): Promise<boolean> {
+    if (!callId) return false
+    const record = this.get(sessionId) ?? await this.load(sessionId, { recoverDangling: false })
+    if (!this.options.authority) return findPersistedToolResult(record.logPath, callId, 'kernel')
+    const entries = await this.readEventEntries(sessionId)
+    for (let index = entries.length - 1; index >= 0; index--) {
+      const event = entries[index]!.event
+      if (event.kind === 'tool_result' && event.callId === callId) return true
+      if (event.kind === 'llm_response' && event.message.content.some(
+        (content) => content.type === 'tool_call' && content.callId === callId,
+      )) return false
+    }
+    return false
   }
 
   assertStorageWritable(sessionId: string): void {
@@ -528,6 +667,16 @@ export class SessionStore {
       ? { ...stateWithCwd, approvalMode: params.initialApprovalMode }
       : stateWithCwd
     const logPath = this.pathFor(sessionId)
+    if (this.options.authority) {
+      await this.authorityReady
+      const createdAt = new Date().toISOString()
+      const candidate = recordForCreate(params, sessionId, logPath, createdAt, stateWithApproval)
+      const persisted = await this.options.authority.create(persistSessionRecord(candidate))
+      const record = restoreSessionRecord(persisted, logPath, params.memoryPolicy)
+      this.records.set(sessionId, record)
+      this.notifyStorageChanged(sessionId)
+      return record
+    }
     const header = await writeHeader({
       path: logPath,
       sessionId,
@@ -672,51 +821,42 @@ export class SessionStore {
     ;(rec as { config: AgentConfig }).config = update(rec.config)
   }
 
-  async updatePreferences(sessionId: string, patch: import('@agent-kernel/shared').SessionPreferencesPatch): Promise<SessionPreferences> {
+  async updatePreferences(sessionId: string, patch: SessionPreferencesPatch): Promise<SessionPreferences> {
     const rec = this.records.get(sessionId) ?? (await this.load(sessionId))
     this.assertStorageWritable(sessionId)
-    const next: SessionPreferences = { ...rec.preferences }
-    let changed = false
-    if ('selectedModel' in patch) {
-      const selectedModel = normalizePreferenceString(patch.selectedModel)
-      if (selectedModel === undefined) delete next.selectedModel
-      else next.selectedModel = selectedModel
-      changed = true
-    }
-    if ('toolCardMode' in patch) {
-      if (patch.toolCardMode === undefined) delete next.toolCardMode
-      else next.toolCardMode = patch.toolCardMode
-      changed = true
-    }
-    if ('transcriptViewStart' in patch) {
-      if (patch.transcriptViewStart === undefined) delete next.transcriptViewStart
-      else next.transcriptViewStart = patch.transcriptViewStart
-      changed = true
-    }
-    if ('rightPanelTab' in patch) {
-      if (patch.rightPanelTab === undefined) delete next.rightPanelTab
-      else next.rightPanelTab = patch.rightPanelTab
-      changed = true
-    }
-    if ('chapterReadingMode' in patch) {
-      if (patch.chapterReadingMode == null) delete next.chapterReadingMode
-      else next.chapterReadingMode = patch.chapterReadingMode
-      changed = true
-    }
-    if (changed) {
-      await this.runAuxiliaryStorageWrite(sessionId, async () => {
-        rec.preferences = next
-        await appendMetadataEntry(rec.logPath, {
-          ...('selectedModel' in patch ? { selectedModel: next.selectedModel ?? '' } : {}),
-          ...('toolCardMode' in patch && next.toolCardMode ? { toolCardMode: next.toolCardMode } : {}),
-          ...('transcriptViewStart' in patch && next.transcriptViewStart !== undefined ? { transcriptViewStart: next.transcriptViewStart } : {}),
-          ...('rightPanelTab' in patch && next.rightPanelTab ? { rightPanelTab: next.rightPanelTab } : {}),
-          ...('chapterReadingMode' in patch ? { chapterReadingMode: next.chapterReadingMode ?? null } : {}),
+    if (!hasPreferencePatch(patch)) return rec.preferences
+
+    let next = applyPreferencePatch(rec.preferences, patch)
+    await this.runAuxiliaryStorageWrite(sessionId, async () => {
+      if (this.options.authority) {
+        await this.authorityReady
+        const persisted = await this.options.authority.mutate(sessionId, {
+          mutationId: `preferences:${randomMutationId()}`,
+          eventType: 'session.preferences_updated',
+          // Each named preference is last-write-wins, while omitted fields are
+          // merged from the transaction's latest authoritative document.
+          apply(current) {
+            if (!current) return undefined
+            next = applyPreferencePatch(normalizedPreferences(current.preferences as SessionPreferences | undefined), patch)
+            return { ...current, preferences: next }
+          },
         })
+        if (!persisted) throw new SessionNotFoundError(sessionId)
+        next = normalizedPreferences(persisted.preferences as SessionPreferences | undefined)
+        rec.preferences = next
+        return
+      }
+      rec.preferences = next
+      await appendMetadataEntry(rec.logPath, {
+        ...('selectedModel' in patch ? { selectedModel: next.selectedModel ?? '' } : {}),
+        ...('toolCardMode' in patch && next.toolCardMode ? { toolCardMode: next.toolCardMode } : {}),
+        ...('transcriptViewStart' in patch && next.transcriptViewStart !== undefined ? { transcriptViewStart: next.transcriptViewStart } : {}),
+        ...('rightPanelTab' in patch && next.rightPanelTab ? { rightPanelTab: next.rightPanelTab } : {}),
+        ...('chapterReadingMode' in patch ? { chapterReadingMode: next.chapterReadingMode ?? null } : {}),
       })
-      this.summaryCache.delete(rec.logPath)
-      this.notifyStorageChanged(sessionId)
-    }
+    })
+    this.summaryCache.delete(rec.logPath)
+    this.notifyStorageChanged(sessionId)
     return next
   }
 
@@ -755,6 +895,13 @@ export class SessionStore {
 
   private async recoverCachedExternalRuntime(record: SessionRecord): Promise<void> {
     if (this.locallyProjectedExternalSessions.has(record.sessionId)) return
+    if (this.options.authority) {
+      const next = interruptedExternalRuntimeState(record.agentRuntime, record.state)
+      if (next) await this.recordRuntimeProjection(record.sessionId, next, 'copilot.recovered_interrupted_turn', {
+        pendingCallCount: record.state.pendingCalls.length,
+      })
+      return
+    }
     const existing = this.runtimeRecoveries.get(record.sessionId)
     if (existing) {
       await existing
@@ -796,6 +943,21 @@ export class SessionStore {
 
   private async loadInner(sessionId: string, options: { recoverDangling: boolean; runtimeConfig?: AgentConfig }): Promise<SessionRecord> {
     const path = this.pathFor(sessionId)
+    if (this.options.authority) {
+      await this.authorityReady
+      const persisted = await this.options.authority.load(sessionId)
+      if (!persisted) throw new SessionNotFoundError(sessionId)
+      const record = restoreSessionRecord(persisted, path)
+      this.applyRuntimeConfig(record, this.resolveRuntimeConfig(options.runtimeConfig, record.executionMode))
+      this.records.set(sessionId, record)
+      if (options.recoverDangling && record.agentRuntime !== 'kernel') {
+        const recovered = interruptedExternalRuntimeState(record.agentRuntime, record.state)
+        if (recovered) await this.recordRuntimeProjection(record.sessionId, recovered, 'copilot.recovered_interrupted_turn', {
+          pendingCallCount: record.state.pendingCalls.length,
+        })
+      }
+      return record
+    }
     if (!existsSync(path)) {
       const found = this.findLogByPrefix(sessionId)
       if (!found) throw new SessionNotFoundError(sessionId)
@@ -992,6 +1154,26 @@ export class SessionStore {
     }
     if (metadataChanged) {
       await this.runAuxiliaryStorageWrite(record.sessionId, async () => {
+        if (this.options.authority) {
+          await this.authorityReady
+          const persisted = await this.options.authority.mutate(record.sessionId, {
+            mutationId: `create-metadata:${randomMutationId()}`,
+            eventType: 'session.metadata_backfilled',
+            // Backfill is fill-if-absent per field. Values already committed by
+            // another Store win; unrelated metadata is never copied from cache.
+            apply: (current) => current ? {
+              ...current,
+              ...(current.workspaceId === undefined && record.workspaceId !== undefined ? { workspaceId: record.workspaceId } : {}),
+              ...(current.workspaceName === undefined && record.workspaceName !== undefined ? { workspaceName: record.workspaceName } : {}),
+              ...(current.organizationId === undefined && record.organizationId !== undefined ? { organizationId: record.organizationId } : {}),
+              ...(current.principal === undefined && record.principal !== undefined ? { principal: record.principal } : {}),
+              ...(current.organizationRole === undefined && record.organizationRole !== undefined ? { organizationRole: record.organizationRole } : {}),
+            } : undefined,
+          })
+          if (!persisted) throw new SessionNotFoundError(record.sessionId)
+          syncBackfilledMetadata(record, persisted)
+          return
+        }
         await appendMetadataEntry(record.logPath, {
           ...(record.workspaceId !== undefined ? { workspaceId: record.workspaceId } : {}),
           ...(record.workspaceName !== undefined ? { workspaceName: record.workspaceName } : {}),
@@ -1005,14 +1187,18 @@ export class SessionStore {
     if (record.state.cwd === undefined && params.initialCwd !== undefined) {
       const event: AgentEvent = { kind: 'cwd_changed', cwd: params.initialCwd }
       const { next, effects } = step(record.state, event, record.config)
-      const entry = await appendEventEntry({
-        path: record.logPath,
-        seq: next.cursor,
-        event,
-        effects,
-      })
-      record.state = next
-      record.lastEventAt = entry.ts
+      if (this.options.authority) {
+        await this.record(record.sessionId, event, effects, next)
+      } else {
+        const entry = await appendEventEntry({
+          path: record.logPath,
+          seq: next.cursor,
+          event,
+          effects,
+        })
+        record.state = next
+        record.lastEventAt = entry.ts
+      }
       this.summaryCache.delete(record.logPath)
     }
   }
@@ -1039,21 +1225,60 @@ export class SessionStore {
         )
       }
 
-      const entry = await appendEventEntry({
-        path: rec.logPath,
-        seq: nextState.cursor,
-        event,
-        effects,
-        ...(usageDelta ? { usage: usageDelta } : {}),
-        ...(llmTrace ? { llmTrace } : {}),
-        ...(model ? { model } : {}),
-        ...(timing ? { timing } : {}),
-      })
-      // Publish in-memory state only after the durable append and fsync succeed.
+      let committedAt: string
+      if (this.options.authority) {
+        await this.authorityReady
+        const now = new Date().toISOString()
+        const persisted = await this.options.authority.mutate(sessionId, {
+          mutationId: `kernel.event:${nextState.cursor}`,
+          eventType: `session.event.${event.kind}`,
+          entry: {
+            kind: 'event',
+            seq: nextState.cursor,
+            ts: now,
+            event,
+            effects,
+            ...(usageDelta ? { usage: usageDelta } : {}),
+            ...(llmTrace ? { llmTrace } : {}),
+            ...(model ? { model } : {}),
+            ...(timing ? { timing } : {}),
+          },
+          apply(current) {
+            if (!current) throw new SessionNotFoundError(sessionId)
+            if (current.state.cursor + 1 !== nextState.cursor) {
+              throw new Error(`stale Session transition for ${sessionId}: persisted cursor ${current.state.cursor}, received ${nextState.cursor}`)
+            }
+            return {
+              ...current,
+              state: nextState,
+              lastEventAt: now,
+              ...(event.kind === 'user_message' ? { turnStartedAt: validTimestamp(timing?.turnStartedAt) ?? now } : {}),
+              ...(event.kind === 'user_message' && event.text?.trim() && current.firstUserMessage === undefined
+                ? { firstUserMessage: event.text }
+                : {}),
+            }
+          },
+        })
+        if (!persisted) throw new SessionNotFoundError(sessionId)
+        committedAt = String(persisted.lastEventAt)
+      } else {
+        const entry = await appendEventEntry({
+          path: rec.logPath,
+          seq: nextState.cursor,
+          event,
+          effects,
+          ...(usageDelta ? { usage: usageDelta } : {}),
+          ...(llmTrace ? { llmTrace } : {}),
+          ...(model ? { model } : {}),
+          ...(timing ? { timing } : {}),
+        })
+        committedAt = entry.ts
+      }
+      // Publish in-memory state only after the authoritative commit succeeds.
       rec.state = nextState
-      rec.lastEventAt = entry.ts
+      rec.lastEventAt = committedAt
       if (event.kind === 'user_message') {
-        rec.turnStartedAt = validTimestamp(timing?.turnStartedAt) ?? entry.ts
+        rec.turnStartedAt = validTimestamp(timing?.turnStartedAt) ?? committedAt
       }
       if (event.kind === 'user_message' && event.text?.trim() && !rec.firstUserMessage) {
         rec.firstUserMessage = event.text
@@ -1089,17 +1314,47 @@ export class SessionStore {
           `stale runtime projection for ${sessionId}: expected cursor ${expectedCursor}, received ${nextState.cursor}`,
         )
       }
-      const metadataEntry = await appendRuntimeMetadataEntry(rec.logPath, {
-        sessionId,
-        action,
-        payload: { ...payload, projectionCursor: nextState.cursor },
-      })
-      const entry = await appendSnapshotEntry(rec.logPath, nextState.cursor, compactExternalRuntimeSnapshotState(nextState))
-      // The sidecar is authoritative now. If the subsequent receipt append
-      // fails, the next projection must not reuse this cursor and overwrite it.
+      let committedAt: string
+      if (this.options.authority) {
+        await this.authorityReady
+        committedAt = new Date().toISOString()
+        const persisted = await this.options.authority.mutate(sessionId, {
+          mutationId: `runtime.projection:${nextState.cursor}`,
+          eventType: action,
+          entry: {
+            kind: 'runtime_metadata',
+            ts: committedAt,
+            sessionId,
+            action,
+            payload: { ...payload, projectionCursor: nextState.cursor },
+          },
+          apply(current) {
+            if (!current) throw new SessionNotFoundError(sessionId)
+            if (current.state.cursor + 1 !== nextState.cursor) {
+              throw new Error(`stale runtime projection for ${sessionId}: persisted cursor ${current.state.cursor}, received ${nextState.cursor}`)
+            }
+            return {
+              ...current,
+              state: nextState,
+              lastEventAt: committedAt,
+              ...(action === 'copilot.user_message' ? { turnStartedAt: committedAt } : {}),
+              ...(current.firstUserMessage === undefined ? { firstUserMessage: firstUserMessageFromState(nextState) } : {}),
+            }
+          },
+        })
+        if (!persisted) throw new SessionNotFoundError(sessionId)
+      } else {
+        const metadataEntry = await appendRuntimeMetadataEntry(rec.logPath, {
+          sessionId,
+          action,
+          payload: { ...payload, projectionCursor: nextState.cursor },
+        })
+        const entry = await appendSnapshotEntry(rec.logPath, nextState.cursor, compactExternalRuntimeSnapshotState(nextState))
+        committedAt = entry.ts
+        if (action === 'copilot.user_message') rec.turnStartedAt = metadataEntry.ts
+      }
       rec.state = nextState
-      rec.lastEventAt = entry.ts
-      if (action === 'copilot.user_message') rec.turnStartedAt = metadataEntry.ts
+      rec.lastEventAt = committedAt
       this.locallyProjectedExternalSessions.add(sessionId)
       if (!rec.firstUserMessage) rec.firstUserMessage = firstUserMessageFromState(nextState)
       this.summaryCache.delete(rec.logPath)
@@ -1107,7 +1362,7 @@ export class SessionStore {
       // The projection metadata is written before the durable snapshot. A separate
       // receipt after it prevents deployment from mistaking an uncommitted tool
       // result for a successfully projected Copilot Tool call.
-      if (action === 'copilot.tool_result' && typeof payload.callId === 'string') {
+      if (!this.options.authority && action === 'copilot.tool_result' && typeof payload.callId === 'string') {
         await appendRuntimeMetadataEntry(rec.logPath, {
           sessionId, action: 'copilot.tool_result_committed',
           payload: { callId: payload.callId, projectionCursor: nextState.cursor },
@@ -1164,7 +1419,27 @@ export class SessionStore {
       }
 
       let committedAt: string
-      if (rec.agentRuntime === 'kernel') {
+      if (this.options.authority) {
+        await this.authorityReady
+        committedAt = new Date().toISOString()
+        const persisted = await this.options.authority.mutate(sessionId, {
+          mutationId: `system-prompt:${transition.next.cursor}`,
+          eventType: 'session.system_prompt_changed',
+          apply(current) {
+            if (!current) throw new SessionNotFoundError(sessionId)
+            if (current.state.cursor + 1 !== transition.next.cursor) {
+              throw new Error(`stale system prompt update for ${sessionId}`)
+            }
+            return {
+              ...current,
+              state: transition.next,
+              config: { ...(current.config as AgentConfig), systemPrompt: prompt },
+              lastEventAt: committedAt,
+            }
+          },
+        })
+        if (!persisted) throw new SessionNotFoundError(sessionId)
+      } else if (rec.agentRuntime === 'kernel') {
         const entry = await appendEventEntry({
           path: rec.logPath,
           seq: transition.next.cursor,
@@ -1212,6 +1487,12 @@ export class SessionStore {
   }
 
   async listChildren(parentSessionId: string): Promise<SessionRecord[]> {
+    if (this.options.authority) {
+      await this.authorityReady
+      const children = (await this.options.authority.list()).filter((document) => document.parentSessionId === parentSessionId)
+      return await Promise.all(children.map(async (document) =>
+        this.records.get(document.sessionId) ?? await this.load(document.sessionId, { recoverDangling: false })))
+    }
     const loaded = new Map<string, SessionRecord>()
     for (const record of this.records.values()) {
       if (record.parentSessionId === parentSessionId) loaded.set(record.sessionId, record)
@@ -1256,7 +1537,24 @@ export class SessionStore {
     const rec = this.records.get(sessionId) ?? (await this.load(sessionId))
     const trimmed = label.trim()
     await this.runAuxiliaryStorageWrite(sessionId, async () => {
-      await appendMetadataEntry(rec.logPath, { label: trimmed })
+      if (this.options.authority) {
+        await this.authorityReady
+        const persisted = await this.options.authority.mutate(sessionId, {
+          mutationId: `rename:${randomMutationId()}`,
+          eventType: 'session.renamed',
+          apply(current) {
+            if (!current) return undefined
+            if (trimmed.length === 0) {
+              const { label: _label, ...withoutLabel } = current
+              return withoutLabel as PersistedSessionDocument
+            }
+            return { ...current, label: trimmed }
+          },
+        })
+        if (!persisted) throw new SessionNotFoundError(sessionId)
+      } else {
+        await appendMetadataEntry(rec.logPath, { label: trimmed })
+      }
       if (trimmed.length === 0) delete rec.label
       else rec.label = trimmed
     })
@@ -1275,7 +1573,17 @@ export class SessionStore {
       if (summary.workspaceId !== workspaceId) continue
       const rec = this.records.get(summary.sessionId) ?? (await this.load(summary.sessionId))
       await this.runAuxiliaryStorageWrite(rec.sessionId, async () => {
-        await appendMetadataEntry(rec.logPath, { workspaceName: trimmed })
+        if (this.options.authority) {
+          await this.authorityReady
+          const persisted = await this.options.authority.mutate(rec.sessionId, {
+            mutationId: `workspace-name:${randomMutationId()}`,
+            eventType: 'session.workspace_renamed',
+            apply: (current) => current ? { ...current, workspaceName: trimmed } : undefined,
+          })
+          if (!persisted) throw new SessionNotFoundError(rec.sessionId)
+        } else {
+          await appendMetadataEntry(rec.logPath, { workspaceName: trimmed })
+        }
         ;(rec as { workspaceName?: string }).workspaceName = trimmed
       })
       this.summaryCache.delete(rec.logPath)
@@ -1290,6 +1598,17 @@ export class SessionStore {
   }
 
   private async deleteUnlocked(sessionId: string): Promise<void> {
+    if (this.options.authority) {
+      await this.authorityReady
+      const exists = await this.options.authority.requestDeletion(sessionId)
+      if (!exists) return
+      // The durable authority tombstone is visible to every Runtime before any
+      // object bytes are removed. Evict this process immediately as well.
+      this.evictSessionCaches(sessionId)
+      this.notifyStorageChanged(sessionId)
+      await this.finishPostgresDeletion(sessionId)
+      return
+    }
     const paths = this.findLogsBySessionId(sessionId)
     const artifactSlugs = new Set(paths.map((path) => basename(path, '.jsonl')))
     const logArtifactRoot = join(this.sessionsDir, 'artifacts')
@@ -1326,6 +1645,28 @@ export class SessionStore {
     this.locallyProjectedExternalSessions.delete(sessionId)
     this.recordTails.delete(sessionId)
     this.notifyStorageChanged(sessionId)
+  }
+
+  private async finishPostgresDeletion(sessionId: string): Promise<void> {
+    await this.options.deleteRegisteredArtifacts?.(sessionId)
+    await this.options.authority!.delete(sessionId)
+    this.evictSessionCaches(sessionId)
+    this.notifyStorageChanged(sessionId)
+  }
+
+  private evictSessionCaches(sessionId: string): void {
+    const record = this.records.get(sessionId)
+    if (record) {
+      this.summaryCache.delete(record.logPath)
+      this.summaryLoads.delete(record.logPath)
+    }
+    this.records.delete(sessionId)
+    this.inFlight.delete(sessionId)
+    this.runtimeRecoveries.delete(sessionId)
+    this.locallyProjectedExternalSessions.delete(sessionId)
+    this.recordTails.delete(sessionId)
+    this.runtimeContextSnapshotTails.delete(sessionId)
+    this.auxiliaryStorageWriteTails.delete(sessionId)
   }
 
   private notifyStorageChanged(sessionId: string): void {
@@ -1370,10 +1711,16 @@ export class SessionStore {
     const cutoffMs = params.before?.getTime()
     if (cutoffMs !== undefined && !Number.isFinite(cutoffMs)) throw new Error('invalid retention cutoff')
     const candidates = new Map<string, SessionRecord>()
-    for (const record of this.records.values()) {
+    if (this.options.authority) {
+      await this.authorityReady
+      for (const document of await this.options.authority.list()) {
+        const record = this.records.get(document.sessionId) ?? restoreSessionRecord(document, this.pathFor(document.sessionId))
+        if (record.organizationId === organizationId && sessionEligibleForRetention(record, cutoffMs)) candidates.set(record.sessionId, record)
+      }
+    } else for (const record of this.records.values()) {
       if (record.organizationId === organizationId && sessionEligibleForRetention(record, cutoffMs)) candidates.set(record.sessionId, record)
     }
-    if (existsSync(this.sessionsDir)) {
+    if (!this.options.authority && existsSync(this.sessionsDir)) {
       for (const file of readdirSync(this.sessionsDir)) {
         if (!file.endsWith('.jsonl')) continue
         const path = join(this.sessionsDir, file)
@@ -1414,11 +1761,21 @@ export class SessionStore {
       // Provider totals may legitimately fall after compaction, so timestamp —
       // not token count — is the ordering authority.
       if (latest && contextSnapshot.updatedAt < latest.updatedAt) return
-      await writeJsonFile(runtimeContextCachePath(record.logPath), {
-        schemaVersion: 1,
-        sessionId: record.sessionId,
-        contextSnapshot,
-      })
+      if (this.options.authority) {
+        await this.authorityReady
+        const persisted = await this.options.authority.mutate(record.sessionId, {
+          mutationId: `runtime-context:${contextSnapshot.updatedAt}`,
+          eventType: 'session.runtime_context_updated',
+          apply: (current) => current ? { ...current, runtimeContextSnapshot: contextSnapshot } : undefined,
+        })
+        if (!persisted) throw new SessionNotFoundError(record.sessionId)
+      } else {
+        await writeJsonFile(runtimeContextCachePath(record.logPath), {
+          schemaVersion: 1,
+          sessionId: record.sessionId,
+          contextSnapshot,
+        })
+      }
       this.notifyStorageChanged(record.sessionId)
       record.runtimeContextSnapshot = contextSnapshot
     })
@@ -1433,6 +1790,12 @@ export class SessionStore {
   }
 
   async listSummaries(): Promise<SessionSummary[]> {
+    if (this.options.authority) {
+      await this.authorityReady
+      const records = (await this.options.authority.list()).map((document) => restoreSessionRecord(document, this.pathFor(document.sessionId)))
+      return records.map(summarizeRecord).sort((a, b) =>
+        (b.lastEventAt ?? b.createdAt).localeCompare(a.lastEventAt ?? a.createdAt))
+    }
     if (!existsSync(this.sessionsDir)) return []
     const files = readdirSync(this.sessionsDir).filter((f) =>
       f.endsWith('.jsonl'),
@@ -1460,6 +1823,12 @@ export class SessionStore {
 
   /** Enumerate one tenant without loading or mutating records from any other tenant. */
   async listSessionIdsForOrganization(organizationId: string | undefined): Promise<string[]> {
+    if (this.options.authority) {
+      await this.authorityReady
+      return (await this.options.authority.list())
+        .filter((document) => document.organizationId === organizationId)
+        .map((document) => document.sessionId)
+    }
     if (!existsSync(this.sessionsDir)) return []
     const ids: string[] = []
     const failures: Error[] = []
@@ -1493,6 +1862,10 @@ export class SessionStore {
 
   /** Enumerate every valid persisted Session without loading it into memory. */
   async listSessionIds(): Promise<string[]> {
+    if (this.options.authority) {
+      await this.authorityReady
+      return (await this.options.authority.list()).map((document) => document.sessionId)
+    }
     if (!existsSync(this.sessionsDir)) return []
     const ids: string[] = []
     const failures: Error[] = []
@@ -1927,15 +2300,19 @@ export class SessionStore {
     }
     const event: AgentEvent = interruptedLlmRecoveryEvent()
     const { next, effects } = step(record.state, event, record.config)
-    const entry = await appendEventEntry({
-      path: record.logPath,
-      seq: next.cursor,
-      event,
-      effects,
-    })
-    record.state = next
-    record.lastEventAt = entry.ts
-    this.summaryCache.delete(record.logPath)
+    if (this.options.authority) {
+      await this.record(record.sessionId, event, effects, next)
+    } else {
+      const entry = await appendEventEntry({
+        path: record.logPath,
+        seq: next.cursor,
+        event,
+        effects,
+      })
+      record.state = next
+      record.lastEventAt = entry.ts
+      this.summaryCache.delete(record.logPath)
+    }
     return { event, effects }
   }
 }
@@ -2045,6 +2422,79 @@ function loadedRecordForPath(
     if (record.logPath === path) return record
   }
   return undefined
+}
+
+function recordForCreate(
+  params: CreateSessionParams,
+  sessionId: string,
+  logPath: string,
+  createdAt: string,
+  state: AgentState,
+): SessionRecord {
+  return {
+    sessionId,
+    agentRuntime: params.agentRuntime ?? 'kernel',
+    executionMode: params.executionMode ?? 'chat',
+    ...(params.agentRuntimeVersion ? { agentRuntimeVersion: params.agentRuntimeVersion } : {}),
+    ...(params.externalSessionId ? { externalSessionId: params.externalSessionId } : {}),
+    logPath,
+    createdAt,
+    config: params.config,
+    toolLock: toolLockFor(params.config),
+    state,
+    preferences: normalizedPreferences(params.preferences),
+    ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
+    ...(params.parentCursor !== undefined ? { parentCursor: params.parentCursor } : {}),
+    ...(params.parentCallId !== undefined ? { parentCallId: params.parentCallId } : {}),
+    ...(params.agentType !== undefined ? { agentType: params.agentType } : {}),
+    ...(params.subAgentStartedAt !== undefined ? { subAgentStartedAt: params.subAgentStartedAt } : {}),
+    ...(params.workspaceId !== undefined ? { workspaceId: params.workspaceId } : {}),
+    ...(params.workspaceName !== undefined ? { workspaceName: params.workspaceName } : {}),
+    ...(params.organizationId !== undefined ? { organizationId: params.organizationId } : {}),
+    ...(params.principal !== undefined ? { principal: params.principal } : {}),
+    ...(params.organizationRole !== undefined ? { organizationRole: params.organizationRole } : {}),
+    ...(params.memoryPolicy !== undefined ? { memoryPolicy: params.memoryPolicy } : {}),
+  }
+}
+
+function persistSessionRecord(record: SessionRecord): PersistedSessionDocument {
+  const { logPath: _logPath, memoryPolicy: _memoryPolicy, ...document } = record
+  return document as PersistedSessionDocument
+}
+
+function syncBackfilledMetadata(record: SessionRecord, document: PersistedSessionDocument): void {
+  const mutable = record as {
+    workspaceId?: string
+    workspaceName?: string
+    organizationId?: string
+    principal?: string
+    organizationRole?: 'owner' | 'admin' | 'member' | 'viewer'
+  }
+  for (const field of ['workspaceId', 'workspaceName', 'organizationId', 'principal'] as const) {
+    const value = document[field]
+    if (typeof value === 'string') mutable[field] = value
+  }
+  const role = document.organizationRole
+  if (role === 'owner' || role === 'admin' || role === 'member' || role === 'viewer') mutable.organizationRole = role
+}
+
+function restoreSessionRecord(
+  document: PersistedSessionDocument,
+  logPath: string,
+  memoryPolicy?: SessionMemoryPolicy,
+): SessionRecord {
+  if (!document.sessionId || !document.state || !Number.isSafeInteger(document.state.cursor)) {
+    throw new Error('Invalid Session document in PostgreSQL authority')
+  }
+  return {
+    ...document,
+    logPath,
+    ...(memoryPolicy !== undefined ? { memoryPolicy } : {}),
+  } as SessionRecord
+}
+
+function randomMutationId(): string {
+  return ulid()
 }
 
 function summarizeRecord(record: SessionRecord): SessionSummary {
@@ -2317,6 +2767,40 @@ function normalizedPreferences(preferences: SessionPreferences | undefined): Ses
     ...(preferences?.rightPanelTab ? { rightPanelTab: preferences.rightPanelTab } : {}),
     ...(preferences?.chapterReadingMode ? { chapterReadingMode: preferences.chapterReadingMode } : {}),
   }
+}
+
+function hasPreferencePatch(patch: SessionPreferencesPatch): boolean {
+  return 'selectedModel' in patch
+    || 'toolCardMode' in patch
+    || 'transcriptViewStart' in patch
+    || 'rightPanelTab' in patch
+    || 'chapterReadingMode' in patch
+}
+
+function applyPreferencePatch(current: SessionPreferences, patch: SessionPreferencesPatch): SessionPreferences {
+  const next = { ...current }
+  if ('selectedModel' in patch) {
+    const value = normalizePreferenceString(patch.selectedModel)
+    if (value === undefined) delete next.selectedModel
+    else next.selectedModel = value
+  }
+  if ('toolCardMode' in patch) {
+    if (patch.toolCardMode === undefined) delete next.toolCardMode
+    else next.toolCardMode = patch.toolCardMode
+  }
+  if ('transcriptViewStart' in patch) {
+    if (patch.transcriptViewStart === undefined) delete next.transcriptViewStart
+    else next.transcriptViewStart = patch.transcriptViewStart
+  }
+  if ('rightPanelTab' in patch) {
+    if (patch.rightPanelTab === undefined) delete next.rightPanelTab
+    else next.rightPanelTab = patch.rightPanelTab
+  }
+  if ('chapterReadingMode' in patch) {
+    if (patch.chapterReadingMode == null) delete next.chapterReadingMode
+    else next.chapterReadingMode = patch.chapterReadingMode
+  }
+  return next
 }
 
 function normalizePreferenceString(value: string | undefined): string | undefined {

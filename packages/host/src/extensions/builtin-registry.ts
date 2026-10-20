@@ -71,12 +71,12 @@ export function createBuiltinExtensionRegistry(additional: readonly HostExtensio
         async tool_search({ deps, sessionId, effect }) {
           const record = deps.store.get(sessionId)
           if (!record) return { ok: false, content: 'Session is unavailable' }
-          return await runToolCatalogTool(record, 'tool_search', effect.input)
+          return await runToolCatalogTool(record, 'tool_search', effect.input, deps.store)
         },
         async tool_describe({ deps, sessionId, effect }) {
           const record = deps.store.get(sessionId)
           if (!record) return { ok: false, content: 'Session is unavailable' }
-          return await runToolCatalogTool(record, 'tool_describe', effect.input)
+          return await runToolCatalogTool(record, 'tool_describe', effect.input, deps.store)
         },
         async skill({ deps, sessionId, effect }) {
           if (!deps.skills) return { ok: false, content: 'skills are not configured on this host' }

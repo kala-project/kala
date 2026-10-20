@@ -7,7 +7,7 @@ import {
 } from '@agent-kernel/shared'
 
 import type { LoopHandle } from '../loop-types.js'
-import type { SessionRecord } from '../store/session.js'
+import type { SessionRecord, SessionStore } from '../store/session.js'
 import { findPersistedToolResult } from '../store/log.js'
 import type { AgentRuntime, AgentRuntimeSendInput } from './types.js'
 import { currentKernelCompactStatus } from '../extensions/compaction.js'
@@ -15,7 +15,7 @@ import { currentKernelCompactStatus } from '../extensions/compaction.js'
 export class KernelAgentRuntime implements AgentRuntime {
   readonly id = 'kernel' as const
 
-  constructor(private readonly loop: LoopHandle) {}
+  constructor(private readonly loop: LoopHandle, private readonly store?: Pick<SessionStore, 'findPersistedKernelToolResult'>) {}
 
   descriptor(): AgentRuntimeDescriptor {
     return {
@@ -34,6 +34,7 @@ export class KernelAgentRuntime implements AgentRuntime {
   }
 
   async toolResultPersisted(record: SessionRecord, callId: string): Promise<boolean> {
+    if (this.store) return await this.store.findPersistedKernelToolResult(record.sessionId, callId)
     return await findPersistedToolResult(record.logPath, callId, this.id)
   }
 

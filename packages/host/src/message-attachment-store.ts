@@ -32,7 +32,19 @@ export type ResolvedMessageAttachment = AttachmentRecord & {
   read(): Promise<Buffer>
 }
 
-export class MessageAttachmentStore {
+export type MessageAttachmentStorage = {
+  load(): Promise<void>
+  register(input: { sessionId: string; name: string; mediaType?: string; data: Buffer }): Promise<ReferencedFileContent>
+  commitReferences(sessionId: string, content: readonly MessageContent[] | undefined): Promise<void>
+  releasePending(sessionId: string, attachmentIds: readonly string[]): Promise<void>
+  resolve(sessionId: string, file: ReferencedFileContent): ResolvedMessageAttachment | Promise<ResolvedMessageAttachment>
+  resolveById(sessionId: string, attachmentId: string): ResolvedMessageAttachment | Promise<ResolvedMessageAttachment>
+  sdkFilePath(sessionId: string, file: ReferencedFileContent): Promise<string | undefined>
+  allowsSdkRead(sessionId: string, requestedPath: string): boolean
+  deleteSession(sessionId: string): Promise<void>
+}
+
+export class MessageAttachmentStore implements MessageAttachmentStorage {
   private readonly records = new Map<string, AttachmentRecord>()
   private tail = Promise.resolve()
 

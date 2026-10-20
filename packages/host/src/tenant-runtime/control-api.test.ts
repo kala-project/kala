@@ -28,9 +28,16 @@ describe('tenant runtime control API', () => {
   it('fails closed without service authentication', async () => { const { port } = await setup(); expect(await call(port, '/internal/health')).toBe(403) })
   it('applies generation-checked provision and suspend commands', async () => {
     const { port, service, store } = await setup(); const command = async (body: unknown) => call(port, '/internal/runtime-units', body, true)
-    expect(await command({ unitId: 'a', operationId: 'p1', generation: 1 })).toBe(200); expect(service.markRoutable).toHaveBeenCalledWith('a'); expect(store.list()).toHaveLength(1)
+    expect(await command({ unitId: 'a', operationId: 'p1', generation: 1 })).toBe(200); expect(service.markRoutable).toHaveBeenCalledWith('a', undefined); expect(store.list()).toHaveLength(1)
     expect(await command({ unitId: 'a', operationId: 's2', generation: 2, action: 'suspend' })).toBe(200); expect(service.suspendUnit).toHaveBeenCalledWith('a')
     expect(await command({ unitId: 'a', operationId: 'stale', generation: 1 })).toBe(400)
+  })
+  it('returns unavailable instead of routing a ready materialization when placement acquire fails', async () => {
+    const { port, service, store } = await setup()
+    service.markRoutable.mockRejectedValueOnce(new Error('runtime unit placement is held'))
+    expect(await call(port, '/internal/runtime-units', { unitId: 'held', organizationId: 'org-a', operationId: 'p1', generation: 1 }, true)).toBe(503)
+    expect(service.markRoutable).toHaveBeenCalledWith('held', 'org-a')
+    expect(store.get('held' as never)).toMatchObject({ desiredState: 'ready', organizationId: 'org-a' })
   })
   it('routes retention only when the authenticated unit has the same trusted organization binding', async () => {
     const { root, port, purgeOrganizationSessions, store } = await setup()

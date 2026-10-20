@@ -291,6 +291,28 @@ describe('Unit scheduler durability and isolation', () => {
     await scheduler.stop()
   })
 
+  it('does not produce a remote effect when owner fencing rejects a due claim', async () => {
+    let now = new Date('2026-10-02T09:00:00.000Z')
+    const store = new ScheduledTaskStore(await directory(), () => now)
+    const exec = executor()
+    const errors: unknown[] = []
+    const scheduler = new UnitScheduler(store, exec, { unitId: 'u', pollMs: 60_000, reportError: (error) => errors.push(error) })
+    await scheduler.start()
+    const task = await store.create({
+      ownerKey: 'organization:a', createdBy: 'a', prompt: 'must stay local', target: { kind: 'session', sessionId: 'owned-elsewhere' },
+      schedule: { kind: 'once', at: '2026-10-02T10:00:00.000Z' },
+    })
+    vi.spyOn(store, 'claim').mockRejectedValue(new Error('Session owner fenced'))
+    now = new Date('2026-10-02T10:00:00.000Z')
+    await scheduler.tick()
+    expect(errors).toEqual([expect.objectContaining({ message: 'Session owner fenced' })])
+    expect(exec.validate).not.toHaveBeenCalled()
+    expect(exec.enqueueSession).not.toHaveBeenCalled()
+    expect(exec.createWorkspaceSession).not.toHaveBeenCalled()
+    expect(await store.history('organization:a', task.id)).toEqual([])
+    await scheduler.stop()
+  })
+
   it('fails a due occurrence when execution-time target authorization no longer passes', async () => {
     let now = new Date('2026-10-02T09:00:00.000Z')
     const exec = executor({ validate: vi.fn(async () => { throw new Error('session not found') }) })

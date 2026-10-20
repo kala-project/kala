@@ -77,11 +77,11 @@ export async function runDagPlanTool(context: HostToolContext): Promise<{ ok: bo
     const resultNodeId = requiredString(effect.input.result_node_id, 'result_node_id')
     const nodes = parseNodes(effect.input.nodes)
     const edges = parseEdges(effect.input.edges)
-    const run = deps.dagStore.createRun(sessionId, objective, `${effect.callId}:run`)
+    const run = await deps.dagStore.createRun(sessionId, objective, `${effect.callId}:run`)
     const expectedGraphVersion = optionalInteger(effect.input.expected_graph_version) ?? 0
     if (expectedGraphVersion !== 0) throw new Error('initial DAG plans require expected_graph_version 0')
     const patch: DagGraphPatch = { expectedGraphVersion, resultNodeId, nodes, edges }
-    const updated = deps.dagStore.installGraph(run.id, patch, `${effect.callId}:graph`)
+    const updated = await deps.dagStore.installGraph(run.id, patch, `${effect.callId}:graph`)
     deps.publishDagRun?.(sessionId)
     deps.dagScheduler?.schedule(sessionId)
     return {

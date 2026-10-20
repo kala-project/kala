@@ -185,6 +185,32 @@ describe('host loop', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  it('does not call the model if the Session owner gate rejects before a turn effect', async () => {
+    const call = vi.fn(async () => ({ message: { role: 'assistant' as const, content: [{ type: 'text' as const, text: 'unsafe' }] } }))
+    const gate = vi.fn(async () => { throw new Error('Session owner lost') })
+    const loop = runHostLoop({ store, llm: { name: 'owner-gate', call }, tools: nullTools(),
+      assertSessionEffectOwner: gate, broadcast: silentBroadcast() })
+    await loop.dispatch(sessionId, { kind: 'user_message', text: 'start' })
+    expect(gate).toHaveBeenCalledWith(sessionId)
+    expect(call).not.toHaveBeenCalled()
+  })
+
+  it('does not dispatch a Tool or a second model call after losing the Session owner', async () => {
+    const call = vi.fn(async () => ({ message: {
+      role: 'assistant' as const,
+      content: [{ type: 'tool_call' as const, callId: 'c1', name: 'read', input: { path: '/tmp/x' } }],
+    } }))
+    const callTool = vi.fn(async () => ({ ok: true, content: 'unsafe' }))
+    let checks = 0
+    const gate = vi.fn(async () => { if (++checks > 2) throw new Error('Session owner lost') })
+    const loop = runHostLoop({ store, llm: { name: 'owner-gate', call }, tools: nullTools({ callTool }),
+      assertSessionEffectOwner: gate, broadcast: silentBroadcast() })
+    await loop.dispatch(sessionId, { kind: 'user_message', text: 'use tool' })
+    expect(call).toHaveBeenCalledTimes(1)
+    expect(callTool).not.toHaveBeenCalled()
+    expect(gate).toHaveBeenCalledTimes(4)
+  })
+
   it('preserves core state timing around extension lifecycle callbacks', async () => {
     const calls: string[] = []
     const extensions = createBuiltinExtensionRegistry([{
@@ -2043,6 +2069,55 @@ describe('host loop', () => {
     }
   })
 
+  it('immediately aborts the in-flight model and rejects new effects when its Runtime closes', async () => {
+    let started!: () => void
+    const active = new Promise<void>((resolve) => { started = resolve })
+    const llm: LLMAdapter = {
+      name: 'shutdown-abort',
+      async call({ signal }) {
+        return await new Promise<LLMResponse>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => {
+            const error = new Error('aborted')
+            error.name = 'AbortError'
+            reject(error)
+          }, { once: true })
+          started()
+        })
+      },
+    }
+    const loop = runHostLoop({ store, llm, tools: nullTools(), broadcast: silentBroadcast() })
+    const turn = loop.dispatch(sessionId, { kind: 'user_message', text: 'start model' })
+    await active
+    loop.abortActiveEffects()
+    await turn
+    await expect(loop.dispatch(sessionId, { kind: 'user_message', text: 'stale effect' }))
+      .rejects.toThrow('effects are stopped')
+  })
+
+  it('cancels in-flight executor work immediately when its Runtime closes', async () => {
+    let started!: () => void
+    const active = new Promise<void>((resolve) => { started = resolve })
+    let resolveTool!: (value: { ok: boolean; content: string }) => void
+    const callTool = vi.fn(async () => await new Promise<{ ok: boolean; content: string }>((resolve) => {
+      resolveTool = resolve
+      started()
+    }))
+    const cancelPending = vi.fn(() => resolveTool({ ok: false, content: 'cancelled' }))
+    let calls = 0
+    const llm: LLMAdapter = { name: 'shutdown-tool', async call() {
+      calls += 1
+      return { message: { role: 'assistant', content: [{ type: 'tool_call', callId: 'shutdown-c1', name: 'read', input: { path: '/tmp/test' } }] } }
+    } }
+    const loop = runHostLoop({ store, llm, tools: nullTools({ callTool, cancelPending }), broadcast: silentBroadcast() })
+    const turn = loop.dispatch(sessionId, { kind: 'user_message', text: 'start tool' })
+    await active
+    loop.abortActiveEffects()
+    await turn
+    expect(cancelPending).toHaveBeenCalledWith(sessionId)
+    expect(callTool).toHaveBeenCalledOnce()
+    expect(calls).toBe(1)
+  })
+
   it('handles agent tool calls inside the host and records a child session', async () => {
     const parentConfig = createConfig({ tools: [AGENT], systemPrompt: 'sys' })
     const parent = await store.create({
@@ -3016,6 +3091,51 @@ describe('host loop', () => {
     expect(llmCalls).toBe(1)
     expect(store.get(sessionId)?.state.status).toBe('thinking')
     expect(loop.drainSnapshot(sessionId)).toMatchObject({ safe: true, checkpointKind: 'before_llm' })
+  })
+
+  it('distributed owner takeover never automatically replays an uncertain model request', async () => {
+    let llmCalls = 0
+    const loop = runHostLoop({
+      store,
+      llm: { name: 'uncertain-model', async call() {
+        llmCalls += 1
+        return { message: { role: 'assistant', content: [{ type: 'tool_call' as const, callId: 'c-uncertain', name: 'read', input: {} }] } }
+      } },
+      tools: nullTools({ callTool: async () => {
+        loop.beginDrain('checkpoint')
+        return { ok: true, content: 'safe checkpoint' }
+      } }),
+      assertSessionEffectOwner: async () => {},
+      broadcast: silentBroadcast(),
+    })
+    await loop.dispatch(sessionId, { kind: 'user_message', text: 'work' })
+    expect(store.get(sessionId)?.state.status).toBe('thinking')
+    loop.endDrain()
+    expect(await loop.resumeSession(sessionId)).toBe(true)
+    expect(llmCalls).toBe(1)
+    const events = (await readSessionLog(store.get(sessionId)!.logPath)).events
+    expect(events.some(({ event }) => event.kind === 'llm_response'
+      && event.message.content.some((part) => part.type === 'text' && part.text === '[interrupted]'))).toBe(true)
+  })
+
+  it('distributed owner takeover does not replay a tool with an unknown external outcome', async () => {
+    const callTool = vi.fn(async () => ({ ok: true, content: 'unsafe duplicate' }))
+    const loop = runHostLoop({
+      store,
+      llm: { name: 'uncertain-tool', async call() {
+        loop.beginDrain('checkpoint')
+        return { message: { role: 'assistant', content: [{ type: 'tool_call' as const, callId: 'c-uncertain-tool', name: 'read', input: {} }] } }
+      } },
+      tools: nullTools({ callTool }),
+      assertSessionEffectOwner: async () => {},
+      broadcast: silentBroadcast(),
+    })
+    await loop.dispatch(sessionId, { kind: 'user_message', text: 'work' })
+    expect(store.get(sessionId)?.state.status).toBe('executing_tools')
+    loop.endDrain()
+    expect(await loop.resumeSession(sessionId)).toBe(false)
+    expect(callTool).not.toHaveBeenCalled()
+    expect(store.get(sessionId)?.state.pendingCalls.length).toBeGreaterThan(0)
   })
 
   it('planned resume continues a checkpointed LLM turn without an interrupted marker', async () => {

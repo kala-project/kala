@@ -6,26 +6,38 @@ import type {
   ReferencedFileContent,
 } from '@agent-kernel/kernel'
 
-import type { MessageAttachmentStore } from './message-attachment-store.js'
+import type { MessageAttachmentStorage } from './message-attachment-store.js'
 
 export function isReferencedFileContent(content: MessageContent): content is ReferencedFileContent {
   return content.type === 'file' && 'source' in content && content.source.kind === 'host_ref'
 }
 
-export function validateMessageAttachmentReferences(
-  store: MessageAttachmentStore | undefined,
+export async function validateMessageAttachmentReferences(
+  store: Pick<MessageAttachmentStorage, 'resolve'> | undefined,
   sessionId: string,
   content: readonly MessageContent[] | undefined,
-): void {
+): Promise<void> {
   for (const block of content ?? []) {
     if (!isReferencedFileContent(block)) continue
     if (!store) throw new Error(`Attachment "${block.name}" cannot be resolved because Host attachment storage is unavailable`)
-    store.resolve(sessionId, block)
+    await store.resolve(sessionId, block)
   }
 }
 
+export async function resolveMessageAttachmentSdkFilePath(
+  store: Pick<MessageAttachmentStorage, 'sdkFilePath'>,
+  sessionId: string,
+  file: ReferencedFileContent,
+): Promise<string> {
+  const path = await store.sdkFilePath(sessionId, file)
+  if (!path) {
+    throw new Error(`Attachment "${file.name}" cannot be exposed as a local SDK file; use byte-based attachment resolution`)
+  }
+  return path
+}
+
 export async function resolveKernelMessageAttachments(
-  store: MessageAttachmentStore | undefined,
+  store: Pick<MessageAttachmentStorage, 'resolve'> | undefined,
   sessionId: string,
   messages: readonly Message[],
 ): Promise<readonly Message[]> {
@@ -39,7 +51,7 @@ export async function resolveKernelMessageAttachments(
         continue
       }
       if (!store) throw new Error(`Attachment "${block.name}" cannot be resolved because Host attachment storage is unavailable`)
-      const data = await store.resolve(sessionId, block).read()
+      const data = await (await store.resolve(sessionId, block)).read()
       const imageType = supportedImageMediaType(block.mediaType)
       if (imageType) {
         content.push({ type: 'image', source: { kind: 'base64', mediaType: imageType, data: data.toString('base64') } })

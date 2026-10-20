@@ -9,7 +9,7 @@
  * a single `close()` for shutdown.
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http'
 import { join } from 'node:path'
@@ -40,10 +40,12 @@ import { createBuiltinExtensionRegistry } from './extensions/builtin-registry.js
 import type { HostExtension } from './extensions/registry.js'
 import { createSkillManager, defaultSkillRoots, discoverSkills, type SkillManager, type SkillRegistry } from './extensions/skills.js'
 import { SessionNotFoundError, SessionStore, type SessionRecord } from './store/session.js'
-import { findSessionOperation, slimEffect } from './store/log.js'
-import { WorkspaceAliasStore } from './store/workspace-alias.js'
-import { PushSubscriptionStore } from './push/store.js'
-import { loadOrCreateVapidKeys } from './push/vapid.js'
+import { slimEffect, type SessionOperationMatch } from './store/log.js'
+import type { PostgresSessionAuthority } from './store/postgres-session-authority.js'
+import type { ExecutorIdentityStorage } from './store/executor-identity.js'
+import { WorkspaceAliasStore, type WorkspaceAliasStorage } from './store/workspace-alias.js'
+import { PushSubscriptionStore, type PushSubscriptionStorage } from './push/store.js'
+import { loadOrCreateVapidKeys, type VapidKeys } from './push/vapid.js'
 import { createPushDispatcher } from './push/dispatch.js'
 import { createPushRoutes } from './push/routes.js'
 import { PushActivityTracker } from './push/activity.js'
@@ -72,8 +74,8 @@ import {
 import { sessionRoom } from './connection/rooms.js'
 import { mcpToolsForWorkspace, mergeMcpTools } from './mcp-tools.js'
 import { attachDynamicStaticMountHandler, attachEmbeddedStaticHandler, attachJsonRoutes, attachReleaseAssetsHandler, claimRoute, attachRequestHandler, attachStaticHandler, type EmbeddedStaticAsset, type StaticMount, type TenantStorageQuotaEnforcer } from './http/routes.js'
-import { SessionArtifactRegistry } from './session-artifact-registry.js'
-import { MessageAttachmentStore } from './message-attachment-store.js'
+import { SessionArtifactRegistry, type SessionArtifactStorage } from './session-artifact-registry.js'
+import { MessageAttachmentStore, type MessageAttachmentStorage } from './message-attachment-store.js'
 import { validateMessageAttachmentReferences } from './message-attachment-resolver.js'
 import { createLocalImagePublisher } from './local-image-publisher.js'
 import { MemoStore } from './memo-store.js'
@@ -91,13 +93,14 @@ import { defaultRestartStatePath, RestartCoordinator } from './restart-coordinat
 import { inspectUnitQuiescence } from './tenant-runtime/quiescence.js'
 import { socketConnectionAuditSnapshot } from './connection/socket-audit.js'
 import { loadPersistedMessageQueueState, persistMessageQueueSnapshot, type PersistedMessageQueueState } from './message-queue-store.js'
+import { QueueClaimFencedError, type PostgresMessageQueueClaim } from './postgres-message-queue.js'
 import { messageOperationFingerprint } from './message-operation-fingerprint.js'
 import { bangShellCallId, bangShellResultOperationId, bangShellResultState, formatBangShellResult, isBangShellResultForCommand, parseBangShellRequest } from './bang-shell.js'
 import { modelIdFromRef, resolveModelContextWindow } from './model-capabilities.js'
 import type { WebSearchCredentialStore } from './web-search/index.js'
 import type { WebSearchCredentialStatus } from './web-search/credential-store.js'
 import type { AzureSpeechCredentialStore } from './speech/credential-store.js'
-import { ExecutorInstallationStore } from './store/executor-installation.js'
+import { ExecutorInstallationStore, type ExecutorInstallationStorage } from './store/executor-installation.js'
 import { attachExecutorInstallationRoutes } from './http/executor-installation-routes.js'
 import { attachMcpSettingsRoutes } from './http/mcp-settings-routes.js'
 import { AgentRuntimeRegistry } from './agent-runtime/types.js'
@@ -109,13 +112,14 @@ import { attachPublicAccessGate } from './http/public-access-gate.js'
 import { KalaStateStore } from './store/state-store.js'
 import { DagOrchestrator } from './dag/orchestrator.js'
 import { DAG_WORKER_TOOLS } from './dag/worker-tool.js'
+import type { DagStorage } from './dag/storage.js'
 import type { SubAgentRuntimeController } from './extensions/agent-tool.js'
 import type { UnitResourceGovernor } from './tenant-runtime/resource-governor.js'
 import { createPublicApiHandler, type PublicApiActor } from './http/public-api.js'
 import { resetCompactRuntime } from './extensions/compaction.js'
 import { StorageInventory } from './store/storage-inventory.js'
 import { SafeCleanupEngine } from './store/safe-cleanup.js'
-import { ScheduledTaskStore } from './scheduled-tasks/store.js'
+import { ScheduledTaskStore, type ScheduledTaskStorage } from './scheduled-tasks/store.js'
 import { occurrenceSessionId, UnitScheduler } from './scheduled-tasks/scheduler.js'
 import type { ScheduledTask, ScheduledTaskSnapshot } from './scheduled-tasks/types.js'
 
@@ -124,6 +128,31 @@ export type HostServerOptions = {
   listenHost?: string
   publicUrls?: readonly PublicUrlPattern[]
   sessionsDir: string
+  /** Private Cloud Session authority. Omit to retain the local JSONL backend. */
+  sessionAuthority?: PostgresSessionAuthority
+  /** Optional SQL-checked Session owner gate before external model and tool effects. */
+  assertSessionEffectOwner?: (sessionId: string) => Promise<void>
+  /** Workspace alias authority. Omit to retain workspace-aliases.json. */
+  workspaceAliasStore?: WorkspaceAliasStorage
+  /** Executor installation authority. Omit to retain executor-installations.json. */
+  executorInstallationStore?: ExecutorInstallationStorage
+  /** Executor identity authority. Private Cloud injects an organization/unit-bound PostgreSQL implementation. */
+  executorIdentityStore?: ExecutorIdentityStorage
+  /** DAG authority. Private Cloud must inject a tenant/unit-scoped PostgreSQL implementation. */
+  dagStore?: DagStorage
+  /** Scheduled-task authority. Omit to retain the local state.json backend. */
+  scheduledTaskStore?: ScheduledTaskStorage
+  /** Push subscription authority. Private Cloud must inject a tenant-scoped implementation. */
+  pushStore?: PushSubscriptionStorage
+  /** VAPID authority override. Pass null to explicitly disable push without generating local keys. */
+  vapidKeys?: VapidKeys | null
+  /** Object-backed artifact stores. Both stores are required to avoid a mixed, partially local configuration. */
+  objectStorage?: {
+    sessionArtifacts: SessionArtifactStorage
+    messageAttachments: MessageAttachmentStorage
+    /** True only when both stores atomically enforce their shared quota before object put. */
+    quotaManagedExternally?: boolean
+  }
   llm: LLMAdapter
   llmQuota?: LlmQuotaEnforcer
   modelPolicy?: TenantModelPolicyEnforcer
@@ -142,6 +171,8 @@ export type HostServerOptions = {
   }
   /** Test synchronization seam: runs after a queue head is claimed, before dispatch I/O. */
   queueDispatchBarrier?: (claimed: { sessionId: string; operationId: string; runtime: string }) => Promise<void>
+  /** Private Cloud persistent queue claim TTL; primarily configurable for fencing tests. */
+  queueClaimTtlMs?: number
   defaultConfig: AgentConfig | ((actor?: DashboardActor) => AgentConfig)
   toolTimeoutMs?: number
   /**
@@ -186,6 +217,8 @@ export type HostServerOptions = {
   setWebSearchCredential?: (provider: 'serper', key: string) => Promise<WebSearchCredentialStatus> | WebSearchCredentialStatus
   deleteWebSearchCredential?: (provider: 'serper') => Promise<WebSearchCredentialStatus> | WebSearchCredentialStatus
   speechCredentials?: AzureSpeechCredentialStore
+  /** Memo authority override. Omit to retain the KalaStateStore SQLite backend. */
+  memoStore?: MemoStore
   stateStore?: KalaStateStore
   artifactRootDir?: string | false
   docsRootDir?: string
@@ -242,7 +275,10 @@ export async function startHostServer(
       options.logger?.warn(entry, 'wire validation failed')
     })
   }
-  const auth: AuthConfig | undefined = options.auth ?? (options.authToken ? { sharedToken: options.authToken } : undefined)
+  const configuredAuth: AuthConfig | undefined = options.auth ?? (options.authToken ? { sharedToken: options.authToken } : undefined)
+  const auth: AuthConfig | undefined = options.executorIdentityStore
+    ? { ...(configuredAuth ?? {}), executorIdentityStore: options.executorIdentityStore }
+    : configuredAuth
   const deployment = options.deployment ?? PORTABLE_DEPLOYMENT
   const product = productVariant(deployment)
   const tenancy = effectiveTenancy(deployment)
@@ -291,6 +327,11 @@ export async function startHostServer(
   const closeServer = async (): Promise<void> => {
     if (closed) return
     closed = true
+    // Fencing PG writes alone cannot stop an already-started model/tool effect.
+    // Abort cancellable effects before waiting for scheduler and queue shutdown.
+    // Default single-process shutdown still drains already accepted queue work.
+    // Only the distributed owner protocol requires immediate loss fencing.
+    if (options.assertSessionEffectOwner) loop?.abortActiveEffects()
     if (promptSynchronizationTimer) clearTimeout(promptSynchronizationTimer)
     detachPublicAccessGate?.()
     for (const batch of tokenDeltaBatches.values()) clearTimeout(batch.timer)
@@ -344,15 +385,21 @@ export async function startHostServer(
   const getDefaultConfig = (actor?: DashboardActor): AgentConfig => typeof options.defaultConfig === 'function'
     ? options.defaultConfig(actor)
     : options.defaultConfig
-  const sessionArtifacts = new SessionArtifactRegistry(join(options.sessionsDir, '..', 'session-artifacts'))
-  await sessionArtifacts.load()
-  const messageAttachments = new MessageAttachmentStore(join(options.sessionsDir, '..', 'message-attachments'))
-  await messageAttachments.load()
+  if (options.sessionAuthority && !options.objectStorage) {
+    throw new Error('Private Cloud session authority requires both externally backed artifact stores')
+  }
+  const sessionArtifacts = options.objectStorage?.sessionArtifacts
+    ?? new SessionArtifactRegistry(join(options.sessionsDir, '..', 'session-artifacts'))
+  const messageAttachments = options.objectStorage?.messageAttachments
+    ?? new MessageAttachmentStore(join(options.sessionsDir, '..', 'message-attachments'))
+  await Promise.all([sessionArtifacts.load(), messageAttachments.load()])
+  const useLocalArtifactGovernor = !options.objectStorage?.quotaManagedExternally
+    && Boolean(options.resourceGovernor && options.resourceUnitId)
   const effectiveStorageQuota: TenantStorageQuotaEnforcer | undefined =
-    options.storageQuota || (options.resourceGovernor && options.resourceUnitId)
+    options.storageQuota || useLocalArtifactGovernor
       ? {
           async assertCanStoreArtifact(params) {
-            if (options.resourceGovernor && options.resourceUnitId) {
+            if (useLocalArtifactGovernor && options.resourceGovernor && options.resourceUnitId) {
               if (options.resourceArtifactUsage) {
                 options.resourceGovernor.reconcile(options.resourceUnitId, {
                   artifactBytes: await options.resourceArtifactUsage(),
@@ -364,7 +411,7 @@ export async function startHostServer(
             try {
               await options.storageQuota?.assertCanStoreArtifact(params)
             } catch (error) {
-              if (options.resourceGovernor && options.resourceUnitId) {
+              if (useLocalArtifactGovernor && options.resourceGovernor && options.resourceUnitId) {
                 options.resourceGovernor.releaseArtifact(options.resourceUnitId, params.bytes)
               }
               throw error
@@ -373,38 +420,52 @@ export async function startHostServer(
         }
       : undefined
   const store = new SessionStore(options.sessionsDir, {
+    authority: options.sessionAuthority,
     runtimeConfig: ({ executionMode }) => deriveSessionConfig(getDefaultConfig(), undefined, executionMode),
     artifactRootDir: options.artifactRootDir,
     deleteRegisteredArtifacts: async (sessionId) => {
-      await Promise.all([
+      const results = await Promise.allSettled([
         sessionArtifacts.deleteSession(sessionId),
         messageAttachments.deleteSession(sessionId),
       ])
+      const failures = results
+        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        .map((result) => result.reason)
+      if (failures.length > 0) throw new AggregateError(failures, `Session ${sessionId} object cleanup failed`)
     },
     onStorageChanged: () => storageInventory?.invalidate(),
   })
-  storageInventory = new StorageInventory(options.sessionsDir)
-  safeCleanup = new SafeCleanupEngine({
-    sessionsDir: options.sessionsDir,
-    quarantineDir: join(options.sessionsDir, '..', 'storage-quarantine'),
-    metadataDir: join(options.sessionsDir, '..', 'storage-cleanup'),
-    withMutationLease: async (sessionIds, action) => await store.withStorageMutationLease(sessionIds, action),
-    onSessionsQuarantined: (sessionIds) => store.evictQuarantinedSessions(sessionIds),
-  })
-  await safeCleanup.recover(new Set())
-  store.installStorageTombstones(await safeCleanup.listTombstonedSessionIds())
+  await store.initialize()
+  // The current inventory and quarantine engine measure/move local Session trees.
+  // Do not expose misleading partial results for PostgreSQL or object-backed data;
+  // Dashboard RPCs fail explicitly with "storage inventory/cleanup unavailable".
+  if (!options.sessionAuthority && !options.objectStorage) {
+    storageInventory = new StorageInventory(options.sessionsDir)
+    safeCleanup = new SafeCleanupEngine({
+      sessionsDir: options.sessionsDir,
+      quarantineDir: join(options.sessionsDir, '..', 'storage-quarantine'),
+      metadataDir: join(options.sessionsDir, '..', 'storage-cleanup'),
+      withMutationLease: async (sessionIds, action) => await store.withStorageMutationLease(sessionIds, action),
+      onSessionsQuarantined: (sessionIds) => store.evictQuarantinedSessions(sessionIds),
+    })
+    await safeCleanup.recover(new Set())
+    store.installStorageTombstones(await safeCleanup.listTombstonedSessionIds())
+  }
   const ownsStateStore = options.stateStore === undefined
   const stateStore = options.stateStore ?? new KalaStateStore(join(options.sessionsDir, '..', 'memos'), {
     legacyMemoDirectory: join(options.sessionsDir, '..', 'memos'),
   })
-  const memoStore = new MemoStore(stateStore)
-  const dagStore = stateStore.dagStore()
+  const memoStore = options.memoStore ?? new MemoStore(stateStore)
+  if (options.sessionAuthority && !options.dagStore) {
+    throw new Error('Private Cloud session authority requires an explicitly tenant/unit-scoped DAG store')
+  }
+  const dagStore = options.dagStore ?? stateStore.dagStore()
   const defaultSkillRootsList = defaultSkillRoots()
   const defaultSkillRegistry = await discoverSkills(defaultSkillRootsList)
-  const workspaceAliases = new WorkspaceAliasStore(join(options.sessionsDir, '..', 'workspace-aliases.json'))
+  const workspaceAliases = options.workspaceAliasStore ?? new WorkspaceAliasStore(join(options.sessionsDir, '..', 'workspace-aliases.json'))
   await workspaceAliases.load()
-  const executorInstallations = new ExecutorInstallationStore(join(options.sessionsDir, '..', 'executor-installations.json'))
-  executorInstallations.load()
+  const executorInstallations = options.executorInstallationStore ?? new ExecutorInstallationStore(join(options.sessionsDir, '..', 'executor-installations.json'))
+  await executorInstallations.load()
   const windowsReleaseAssetsReady = () => hasIntegrityCheckedWindowsReleaseAssets(options.releaseAssetsDir, options.embeddedReleaseAssets)
   attachExecutorInstallationRoutes(http, {
     store: executorInstallations,
@@ -416,12 +477,18 @@ export async function startHostServer(
   })
 
   // Web Push (see docs/planning/roadmap-notes/pwa-mobile-and-push.md §5).
-  // Fail-open: if VAPID isn't configured / can't be generated, dispatcher
-  // short-circuits and /push/vapid-public-key returns publicKey:null so the
-  // dashboard hides the push UI instead of erroring on subscribe.
-  const pushStore = new PushSubscriptionStore(join(options.sessionsDir, '..', 'push-subscriptions.jsonl'))
-  await pushStore.load()
-  const vapid = loadOrCreateVapidKeys(options.sessionsDir)
+  // Private Cloud must provide both authorities so a tmpfs restart can never
+  // silently fall back to local subscriptions or auto-generated VAPID keys.
+  if (options.sessionAuthority && !options.pushStore) {
+    throw new Error('Private Cloud session authority requires an explicitly tenant-scoped push store')
+  }
+  if (options.sessionAuthority && options.vapidKeys === undefined) {
+    throw new Error('Private Cloud session authority requires externally supplied VAPID keys or explicit null')
+  }
+  const localPushStore = options.pushStore ? undefined : new PushSubscriptionStore(join(options.sessionsDir, '..', 'push-subscriptions.jsonl'))
+  if (localPushStore) await localPushStore.load()
+  const pushStore = options.pushStore ?? localPushStore!
+  const vapid = options.vapidKeys !== undefined ? options.vapidKeys : loadOrCreateVapidKeys(options.sessionsDir)
   const pushActivity = new PushActivityTracker()
   const pushDispatcher = createPushDispatcher({
     store: pushStore,
@@ -469,6 +536,10 @@ export async function startHostServer(
   })
 
   let restart: RestartCoordinator | undefined
+  const hostStartedAt = new Date().toISOString()
+  // Cloud Pod replacement is owned by the orchestrator, not the local-file
+  // restart workflow. Do not create or recover restart-state.json on tmpfs.
+  const restartUnavailableStatus = () => ({ pid: process.pid, startedAt: hostStartedAt, current: null, last: null })
   const settingsWithSkills = (settings: NonNullable<HostServerOptions['settings']>) => async (actor: DashboardActor): Promise<ServerSettingsPayload> => {
     const base = typeof settings === 'function'
       ? await settings(actor)
@@ -623,14 +694,14 @@ export async function startHostServer(
     const operationId = requestedOperationId ?? ulid()
     let record = store.get(sessionId)
     if (!record) record = await store.load(sessionId, { recoverDangling: false })
-    validateMessageAttachmentReferences(messageAttachments, sessionId, content)
+    await validateMessageAttachmentReferences(messageAttachments, sessionId, content)
     const shell = intent === 'shell' ? parseBangShellRequest(text) : undefined
     if (intent === 'shell' && !shell) throw new Error('Shell intent requires a leading ! command')
     if (shell && content?.length) throw new Error('Shell commands cannot include attachments or structured content')
     if (shell && !record.workspaceId) throw new Error('Shell commands require a Session bound to a workspace')
     const operationScan = record.agentRuntime === 'kernel' ? {} : { maxScanBytes: 64 * 1024 * 1024 }
     if (shell) {
-      const existingResult = await findSessionOperation(record.logPath, bangShellResultOperationId(operationId), operationScan)
+      const existingResult = await store.findOperation(sessionId, bangShellResultOperationId(operationId), operationScan)
       if (existingResult?.kind === 'event') {
         if (!isBangShellResultForCommand(existingResult.event.text, shell.command)) {
           throw new Error(`operationId ${operationId} was already used for a different shell command`)
@@ -644,7 +715,7 @@ export async function startHostServer(
         return { accepted: true, committed: true, cursor: record.state.cursor }
       }
     }
-    const existingOperation = await findSessionOperation(record.logPath, operationId, operationScan)
+    const existingOperation = await store.findOperation(sessionId, operationId, operationScan)
     if (existingOperation?.kind === 'event') {
       assertMessageOperationCompatible(existingOperation.event, text, content)
       return { accepted: true, committed: true, cursor: existingOperation.cursor }
@@ -773,14 +844,9 @@ export async function startHostServer(
       const runtime = agentRuntimes?.get(record.agentRuntime)
       return runtime ? await runtime.toolResultPersisted(record, callId) : false
     },
-    restartStatus: () => restart?.status() ?? {
-      pid: process.pid,
-      startedAt: new Date(0).toISOString(),
-      current: null,
-      last: null,
-    },
+    restartStatus: () => restart?.status() ?? restartUnavailableStatus(),
     requestRestart: (input) => {
-      if (!restart) throw new Error('restart coordinator is not ready')
+      if (!restart) throw new Error(options.sessionAuthority ? 'Private Cloud Runtime restart must be managed by the orchestrator' : 'restart coordinator is not ready')
       return restart.request(input)
     },
     commitRestartActivation: (attemptId) => restart?.commitActivation(attemptId) ?? null,
@@ -872,6 +938,10 @@ export async function startHostServer(
   const queuedMessages = new Map<string, QueuedUserMessage[]>()
   const cancelledQueueOperations = new Map<string, Set<string>>()
   const claimedQueueOperations = new Map<string, QueuedUserMessage>()
+  const persistentQueue = options.sessionAuthority?.messageQueue
+  const persistentQueueClaims = new Map<string, PostgresMessageQueueClaim>()
+  const queueClaimOwner = `host:${randomUUID()}`
+  const queueClaimTtlMs = options.queueClaimTtlMs ?? 30_000
   const drainingQueues = new Set<string>()
   const requestedQueueDrains = new Set<string>()
   const queueLoads = new Map<string, Promise<PersistedMessageQueueState>>()
@@ -919,6 +989,7 @@ export async function startHostServer(
           command: item.shell.command,
           state: item.shell.state ?? 'queued',
           ...(item.shell.result ? { result: item.shell.result } : {}),
+          ...(item.shell.error ? { error: item.shell.error } : {}),
         } } : {}),
       })),
     }
@@ -928,12 +999,22 @@ export async function startHostServer(
     dashboardNs.to(sessionRoom(sessionId)).emit('server:message_queue', queueSnapshot(sessionId))
   }
 
+  const applyQueueState = (sessionId: string, state: PersistedMessageQueueState): QueuedUserMessage[] => {
+    if (state.items.length === 0) queuedMessages.delete(sessionId)
+    else queuedMessages.set(sessionId, [...state.items])
+    cancelledQueueOperations.set(sessionId, new Set(state.cancelledOperationIds))
+    syncGovernedQueueUsage()
+    return queuedMessages.get(sessionId) ?? []
+  }
+
   const loadQueue = async (sessionId: string): Promise<QueuedUserMessage[]> => {
     const existing = queuedMessages.get(sessionId)
-    if (existing || cancelledQueueOperations.has(sessionId)) return existing ?? []
+    if (!persistentQueue && (existing || cancelledQueueOperations.has(sessionId))) return existing ?? []
     let pending = queueLoads.get(sessionId)
     if (!pending) {
-      pending = loadPersistedMessageQueueState(store, sessionId).catch((error) => {
+      pending = (persistentQueue
+        ? persistentQueue.loadOrInitialize(sessionId, async () => await loadPersistedMessageQueueState(store, sessionId))
+        : loadPersistedMessageQueueState(store, sessionId)).catch((error) => {
         // Dashboard sockets may subscribe before creating their Session. Preserve
         // that empty-queue behavior, but fail closed for all actual read errors
         // so tombstones are never silently discarded.
@@ -948,13 +1029,11 @@ export async function startHostServer(
     } finally {
       queueLoads.delete(sessionId)
     }
-    if (restored.items.length > 0) queuedMessages.set(sessionId, restored.items)
-    cancelledQueueOperations.set(sessionId, new Set(restored.cancelledOperationIds))
-    syncGovernedQueueUsage()
-    return queuedMessages.get(sessionId) ?? []
+    return applyQueueState(sessionId, restored)
   }
 
   const persistQueue = async (sessionId: string, queue: readonly QueuedUserMessage[], cancelled = cancelledQueueOperations.get(sessionId) ?? new Set<string>()): Promise<void> => {
+    if (persistentQueue) throw new Error('Private Cloud queue mutations must use PostgreSQL transactional operations')
     await persistMessageQueueSnapshot(store, sessionId, queue, [...cancelled])
     if (queue.length === 0) queuedMessages.delete(sessionId)
     else queuedMessages.set(sessionId, [...queue])
@@ -994,6 +1073,25 @@ export async function startHostServer(
   const claimQueueHead = async (sessionId: string): Promise<QueuedUserMessage | undefined> =>
     await withQueueMutation(sessionId, async () => {
       if (closed || claimedQueueOperations.has(sessionId)) return undefined
+      if (persistentQueue) {
+        const result = await persistentQueue.claimHead(sessionId, `${queueClaimOwner}:${randomUUID()}`, queueClaimTtlMs)
+        applyQueueState(sessionId, result.state)
+        if (!result.claim) {
+          if (result.executionUnknown && !closed) emitQueueUpdate(sessionId)
+          return undefined
+        }
+        let claimed = result.claim.item
+        if (claimed.shell && claimed.shell.state !== 'running' && !claimed.shell.result) {
+          const shell = { ...claimed.shell, state: 'running' as const }
+          const persisted = await persistentQueue.persistShellResult(result.claim, shell)
+          applyQueueState(sessionId, persisted.state)
+          claimed = { ...claimed, shell }
+          result.claim.item = claimed
+        }
+        persistentQueueClaims.set(sessionId, result.claim)
+        claimedQueueOperations.set(sessionId, claimed)
+        return claimed
+      }
       const next = (await loadQueue(sessionId))[0]
       if (!next) return undefined
       // Capture the exact payload while holding the same lock as edit/delete.
@@ -1016,19 +1114,36 @@ export async function startHostServer(
       return claimed
     })
 
-  const releaseQueueClaim = (sessionId: string, id: string): void => {
-    if (claimedQueueOperations.get(sessionId)?.id === id) claimedQueueOperations.delete(sessionId)
+  const releaseQueueClaim = async (sessionId: string, id: string): Promise<void> => {
+    if (claimedQueueOperations.get(sessionId)?.id !== id) return
+    const persistentClaim = persistentQueueClaims.get(sessionId)
+    if (persistentQueue && persistentClaim) await persistentQueue.releaseClaim(persistentClaim).catch(() => false)
+    persistentQueueClaims.delete(sessionId)
+    claimedQueueOperations.delete(sessionId)
   }
 
   const dequeueClaimedQueueHead = async (sessionId: string, claimed: QueuedUserMessage): Promise<boolean> => {
     let changed = false
     await withQueueMutation(sessionId, async () => {
       if (closed) return
+      const persistentClaim = persistentQueueClaims.get(sessionId)
+      if (persistentQueue && persistentClaim) {
+        try {
+          const result = await persistentQueue.completeClaim(persistentClaim)
+          applyQueueState(sessionId, result.state)
+          persistentQueueClaims.delete(sessionId)
+          claimedQueueOperations.delete(sessionId)
+          changed = result.changed
+        } catch (error) {
+          if (!(error instanceof QueueClaimFencedError)) throw error
+        }
+        return
+      }
       const queue = [...await loadQueue(sessionId)]
       if (queue[0]?.id !== claimed.id) return
       queue.shift()
       await persistQueue(sessionId, queue)
-      releaseQueueClaim(sessionId, claimed.id)
+      await releaseQueueClaim(sessionId, claimed.id)
       changed = true
     })
     if (changed && !closed) emitQueueUpdate(sessionId)
@@ -1038,12 +1153,42 @@ export async function startHostServer(
   const isClaimedQueueHeadDispatchable = async (sessionId: string, claimed: QueuedUserMessage): Promise<boolean> =>
     await withQueueMutation(sessionId, async () => {
       if (closed) return false
+      if (persistentQueue) {
+        const persistentClaim = persistentQueueClaims.get(sessionId)
+        return persistentClaim?.item.id === claimed.id
+          && persistentClaim.item.operationId === claimed.operationId
+          && await persistentQueue.confirmClaim(persistentClaim)
+      }
       const activeClaim = claimedQueueOperations.get(sessionId)
       if (activeClaim?.id !== claimed.id || activeClaim.operationId !== claimed.operationId) return false
       const queueHead = (await loadQueue(sessionId))[0]
       if (queueHead?.id !== claimed.id || queueHead.operationId !== claimed.operationId) return false
       return !cancelledQueueOperations.get(sessionId)?.has(claimed.operationId)
     })
+
+  const withQueueClaimHeartbeat = async <T>(sessionId: string, operation: () => Promise<T>): Promise<T> => {
+    if (!persistentQueue) return await operation()
+    let stopped = false
+    let fenced: unknown
+    const renew = async (): Promise<void> => {
+      const claim = persistentQueueClaims.get(sessionId)
+      if (!claim || stopped) return
+      try {
+        persistentQueueClaims.set(sessionId, await persistentQueue.renewClaim(claim, queueClaimTtlMs))
+      } catch (error) {
+        fenced = error
+      }
+    }
+    const timer = setInterval(() => { void renew() }, Math.max(10, Math.floor(queueClaimTtlMs / 3)))
+    try {
+      const result = await operation()
+      if (fenced) throw fenced
+      return result
+    } finally {
+      stopped = true
+      clearInterval(timer)
+    }
+  }
 
   const prepareQueuedDispatch = async (
     sessionId: string,
@@ -1053,7 +1198,15 @@ export async function startHostServer(
     if (!claimed.shell) {
       return { text: claimed.text, operationId: claimed.operationId, ...(claimed.content ? { content: claimed.content } : {}) }
     }
+    // PostgreSQL takeover recovery marks an uncertain external effect as
+    // unknown. It remains queued for operator inspection/deletion and must
+    // never be interpreted as either a result or permission to execute again.
+    if (persistentQueue && claimed.shell.state === 'unknown' && !claimed.shell.result) return undefined
     if (!claimed.shell.result) {
+      const persistentClaim = persistentQueueClaims.get(sessionId)
+      // Shell is an external side effect. Re-check the durable claim immediately
+      // before dispatch; a stale process must never execute based on local state.
+      if (persistentQueue && (!persistentClaim || !await persistentQueue.confirmClaim(persistentClaim))) return undefined
       const toolResult = record.workspaceId
         ? await executors.callTool(sessionId, {
             kind: 'call_tool',
@@ -1067,6 +1220,20 @@ export async function startHostServer(
       const resultState = bangShellResultState(toolResult)
       let resultPersisted = false
       await withQueueMutation(sessionId, async () => {
+        if (persistentQueue && persistentClaim) {
+          try {
+            const shell = { ...claimed.shell!, state: resultState, result: formatted }
+            const result = await persistentQueue.persistShellResult(persistentQueueClaims.get(sessionId) ?? persistentClaim, shell)
+            applyQueueState(sessionId, result.state)
+            claimed.shell = shell
+            const activeClaim = persistentQueueClaims.get(sessionId)
+            if (activeClaim) activeClaim.item = claimed
+            resultPersisted = true
+          } catch (error) {
+            if (!(error instanceof QueueClaimFencedError)) throw error
+          }
+          return
+        }
         const queue = [...await loadQueue(sessionId)]
         const activeClaim = claimedQueueOperations.get(sessionId)
         if (activeClaim?.id !== claimed.id || activeClaim.operationId !== claimed.operationId) return
@@ -1112,8 +1279,8 @@ export async function startHostServer(
         const committedOperationId = msg.shell ? bangShellResultOperationId(msg.operationId) : msg.operationId
         if (msg.shell) {
           const record = store.get(sessionId) ?? await store.load(sessionId, { recoverDangling: false })
-          const committed = await findSessionOperation(
-            record.logPath,
+          const committed = await store.findOperation(
+            sessionId,
             committedOperationId,
             record.agentRuntime === 'kernel' ? {} : { maxScanBytes: 64 * 1024 * 1024 },
           )
@@ -1131,8 +1298,8 @@ export async function startHostServer(
           }
         } else {
           const record = store.get(sessionId) ?? await store.load(sessionId, { recoverDangling: false })
-          const committed = await findSessionOperation(
-            record.logPath,
+          const committed = await store.findOperation(
+            sessionId,
             committedOperationId,
             record.agentRuntime === 'kernel' ? {} : { maxScanBytes: 64 * 1024 * 1024 },
           )
@@ -1149,6 +1316,18 @@ export async function startHostServer(
           ? resourceGovernor.tryEnqueue(resourceUnitId)
           : { ok: true as const }
         if (!admission.ok) throw new Error(`Runtime Unit queue limit exceeded (${admission.code})`)
+        if (persistentQueue) {
+          try {
+            const result = await persistentQueue.enqueue(sessionId, msg, priority === 'front' ? 'front' : 'back')
+            applyQueueState(sessionId, result.state)
+            changed = result.changed
+            if (!changed && resourceGovernor && resourceUnitId) resourceGovernor.dequeue(resourceUnitId)
+          } catch (error) {
+            if (resourceGovernor && resourceUnitId) resourceGovernor.dequeue(resourceUnitId)
+            throw error
+          }
+          return
+        }
         if (priority === 'front') {
           const claimed = claimedQueueOperations.get(sessionId)
           let insertAt = 0
@@ -1177,6 +1356,13 @@ export async function startHostServer(
     async reorder(sessionId, id, beforeId) {
       let changed = false
       await withQueueMutation(sessionId, async () => {
+        if (persistentQueue) {
+          await loadQueue(sessionId)
+          const result = await persistentQueue.reorder(sessionId, id, beforeId ?? undefined)
+          applyQueueState(sessionId, result.state)
+          changed = result.changed
+          return
+        }
         const claimed = claimedQueueOperations.get(sessionId)
         if (claimed && (id === claimed.id || id === claimed.operationId || beforeId === claimed.id || beforeId === claimed.operationId)) {
           throw claimedQueueMutationError(claimed)
@@ -1219,6 +1405,12 @@ export async function startHostServer(
           ...(nextContent ? { content: nextContent } : {}),
           ...(shell ? { shell: { ...shell, state: 'queued' as const } } : { shell: undefined }),
         }
+        if (persistentQueue) {
+          const result = await persistentQueue.update(sessionId, id, queue[index]!)
+          applyQueueState(sessionId, result.state)
+          changed = result.changed
+          return
+        }
         await persistQueue(sessionId, queue)
         changed = true
       })
@@ -1228,6 +1420,13 @@ export async function startHostServer(
     async delete(sessionId, id) {
       let changed = false
       await withQueueMutation(sessionId, async () => {
+        if (persistentQueue) {
+          await loadQueue(sessionId)
+          const result = await persistentQueue.delete(sessionId, id)
+          applyQueueState(sessionId, result.state)
+          changed = result.changed
+          return
+        }
         const claimed = claimedQueueOperations.get(sessionId)
         if (claimed && (id === claimed.id || id === claimed.operationId)) throw claimedQueueMutationError(claimed)
         const queue = await loadQueue(sessionId)
@@ -1246,6 +1445,13 @@ export async function startHostServer(
     async stop(sessionId) {
       let changed = false
       await withQueueMutation(sessionId, async () => {
+        if (persistentQueue) {
+          await loadQueue(sessionId)
+          const result = await persistentQueue.stop(sessionId)
+          applyQueueState(sessionId, result.state)
+          changed = result.changed
+          return
+        }
         const queue = await loadQueue(sessionId)
         const claimed = claimedQueueOperations.get(sessionId)
         if (queue.length === 0 && !claimed) return
@@ -1288,38 +1494,41 @@ export async function startHostServer(
           if (record.agentRuntime !== 'kernel') {
             record = await store.load(sessionId)
             if (!isRestingStatus(record.state.status)) return
+            const runtimeRecord = record
             const next = await claimQueueHead(sessionId)
             if (!next || closed) return
             const turnAdmission = resourceGovernor && resourceUnitId
               ? resourceGovernor.tryStartTurn(resourceUnitId)
               : { ok: true as const }
             if (!turnAdmission.ok) {
-              releaseQueueClaim(sessionId, next.id)
+              await releaseQueueClaim(sessionId, next.id)
               return
             }
             try {
-              await options.queueDispatchBarrier?.({ sessionId, operationId: next.operationId, runtime: record.agentRuntime })
-              if (!await isClaimedQueueHeadDispatchable(sessionId, next)) continue
-              const dispatch = await prepareQueuedDispatch(sessionId, record, next)
-              if (!dispatch) continue
-              const alreadyDispatched = await sessionUserOperationCursor(store, sessionId, dispatch.operationId) !== undefined
-              if (!alreadyDispatched) {
-                const runtime = agentRuntimes?.require(record.agentRuntime)
-                if (!runtime) return
-                await runtime.send(record, {
-                  text: dispatch.text,
-                  ...(dispatch.content ? { content: dispatch.content } : {}),
-                  ...(next.model ?? effectiveModelForSession(sessionId)
-                    ? { model: next.model ?? effectiveModelForSession(sessionId) }
-                    : {}),
-                  operationId: dispatch.operationId,
-                  queuedAt: next.createdAt,
-                })
-              }
-              await dequeueClaimedQueueHead(sessionId, next)
+              await withQueueClaimHeartbeat(sessionId, async () => {
+                await options.queueDispatchBarrier?.({ sessionId, operationId: next.operationId, runtime: runtimeRecord.agentRuntime })
+                if (!await isClaimedQueueHeadDispatchable(sessionId, next)) return
+                const dispatch = await prepareQueuedDispatch(sessionId, runtimeRecord, next)
+                if (!dispatch) return
+                const alreadyDispatched = await sessionUserOperationCursor(store, sessionId, dispatch.operationId) !== undefined
+                if (!alreadyDispatched) {
+                  const runtime = agentRuntimes?.require(runtimeRecord.agentRuntime)
+                  if (!runtime) return
+                  await runtime.send(runtimeRecord, {
+                    text: dispatch.text,
+                    ...(dispatch.content ? { content: dispatch.content } : {}),
+                    ...(next.model ?? effectiveModelForSession(sessionId)
+                      ? { model: next.model ?? effectiveModelForSession(sessionId) }
+                      : {}),
+                    operationId: dispatch.operationId,
+                    queuedAt: next.createdAt,
+                  })
+                }
+                await dequeueClaimedQueueHead(sessionId, next)
+              })
             } finally {
               if (resourceGovernor && resourceUnitId) resourceGovernor.finishTurn(resourceUnitId)
-              releaseQueueClaim(sessionId, next.id)
+              await releaseQueueClaim(sessionId, next.id)
               for (const queuedSessionId of queuedMessages.keys()) void messageQueues.drain(queuedSessionId)
             }
             continue
@@ -1346,7 +1555,7 @@ export async function startHostServer(
             ? resourceGovernor.tryStartTurn(resourceUnitId)
             : { ok: true as const }
           if (!turnAdmission.ok) {
-            releaseQueueClaim(sessionId, next.id)
+            await releaseQueueClaim(sessionId, next.id)
             return
           }
           // Dispatch first and persist the dequeue only after the durable
@@ -1357,28 +1566,35 @@ export async function startHostServer(
             await dequeueClaimedQueueHead(sessionId, next)
           }
           try {
-            await options.queueDispatchBarrier?.({ sessionId, operationId: next.operationId, runtime: record.agentRuntime })
-            if (!await isClaimedQueueHeadDispatchable(sessionId, next)) continue
-            const dispatch = await prepareQueuedDispatch(sessionId, record, next)
-            if (!dispatch) continue
-            const alreadyDispatched = await sessionUserOperationCursor(store, sessionId, dispatch.operationId) !== undefined
-            if (!alreadyDispatched) {
-              await loop.dispatch(sessionId, {
-                kind: 'user_message',
-                operationId: dispatch.operationId,
-                queuedAt: next.createdAt,
-                text: dispatch.text,
-                ...(dispatch.content ? { content: dispatch.content } : {}),
-              }, { ...(next.model ? { model: next.model } : {}), onCommitted: dequeueCommitted })
-            } else {
-              await dequeueCommitted()
-            }
+            await withQueueClaimHeartbeat(sessionId, async () => {
+              await options.queueDispatchBarrier?.({ sessionId, operationId: next.operationId, runtime: record.agentRuntime })
+              if (!await isClaimedQueueHeadDispatchable(sessionId, next)) return
+              const dispatch = await prepareQueuedDispatch(sessionId, record, next)
+              if (!dispatch) return
+              const alreadyDispatched = await sessionUserOperationCursor(store, sessionId, dispatch.operationId) !== undefined
+              if (!alreadyDispatched) {
+                await loop.dispatch(sessionId, {
+                  kind: 'user_message',
+                  operationId: dispatch.operationId,
+                  queuedAt: next.createdAt,
+                  text: dispatch.text,
+                  ...(dispatch.content ? { content: dispatch.content } : {}),
+                }, { ...(next.model ? { model: next.model } : {}), onCommitted: dequeueCommitted })
+              } else {
+                await dequeueCommitted()
+              }
+            })
           } finally {
             if (resourceGovernor && resourceUnitId) resourceGovernor.finishTurn(resourceUnitId)
-            releaseQueueClaim(sessionId, next.id)
+            await releaseQueueClaim(sessionId, next.id)
             for (const queuedSessionId of queuedMessages.keys()) void messageQueues.drain(queuedSessionId)
           }
         }
+      } catch (error) {
+        // An already-admitted drain can reach dispatch after a distributed
+        // owner-loss close. Leave its durable queue claim for the successor;
+        // do not leak a rejected fire-and-forget drain into the process.
+        if (!closed || !options.assertSessionEffectOwner) throw error
       } finally {
         drainingQueues.delete(sessionId)
         if (requestedQueueDrains.delete(sessionId) && !closed && !loop.isDraining()) {
@@ -1395,8 +1611,8 @@ export async function startHostServer(
   ): Promise<number | undefined> {
     const record = sessionStore.get(sessionId)
     if (!record) return undefined
-    const operation = await findSessionOperation(
-      record.logPath,
+    const operation = await sessionStore.findOperation(
+      sessionId,
       operationId,
       record.agentRuntime === 'kernel' ? {} : { maxScanBytes: 64 * 1024 * 1024 },
     )
@@ -1405,7 +1621,7 @@ export async function startHostServer(
   }
 
   function assertCopilotOperationCompatible(
-    existing: Extract<NonNullable<Awaited<ReturnType<typeof findSessionOperation>>>, { kind: 'runtime_metadata' }>,
+    existing: Extract<SessionOperationMatch, { kind: 'runtime_metadata' }>,
     text: string,
     content: readonly import('@agent-kernel/kernel').MessageContent[] | undefined,
   ): void {
@@ -1676,6 +1892,7 @@ export async function startHostServer(
     ...(options.llmQuota !== undefined ? { llmQuota: options.llmQuota } : {}),
     ...(options.modelPolicy !== undefined ? { modelPolicy: options.modelPolicy } : {}),
     tools: executors,
+    ...(options.assertSessionEffectOwner ? { assertSessionEffectOwner: options.assertSessionEffectOwner } : {}),
     broadcast,
     models: {
       get: effectiveModelForSession,
@@ -1704,17 +1921,19 @@ export async function startHostServer(
       schedule: (parentSessionId) => dagOrchestrator?.schedule(parentSessionId),
     },
     publishDagRun: (parentSessionId) => {
-      dashboardNs.to(sessionRoom(parentSessionId)).emit('server:dag_run', {
-        sessionId: parentSessionId,
-        run: dagStore.runForSession(parentSessionId) ?? null,
-      })
+      void Promise.resolve(dagStore.runForSession(parentSessionId)).then((run) => {
+        dashboardNs.to(sessionRoom(parentSessionId)).emit('server:dag_run', {
+          sessionId: parentSessionId,
+          run: run ?? null,
+        })
+      }).catch((error: unknown) => broadcast.onError(parentSessionId, error instanceof Error ? error.message : String(error)))
     },
     publishLocalImages,
     extensions,
   }
   loop = runHostLoop(loopDeps)
   agentRuntimes = new AgentRuntimeRegistry()
-  agentRuntimes.register(new KernelAgentRuntime(loop))
+  agentRuntimes.register(new KernelAgentRuntime(loop, store))
   const runtimeController: SubAgentRuntimeController = {
     async send(record, text, model) {
       await ensureEffectiveSystemPrompt(record)
@@ -1731,6 +1950,7 @@ export async function startHostServer(
   const copilotRuntime = new CopilotAgentRuntime({
     store,
     tools: copilotTools,
+    ...(options.assertSessionEffectOwner ? { assertSessionEffectOwner: options.assertSessionEffectOwner } : {}),
     messageAttachments,
     publishLocalImages,
     broadcast: {
@@ -1793,7 +2013,7 @@ export async function startHostServer(
   await copilotRuntime.start()
   agentRuntimes.register(copilotRuntime)
   dagOrchestrator = new DagOrchestrator(dagStore, loopDeps, loop, runtimeController)
-  for (const sessionId of dagStore.activeParentSessionIds()) dagOrchestrator.schedule(sessionId)
+  for (const sessionId of await dagStore.activeParentSessionIds()) dagOrchestrator.schedule(sessionId)
   const loadApiRecord = async (sessionId: string): Promise<SessionRecord | undefined> => {
     const loaded = store.get(sessionId)
     if (loaded) return loaded
@@ -1857,7 +2077,7 @@ export async function startHostServer(
       ...(organizationId ? { organizationId, role: 'member' as const } : {}),
     }
   }
-  const scheduledTaskStore = new ScheduledTaskStore(join(options.sessionsDir, '.scheduled-tasks'))
+  const scheduledTaskStore = options.scheduledTaskStore ?? new ScheduledTaskStore(join(options.sessionsDir, '.scheduled-tasks'))
   scheduledTaskScheduler = new UnitScheduler(scheduledTaskStore, {
     async validate(task) {
       await validateScheduledTarget(scheduledActor(task), task)
@@ -1866,7 +2086,7 @@ export async function startHostServer(
       const sessionId = task.target.kind === 'session' ? task.target.sessionId : occurrenceSessionId(run.occurrenceId)
       const record = await loadApiRecord(sessionId)
       if (!record) return task.target.kind === 'workspace' ? 'absent' : 'unknown'
-      const operation = await findSessionOperation(record.logPath, run.operationId, record.agentRuntime === 'kernel' ? {} : { maxScanBytes: 64 * 1024 * 1024 })
+      const operation = await store.findOperation(sessionId, run.operationId, record.agentRuntime === 'kernel' ? {} : { maxScanBytes: 64 * 1024 * 1024 })
       if (operation) return 'committed'
       // The durable message queue also de-duplicates this operation ID. An absent
       // Session receipt is therefore safe to retry locally with the same ID.
@@ -2045,10 +2265,15 @@ export async function startHostServer(
       if (!root) return
       const targetIds = collectSessionDescendants(await store.listSummaries(), sessionId)
       for (const targetSessionId of targetIds) {
+        // A different replica may own a descendant even when this Runtime has
+        // no local turn. Refuse the whole tree before pausing tasks or making
+        // any external cleanup request unless every Session is locally owned.
+        await options.assertSessionEffectOwner?.(targetSessionId)
         if (loop.hasActiveTurn(targetSessionId)) throw new Error('session tree has an active turn; stop it before deleting')
       }
       await scheduledTaskStore.pauseSessionTargets(scheduleOwnerKey(actor), new Set(targetIds))
       for (const targetSessionId of targetIds.reverse()) {
+        await options.assertSessionEffectOwner?.(targetSessionId)
         await messageQueues.stop(targetSessionId)
         await executors.cancelPending(targetSessionId)
         const record = await apiRecord(actor, targetSessionId)
@@ -2085,13 +2310,13 @@ export async function startHostServer(
     },
     async getDagRun(actor, sessionId) {
       if (!await apiRecord(actor, sessionId)) throw new Error('session not found')
-      return dagStore.runForSession(sessionId) ?? null
+      return await dagStore.runForSession(sessionId) ?? null
     },
     async answerDagDecision(actor, sessionId, decisionId, input) {
       if (!await apiRecord(actor, sessionId)) throw new Error('session not found')
-      const run = dagStore.runForSession(sessionId)
+      const run = await dagStore.runForSession(sessionId)
       if (!run) throw new Error('DAG run does not exist')
-      const updated = dagStore.answerDecision(run.id, decisionId, input.answer, input.operationId)
+      const updated = await dagStore.answerDecision(run.id, decisionId, input.answer, input.operationId)
       dagOrchestrator?.schedule(sessionId)
       dashboardNs.to(sessionRoom(sessionId)).emit('server:dag_run', { sessionId, run: updated })
       return updated
@@ -2124,7 +2349,7 @@ export async function startHostServer(
     },
   })
   await scheduledTaskScheduler.start()
-  restart = new RestartCoordinator({
+  if (!options.sessionAuthority) restart = new RestartCoordinator({
     store,
     loop,
     statePath: defaultRestartStatePath(options.sessionsDir),
@@ -2262,7 +2487,7 @@ export async function startHostServer(
   // at before_tool_dispatch may need Executors to reconnect to this candidate.
   // Dashboard mutation remains fenced by mutableReady until the Supervisor's
   // final route commit, while the Executor namespace can settle continuation.
-  await restart.resumeMarkedSessions()
+  await restart?.resumeMarkedSessions()
 
   // Reconcile persisted Sessions only after the listener and runtime services
   // are available. Residual failures remain pending until storage recovers.
@@ -2274,7 +2499,7 @@ export async function startHostServer(
     loop,
     store,
     executorsSnapshot: () => executors.snapshot().map((executor) => workspaceAliases.apply(executor)),
-    restartStatus: () => restart!.status(),
+    restartStatus: () => restart?.status() ?? restartUnavailableStatus(),
     port,
     close: closeServer,
   }

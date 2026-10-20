@@ -34,13 +34,32 @@ export type ManagedExecutorInstallationBinding = {
   organizationId?: string
 }
 
-export class ExecutorInstallationStore {
+export interface ExecutorInstallationStorage {
+  load(): Promise<void>
+  create(input: CreateExecutorInstall, idempotencyKey?: string, tenant?: ExecutorInstallationTenantAttribution): Promise<CreatedExecutorInstallation>
+  claim(setupCode: string): Promise<ClaimedExecutorInstallation | undefined>
+  get(id: string): Promise<ExecutorInstallStatusSnapshot | undefined>
+  managedBinding(id: string): Promise<ManagedExecutorInstallationBinding | undefined>
+  managedBindingsForWorkspace(workspaceId: string): Promise<ManagedExecutorInstallationBinding[]>
+  events(id: string, afterSeq?: number): Promise<readonly ExecutorInstallEvent[] | undefined>
+  update(id: string, input: UpdateExecutorInstall): Promise<ExecutorInstallStatusSnapshot | undefined>
+  delete(id: string): Promise<boolean>
+  authenticate(id: string, bootstrap: string | undefined): Promise<boolean>
+  markBootstrapDownloaded(bootstrap: string): Promise<ExecutorInstallStatusSnapshot | undefined>
+  reportClient(id: string, bootstrap: string, status: ExecutorInstallStatus, errorCode?: string, metadata?: ExecutorInstallEventMetadata): Promise<ExecutorInstallStatusSnapshot>
+  approve(id: string): Promise<ExecutorInstallStatusSnapshot | undefined>
+  reject(id: string): Promise<ExecutorInstallStatusSnapshot | undefined>
+  redeem(id: string, bootstrap: string, workspaceId: string): Promise<ExecutorInstallStatusSnapshot>
+  markOnline(id: string, workspaceId: string, metadata?: ExecutorInstallEventMetadata): Promise<ExecutorInstallStatusSnapshot | undefined>
+}
+
+export class ExecutorInstallationStore implements ExecutorInstallationStorage {
   private records = new Map<string, InstallationRecord>()
   private idempotency = new Map<string, string>()
 
   constructor(private readonly path: string, private readonly ttlMs = DEFAULT_TTL_MS) {}
 
-  load(): void {
+  async load(): Promise<void> {
     if (!existsSync(this.path)) return
     const parsed = JSON.parse(readFileSync(this.path, 'utf8')) as FileShape
     if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.installations)) return
@@ -56,7 +75,7 @@ export class ExecutorInstallationStore {
     this.idempotency = new Map(Object.entries(parsed.idempotency ?? {}).filter(([, id]) => this.records.has(id)))
   }
 
-  create(input: CreateExecutorInstall, idempotencyKey?: string, tenant?: ExecutorInstallationTenantAttribution): CreatedExecutorInstallation {
+  async create(input: CreateExecutorInstall, idempotencyKey?: string, tenant?: ExecutorInstallationTenantAttribution): Promise<CreatedExecutorInstallation> {
     if (idempotencyKey) {
       const existingId = this.idempotency.get(idempotencyKey)
       const existing = existingId ? this.records.get(existingId) : undefined
@@ -86,7 +105,7 @@ export class ExecutorInstallationStore {
     return { install: this.snapshot(record), setupCode }
   }
 
-  claim(setupCode: string): ClaimedExecutorInstallation | undefined {
+  async claim(setupCode: string): Promise<ClaimedExecutorInstallation | undefined> {
     const normalized = normalizeSetupCode(setupCode)
     if (!normalized) return undefined
     const hash = hashToken(normalized)
@@ -100,20 +119,20 @@ export class ExecutorInstallationStore {
     return { install: this.snapshot(record), bootstrap }
   }
 
-  get(id: string): ExecutorInstallStatusSnapshot | undefined {
+  async get(id: string): Promise<ExecutorInstallStatusSnapshot | undefined> {
     const record = this.activeRecord(id)
     return record ? this.snapshot(record) : undefined
   }
 
   /** Dashboard-native installation binding used by sensitive managed settings. */
-  managedBinding(id: string): ManagedExecutorInstallationBinding | undefined {
+  async managedBinding(id: string): Promise<ManagedExecutorInstallationBinding | undefined> {
     const record = this.activeRecord(id)
     return record?.workspaceId
       ? { id: record.id, workspaceId: record.workspaceId, ...(record.organizationId ? { organizationId: record.organizationId } : {}) }
       : undefined
   }
 
-  managedBindingsForWorkspace(workspaceId: string): ManagedExecutorInstallationBinding[] {
+  async managedBindingsForWorkspace(workspaceId: string): Promise<ManagedExecutorInstallationBinding[]> {
     const bindings: ManagedExecutorInstallationBinding[] = []
     for (const record of this.records.values()) {
       const active = this.activeRecord(record.id)
@@ -123,12 +142,12 @@ export class ExecutorInstallationStore {
     return bindings
   }
 
-  events(id: string, afterSeq = -1): readonly ExecutorInstallEvent[] | undefined {
+  async events(id: string, afterSeq = -1): Promise<readonly ExecutorInstallEvent[] | undefined> {
     const record = this.activeRecord(id)
     return record?.events.filter((event) => event.seq > afterSeq)
   }
 
-  update(id: string, input: UpdateExecutorInstall): ExecutorInstallStatusSnapshot | undefined {
+  async update(id: string, input: UpdateExecutorInstall): Promise<ExecutorInstallStatusSnapshot | undefined> {
     const record = this.activeRecord(id)
     if (!record || record.status !== 'created' || record.bootstrapDownloadedAt) return undefined
     Object.assign(record, input, { updatedAt: new Date().toISOString() })
@@ -136,19 +155,19 @@ export class ExecutorInstallationStore {
     return this.snapshot(record)
   }
 
-  delete(id: string): boolean {
+  async delete(id: string): Promise<boolean> {
     if (!this.records.delete(id)) return false
     for (const [key, value] of this.idempotency) if (value === id) this.idempotency.delete(key)
     this.save()
     return true
   }
 
-  authenticate(id: string, bootstrap: string | undefined): boolean {
+  async authenticate(id: string, bootstrap: string | undefined): Promise<boolean> {
     const record = this.activeRecord(id)
     return Boolean(record && bootstrap && safeHashEqual(record.bootstrapHash, hashToken(bootstrap)))
   }
 
-  markBootstrapDownloaded(bootstrap: string): ExecutorInstallStatusSnapshot | undefined {
+  async markBootstrapDownloaded(bootstrap: string): Promise<ExecutorInstallStatusSnapshot | undefined> {
     const record = this.findByBootstrap(bootstrap)
     if (!record || record.bootstrapDownloadedAt || record.redeemedAt || record.status !== 'created') return undefined
     record.bootstrapDownloadedAt = new Date().toISOString()
@@ -156,7 +175,7 @@ export class ExecutorInstallationStore {
     return this.snapshot(record)
   }
 
-  reportClient(id: string, bootstrap: string, status: ExecutorInstallStatus, errorCode?: string, metadata?: ExecutorInstallEventMetadata): ExecutorInstallStatusSnapshot {
+  async reportClient(id: string, bootstrap: string, status: ExecutorInstallStatus, errorCode?: string, metadata?: ExecutorInstallEventMetadata): Promise<ExecutorInstallStatusSnapshot> {
     const record = this.requireBootstrap(id, bootstrap)
     if (status === 'online' || status === 'completed') throw new ExecutorInstallationError('host_observed_status_required', 409)
     this.transitionRecord(record, status, errorCode, metadata)
@@ -167,21 +186,21 @@ export class ExecutorInstallationStore {
     return this.snapshot(record)
   }
 
-  approve(id: string): ExecutorInstallStatusSnapshot | undefined {
+  async approve(id: string): Promise<ExecutorInstallStatusSnapshot | undefined> {
     const record = this.activeRecord(id)
     if (!record || record.status !== 'pairing_pending') return undefined
     this.transitionRecord(record, 'paired')
     return this.snapshot(record)
   }
 
-  reject(id: string): ExecutorInstallStatusSnapshot | undefined {
+  async reject(id: string): Promise<ExecutorInstallStatusSnapshot | undefined> {
     const record = this.activeRecord(id)
     if (!record || record.status !== 'pairing_pending') return undefined
     this.transitionRecord(record, 'rejected')
     return this.snapshot(record)
   }
 
-  redeem(id: string, bootstrap: string, workspaceId: string): ExecutorInstallStatusSnapshot {
+  async redeem(id: string, bootstrap: string, workspaceId: string): Promise<ExecutorInstallStatusSnapshot> {
     const record = this.requireBootstrap(id, bootstrap)
     if (record.status !== 'paired') throw new ExecutorInstallationError('installation_not_approved', 409)
     if (record.redeemedAt) throw new ExecutorInstallationError('installation_already_redeemed', 409)
@@ -191,7 +210,7 @@ export class ExecutorInstallationStore {
     return this.snapshot(record)
   }
 
-  markOnline(id: string, workspaceId: string, metadata?: ExecutorInstallEventMetadata): ExecutorInstallStatusSnapshot | undefined {
+  async markOnline(id: string, workspaceId: string, metadata?: ExecutorInstallEventMetadata): Promise<ExecutorInstallStatusSnapshot | undefined> {
     const record = this.activeRecord(id)
     if (!record || record.workspaceId !== workspaceId || record.status !== 'starting') return undefined
     this.transitionRecord(record, 'online', undefined, metadata)

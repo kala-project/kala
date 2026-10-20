@@ -1,7 +1,35 @@
+import { requestRuntime } from '../edge/server.js'
 import type { ControlPlaneDatabase, SqlExecutor } from '../persistence/postgres.js'
+import type { RuntimeProvisioningOriginResolver } from '../runtime-origin/postgres-runtime-origin-resolver.js'
 
 export type RuntimeHostResponse = { status: number; body: Buffer }
 export type RuntimeHostRequest = (body: unknown) => Promise<RuntimeHostResponse>
+
+export function createRuntimeHostProvisioningClient(options: {
+  origin: string
+  runtimeProvisioningOriginResolver?: RuntimeProvisioningOriginResolver
+  ingressSecret: string
+  tls?: { ca: string | Buffer; cert: string | Buffer; key: string | Buffer; servername?: string }
+}): RuntimeHostRequest {
+  return async (body) => {
+    const unitId = typeof body === 'object' && body !== null && typeof (body as { unitId?: unknown }).unitId === 'string'
+      ? (body as { unitId: string }).unitId
+      : undefined
+    if (!unitId) throw new Error('Tenant provisioning requires an authoritative runtime unit')
+    const origin = options.runtimeProvisioningOriginResolver
+      ? await options.runtimeProvisioningOriginResolver.resolveProvisioningOrigin(unitId)
+      : options.origin
+    if (!origin) throw new Error('Tenant provisioning runtime origin is unavailable')
+    return requestRuntime(
+      origin,
+      '/internal/runtime-units',
+      'POST',
+      { 'content-type': 'application/json', 'x-agent-runlab-ingress-secret': options.ingressSecret },
+      Buffer.from(JSON.stringify(body)),
+      options.tls,
+    )
+  }
+}
 
 type Placement = {
   organization_id: string

@@ -66,10 +66,10 @@ import {
   readGithubSession,
 } from '../auth-control.js'
 import type { AuditActor, AuditLogger } from '../audit-log.js'
-import type { SessionArtifactRegistry } from '../session-artifact-registry.js'
+import type { SessionArtifactStorage } from '../session-artifact-registry.js'
 import {
   MAX_MESSAGE_ATTACHMENT_BYTES,
-  type MessageAttachmentStore,
+  type MessageAttachmentStorage,
 } from '../message-attachment-store.js'
 import { assertImageAttachmentBytes, assertKernelTextAttachment, supportedImageMediaType, validateMessageAttachmentReferences } from '../message-attachment-resolver.js'
 import type { OperationalMetrics } from '../operational-metrics.js'
@@ -225,8 +225,8 @@ export function attachJsonRoutes(
     artifactRootDir?: string | false
     docsRootDir?: string
     embeddedDocs?: readonly EmbeddedStaticAsset[]
-    sessionArtifacts?: SessionArtifactRegistry
-    messageAttachments?: MessageAttachmentStore
+    sessionArtifacts?: SessionArtifactStorage
+    messageAttachments?: MessageAttachmentStorage
     storageQuota?: TenantStorageQuotaEnforcer
     sessions?: SessionStore
     routerHealth?: () => unknown
@@ -452,28 +452,29 @@ export function attachJsonRoutes(
         sendError(res, auth.status, auth.error)
         return
       }
-      const body: ServerExecutorInvitesPayload = { invites: payloads.auth?.executorIdentityStore?.inviteSnapshot() ?? [] }
-      sendJson(req, res, body)
+      void Promise.resolve(payloads.auth?.executorIdentityStore?.inviteSnapshot() ?? [])
+        .then((invites) => sendJson(req, res, { invites } satisfies ServerExecutorInvitesPayload))
+        .catch((err: unknown) => sendError(res, 500, err instanceof Error ? err.message : String(err)))
       return
     }
     if (path === '/auth/executor-pairings' && req.method === 'POST') {
       claimRoute(req)
-      void readJson(req).then((body) => {
+      void readJson(req).then(async (body) => {
         const input=body as {workspaceId?:unknown;label?:unknown};const workspaceId=cleanString(input.workspaceId)
         if(!workspaceId){sendError(res,400,'workspaceId is required');return}
-        const pairing=payloads.auth?.executorIdentityStore?.createPairing({workspaceId,label:cleanString(input.label)})
+        const pairing=await payloads.auth?.executorIdentityStore?.createPairing({workspaceId,label:cleanString(input.label)})
         if(!pairing){sendError(res,500,'executor identity store is not configured');return}
         payloads.audit?.log({action:'executor_pairing.request',actor:{kind:'anonymous'},target:{workspaceId},outcome:'ok',metadata:{id:pairing.id}})
         sendJson(req,res,pairing)
       }).catch((e)=>sendError(res,400,e instanceof Error?e.message:String(e)));return
     }
-    if (path === '/auth/executor-pairings' && req.method === 'GET') { claimRoute(req);const auth=authorizeSensitiveManagement(req,effectiveTenancy(payloads.deployment??PORTABLE_DEPLOYMENT),payloads.auth);if(!auth.ok){sendError(res,auth.status,auth.error);return}sendJson(req,res,{pairings:payloads.auth?.executorIdentityStore?.pairingSnapshot()??[]});return }
+    if (path === '/auth/executor-pairings' && req.method === 'GET') { claimRoute(req);const auth=authorizeSensitiveManagement(req,effectiveTenancy(payloads.deployment??PORTABLE_DEPLOYMENT),payloads.auth);if(!auth.ok){sendError(res,auth.status,auth.error);return}void Promise.resolve(payloads.auth?.executorIdentityStore?.pairingSnapshot()??[]).then((pairings)=>sendJson(req,res,{pairings})).catch((e:unknown)=>sendError(res,500,e instanceof Error?e.message:String(e)));return }
     const pairingMatch=path.match(/^\/auth\/executor-pairings\/([^/]+)\/(approve|reject|claim)$/u)
     if(pairingMatch&&req.method==='POST'){
       claimRoute(req);const id=decodeURIComponent(pairingMatch[1]??''),action=pairingMatch[2]
-      if(action==='claim'){void readJson(req).then((body)=>{const secret=cleanString((body as {claimSecret?:unknown}).claimSecret);const result=secret?payloads.auth?.executorIdentityStore?.claimPairing(id,secret):undefined;if(!result){sendError(res,404,'pairing not found');return}sendJson(req,res,result)});return}
+      if(action==='claim'){void readJson(req).then(async(body)=>{const secret=cleanString((body as {claimSecret?:unknown}).claimSecret);const result=secret?await payloads.auth?.executorIdentityStore?.claimPairing(id,secret):undefined;if(!result){sendError(res,404,'pairing not found');return}sendJson(req,res,result)}).catch((e:unknown)=>sendError(res,500,e instanceof Error?e.message:String(e)));return}
       const auth=authorizeSensitiveManagement(req,effectiveTenancy(payloads.deployment??PORTABLE_DEPLOYMENT),payloads.auth);if(!auth.ok){sendError(res,auth.status,auth.error);return}
-      const result=payloads.auth?.executorIdentityStore?.decidePairing(id,action==='approve');if(!result){sendError(res,404,'pending pairing not found');return}payloads.audit?.log({action:`executor_pairing.${action}`,actor:auth.actor,target:{workspaceId:result.workspaceId},outcome:'ok',metadata:{id}});sendJson(req,res,result);return
+      void Promise.resolve(payloads.auth?.executorIdentityStore?.decidePairing(id,action==='approve')).then((result)=>{if(!result){sendError(res,404,'pending pairing not found');return}payloads.audit?.log({action:`executor_pairing.${action}`,actor:auth.actor,target:{workspaceId:result.workspaceId},outcome:'ok',metadata:{id}});sendJson(req,res,result)}).catch((e:unknown)=>sendError(res,500,e instanceof Error?e.message:String(e)));return
     }
     if (path === '/auth/executor-invites' && req.method === 'POST') {
       claimRoute(req)
@@ -484,9 +485,9 @@ export function attachJsonRoutes(
         return
       }
       void readJson(req)
-        .then((body) => {
+        .then(async (body) => {
           const input = typeof body === 'object' && body !== null ? body as { label?: unknown; workspaceId?: unknown } : {}
-          const invite = payloads.auth?.executorIdentityStore?.createInvite({ label: cleanString(input.label), workspaceId: cleanString(input.workspaceId) })
+          const invite = await payloads.auth?.executorIdentityStore?.createInvite({ label: cleanString(input.label), workspaceId: cleanString(input.workspaceId) })
           if (!invite) {
             sendError(res, 500, 'executor identity store is not configured')
             return
@@ -515,9 +516,9 @@ export function attachJsonRoutes(
       }
       if (req.method === 'PATCH' && !action) {
         void readJson(req)
-          .then((body) => {
+          .then(async (body) => {
             const input = typeof body === 'object' && body !== null ? body as { label?: unknown; workspaceId?: unknown } : {}
-            const updated = payloads.auth?.executorIdentityStore?.updateInvite(id, {
+            const updated = await payloads.auth?.executorIdentityStore?.updateInvite(id, {
               ...(Object.prototype.hasOwnProperty.call(input, 'label') ? { label: cleanString(input.label) ?? '' } : {}),
               ...(Object.prototype.hasOwnProperty.call(input, 'workspaceId') ? { workspaceId: input.workspaceId === null ? null : cleanString(input.workspaceId) ?? '' } : {}),
             })
@@ -532,29 +533,32 @@ export function attachJsonRoutes(
         return
       }
       if (req.method === 'DELETE' && !action) {
-        const deleted = payloads.auth?.executorIdentityStore?.deleteInvite(id) ?? false
-        payloads.audit?.log({ action: 'executor_invite.delete', actor: httpActor(req, payloads.auth), outcome: deleted ? 'ok' : 'denied', ...(deleted ? {} : { error: 'invite_not_found' }), metadata: { id } })
-        if (!deleted) { sendError(res, 404, 'invite not found'); return }
-        sendJson(req, res, { ok: true, id, deleted: true })
+        void Promise.resolve(payloads.auth?.executorIdentityStore?.deleteInvite(id) ?? false).then((deleted) => {
+          payloads.audit?.log({ action: 'executor_invite.delete', actor: httpActor(req, payloads.auth), outcome: deleted ? 'ok' : 'denied', ...(deleted ? {} : { error: 'invite_not_found' }), metadata: { id } })
+          if (!deleted) { sendError(res, 404, 'invite not found'); return }
+          sendJson(req, res, { ok: true, id, deleted: true })
+        }).catch((err: unknown) => sendError(res, 500, err instanceof Error ? err.message : String(err)))
         return
       }
       if (req.method === 'POST' && action === 'revoke') {
-        const revoked = payloads.auth?.executorIdentityStore?.revokeInvite(id) ?? false
-        payloads.audit?.log({ action: 'executor_invite.revoke', actor: httpActor(req, payloads.auth), outcome: revoked ? 'ok' : 'denied', ...(revoked ? {} : { error: 'invite_not_found_or_revoked' }), metadata: { id } })
-        if (!revoked) { sendError(res, 404, 'invite not found or already revoked'); return }
-        const body: ServerExecutorInviteRevokedPayload = { ok: true, id, revoked: true }
-        sendJson(req, res, body)
+        void Promise.resolve(payloads.auth?.executorIdentityStore?.revokeInvite(id) ?? false).then((revoked) => {
+          payloads.audit?.log({ action: 'executor_invite.revoke', actor: httpActor(req, payloads.auth), outcome: revoked ? 'ok' : 'denied', ...(revoked ? {} : { error: 'invite_not_found_or_revoked' }), metadata: { id } })
+          if (!revoked) { sendError(res, 404, 'invite not found or already revoked'); return }
+          const body: ServerExecutorInviteRevokedPayload = { ok: true, id, revoked: true }
+          sendJson(req, res, body)
+        }).catch((err: unknown) => sendError(res, 500, err instanceof Error ? err.message : String(err)))
         return
       }
       if (req.method === 'POST' && action === 'regenerate') {
-        const invite = payloads.auth?.executorIdentityStore?.regenerateInvite(id)
-        if (!invite) {
-          sendError(res, 404, 'invite not found')
-          return
-        }
-        const response: ServerExecutorInvitePayload = invite
-        payloads.audit?.log({ action: 'executor_invite.regenerate', actor: httpActor(req, payloads.auth), outcome: 'ok', metadata: { id } })
-        sendJson(req, res, response)
+        void Promise.resolve(payloads.auth?.executorIdentityStore?.regenerateInvite(id)).then((invite) => {
+          if (!invite) {
+            sendError(res, 404, 'invite not found')
+            return
+          }
+          const response: ServerExecutorInvitePayload = invite
+          payloads.audit?.log({ action: 'executor_invite.regenerate', actor: httpActor(req, payloads.auth), outcome: 'ok', metadata: { id } })
+          sendJson(req, res, response)
+        }).catch((err: unknown) => sendError(res, 500, err instanceof Error ? err.message : String(err)))
         return
       }
       sendError(res, 405, 'method not allowed')
@@ -568,16 +572,17 @@ export function attachJsonRoutes(
         sendError(res, auth.status, auth.error)
         return
       }
-      const identities = payloads.auth?.executorIdentityStore?.snapshot() ?? []
-      const body: ServerExecutorIdentitiesPayload = {
-        identities: identities.map((entry) => ({
-          workspaceId: entry.workspaceId,
-          ...(entry.label ? { label: entry.label } : {}),
-          createdAt: entry.createdAt,
-          ...(entry.lastSeenAt ? { lastSeenAt: entry.lastSeenAt } : {}),
-        })),
-      }
-      sendJson(req, res, body)
+      void Promise.resolve(payloads.auth?.executorIdentityStore?.snapshot() ?? []).then((identities) => {
+        const body: ServerExecutorIdentitiesPayload = {
+          identities: identities.map((entry) => ({
+            workspaceId: entry.workspaceId,
+            ...(entry.label ? { label: entry.label } : {}),
+            createdAt: entry.createdAt,
+            ...(entry.lastSeenAt ? { lastSeenAt: entry.lastSeenAt } : {}),
+          })),
+        }
+        sendJson(req, res, body)
+      }).catch((err: unknown) => sendError(res, 500, err instanceof Error ? err.message : String(err)))
       return
     }
     if (path === '/auth/executor-identities' && req.method === 'DELETE') {
@@ -594,10 +599,11 @@ export function attachJsonRoutes(
         sendError(res, 400, 'workspaceId is required')
         return
       }
-      const revoked = payloads.auth?.executorIdentityStore?.revokeWorkspace(workspaceId) ?? false
-      payloads.audit?.log({ action: 'executor_identity.revoke', actor: httpActor(req, payloads.auth), target: { workspaceId }, outcome: revoked ? 'ok' : 'denied', ...(revoked ? {} : { error: 'identity_not_found' }) })
-      const body: ServerExecutorIdentityRevokedPayload = { ok: true, workspaceId, revoked }
-      sendJson(req, res, body)
+      void Promise.resolve(payloads.auth?.executorIdentityStore?.revokeWorkspace(workspaceId) ?? false).then((revoked) => {
+        payloads.audit?.log({ action: 'executor_identity.revoke', actor: httpActor(req, payloads.auth), target: { workspaceId }, outcome: revoked ? 'ok' : 'denied', ...(revoked ? {} : { error: 'identity_not_found' }) })
+        const body: ServerExecutorIdentityRevokedPayload = { ok: true, workspaceId, revoked }
+        sendJson(req, res, body)
+      }).catch((err: unknown) => sendError(res, 500, err instanceof Error ? err.message : String(err)))
       return
     }
     const internalToolBarrier = /^\/internal\/runtime\/tool-result\/([^/]+)\/([^/]+)$/u.exec(path)
@@ -812,7 +818,7 @@ export function attachJsonRoutes(
         const fileValidation = validateInlineMessageFiles(input.data.content)
         if (!fileValidation.ok) throw new HttpRouteError(400, `${fileValidation.error.code}: ${fileValidation.error.message}`)
         if (!input.data.text.trim() && !input.data.content?.length) throw new HttpRouteError(400, 'message content is required')
-        validateMessageAttachmentReferences(payloads.messageAttachments, input.data.sessionId, input.data.content)
+        await validateMessageAttachmentReferences(payloads.messageAttachments, input.data.sessionId, input.data.content)
         const session = await payloads.sessions?.load(input.data.sessionId, { recoverDangling: false }).catch((error) => {
           if (error instanceof SessionNotFoundError) throw error
           throw new HttpRouteError(400, error instanceof Error ? error.message : String(error))
@@ -952,7 +958,7 @@ export function attachJsonRoutes(
         if (!intent) throw new Error('intent is required')
         const content = Array.isArray(input.content) ? input.content as readonly import('@agent-kernel/kernel').MessageContent[] : undefined
         if (!text.trim() && !content?.length) throw new Error('message content is required')
-        validateMessageAttachmentReferences(payloads.messageAttachments, sessionId, content)
+        await validateMessageAttachmentReferences(payloads.messageAttachments, sessionId, content)
         let outcome: { accepted?: boolean; committed: boolean; cursor?: number }
         try {
           outcome = await payloads.enqueueUserMessage!({ sessionId, operationId, text, intent, mode, ...(content ? { content } : {}) })
@@ -1240,7 +1246,7 @@ export function attachJsonRoutes(
         .then(async (session) => {
           const accessError = httpSessionAccessError(req, session)
           if (accessError) throw new HttpRouteError(accessError.status, accessError.message)
-          const attachment = payloads.messageAttachments!.resolveById(sessionId, attachmentId)
+          const attachment = await payloads.messageAttachments!.resolveById(sessionId, attachmentId)
           if (!supportedImageMediaType(attachment.mediaType)) throw new HttpRouteError(409, 'attachment is not a previewable image')
           const data = req.method === 'HEAD' ? undefined : await attachment.read()
           const headers = {
@@ -1258,35 +1264,35 @@ export function attachJsonRoutes(
     }
     if (path.startsWith('/session-artifacts/')) {
       claimRoute(req)
-      const artifactId = decodeURIComponent(path.slice('/session-artifacts/'.length))
-      const record = payloads.sessionArtifacts?.get(artifactId)
-      if (!record || !payloads.sessions) { sendError(res, 404, 'artifact not found'); return }
+      if (!payloads.sessionArtifacts || !payloads.sessions) { sendError(res, 404, 'artifact not found'); return }
+      let artifactId: string
+      try { artifactId = decodeURIComponent(path.slice('/session-artifacts/'.length)) } catch { sendError(res, 400, 'invalid artifact id'); return }
       const artifactUrl = new URL(url, 'http://localhost')
       const sessionId = artifactUrl.searchParams.get('sessionId')
-      if (!sessionId || record.sessionId !== sessionId) { sendError(res, 403, 'artifact does not belong to this session'); return }
-      if (record.mediaType === 'image/svg+xml' && artifactUrl.searchParams.get('allowSvg') !== '1') {
-        sendError(res, 409, 'SVG preview requires explicit confirmation')
-        return
-      }
-      void payloads.sessions.load(sessionId)
-        .then(() => {
-          const session = payloads.sessions!.get(sessionId)
-          const accessError = httpSessionAccessError(req, session)
-          if (accessError) throw new HttpRouteError(accessError.status, accessError.message)
-          const headers = {
-            'content-type': record.mediaType,
-            'content-length': String(record.bytes),
-            'cache-control': 'private, max-age=31536000, immutable',
-            etag: `"${record.sha256}"`,
-            'x-content-type-options': 'nosniff',
-            ...(record.mediaType === 'image/svg+xml'
-              ? { 'content-security-policy': "default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox" }
-              : {}),
-          }
-          res.writeHead(200, headers)
-          if (req.method === 'HEAD') res.end()
-          else createReadStream(payloads.sessionArtifacts!.contentPath(record)).pipe(res)
-        })
+      if (!sessionId) { sendError(res, 403, 'artifact does not belong to this session'); return }
+      void (async () => {
+        const session = await payloads.sessions!.load(sessionId)
+        const accessError = httpSessionAccessError(req, session)
+        if (accessError) throw new HttpRouteError(accessError.status, accessError.message)
+        const record = await payloads.sessionArtifacts!.get(sessionId, artifactId)
+        if (!record) throw new HttpRouteError(404, 'artifact not found')
+        if (record.mediaType === 'image/svg+xml' && artifactUrl.searchParams.get('allowSvg') !== '1') {
+          throw new HttpRouteError(409, 'SVG preview requires explicit confirmation')
+        }
+        const data = req.method === 'HEAD' ? undefined : await record.read()
+        const headers = {
+          'content-type': record.mediaType,
+          'content-length': String(record.bytes),
+          'cache-control': 'private, max-age=31536000, immutable',
+          etag: `"${record.sha256}"`,
+          'x-content-type-options': 'nosniff',
+          ...(record.mediaType === 'image/svg+xml'
+            ? { 'content-security-policy': "default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox" }
+            : {}),
+        }
+        res.writeHead(200, headers)
+        res.end(data)
+      })()
         .catch((error: unknown) => sendError(res, error instanceof HttpRouteError ? error.status : 404, error instanceof Error ? error.message : 'session not found'))
       return
     }
@@ -1798,6 +1804,9 @@ async function sessionLogPath(body: EnhancementActionRequest, sessions: SessionS
   }
   const sessionId = requiredString(body.sessionId, 'sessionId')
   if (!sessions) throw new HttpRouteError(400, 'sessionId lookup is unavailable')
+  if (sessions.usesPostgresAuthority) {
+    throw new HttpRouteError(409, `${action} requires a local JSONL; PostgreSQL Session authority has no local Session log`)
+  }
   const cached = sessions.get(sessionId)
   if (cached) return cached.logPath
   return (await sessions.load(sessionId)).logPath

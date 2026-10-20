@@ -52,6 +52,7 @@ exports[`wire contract — schema surface > exports a stable, sorted set of sche
   "ClientListSubAgentsSchema",
   "ClientLoadHistorySchema",
   "ClientLoadLogArtifactSchema",
+  "ClientPrepareSessionRouteSchema",
   "ClientPrepareStorageCleanupSchema",
   "ClientReadBgOutputSchema",
   "ClientReadFileSchema",

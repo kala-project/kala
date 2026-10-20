@@ -30,10 +30,10 @@ import type { HookConfig, HookRunner } from './extensions/hooks.js'
 import type { SkillManager, SkillRegistry } from './extensions/skills.js'
 import type { SessionStore } from './store/session.js'
 import type { WebSearchCredentialStore } from './web-search/index.js'
-import type { MessageAttachmentStore } from './message-attachment-store.js'
+import type { MessageAttachmentStorage } from './message-attachment-store.js'
 import type { AskUserChoiceBroker } from './ask-user-choice.js'
 import type { ExtensionRegistry } from './extensions/registry.js'
-import type { DagStore } from './dag/store.js'
+import type { DagStorage } from './dag/storage.js'
 
 export type LoopBroadcast = {
   onEvent(
@@ -189,6 +189,8 @@ export type HostLoopDeps = {
   store: SessionStore
   llm: LLMAdapter
   tools: ToolDispatcher
+  /** Optional fail-closed check immediately before each model or tool effect. */
+  assertSessionEffectOwner?: (sessionId: string) => Promise<void>
   llmQuota?: LlmQuotaEnforcer
   modelPolicy?: TenantModelPolicyEnforcer
   broadcast: LoopBroadcast
@@ -199,11 +201,11 @@ export type HostLoopDeps = {
   webSearchCredentials?: WebSearchCredentialStore
   audit?: import('./audit-log.js').AuditLogger
   artifactRootDir?: string
-  messageAttachments?: MessageAttachmentStore
+  messageAttachments?: MessageAttachmentStorage
   publishLocalImages?: (sessionId: string, record: import('./store/session.js').SessionRecord, message: import('@agent-kernel/kernel').Message) => Promise<import('@agent-kernel/kernel').Message>
   askUserChoice?: AskUserChoiceBroker
   extensions?: ExtensionRegistry
-  dagStore?: DagStore
+  dagStore?: DagStorage
   dagWorkerConfig?: () => AgentConfig
   dagScheduler?: {
     schedule(parentSessionId: string): void
@@ -218,6 +220,8 @@ export type LoopHandle = {
   /** True while any serialized turn work is still running, including the gaps between LLM and tool effects. */
   hasActiveTurn(sessionId: string): boolean
   waitForActiveTurn(sessionId: string): Promise<void>
+  /** Stop new effects and abort active model calls and cancellable executor tools on Unit loss/close. */
+  abortActiveEffects(): void
   /** Wait until every serialized Session turn has left the Loop. */
   waitForQuiescence(): Promise<void>
   recoverInterruptedLlm(sessionId: string): Promise<boolean>

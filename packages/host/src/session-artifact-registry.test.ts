@@ -17,6 +17,10 @@ describe('SessionArtifactRegistry', () => {
     const restarted = new SessionArtifactRegistry(root)
     await restarted.load()
     expect(restarted.get(record.artifactId)?.sessionId).toBe('s1')
+    const resolved = restarted.get('s1', record.artifactId)
+    expect(resolved?.sessionId).toBe('s1')
+    await expect(resolved?.read()).resolves.toEqual(png)
+    expect(restarted.get('another-session', record.artifactId)).toBeUndefined()
   })
 
   it('rejects non-image payloads', async () => {

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { request as httpsRequest } from 'node:https'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createConfig } from '@agent-kernel/kernel'
 import { AGENT_RUNTIME_CAPABILITIES, PROTOCOL_VERSION, type ServerSessionsPayload } from '@agent-kernel/shared'
 import { io as connect, type Socket } from 'socket.io-client'
@@ -12,6 +12,9 @@ import { io as connect, type Socket } from 'socket.io-client'
 import type { LLMAdapter } from '../llm/adapter.js'
 import { startLoopbackHostRuntimeUnit } from './loopback-host-unit.js'
 import { startTenantRuntimeService, type TenantRuntimeService } from './service.js'
+import type { RuntimeUnitPlacementOwnership } from './runtime-unit-placement-ownership.js'
+import type { RuntimeReplicaMembership } from './runtime-replica-membership.js'
+import type { TenantRuntimeUnitId } from './unit.js'
 
 const roots: string[] = []
 const sockets: Socket[] = []
@@ -105,6 +108,142 @@ describe('multi-tenant Host composition', () => {
     expect(host.units.list()).toHaveLength(2)
     // Push/VAPID state is constructed below each Unit root, never globally.
     expect(join(root, 'a', 'push-vapid.json')).not.toBe(join(root, 'b', 'push-vapid.json'))
+  })
+
+  it('checks live placement on the handshake and closes an established Unit when its lease is lost', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tenant-placement-gate-')); roots.push(root)
+    let leaseLost: ((unitId: TenantRuntimeUnitId) => Promise<void>) | undefined
+    const ownership: RuntimeUnitPlacementOwnership = {
+      activate: vi.fn(async () => undefined),
+      isCurrent: vi.fn(async () => true),
+      release: vi.fn(async () => undefined),
+      releaseAll: vi.fn(async () => undefined),
+      setLeaseLostHandler(handler) { leaseLost = handler },
+    }
+    host = await startTenantRuntimeService({
+      port: 0,
+      requireProvisioning: true,
+      placementOwnership: ownership,
+      resolveUnitId: () => 'placed-unit',
+      factory: async (id) => startLoopbackHostRuntimeUnit(id, {
+        sessionsDir: join(root, 'sessions'), llm,
+        defaultConfig: createConfig({ systemPrompt: 'test', tools: [] }), capabilities: AGENT_RUNTIME_CAPABILITIES,
+      }),
+    })
+    await host.markRoutable('placed-unit', 'org-a')
+    const socket = connect(`http://127.0.0.1:${host.port}/dashboard`, {
+      transports: ['websocket'], auth: { sessionId: 'placed-session', role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+    })
+    sockets.push(socket)
+    await new Promise<void>((resolve, reject) => { socket.once('connect', resolve); socket.once('connect_error', reject) })
+    expect(ownership.activate).toHaveBeenCalledWith('placed-unit', 'org-a')
+    expect(ownership.isCurrent).toHaveBeenCalled()
+
+    const disconnected = new Promise<void>((resolve) => socket.once('disconnect', () => resolve()))
+    await leaseLost!('placed-unit' as TenantRuntimeUnitId)
+    await disconnected
+    vi.mocked(ownership.isCurrent).mockResolvedValue(false)
+    expect(host.units.list()).toHaveLength(0)
+    expect((await fetch(`http://127.0.0.1:${host.port}/runtime/capabilities`)).status).toBe(503)
+  })
+
+  it('keeps Unit placement mandatory and stops the Unit when its replica membership is lost', async () => {
+    const placement: RuntimeUnitPlacementOwnership = {
+      activate: vi.fn(async () => undefined), isCurrent: vi.fn(async () => true),
+      release: vi.fn(async () => undefined), releaseAll: vi.fn(async () => undefined), setLeaseLostHandler: vi.fn(),
+    }
+    let membershipLost: ((id: TenantRuntimeUnitId) => Promise<void>) | undefined
+    const membership: RuntimeReplicaMembership = {
+      activate: vi.fn(async () => undefined), release: vi.fn(async () => undefined),
+      releaseAll: vi.fn(async () => undefined), setLeaseLostHandler(handler) { membershipLost = handler },
+    }
+    const unitId = 'shadow-membership' as TenantRuntimeUnitId
+    const close = vi.fn(async () => undefined)
+    host = await startTenantRuntimeService({
+      port: 0, placementOwnership: placement, replicaMembership: membership,
+      requireProvisioning: true, resolveUnitId: () => unitId,
+      factory: async () => ({ id: unitId, state: 'ready', origin: 'http://127.0.0.1:9', drain: async () => undefined, close }),
+    })
+    await host.markRoutable(unitId, 'org-a')
+    expect(placement.activate).toHaveBeenCalledWith(unitId, 'org-a')
+    expect(membership.activate).toHaveBeenCalledWith(unitId, 'org-a')
+    await host.units.getOrLoad(unitId)
+    await membershipLost!(unitId)
+    expect(close).toHaveBeenCalledTimes(1)
+    expect(membership.release).toHaveBeenCalledWith(unitId)
+    expect(placement.release).toHaveBeenCalledWith(unitId)
+    expect(host.units.list()).toHaveLength(0)
+  })
+
+  it('rejects shadow replica membership without exclusive Unit placement', async () => {
+    const membership: RuntimeReplicaMembership = {
+      activate: vi.fn(async () => undefined), release: vi.fn(async () => undefined),
+      releaseAll: vi.fn(async () => undefined), setLeaseLostHandler: vi.fn(),
+    }
+    await expect(startTenantRuntimeService({
+      port: 0, replicaMembership: membership,
+      resolveUnitId: () => 'unit-a', factory: async () => { throw new Error('must not load') },
+    })).rejects.toThrow('requires Unit placement')
+    expect(membership.activate).not.toHaveBeenCalled()
+  })
+
+  it('releases Unit placement and refuses routing when membership registration fails', async () => {
+    const placement: RuntimeUnitPlacementOwnership = {
+      activate: vi.fn(async () => undefined), isCurrent: vi.fn(async () => true),
+      release: vi.fn(async () => undefined), releaseAll: vi.fn(async () => undefined), setLeaseLostHandler: vi.fn(),
+    }
+    const membership: RuntimeReplicaMembership = {
+      activate: vi.fn(async () => { throw new Error('replica unavailable') }),
+      release: vi.fn(async () => undefined), releaseAll: vi.fn(async () => undefined), setLeaseLostHandler: vi.fn(),
+    }
+    host = await startTenantRuntimeService({
+      port: 0, placementOwnership: placement, replicaMembership: membership, requireProvisioning: true,
+      resolveUnitId: () => 'unit-a', factory: async () => { throw new Error('must not load') },
+    })
+    await expect(host.markRoutable('unit-a', 'org-a')).rejects.toThrow('replica unavailable')
+    expect(placement.release).toHaveBeenCalledWith('unit-a')
+    expect((await fetch(`http://127.0.0.1:${host.port}/runtime/capabilities`)).status).toBe(404)
+  })
+
+  it('leaves an explicitly exempt public Unit outside placement and organization binding', async () => {
+    const ownership: RuntimeUnitPlacementOwnership = {
+      activate: vi.fn(async () => undefined), isCurrent: vi.fn(async () => false),
+      release: vi.fn(async () => undefined), releaseAll: vi.fn(async () => undefined), setLeaseLostHandler: vi.fn(),
+    }
+    host = await startTenantRuntimeService({
+      port: 0, requireProvisioning: true, placementOwnership: ownership,
+      requiresPlacement: (id) => id !== 'public-installer', resolveUnitId: () => 'public-installer',
+      factory: async () => { throw new Error('request need not load for this assertion') },
+    })
+    await host.markRoutable('public-installer')
+    expect(ownership.activate).not.toHaveBeenCalled()
+    await fetch(`http://127.0.0.1:${host.port}/missing`)
+    expect(ownership.isCurrent).not.toHaveBeenCalled()
+  })
+
+  it('closes an owned Unit resource exactly once on normal close', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tenant-unit-resource-')); roots.push(root)
+    let closeCount = 0
+    const unit = await startLoopbackHostRuntimeUnit('resource-unit', {
+      sessionsDir: join(root, 'sessions'), llm,
+      defaultConfig: createConfig({ systemPrompt: 'test', tools: [] }),
+      capabilities: AGENT_RUNTIME_CAPABILITIES,
+      closeResource: async () => { closeCount += 1 },
+    })
+    await unit.close()
+    await unit.close()
+    expect(closeCount).toBe(1)
+  })
+
+  it('closes an owned Unit resource when Host startup fails', async () => {
+    let closeCount = 0
+    await expect(startLoopbackHostRuntimeUnit('failed-resource-unit', {
+      sessionsDir: '\0', llm,
+      defaultConfig: createConfig({ systemPrompt: 'test', tools: [] }),
+      capabilities: AGENT_RUNTIME_CAPABILITIES,
+      closeResource: async () => { closeCount += 1 },
+    })).rejects.toThrow()
+    expect(closeCount).toBe(1)
   })
 
   it('attaches a Unit-local executor and executes filesystem tools inside its workspace', async () => {

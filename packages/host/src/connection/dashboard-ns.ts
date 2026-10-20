@@ -31,6 +31,7 @@ import type {
   ClientListSessions,
   ClientListSubAgents,
   ClientLoadHistory,
+  ClientPrepareSessionRoute,
   ClientLoadLogArtifact,
   ClientReadBgOutput,
   ClientReadOverflow,
@@ -120,7 +121,7 @@ import { createBuiltinExtensionRegistry } from '../extensions/builtin-registry.j
 import type { ConsolidationOutcome } from '../extensions/memory-consolidation.js'
 import { activeSubAgentFor, interruptSubAgentAfterRuntimeCancel, markSubAgentInterrupted } from '../extensions/agent-tool.js'
 import { resetCompactRuntime } from '../extensions/compaction.js'
-import { readSessionHistory, readSessionLog } from '../store/log.js'
+import { readSessionLog } from '../store/log.js'
 import { SessionStore, type SessionRecord } from '../store/session.js'
 import { createExecutorRegistry } from './executor.js'
 import { dirname, resolve as resolvePath, sep } from 'node:path'
@@ -137,7 +138,7 @@ import { OperationDeduper } from './operation-deduper.js'
 import type { AgentRuntimeRegistry } from '../agent-runtime/types.js'
 import { validateMessageAttachmentReferences } from '../message-attachment-resolver.js'
 import { askUserChoiceRequestFromPendingCall, type AskUserChoiceBroker } from '../ask-user-choice.js'
-import type { DagStore } from '../dag/store.js'
+import type { DagStorage } from '../dag/storage.js'
 import type { StorageInventory } from '../store/storage-inventory.js'
 import type { SafeCleanupEngine } from '../store/safe-cleanup.js'
 import { DAG_PLANNER_INSTRUCTION, DAG_PLAN_TOOL } from '../dag/tool.js'
@@ -156,8 +157,10 @@ export type QueuedUserMessage = {
   /** Host-owned shell escape. State and result are persisted before Agent dispatch. */
   shell?: {
     command: string
-    state?: 'queued' | 'running' | 'completed' | 'nonzero' | 'failed'
+    state?: 'queued' | 'running' | 'completed' | 'nonzero' | 'failed' | 'unknown'
     result?: string
+    /** Operator-facing detail for a shell effect whose completion cannot be established safely. */
+    error?: string
   }
 }
 
@@ -250,7 +253,7 @@ export type DashboardDeps = {
   streamingDraftSnapshot?(sessionId: string): { text: string; afterSeq: number; messageCount: number } | undefined
   agentRuntimes: AgentRuntimeRegistry
   askUserChoice?: AskUserChoiceBroker
-  dagStore?: DagStore
+  dagStore?: DagStorage
   storageInventory?: StorageInventory
   safeCleanup?: SafeCleanupEngine
   executorSnapshot?(): readonly AttachedExecutor[]
@@ -374,6 +377,11 @@ export function configureDashboardNamespace(
       nextFn(new Error('missing_connection_identity'))
       return
     }
+    const routedSessionId = socket.handshake.headers['x-agent-runlab-route-session-id']
+    if (routedSessionId !== undefined && (typeof routedSessionId !== 'string' || auth.clientId || auth.sessionId !== routedSessionId)) {
+      nextFn(new Error('session_route_mismatch'))
+      return
+    }
     const connectionMeta = dashboardConnectionMeta({
       actor: authResult.actor,
       clientVersion: auth.clientVersion,
@@ -395,6 +403,23 @@ export function configureDashboardNamespace(
     const sessionId = auth.sessionId ?? `control:${auth.clientId}`
     socket.emit('server:agent_runtimes', { runtimes: deps.agentRuntimes.catalog() })
     socket.use(([event, ...args], next) => {
+      const routedSessionId = socket.handshake.headers['x-agent-runlab-route-session-id']
+      if (typeof routedSessionId === 'string') {
+        const payload = args[0]
+        if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+          const scoped = payload as Record<string, unknown>
+          if ((scoped.sessionId !== undefined && scoped.sessionId !== routedSessionId)
+            || (scoped.sessionIds !== undefined && (!Array.isArray(scoped.sessionIds)
+              || scoped.sessionIds.some((id) => id !== routedSessionId)))
+            || (scoped.channels !== undefined && (!Array.isArray(scoped.channels)
+              || scoped.channels.some((channel) => channel !== `session:${routedSessionId}`)))) {
+            const ack = args.at(-1)
+            if (typeof ack === 'function') (ack as (value: RpcAck) => void)({ ok: false, error: 'session_route_mismatch' })
+            next(new Error('session_route_mismatch'))
+            return
+          }
+        }
+      }
       if (deps.mutableReady?.() === false && !READ_ONLY_DASHBOARD_EVENTS.has(String(event))) {
         const ack = args.at(-1)
         if (typeof ack === 'function') (ack as (value: RpcAck) => void)({ ok: false, error: 'runtime_not_ready' })
@@ -480,6 +505,7 @@ export function configureDashboardNamespace(
         'client:user_message', 'client:user_approve', 'client:user_reject', 'client:ask_user_choice', 'client:cancel', 'client:interrupt_sub_agent',
         'client:clear', 'client:compact', 'client:cancel_stream', 'client:set_approval_mode', 'client:fork',
         'client:create_session', 'client:delete_session', 'client:prepare_storage_cleanup', 'client:execute_storage_cleanup', 'client:update_preferences', 'client:set_cwd',
+        'client:prepare_session_route',
         'client:reorder_queued_message', 'client:update_queued_message', 'client:delete_queued_message',
         'client:rename_session', 'client:rename_workspace', 'client:consolidate_memory', 'bg:kill',
         'client:initialize_dag', 'client:answer_dag_decision',
@@ -707,6 +733,30 @@ export function configureDashboardNamespace(
       }
     })
 
+    socket.on('client:prepare_session_route', async (raw: ClientPrepareSessionRoute, ack: (result: RpcAck) => void) => {
+      const p = vparse(schema.ClientPrepareSessionRouteSchema, raw, 'client:prepare_session_route', (raw as ClientPrepareSessionRoute | undefined)?.sessionId)
+      if (!p) { ack({ ok: false, error: 'invalid session route request' }); return }
+      // Only the Unit-affine, authenticated control channel may initialize an
+      // existing Session owner; a routed Session socket must not acquire others.
+      if (!multiplexed || auditActor(socket).kind !== 'ingress'
+        || !deps.loopDeps.assertSessionEffectOwner || !mutableRuntimeReady()) {
+        ack({ ok: false, error: 'session route preparation unavailable' })
+        return
+      }
+      try {
+        const record = deps.store.get(p.sessionId)
+          ?? await deps.store.load(p.sessionId, { recoverDangling: false })
+        if (!record || validateIngressSessionAccess(socket, record)) {
+          ack({ ok: false, error: 'session unavailable' })
+          return
+        }
+        await deps.loopDeps.assertSessionEffectOwner(p.sessionId)
+        ack({ ok: true })
+      } catch {
+        ack({ ok: false, error: 'session owner unavailable' })
+      }
+    })
+
     socket.on('client:load_history', async (raw: ClientLoadHistory) => {
       const p = vparse(schema.ClientLoadHistorySchema, raw, 'client:load_history', (raw as ClientLoadHistory | undefined)?.sessionId)
       if (!p) return
@@ -733,7 +783,7 @@ export function configureDashboardNamespace(
         // runtime metadata, but no replayable Kernel events, so scanning it
         // here only delays control actions and can exhaust the Host heap.
         const parsed = target.agentRuntime === 'kernel'
-          ? await readSessionHistory(target.logPath)
+          ? await deps.store.readHistory(target.sessionId)
           : { events: [], runtimeMetadata: [] }
         const since = p.sinceCursor ?? 0
         const compactionMetadataByReplaceRange = buildCompactionMetadataIndex(parsed.runtimeMetadata)
@@ -779,13 +829,16 @@ export function configureDashboardNamespace(
           socket.emit('server:log_artifact', { sessionId: p.sessionId, seq: p.seq, error: 'event not found' })
           return
         }
-        const parsed = await readSessionLog(target.logPath)
-        const entry = parsed.events.find((e) => e.seq === p.seq)
+        const events = await deps.store.readEventEntries(target.sessionId)
+        const entry = events.find((e) => e.seq === p.seq)
         if (!entry) {
           socket.emit('server:log_artifact', { sessionId: p.sessionId, seq: p.seq, error: 'event not found' })
           return
         }
         const payload: { effects?: unknown; llmTrace?: unknown } = {}
+        if (deps.store.usesPostgresAuthority && (entry.effectsArtifact || entry.llmTraceArtifact)) {
+          throw new Error('Local trace artifacts are unavailable with PostgreSQL Session authority')
+        }
         if (entry.effectsArtifact) {
           payload.effects = await readJsonLogArtifact(target.logPath, entry.effectsArtifact.path)
         }
@@ -1110,18 +1163,25 @@ export function configureDashboardNamespace(
         // SDK generation/tools directly and can therefore confirm cancellation
         // before the wrapper tells the dashboard it was stopped.
         const result = child.agentRuntime === 'kernel'
-          ? markSubAgentInterrupted(p.parentSessionId, p.parentCallId, p.childSessionId)
+          ? await (async () => {
+              await deps.loopDeps.assertSessionEffectOwner?.(child.sessionId)
+              const interrupted = markSubAgentInterrupted(p.parentSessionId, p.parentCallId, p.childSessionId)
+              if (interrupted.ok) await runtime.cancel(child)
+              return interrupted
+            })()
           : await interruptSubAgentAfterRuntimeCancel(
               p.parentSessionId,
               p.parentCallId,
               p.childSessionId,
-              async () => await runtime.cancel(child),
+              async () => {
+                await deps.loopDeps.assertSessionEffectOwner?.(child.sessionId)
+                await runtime.cancel(child)
+              },
             )
         if (!result.ok) {
           deps.broadcastError(p.parentSessionId, 'host', result.error ?? 'sub-agent interrupt failed')
           return
         }
-        if (child.agentRuntime === 'kernel') await runtime.cancel(child)
       } catch (err) {
         deps.broadcastError(
           p.parentSessionId,
@@ -1133,13 +1193,19 @@ export function configureDashboardNamespace(
     socket.on('client:clear', async (raw: ClientClear) => {
       const p = vparse(schema.ClientClearSchema, raw, 'client:clear', (raw as ClientClear | undefined)?.sessionId)
       if (!p) return
-      if (!await requireRuntimeCapability(deps, p.sessionId, 'clear', 'clear')) return
-      deps.audit?.log({ action: 'dashboard.session_clear', actor: auditActor(socket), target: { sessionId: p.sessionId }, outcome: 'ok' })
-      await deps.loopDeps.tools.cancelPending(p.sessionId)
-      deps.loopDeps.askUserChoice?.cancelSession(p.sessionId, 'ask_user_choice request was cleared')
-      deps.loop.cancelStream(p.sessionId)
-      const evt: AgentEvent = { kind: 'clear' }
-      await safeDispatch(deps, p.sessionId, evt)
+      try {
+        if (!await requireRuntimeCapability(deps, p.sessionId, 'clear', 'clear')) return
+        await deps.loopDeps.assertSessionEffectOwner?.(p.sessionId)
+        await deps.loopDeps.tools.cancelPending(p.sessionId)
+        await deps.loopDeps.assertSessionEffectOwner?.(p.sessionId)
+        deps.loopDeps.askUserChoice?.cancelSession(p.sessionId, 'ask_user_choice request was cleared')
+        deps.loop.cancelStream(p.sessionId)
+        const evt: AgentEvent = { kind: 'clear' }
+        await safeDispatch(deps, p.sessionId, evt)
+        deps.audit?.log({ action: 'dashboard.session_clear', actor: auditActor(socket), target: { sessionId: p.sessionId }, outcome: 'ok' })
+      } catch (err) {
+        deps.broadcastError(p.sessionId, 'host', err instanceof Error ? err.message : String(err))
+      }
     })
     socket.on('client:compact', async (raw: ClientCompact) => {
       const p = vparse(schema.ClientCompactSchema, raw, 'client:compact', (raw as ClientCompact | undefined)?.sessionId)
@@ -1166,6 +1232,7 @@ export function configureDashboardNamespace(
           throw new Error(`${record.agentRuntime} sessions do not support compaction`)
         }
         deps.store.assertStorageWritable(record.sessionId)
+        await deps.loopDeps.assertSessionEffectOwner?.(record.sessionId)
         await runtime.compact(record)
       } catch (err) {
         deps.broadcastError(
@@ -1175,15 +1242,19 @@ export function configureDashboardNamespace(
         )
       }
     })
-    socket.on('client:cancel_stream', (raw: ClientCancelStream) => {
+    socket.on('client:cancel_stream', async (raw: ClientCancelStream) => {
       const p = vparse(schema.ClientCancelStreamSchema, raw, 'client:cancel_stream', (raw as ClientCancelStream | undefined)?.sessionId)
       if (!p) return
-      // No error path — cancelStream is a no-op when nothing is streaming.
-      // The loop turns the abort into a normal llm_response, so the FSM
-      // and log stay coherent without any special-case wiring here.
-      void requireRuntimeCapability(deps, p.sessionId, 'compact', 'stream cancellation').then((record) => {
-        if (record) deps.loop.cancelStream(p.sessionId)
-      })
+      // cancelStream remains a no-op when nothing is streaming, but ownership
+      // loss is surfaced because this replica must not abort another owner's turn.
+      try {
+        const record = await requireRuntimeCapability(deps, p.sessionId, 'compact', 'stream cancellation')
+        if (!record) return
+        await deps.loopDeps.assertSessionEffectOwner?.(record.sessionId)
+        deps.loop.cancelStream(record.sessionId)
+      } catch (err) {
+        deps.broadcastError(p.sessionId, 'host', err instanceof Error ? err.message : String(err))
+      }
     })
     socket.on('client:set_approval_mode', async (raw: ClientSetApprovalMode, ack?: (result: RpcAck) => void) => {
       const p = vparse(schema.ClientSetApprovalModeSchema, raw, 'client:set_approval_mode', (raw as ClientSetApprovalMode | undefined)?.sessionId)
@@ -1608,7 +1679,7 @@ export function configureDashboardNamespace(
       }
       socket.emit('server:memory_consolidated', payload)
     })
-    socket.on('client:get_dag_run', (raw: ClientGetDagRun, ack) => {
+    socket.on('client:get_dag_run', async (raw: ClientGetDagRun, ack) => {
       const p = vparse(schema.ClientGetDagRunSchema, raw, 'client:get_dag_run', (raw as ClientGetDagRun | undefined)?.sessionId)
       if (!p) {
         ack({ ok: false, error: 'invalid payload' })
@@ -1620,9 +1691,9 @@ export function configureDashboardNamespace(
         ack({ ok: false, error: accessError })
         return
       }
-      ack({ ok: true, value: deps.dagStore?.runForSession(p.sessionId) ?? null })
+      ack({ ok: true, value: deps.dagStore ? await deps.dagStore.runForSession(p.sessionId) ?? null : null })
     })
-    socket.on('client:list_dag_runs', (raw: ClientListDagRuns, ack) => {
+    socket.on('client:list_dag_runs', async (raw: ClientListDagRuns, ack) => {
       const p = vparse(schema.ClientListDagRunsSchema, raw, 'client:list_dag_runs', (raw as ClientListDagRuns | undefined)?.sessionId)
       if (!p) {
         ack({ ok: false, error: 'invalid payload' })
@@ -1634,9 +1705,9 @@ export function configureDashboardNamespace(
         ack({ ok: false, error: accessError })
         return
       }
-      ack({ ok: true, value: deps.dagStore?.runsForSession(p.sessionId) ?? [] })
+      ack({ ok: true, value: deps.dagStore ? await deps.dagStore.runsForSession(p.sessionId) : [] })
     })
-    socket.on('client:initialize_dag', (raw: ClientInitializeDag, ack) => {
+    socket.on('client:initialize_dag', async (raw: ClientInitializeDag, ack) => {
       const p = vparse(schema.ClientInitializeDagSchema, raw, 'client:initialize_dag', (raw as ClientInitializeDag | undefined)?.sessionId)
       if (!p) {
         ack({ ok: false, error: 'invalid payload' })
@@ -1649,8 +1720,8 @@ export function configureDashboardNamespace(
         const accessError = validateIngressSessionAccess(socket, record)
         if (accessError) throw new Error(accessError)
         if (record.executionMode !== 'dag') throw new Error('Session is not in DAG-First mode')
-        const run = deps.dagStore.createRun(p.sessionId, p.objective, `${p.operationId}:run`)
-        const updated = deps.dagStore.installGraph(run.id, p.graph, `${p.operationId}:graph`)
+        const run = await deps.dagStore.createRun(p.sessionId, p.objective, `${p.operationId}:run`)
+        const updated = await deps.dagStore.installGraph(run.id, p.graph, `${p.operationId}:graph`)
         deps.dashboardNs.to(sessionRoom(p.sessionId)).emit('server:dag_run', { sessionId: p.sessionId, run: updated })
         deps.loopDeps.dagScheduler?.schedule(p.sessionId)
         ack({ ok: true, value: updated })
@@ -1658,7 +1729,7 @@ export function configureDashboardNamespace(
         ack({ ok: false, error: error instanceof Error ? error.message : String(error) })
       }
     })
-    socket.on('client:answer_dag_decision', (raw: ClientAnswerDagDecision, ack) => {
+    socket.on('client:answer_dag_decision', async (raw: ClientAnswerDagDecision, ack) => {
       const p = vparse(schema.ClientAnswerDagDecisionSchema, raw, 'client:answer_dag_decision', (raw as ClientAnswerDagDecision | undefined)?.sessionId)
       if (!p) {
         ack({ ok: false, error: 'invalid payload' })
@@ -1670,9 +1741,9 @@ export function configureDashboardNamespace(
         if (!record) throw new Error('Session is unavailable')
         const accessError = validateIngressSessionAccess(socket, record)
         if (accessError) throw new Error(accessError)
-        const run = deps.dagStore.runForSession(p.sessionId)
+        const run = await deps.dagStore.runForSession(p.sessionId)
         if (!run || run.id !== p.runId) throw new Error('DAG run is unavailable')
-        const updated = deps.dagStore.answerDecision(p.runId, p.decisionId, p.answer, p.operationId)
+        const updated = await deps.dagStore.answerDecision(p.runId, p.decisionId, p.answer, p.operationId)
         deps.dashboardNs.to(sessionRoom(p.sessionId)).emit('server:dag_run', { sessionId: p.sessionId, run: updated })
         deps.loopDeps.dagScheduler?.schedule(p.sessionId)
         ack({ ok: true, value: updated })
@@ -1795,6 +1866,9 @@ export function configureDashboardNamespace(
         if (!deps.agentRuntimes.require(source.agentRuntime).descriptor().capabilities.fork) {
           throw new Error(`${source.agentRuntime} sessions do not support fork`)
         }
+        if (deps.store.usesPostgresAuthority) {
+          throw new Error('Session fork is unavailable with PostgreSQL Session authority until the initial state is persisted')
+        }
         const parsed = await readSessionLog(source.logPath)
         const keptEvents = parsed.events
           .filter((e) => e.seq <= p.cursor)
@@ -1887,9 +1961,13 @@ export function configureDashboardNamespace(
         // active, then delete leaves before their parents.
         const targetIds = collectSessionDescendants(await deps.store.listSummaries(), p.sessionId)
         for (const targetSessionId of targetIds) {
+          // A descendant can run on another replica even when no local Loop
+          // turn exists. Abort the entire tree before any external cleanup.
+          await deps.loopDeps.assertSessionEffectOwner?.(targetSessionId)
           if (deps.loop.hasActiveTurn(targetSessionId)) throw new Error('session tree has an active turn; stop it before deleting')
         }
         for (const targetSessionId of targetIds.reverse()) {
+          await deps.loopDeps.assertSessionEffectOwner?.(targetSessionId)
           // Deletion can race Host-owned shell work, which is not represented as
           // a Loop turn. Tombstone its queue item and cancel the Executor call
           // before removing Session storage so no late result can recreate it.
@@ -2237,6 +2315,7 @@ async function safeDispatch(
       )
       return
     }
+    await deps.loopDeps.assertSessionEffectOwner?.(record.sessionId)
     await deps.loop.dispatch(sessionId, event)
   } catch (err) {
     deps.broadcastError(
@@ -2285,7 +2364,7 @@ export async function handleUserMessage(
     deps.broadcastError(p.sessionId, 'host', `${record.agentRuntime} sessions do not support attachments`)
     return
   }
-  validateMessageAttachmentReferences(deps.loopDeps.messageAttachments, p.sessionId, p.content)
+  await validateMessageAttachmentReferences(deps.loopDeps.messageAttachments, p.sessionId, p.content)
   const runtime = deps.agentRuntimes.require(record.agentRuntime)
   const requestedMode = p.mode ?? 'steer'
   const messageModel = effectiveModelForRecord(deps, record)

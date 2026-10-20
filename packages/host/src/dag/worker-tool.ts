@@ -10,6 +10,7 @@ type ActiveDagWorker = {
   nodeId: string
   attempt: number
   workerId: string
+  leaseGeneration?: number
 }
 
 const activeWorkers = new Map<string, ActiveDagWorker>()
@@ -117,19 +118,22 @@ export async function runDagWorkerTool(context: HostToolContext): Promise<{ ok: 
   try {
     let updated
     if (context.effect.name === 'dag_report_progress') {
-      updated = context.deps.dagStore.updateNodeProgress(
+      updated = await context.deps.dagStore.updateNodeProgress(
         worker.runId,
         worker.nodeId,
         worker.workerId,
         requiredString(context.effect.input.message, 'message'),
+        new Date().toISOString(),
+        worker.leaseGeneration ?? worker.attempt,
       )
     } else if (context.effect.name === 'dag_request_decision') {
       const riskLevel = optionalRiskLevel(context.effect.input.risk_level)
-      context.deps.dagStore.createDecision({
+      await context.deps.dagStore.createDecision({
         id: randomUUID(),
         runId: worker.runId,
         nodeId: worker.nodeId,
         workerId: worker.workerId,
+        leaseGeneration: worker.leaseGeneration ?? worker.attempt,
         question: requiredString(context.effect.input.question, 'question'),
         context: optionalString(context.effect.input.context) ?? '',
         choices: stringArray(context.effect.input.choices, 'choices', 20),
@@ -138,7 +142,7 @@ export async function runDagWorkerTool(context: HostToolContext): Promise<{ ok: 
         ...(optionalString(context.effect.input.reason) ? { reason: optionalString(context.effect.input.reason)! } : {}),
         ...(riskLevel ? { riskLevel } : {}),
       })
-      updated = context.deps.dagStore.getRun(worker.runId)
+      updated = await context.deps.dagStore.getRun(worker.runId)
     } else if (context.effect.name === 'dag_replace_self') {
       const nodes = parseNodes(context.effect.input.nodes)
       const entryNodeId = requiredString(context.effect.input.entry_node_id, 'entry_node_id')
@@ -157,12 +161,14 @@ export async function runDagWorkerTool(context: HostToolContext): Promise<{ ok: 
         nodes,
         edges,
       }
-      updated = context.deps.dagStore.expandNode(
+      updated = await context.deps.dagStore.expandNode(
         worker.runId,
         worker.nodeId,
         worker.workerId,
         patch,
         context.effect.callId,
+        new Date().toISOString(),
+        worker.leaseGeneration ?? worker.attempt,
       )
     } else {
       return { ok: false, content: 'Unknown DAG worker tool' }

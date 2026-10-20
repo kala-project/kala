@@ -54,7 +54,7 @@ export async function runTodoGraphTool(
   try {
     const record = deps.store.get(sessionId)
     if (!record) throw new GraphError('ENOENT', `unknown session: ${sessionId}`)
-    const current = liveGraphs.get(record.logPath) ?? await latestTodoGraph(record.logPath)
+    const current = liveGraphs.get(record.sessionId) ?? await latestTodoGraphForSession(deps.store, record.sessionId, record.logPath)
     const input = effect.input as { operations?: unknown; expectedRevision?: unknown }
     if (input.expectedRevision !== undefined && input.expectedRevision !== current.revision) {
       throw new GraphError('ECONFLICT', `revision mismatch; expected ${String(input.expectedRevision)}, current ${current.revision}`)
@@ -64,7 +64,7 @@ export async function runTodoGraphTool(
     }
     if (input.operations.length > 100) throw new GraphError('ELIMIT', 'at most 100 operations are allowed')
     const next = applyTodoGraphOperations(current, input.operations)
-    liveGraphs.set(record.logPath, next)
+    liveGraphs.set(record.sessionId, next)
     return { ok: true, content: JSON.stringify(next) }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -179,6 +179,31 @@ export async function latestTodoGraph(logPath: string): Promise<TodoGraphSnapsho
   return snapshot
 }
 
+type TodoGraphEventStore = Pick<HostLoopDeps['store'], 'readEventEntries'>
+
+export async function latestTodoGraphForSession(store: TodoGraphEventStore, sessionId: string, localLogPath?: string): Promise<TodoGraphSnapshot> {
+  let entries
+  try {
+    entries = await store.readEventEntries(sessionId)
+  } catch (error) {
+    if (localLogPath && error instanceof Error && error.message.includes('refuses to fully read external Runtime session')) {
+      return latestTodoGraphFromTail(localLogPath)
+    }
+    throw error
+  }
+  const calls = new Map<string, string>()
+  let snapshot = EMPTY
+  for (const entry of entries) {
+    for (const effect of entry.effects) {
+      if (effect.kind === 'call_tool') calls.set(effect.callId, effect.name)
+    }
+    if (entry.event.kind !== 'tool_result' || !entry.event.ok || calls.get(entry.event.callId) !== 'todo_graph') continue
+    const candidate = parseTodoGraphSnapshot(entry.event.content)
+    if (candidate) snapshot = candidate
+  }
+  return snapshot
+}
+
 async function latestTodoGraphFromTail(logPath: string): Promise<TodoGraphSnapshot> {
   const handle = await open(logPath, 'r')
   const needle = Buffer.from('"kind":"tool_result"')
@@ -262,18 +287,19 @@ export async function todoGraphContinuationState(
 ): Promise<{ revision: number; needsContinuation: boolean }> {
   const record = deps.store.get(sessionId)
   if (!record) return { revision: 0, needsContinuation: false }
-  let snapshot = liveGraphs.get(record.logPath)
-  if (!snapshot) {
-    try {
-      snapshot = await latestTodoGraph(record.logPath)
-    } catch (error) {
-      // Session teardown/tests can remove the log after the terminal event has
-      // committed but before this optional continuation check runs.
-      if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return { revision: 0, needsContinuation: false }
-      throw error
-    }
+  let snapshot: TodoGraphSnapshot
+  try {
+    // Continuation is a durable obligation: a process-global cache may belong
+    // to another SessionStore instance with the same ID, or contain a Tool
+    // result that has not committed yet. Always consult the selected authority.
+    snapshot = await latestTodoGraphForSession(deps.store, record.sessionId, record.logPath)
+  } catch (error) {
+    // Session teardown/tests can remove the log after the terminal event has
+    // committed but before this optional continuation check runs.
+    if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return { revision: 0, needsContinuation: false }
+    throw error
   }
-  liveGraphs.set(record.logPath, snapshot)
+  liveGraphs.set(record.sessionId, snapshot)
   return {
     revision: snapshot.revision,
     needsContinuation: snapshot.summary.active > 0 || snapshot.summary.ready > 0,

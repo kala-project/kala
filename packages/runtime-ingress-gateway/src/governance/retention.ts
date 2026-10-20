@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 import type { ControlPlaneDatabase } from '../persistence/postgres.js'
 import { requestRuntime } from '../edge/server.js'
+import type { RuntimeOriginResolver } from '../runtime-origin/postgres-runtime-origin-resolver.js'
 
 export type RetentionPurgeResult = {
   organizationId: string
@@ -84,13 +85,18 @@ export class RetentionService {
 
 export function createRuntimeHostRetentionClient(options: {
   origin: string
+  runtimeOriginResolver?: RuntimeOriginResolver
   ingressSecret: string
   tls?: { ca: string | Buffer; cert: string | Buffer; key: string | Buffer; servername?: string }
 }): { purgeOrganizationSessions(params: { organizationId: string; runtimeUnitId: string; before: Date }): Promise<{ sessions: number }> } {
   return {
     async purgeOrganizationSessions(params) {
+      const origin = options.runtimeOriginResolver
+        ? await options.runtimeOriginResolver.resolve(params.runtimeUnitId)
+        : options.origin
+      if (!origin) throw new Error('Runtime Host retention origin is unavailable')
       const response = await requestRuntime(
-        options.origin,
+        origin,
         '/internal/retention/sessions',
         'POST',
         { 'content-type': 'application/json', 'x-agent-runlab-ingress-secret': options.ingressSecret },

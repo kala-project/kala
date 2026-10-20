@@ -5,7 +5,11 @@ import { join, win32 } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { isContainedAttachmentPath, MessageAttachmentStore } from './message-attachment-store.js'
-import { resolveKernelMessageAttachments } from './message-attachment-resolver.js'
+import {
+  resolveKernelMessageAttachments,
+  resolveMessageAttachmentSdkFilePath,
+  validateMessageAttachmentReferences,
+} from './message-attachment-resolver.js'
 
 let root = ''
 
@@ -84,6 +88,28 @@ describe('MessageAttachmentStore', () => {
       role: 'user',
       content: [binary],
     }])).rejects.toThrow('cannot send binary attachment')
+  })
+
+  it('awaits asynchronous attachment resolution and rejects unavailable SDK paths explicitly', async () => {
+    const store = new MessageAttachmentStore(root)
+    const file = await store.register({
+      sessionId: 'session-a',
+      name: 'notes.txt',
+      mediaType: 'text/plain',
+      data: Buffer.from('async attachment', 'utf8'),
+    })
+    const asyncResolver = {
+      resolve: async (sessionId: string, referenced: typeof file) => store.resolve(sessionId, referenced),
+    }
+
+    await expect(validateMessageAttachmentReferences(asyncResolver, 'session-a', [file])).resolves.toBeUndefined()
+    const resolved = await resolveKernelMessageAttachments(asyncResolver, 'session-a', [{ role: 'user', content: [file] }])
+    expect(resolved[0]?.content[0]).toEqual({ type: 'text', text: expect.stringContaining('async attachment') })
+    await expect(resolveMessageAttachmentSdkFilePath(
+      { sdkFilePath: async () => undefined },
+      'session-a',
+      file,
+    )).rejects.toThrow('cannot be exposed as a local SDK file')
   })
 
   it('reloads committed image references and bytes after a Runtime replacement', async () => {

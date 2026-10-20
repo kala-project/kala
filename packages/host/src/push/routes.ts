@@ -22,12 +22,12 @@ import type {
 import { DESKTOP_NOTIFICATION_KINDS } from '@agent-kernel/shared/push'
 
 import type { PushDispatcher } from './dispatch.js'
-import { deviceNameFromUserAgent, pushDeviceIdForEndpoint, type PushSubscriptionStore } from './store.js'
+import { deviceNameFromUserAgent, pushDeviceIdForEndpoint, type PushSubscriptionStorage } from './store.js'
 import type { VapidKeys } from './vapid.js'
 import type { PushActivityTracker } from './activity.js'
 
 type PushHttpContext = {
-  store: PushSubscriptionStore
+  store: PushSubscriptionStorage
   vapid: VapidKeys | null
   dispatcher: PushDispatcher
   activity: PushActivityTracker
@@ -51,14 +51,14 @@ export function createPushRoutes(ctx: PushHttpContext): PushRouteHandler {
       // any subscribers at all. When users report "I don't receive pushes"
       // the first question is always "does the store even have your
       // endpoint" — surface it instead of forcing an SSH into the box.
-      const status = ctx.dispatcher.status()
+      const status = await ctx.dispatcher.status()
       const subscribers = status.configured ? status.subscribers : 0
       sendJson(res, 200, { configured: status.configured, subscribers })
       return true
     }
     if (path === '/push/devices' && req.method === 'GET') {
       const currentDeviceId = new URL(url, 'http://localhost').searchParams.get('currentDeviceId')
-      const devices: PushDevice[] = ctx.store.list().map((record) => ({
+      const devices: PushDevice[] = (await ctx.store.list()).map((record) => ({
         deviceId: record.deviceId ?? pushDeviceIdForEndpoint(record.endpoint),
         name: record.deviceName ?? deviceNameFromUserAgent(record.userAgent),
         enabled: record.enabled !== false,
@@ -76,7 +76,7 @@ export function createPushRoutes(ctx: PushHttpContext): PushRouteHandler {
         return true
       }
       const name = typeof body.name === 'string' ? body.name.trim().slice(0, 80) : undefined
-      const changed = ctx.store.updateDevice(body.deviceId, {
+      const changed = await ctx.store.updateDevice(body.deviceId, {
         ...(typeof body.enabled === 'boolean' ? { enabled: body.enabled } : {}),
         ...(name ? { name } : {}),
       })
@@ -89,7 +89,7 @@ export function createPushRoutes(ctx: PushHttpContext): PushRouteHandler {
         sendJson(res, 400, { error: 'missing deviceId' })
         return true
       }
-      sendJson(res, 200, { ok: true, removed: ctx.store.removeDevice(body.deviceId) })
+      sendJson(res, 200, { ok: true, removed: await ctx.store.removeDevice(body.deviceId) })
       return true
     }
     if (path === '/push/test' && req.method === 'POST') {
@@ -135,8 +135,8 @@ export function createPushRoutes(ctx: PushHttpContext): PushRouteHandler {
         return true
       }
       const now = new Date().toISOString()
-      const existing = ctx.store.list().find((r) => r.endpoint === parsed.endpoint)
-      ctx.store.upsert({
+      const existing = (await ctx.store.list()).find((r) => r.endpoint === parsed.endpoint)
+      await ctx.store.upsert({
         endpoint: parsed.endpoint,
         keys: parsed.keys,
         kinds: parsed.kinds,
@@ -148,7 +148,7 @@ export function createPushRoutes(ctx: PushHttpContext): PushRouteHandler {
         ...(parsed.deviceName ? { deviceName: parsed.deviceName } : {}),
         enabled: existing?.enabled ?? true,
       })
-      sendJson(res, 200, { ok: true, subscribers: ctx.store.size() })
+      sendJson(res, 200, { ok: true, subscribers: await ctx.store.size() })
       return true
     }
     if (path === '/push/unsubscribe' && req.method === 'POST') {
@@ -158,7 +158,7 @@ export function createPushRoutes(ctx: PushHttpContext): PushRouteHandler {
         sendJson(res, 400, { error: 'missing endpoint' })
         return true
       }
-      const removed = ctx.store.remove(endpoint)
+      const removed = await ctx.store.remove(endpoint)
       sendJson(res, 200, { ok: true, removed })
       return true
     }

@@ -6,53 +6,53 @@ import { describe, expect, it } from 'vitest'
 import { ExecutorInstallationError, ExecutorInstallationStore } from './executor-installation.js'
 
 describe('ExecutorInstallationStore', () => {
-  it('persists only a bootstrap hash and resumes status after reload', () => {
+  it('persists only a bootstrap hash and resumes status after reload', async () => {
     const path = join(mkdtempSync(join(tmpdir(), 'executor-installs-')), 'installs.json')
     const store = new ExecutorInstallationStore(path)
-    const created = store.create({ platform: 'linux', mode: 'service', privilegeMode: 'privileged', workspaceRoot: '/work' })
+    const created = await store.create({ platform: 'linux', mode: 'service', privilegeMode: 'privileged', workspaceRoot: '/work' })
     expect(readFileSync(path, 'utf8')).not.toContain(created.setupCode)
     expect(readFileSync(path, 'utf8')).toContain('sha256:')
 
-    const claimed = store.claim(created.setupCode)
+    const claimed = await store.claim(created.setupCode)
     expect(claimed?.install.status).toBe('bootstrap_downloaded')
     const bootstrap = claimed!.bootstrap
-    expect(store.reportClient(created.install.id, bootstrap, 'asset_verified').seq).toBe(2)
-    expect(store.reportClient(created.install.id, bootstrap, 'pairing_pending').status).toBe('paired')
-    expect(store.reportClient(created.install.id, bootstrap, 'service_installing').status).toBe('service_installing')
-    expect(store.reportClient(created.install.id, bootstrap, 'starting').status).toBe('starting')
+    expect((await store.reportClient(created.install.id, bootstrap, 'asset_verified')).seq).toBe(2)
+    expect((await store.reportClient(created.install.id, bootstrap, 'pairing_pending')).status).toBe('paired')
+    expect((await store.reportClient(created.install.id, bootstrap, 'service_installing')).status).toBe('service_installing')
+    expect((await store.reportClient(created.install.id, bootstrap, 'starting')).status).toBe('starting')
 
     const reloaded = new ExecutorInstallationStore(path)
-    reloaded.load()
-    expect(reloaded.get(created.install.id)?.status).toBe('starting')
+    await reloaded.load()
+    expect((await reloaded.get(created.install.id))?.status).toBe('starting')
   })
 
-  it('loads legacy records without escalating missing privilege modes and rejects invalid explicit modes', () => {
+  it('loads legacy records without escalating missing privilege modes and rejects invalid explicit modes', async () => {
     const path = join(mkdtempSync(join(tmpdir(), 'executor-installs-')), 'installs.json')
     const store = new ExecutorInstallationStore(path)
-    const created = store.create({ platform: 'linux', mode: 'service', privilegeMode: 'privileged', workspaceRoot: '/work' })
+    const created = await store.create({ platform: 'linux', mode: 'service', privilegeMode: 'privileged', workspaceRoot: '/work' })
     const value = JSON.parse(readFileSync(path, 'utf8')) as { installations: Array<Record<string, unknown>> }
     delete value.installations[0]!.privilegeMode
     writeFileSync(path, JSON.stringify(value))
     const migrated = new ExecutorInstallationStore(path)
-    migrated.load()
-    expect(migrated.get(created.install.id)?.privilegeMode).toBe('restricted')
+    await migrated.load()
+    expect((await migrated.get(created.install.id))?.privilegeMode).toBe('restricted')
     value.installations[0]!.privilegeMode = 'root'
     writeFileSync(path, JSON.stringify(value))
-    expect(() => new ExecutorInstallationStore(path).load()).toThrow('requires a valid privilegeMode')
+    await expect(new ExecutorInstallationStore(path).load()).rejects.toThrow('requires a valid privilegeMode')
   })
 
-  it('redeems once and only host observation can complete', () => {
+  it('redeems once and only host observation can complete', async () => {
     const store = new ExecutorInstallationStore(join(mkdtempSync(join(tmpdir(), 'executor-installs-')), 'installs.json'))
-    const created = store.create({ platform: 'macos', mode: 'temporary', privilegeMode: 'privileged', workspaceRoot: '/work' })
-    const bootstrap = store.claim(created.setupCode)!.bootstrap
-    store.reportClient(created.install.id, bootstrap, 'asset_verified')
-    expect(store.reportClient(created.install.id, bootstrap, 'pairing_pending').status).toBe('paired')
-    store.redeem(created.install.id, bootstrap, 'ws-1')
-    expect(() => store.redeem(created.install.id, bootstrap, 'ws-1')).toThrow(ExecutorInstallationError)
-    store.reportClient(created.install.id, bootstrap, 'starting')
-    expect(() => store.reportClient(created.install.id, bootstrap, 'online')).toThrow('host_observed_status_required')
-    expect(store.markOnline(created.install.id, 'wrong')).toBeUndefined()
-    expect(store.markOnline(created.install.id, 'ws-1')?.status).toBe('completed')
-    expect(store.events(created.install.id)?.map((event) => event.status)).toContain('online')
+    const created = await store.create({ platform: 'macos', mode: 'temporary', privilegeMode: 'privileged', workspaceRoot: '/work' })
+    const bootstrap = (await store.claim(created.setupCode))!.bootstrap
+    await store.reportClient(created.install.id, bootstrap, 'asset_verified')
+    expect((await store.reportClient(created.install.id, bootstrap, 'pairing_pending')).status).toBe('paired')
+    await store.redeem(created.install.id, bootstrap, 'ws-1')
+    await expect(store.redeem(created.install.id, bootstrap, 'ws-1')).rejects.toBeInstanceOf(ExecutorInstallationError)
+    await store.reportClient(created.install.id, bootstrap, 'starting')
+    await expect(store.reportClient(created.install.id, bootstrap, 'online')).rejects.toThrow('host_observed_status_required')
+    expect(await store.markOnline(created.install.id, 'wrong')).toBeUndefined()
+    expect((await store.markOnline(created.install.id, 'ws-1'))?.status).toBe('completed')
+    expect((await store.events(created.install.id))?.map((event) => event.status)).toContain('online')
   })
 })

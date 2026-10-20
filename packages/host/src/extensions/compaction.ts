@@ -46,7 +46,6 @@ import {
 
 import type { CompactRequest, CompactStatusPayload, CompactTrigger, HostLoopDeps, LoopHandle } from '../loop-types.js'
 import { dispatchOne } from '../loop.js'
-import { appendRuntimeMetadataEntry } from '../store/log.js'
 import type { SessionRecord } from '../store/session.js'
 import { contextSnapshot, shouldAutoCompact } from '../context/manager.js'
 
@@ -639,13 +638,8 @@ async function appendCompactionMetadata(
   action: 'compaction_applied' | 'compaction_skipped' | 'compaction_rejected',
   payload: Record<string, unknown>,
 ): Promise<void> {
-  const record = deps.store.get(sessionId)
-  if (!record) return
-  await appendRuntimeMetadataEntry(record.logPath, {
-    sessionId,
-    action,
-    payload,
-  })
+  if (!deps.store.get(sessionId)) return
+  await deps.store.appendRuntimeMetadata(sessionId, { action, payload })
 }
 
 function markBatchBackOff(rt: CompactSessionRuntime, state: AgentState): void {
@@ -763,6 +757,7 @@ async function summarize(
     tools: [],
   }
 
+  await deps.assertSessionEffectOwner?.(sessionId)
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), COMPACT_TIMEOUT_MS)
   let res: Awaited<ReturnType<HostLoopDeps['llm']['call']>>

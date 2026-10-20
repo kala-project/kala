@@ -36,6 +36,7 @@ import lockfile from 'proper-lockfile'
 
 import { PROTOCOL_VERSION } from '@agent-kernel/shared'
 import { startExecutor } from '../src/client.js'
+import { discoverExecutorReplicas, startExecutorReplicaFleet } from '../src/replica-fleet.js'
 import { createRuntimeLogger } from '../src/logger.js'
 import { checkExecutorUpdate } from '../src/update.js'
 import { applyManagedUpdate, rollbackManagedUpdate } from '../src/update-runtime.js'
@@ -54,7 +55,8 @@ import { assertElevatedWindowsAdministrator, assertManagedWindowsInstallation, c
 import type { ServiceAction, ServiceMode } from '../src/cli-args.js'
 import type { InstallerSession } from '../src/installer-session.js'
 import { spawn } from 'node:child_process'
-import { homedir, tmpdir } from 'node:os'
+import { homedir, hostname, tmpdir } from 'node:os'
+import { ulid } from 'ulid'
 import { parseMcpServerDeclaration, parseMcpServers, type McpServerConfig } from '../src/mcp-config.js'
 
 const logger = createRuntimeLogger('kala-executor')
@@ -570,37 +572,69 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
     }
   }
 
-  const handle = startExecutor({
+  const workspaceId = managed?.workspaceId ?? loadOrCreateWorkspaceId(undefined, profile)
+  const workspaceName = name ?? hostname()
+  const effectiveExecutorId = executorId ?? ulid()
+  const saveToken = (nextToken: string): void => {
+    saveExecutorToken(nextToken, undefined, profile)
+    if (invite) saveExecutorRouteHint(invite, profile)
+    logger.info('executor identity saved for future reconnects')
+  }
+  const commonOptions = {
     host,
-    workspaceId: managed?.workspaceId ?? loadOrCreateWorkspaceId(undefined, profile),
-    ...(name !== undefined ? { workspaceName: name } : {}),
+    workspaceId,
+    workspaceName,
     ...(sandboxRoots.length > 0 ? { sandboxRoots } : {}),
-    ...(pairingToken !== undefined ? { token: pairingToken } : {}),
-    ...(invite !== undefined ? { invite } : {}),
-    ...(routeHint !== undefined ? { routeHint } : {}),
-    ...(executorId !== undefined ? { executorId } : {}),
+    executorId: effectiveExecutorId,
     ...(managed?.installationId ? { installId: managed.installationId } : {}),
     ...(mcpServers.length > 0 ? { mcpServers } : {}),
     ...(managedMcpConfig ? { managedMcpConfig } : {}),
     logger,
-    onToken(nextToken) {
-      saveExecutorToken(nextToken, undefined, profile)
-      if (invite) saveExecutorRouteHint(invite, profile)
-      logger.info('executor identity saved for future reconnects')
-    },
-  })
+  }
+  const replicas = await discoverExecutorReplicas({ host, ...(invite ? { invite } : {}), ...(routeHint ? { routeHint } : {}) })
+  if (replicas && replicas.length === 0) throw new Error('No active Runtime replicas are available for this Executor route')
+  let fleetToken = pairingToken
+  if (replicas?.length && invite && !fleetToken) {
+    let resolveEnrollment!: (token: string) => void
+    const enrolled = new Promise<string>((resolve) => { resolveEnrollment = resolve })
+    const enrollment = startExecutor({
+      ...commonOptions,
+      invite,
+      ...(routeHint ? { routeHint } : {}),
+      replicaId: replicas[0],
+      onToken(nextToken) { saveToken(nextToken); resolveEnrollment(nextToken) },
+    })
+    const enrollmentResult = await Promise.race([
+      enrolled.then((nextToken) => ({ token: nextToken })),
+      enrollment.permanentError.then((error) => ({ error })),
+    ])
+    await enrollment.close()
+    if ('error' in enrollmentResult) throw new Error(`Executor enrollment failed: ${enrollmentResult.error.message}`)
+    fleetToken = enrollmentResult.token
+  }
+  const handle = replicas?.length && fleetToken && routeHint
+    ? startExecutorReplicaFleet({
+        ...commonOptions,
+        token: fleetToken,
+        routeHint,
+        replicaIds: replicas,
+        refreshReplicaIds: () => discoverExecutorReplicas({ host, routeHint }),
+      })
+    : startExecutor({
+        ...commonOptions,
+        ...(pairingToken !== undefined ? { token: pairingToken } : {}),
+        ...(invite !== undefined ? { invite } : {}),
+        ...(routeHint !== undefined ? { routeHint } : {}),
+        onToken: saveToken,
+      })
 
-  handle.socket.on('connect', () => {
-    logger.debug(
-      {
-        executorId: handle.executorId,
-        workspaceId: handle.workspaceId,
-        workspaceName: handle.workspaceName,
-        host,
-      },
-      'executor connection details',
-    )
-  })
+  if ('socket' in handle) {
+    handle.socket.on('connect', () => {
+      logger.debug({ executorId: effectiveExecutorId, workspaceId, workspaceName, host }, 'executor connection details')
+    })
+  } else {
+    logger.info({ replicas: handle.replicaIds() }, 'connecting Executor to active Runtime replicas')
+  }
 
   // MCP subprocesses can start before the Host becomes reachable. Register
   // cleanup immediately instead of leaving children behind during that wait.
@@ -631,14 +665,14 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
       await shutdown(exitCodeByReason[initialFailure.code] ?? 1)
       return
     }
-    logger.info({ workspaceId: handle.workspaceId, workspaceName: handle.workspaceName, host, sandboxRoots }, 'executor announced; awaiting tool calls')
+    logger.info({ workspaceId, workspaceName, host, sandboxRoots, ...(!('socket' in handle) ? { replicas: handle.replicaIds() } : {}) }, 'executor announced; awaiting tool calls')
     if (!managed?.serviceMode) printForegroundCommands()
     updateControl = managed?.managedRoot && process.platform !== 'win32'
     ? await startUpdateControlServer({
         socketPath: join(managed.managedRoot, 'update-control.sock'),
         status: () => ({
-          version: executorReleaseVersion(), workspaceId: handle.workspaceId,
-          connected: handle.socket.connected, draining: handle.draining(),
+          version: executorReleaseVersion(), workspaceId,
+          connected: 'socket' in handle ? handle.socket.connected : handle.connected(), draining: handle.draining(),
           activeTools: handle.activeToolCount(), activeTerminals: handle.activeTerminalCount(),
         }),
         beginDrain: () => handle.beginDrain(),

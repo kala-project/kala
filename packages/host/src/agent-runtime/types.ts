@@ -8,7 +8,7 @@ import type {
 
 import type { SessionRecord, SessionStore } from '../store/session.js'
 import type { ToolDispatcher } from '../loop-types.js'
-import type { MessageAttachmentStore } from '../message-attachment-store.js'
+import type { MessageAttachmentStorage } from '../message-attachment-store.js'
 
 export type AgentRuntimeBroadcast = {
   onState(record: SessionRecord, state: AgentState, contextSnapshot?: ContextUsageSnapshot): void
@@ -21,8 +21,10 @@ export type AgentRuntimeBroadcast = {
 export type AgentRuntimeContext = {
   store: SessionStore
   tools: ToolDispatcher
+  /** Optional fail-closed owner check before sending the SDK's model request. */
+  assertSessionEffectOwner?: (sessionId: string) => Promise<void>
   broadcast: AgentRuntimeBroadcast
-  messageAttachments?: MessageAttachmentStore
+  messageAttachments?: MessageAttachmentStorage
   publishLocalImages?: (sessionId: string, record: SessionRecord, message: Message) => Promise<Message>
 }
 

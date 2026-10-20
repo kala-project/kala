@@ -41,6 +41,7 @@ import type {
   ClientListSubAgents,
   ClientLoadLogArtifact,
   ClientLoadHistory,
+  ClientPrepareSessionRoute,
   ClientReadBgOutput,
   ClientReadFile,
   ClientReadOverflow,
@@ -265,6 +266,10 @@ export const ClientLoadHistorySchema = z.object({
   sessionId: SessionIdSchema,
   sinceCursor: z.number().int().nonnegative().optional(),
 }) satisfies z.ZodType<ClientLoadHistory>
+
+export const ClientPrepareSessionRouteSchema = z.object({
+  sessionId: SessionIdSchema,
+}).strict() satisfies z.ZodType<ClientPrepareSessionRoute>
 
 export const ClientLoadLogArtifactSchema = z.object({
   sessionId: SessionIdSchema,

@@ -21,6 +21,7 @@ import type {
 export const MAX_DAG_DECISIONS_PER_NODE = 8
 
 import { assertDag, assertNodeTransition, assertSingleEntryReachability, readyNodeIds, scopesConflict } from './graph.js'
+import type { ClaimedDagNode, DagStorage } from './storage.js'
 
 const MAX_GRAPH_NODES = 100
 const MAX_GRAPH_EDGES = 500
@@ -61,7 +62,7 @@ type NodeRow = {
 
 type EdgeRow = { id: string; run_id: string; source: string; target: string }
 
-export class DagStore {
+export class DagStore implements DagStorage {
   constructor(private readonly db: DatabaseSync) {}
 
   createRun(parentSessionId: string, objective: string, operationId: string, now = new Date().toISOString()): DagRun {
@@ -167,6 +168,7 @@ export class DagStore {
     patch: DagGraphPatch,
     operationId: string,
     now = new Date().toISOString(),
+    leaseGeneration?: number,
   ): DagRun {
     const existing = this.operationResult(operationId, 'expand_node', runId)
     if (existing) return this.requireRun(existing)
@@ -177,7 +179,7 @@ export class DagStore {
       if (run.graph_version !== patch.expectedGraphVersion) throw new Error('DAG graph version conflict')
       const original = this.requireNode(runId, nodeId)
       if (original.status !== 'running') throw new Error('DAG graph expansion requires a running node')
-      this.assertLease(runId, nodeId, workerId, now)
+      this.assertLease(runId, nodeId, workerId, now, leaseGeneration)
 
       const allNodes = this.nodeRows(runId)
       const allIds = new Set(allNodes.map((node) => node.id))
@@ -253,11 +255,11 @@ export class DagStore {
     limit: number,
     leaseMs: number,
     now = new Date(),
-  ): readonly DagNode[] {
+  ): readonly ClaimedDagNode[] {
     const owner = requiredText(workerId, 'DAG worker id')
     if (!Number.isInteger(limit) || limit < 1 || limit > 32) throw new Error('DAG claim limit must be 1-32')
     if (!Number.isInteger(leaseMs) || leaseMs < 1_000) throw new Error('DAG lease must be at least 1000ms')
-    const claimed: DagNode[] = []
+    const claimed: ClaimedDagNode[] = []
     this.transaction(() => {
       this.requireMutableRun(runId)
       const nowIso = now.toISOString()
@@ -287,16 +289,16 @@ export class DagStore {
         `).run(runId, node.id, attempt, owner, nowIso)
         this.recordEvent(runId, 'lease', `Node claimed by ${owner} for attempt ${attempt}`, node.id, nowIso)
         runningScopes.push([...node.writeScopes])
-        claimed.push({ ...node, status: 'running', attempt, startedAt: nowIso, progress: 'Running' })
+        claimed.push({ ...node, status: 'running', attempt, startedAt: nowIso, progress: 'Running', leaseGeneration: attempt })
       }
     })
     return claimed
   }
 
-  attachChildSession(runId: string, nodeId: string, workerId: string, childSessionId: string, now = new Date().toISOString()): void {
+  attachChildSession(runId: string, nodeId: string, workerId: string, childSessionId: string, now = new Date().toISOString(), leaseGeneration?: number): void {
     this.transaction(() => {
       this.requireMutableRun(runId)
-      this.assertLease(runId, nodeId, workerId, now)
+      this.assertLease(runId, nodeId, workerId, now, leaseGeneration)
       const result = this.db.prepare(`
         UPDATE dag_nodes SET child_session_id = ? WHERE run_id = ? AND id = ? AND status = 'running'
       `).run(requiredText(childSessionId, 'DAG child session id'), runId, nodeId)
@@ -304,10 +306,10 @@ export class DagStore {
     })
   }
 
-  updateNodeProgress(runId: string, nodeId: string, workerId: string, progress: string, now = new Date().toISOString()): DagRun {
+  updateNodeProgress(runId: string, nodeId: string, workerId: string, progress: string, now = new Date().toISOString(), leaseGeneration?: number): DagRun {
     this.transaction(() => {
       this.requireMutableRun(runId)
-      this.assertLease(runId, nodeId, workerId, now)
+      this.assertLease(runId, nodeId, workerId, now, leaseGeneration)
       const normalized = requiredText(progress, 'DAG node progress')
       const result = this.db.prepare(`
         UPDATE dag_nodes SET progress = ? WHERE run_id = ? AND id = ? AND status = 'running'
@@ -318,11 +320,11 @@ export class DagStore {
     return this.requireRun(runId)
   }
 
-  renewLease(runId: string, nodeId: string, workerId: string, leaseMs: number, now = new Date()): void {
+  renewLease(runId: string, nodeId: string, workerId: string, leaseMs: number, now = new Date(), leaseGeneration?: number): void {
     if (!Number.isInteger(leaseMs) || leaseMs < 1_000) throw new Error('DAG lease must be at least 1000ms')
     this.transaction(() => {
       this.requireMutableRun(runId)
-      this.assertLease(runId, nodeId, workerId, now.toISOString())
+      this.assertLease(runId, nodeId, workerId, now.toISOString(), leaseGeneration)
       const expiresAt = new Date(now.getTime() + leaseMs).toISOString()
       const result = this.db.prepare(`
         UPDATE dag_leases SET expires_at = ? WHERE run_id = ? AND node_id = ? AND owner = ?
@@ -341,12 +343,13 @@ export class DagStore {
     ) & { toolActivity?: readonly DagToolActivity[] },
     operationId: string,
     now = new Date().toISOString(),
+    leaseGeneration?: number,
   ): DagRun {
     const existing = this.operationResult(operationId, 'complete_node', runId)
     if (existing) return this.requireRun(existing)
     this.transaction(() => {
       this.requireMutableRun(runId)
-      this.assertLease(runId, nodeId, workerId, now)
+      this.assertLease(runId, nodeId, workerId, now, leaseGeneration)
       const node = this.requireNode(runId, nodeId)
       assertNodeTransition(node.status, outcome.status)
       const completed = this.db.prepare(`
@@ -384,13 +387,13 @@ export class DagStore {
   }
 
   createDecision(
-    input: Omit<DagDecision, 'status' | 'createdAt'> & { workerId: string; createdAt?: string },
+    input: Omit<DagDecision, 'status' | 'createdAt'> & { workerId: string; createdAt?: string; leaseGeneration?: number },
   ): DagDecision {
     const createdAt = input.createdAt ?? new Date().toISOString()
     let rejectedReason: string | undefined
     this.transaction(() => {
       this.requireMutableRun(input.runId)
-      this.assertLease(input.runId, input.nodeId, input.workerId, createdAt)
+      this.assertLease(input.runId, input.nodeId, input.workerId, createdAt, input.leaseGeneration)
       const node = this.requireNode(input.runId, input.nodeId)
       if (node.status !== 'running') throw new Error('DAG decisions require a running node')
       const decisionCount = Number((this.db.prepare(`
@@ -624,11 +627,14 @@ export class DagStore {
       .map((node) => parseStringArray(node.write_scopes))
   }
 
-  private assertLease(runId: string, nodeId: string, owner: string, now: string): void {
+  private assertLease(runId: string, nodeId: string, owner: string, now: string, generation?: number): void {
     const lease = this.db.prepare(`
       SELECT owner, expires_at AS expiresAt FROM dag_leases WHERE run_id = ? AND node_id = ?
     `).get(runId, nodeId) as { owner: string; expiresAt: string } | undefined
     if (!lease || lease.owner !== owner) throw new Error('DAG node lease is not owned by this worker')
+    if (generation !== undefined && this.requireNode(runId, nodeId).attempt !== generation) {
+      throw new Error('DAG node lease was fenced by a newer generation')
+    }
     if (Date.parse(lease.expiresAt) <= Date.parse(now)) throw new Error('DAG node lease has expired')
   }
 

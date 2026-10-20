@@ -1,6 +1,8 @@
+import { createServer } from 'node:http'
+
 import { describe, expect, it, vi } from 'vitest'
 
-import { RetentionService, startRetentionScheduler } from './retention.js'
+import { createRuntimeHostRetentionClient, RetentionService, startRetentionScheduler } from './retention.js'
 import type { ControlPlaneDatabase, SqlExecutor, SqlQueryResult } from '../persistence/postgres.js'
 
 describe('RetentionService', () => {
@@ -119,6 +121,45 @@ describe('RetentionService', () => {
 
     expect(database.executed[0]?.sql).toBe("SELECT r.organization_id FROM retention_policies r JOIN organizations o ON o.id=r.organization_id WHERE o.status IN ('active','suspended','closing') ORDER BY r.organization_id")
     expect(database.transactionCount).toBe(2)
+  })
+
+  it('routes retention through the trusted Unit resolver and never falls back to static Host', async () => {
+    const requests: Array<{ body: unknown; path?: string }> = []
+    const runtime = createServer(async (request, response) => {
+      const chunks: Buffer[] = []
+      for await (const chunk of request) chunks.push(Buffer.from(chunk))
+      requests.push({ path: request.url, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) })
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ sessions: 4 }))
+    })
+    await new Promise<void>((resolve) => runtime.listen(0, '127.0.0.1', resolve))
+    const address = runtime.address()
+    const origin = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`
+    const resolvedUnits: string[] = []
+    const client = createRuntimeHostRetentionClient({
+      origin: 'http://127.0.0.1:9',
+      ingressSecret: 'test-secret',
+      runtimeOriginResolver: { async resolve(unitId) { resolvedUnits.push(unitId); return origin } },
+    })
+    try {
+      await expect(client.purgeOrganizationSessions({
+        organizationId: 'org_acme', runtimeUnitId: 'unit_acme', before: new Date('2026-08-08T04:00:00Z'),
+      })).resolves.toEqual({ sessions: 4 })
+      expect(resolvedUnits).toEqual(['unit_acme'])
+      expect(requests).toEqual([{ path: '/internal/retention/sessions', body: { organizationId: 'org_acme', unitId: 'unit_acme', before: '2026-08-08T04:00:00.000Z' } }])
+
+      const unavailable = createRuntimeHostRetentionClient({
+        origin,
+        ingressSecret: 'test-secret',
+        runtimeOriginResolver: { async resolve() { return undefined } },
+      })
+      await expect(unavailable.purgeOrganizationSessions({
+        organizationId: 'org_acme', runtimeUnitId: 'unit_acme', before: new Date(),
+      })).rejects.toThrow('origin is unavailable')
+      expect(requests).toHaveLength(1)
+    } finally {
+      await new Promise<void>((resolve) => runtime.close(() => resolve()))
+    }
   })
 
   it('starts a bounded retention scheduler and rejects unsafe intervals', async () => {

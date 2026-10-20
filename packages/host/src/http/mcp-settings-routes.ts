@@ -6,7 +6,7 @@ import type { ManagedMcpServer, PlatformTenancy } from '@agent-kernel/shared'
 import type { AuthConfig, DashboardActor } from '../auth-control.js'
 import type { AuditLogger } from '../audit-log.js'
 import type { ExecutorRegistry } from '../connection/executor.js'
-import type { ExecutorInstallationStore, ManagedExecutorInstallationBinding } from '../store/executor-installation.js'
+import type { ExecutorInstallationStorage, ManagedExecutorInstallationBinding } from '../store/executor-installation.js'
 import { authorizeSensitiveExecutorManagement } from './executor-installation-routes.js'
 import { validatedPublicOrigin } from './public-access-gate.js'
 import { claimRoute } from './routes.js'
@@ -18,7 +18,7 @@ const MAX_MCP_STRING_LENGTH = 8 * 1024
 const MCP_SERVER_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/u
 
 type McpExecutorAccess = Pick<ExecutorRegistry, 'snapshot' | 'hasTrustedManagedExecutor' | 'mcpConfigStatus' | 'configureMcp'>
-type McpInstallationAccess = Pick<ExecutorInstallationStore, 'managedBinding' | 'managedBindingsForWorkspace'>
+type McpInstallationAccess = Pick<ExecutorInstallationStorage, 'managedBinding' | 'managedBindingsForWorkspace'>
 
 type McpSettingsSummary = {
   supported: boolean
@@ -37,7 +37,7 @@ export function attachMcpSettingsRoutes(server: HttpServer, options: {
 }): void {
   const configuring = new Set<string>()
 
-  server.on('request', (req, res) => {
+  server.on('request', async (req, res) => {
     if (res.headersSent || res.writableEnded) return
     const url = new URL(req.url ?? '/', 'http://localhost')
     if (url.pathname !== '/settings/mcp') return
@@ -64,7 +64,12 @@ export function attachMcpSettingsRoutes(server: HttpServer, options: {
         sendError(res, 400, 'workspace_id_required')
         return
       }
-      const selected = selectManagedExecutor(workspaceId, authorization.actor, options.installations, options.executors)
+      const selected = await selectManagedExecutor(workspaceId, authorization.actor, options.installations, options.executors).catch(() => undefined)
+      if (!selected) {
+        audit(options.audit, 'mcp_config.read', authorization.actor, workspaceId, [], 'error', 'installation_store_unavailable')
+        sendError(res, 500, 'internal_error')
+        return
+      }
       if (!selected.ok) {
         audit(options.audit, 'mcp_config.read', authorization.actor, workspaceId, [], 'denied', selected.error)
         sendError(res, selected.status, selected.error)
@@ -91,13 +96,14 @@ export function attachMcpSettingsRoutes(server: HttpServer, options: {
       return
     }
 
-    void readJson(req).then((body) => {
+    void readJson(req).then(async (body) => {
       const input = parsePutBody(body)
       if (!input) {
         sendError(res, 400, 'invalid_request')
         return
       }
-      const selected = selectManagedExecutor(input.workspaceId, authorization.actor, options.installations, options.executors)
+      const selected = await selectManagedExecutor(input.workspaceId, authorization.actor, options.installations, options.executors)
+        .catch(() => { throw new InstallationStoreUnavailableError() })
       const names = input.servers.map((item) => item.name)
       if (!selected.ok) {
         audit(options.audit, 'mcp_config.update', authorization.actor, input.workspaceId, names, 'denied', selected.error)
@@ -127,26 +133,30 @@ export function attachMcpSettingsRoutes(server: HttpServer, options: {
         sendError(res, 502, 'mcp_configuration_failed')
       }).finally(() => configuring.delete(selected.binding.id))
     }).catch((error: unknown) => {
+      if (error instanceof InstallationStoreUnavailableError) {
+        sendError(res, 500, 'internal_error')
+        return
+      }
       sendError(res, error instanceof RequestTooLargeError ? 413 : 400, error instanceof RequestTooLargeError ? 'request_too_large' : 'invalid_request')
     })
   })
 }
 
-function selectManagedExecutor(
+async function selectManagedExecutor(
   workspaceId: string,
   actor: DashboardActor,
   installations: McpInstallationAccess,
   executors: Pick<McpExecutorAccess, 'snapshot' | 'hasTrustedManagedExecutor'>,
-): { ok: true; binding: ManagedExecutorInstallationBinding } | { ok: false; status: number; error: string } {
+): Promise<{ ok: true; binding: ManagedExecutorInstallationBinding } | { ok: false; status: number; error: string }> {
   const executor = executors.snapshot().find((candidate) => candidate.workspaceId === workspaceId)
   if (!executor) {
-    const bindings = installations.managedBindingsForWorkspace(workspaceId)
+    const bindings = await installations.managedBindingsForWorkspace(workspaceId)
     const ownershipError = bindings.length > 0 ? bindingOwnershipError(actor, bindings) : undefined
     if (ownershipError) return { ok: false, status: 403, error: ownershipError }
     return { ok: false, status: 409, error: bindings.length > 0 ? 'workspace_offline' : 'unmanaged_workspace' }
   }
   if (!executor.installId) return { ok: false, status: 409, error: 'unmanaged_executor' }
-  const binding = installations.managedBinding(executor.installId)
+  const binding = await installations.managedBinding(executor.installId)
   if (!binding || binding.workspaceId !== workspaceId) return { ok: false, status: 409, error: 'unmanaged_executor' }
   if (!executors.hasTrustedManagedExecutor(workspaceId, binding.id)) return { ok: false, status: 409, error: 'unmanaged_executor' }
   const ownershipError = bindingOwnershipError(actor, [binding])
@@ -229,6 +239,7 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
 }
 
 class RequestTooLargeError extends Error {}
+class InstallationStoreUnavailableError extends Error {}
 
 function audit(logger: AuditLogger | undefined, action: string, actor: DashboardActor, workspaceId: string, serverNames: string[], outcome: 'ok' | 'denied' | 'error', error?: string): void {
   logger?.log({

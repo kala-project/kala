@@ -4,6 +4,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 export type ArtifactObject = { organizationId: string; key: string; contentType: string; body: Uint8Array; expiresAt?: Date }
 export interface ArtifactObjectStore {
   put(object: ArtifactObject): Promise<void>
+  get(organizationId: string, key: string): Promise<Uint8Array>
   delete(organizationId: string, key: string): Promise<void>
   signedGetUrl(organizationId: string, key: string, ttlSeconds: number): Promise<URL>
 }
@@ -24,6 +25,11 @@ export class S3ArtifactObjectStore implements ArtifactObjectStore {
   async put(object: ArtifactObject): Promise<void> {
     if (object.body.byteLength > this.options.maxObjectBytes) throw new Error('artifact quota exceeded')
     await this.client.send(new PutObjectCommand({ Bucket: this.options.bucket, Key: tenantObjectKey(object.organizationId, object.key), Body: object.body, ContentType: object.contentType, ...(object.expiresAt ? { Expires: object.expiresAt } : {}) }))
+  }
+  async get(organizationId: string, key: string): Promise<Uint8Array> {
+    const response = await this.client.send(new GetObjectCommand({ Bucket: this.options.bucket, Key: tenantObjectKey(organizationId, key) }))
+    if (!response.Body) throw new Error('artifact body is unavailable')
+    return await response.Body.transformToByteArray()
   }
   async delete(organizationId: string, key: string): Promise<void> {
     await this.client.send(new DeleteObjectCommand({ Bucket: this.options.bucket, Key: tenantObjectKey(organizationId, key) }))
