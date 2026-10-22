@@ -49,6 +49,20 @@ const sidebarWorkspaces = [
 
 const sessions: PrototypeSessionSummary[] = [
   {
+    sessionId: 'prototype-workstream', agentRuntime: 'kernel', executionMode: 'chat',
+    createdAt: iso(-220), lastEventAt: iso(-100), eventCount: 16,
+    workspaceId: 'workspace-storage', workspaceName: 'Storage Lab', currentCwd: '/placeholder/storage-lab',
+    label: '确认对象存储恢复路径', firstUserMessage: '核对存储设计与恢复路径，修复会造成数据丢失的缺口，并说明尚未验证的部分。',
+    status: 'done', preferences: { rightPanelTab: 'files', toolCardMode: 'dots' },
+  },
+  {
+    sessionId: 'prototype-workstream-review', agentRuntime: 'kernel', executionMode: 'chat',
+    createdAt: iso(-195), lastEventAt: iso(-180), eventCount: 3,
+    workspaceId: 'workspace-storage', workspaceName: 'Storage Lab', currentCwd: '/placeholder/storage-lab',
+    label: '审查对象引用的丢失窗口', firstUserMessage: '独立检查对象引用和消息确认是否存在数据丢失窗口。',
+    status: 'done', parentSessionId: 'prototype-workstream',
+  },
+  {
     sessionId: 'prototype-active',
     agentRuntime: 'kernel',
     executionMode: 'chat',
@@ -283,6 +297,45 @@ const executors: AttachedExecutor[] = [
     os: workspace.os, attachedAt: iso(-420 - index * 50), clientVersion: 'prototype',
   })),
 ]
+
+const workstreamMessages: Message[] = [
+  { role: 'user', content: [{ type: 'text', text: '核对对象存储设计与恢复路径，找出可能丢失已确认消息的缺口；先统一设计，再修复主要路径，最后说明没有验证的边界。' }] },
+  { role: 'assistant', content: [{ type: 'thinking', text: '## 对齐设计约束\n检查存储权威与已确认消息的恢复承诺，先划清目标与当前实现。' }] },
+  { role: 'assistant', content: [
+    { type: 'tool_call', callId: 'work-read-contract', name: 'read_file', input: { path: 'docs/storage-contract.md' }, intent: '核对已确认消息与对象存储的持久化约束' },
+    { type: 'tool_call', callId: 'work-read-queue', name: 'read_file', input: { path: 'src/storage/message-queue.ts' }, intent: '查明消息入队与对象引用的提交顺序' },
+  ] },
+  { role: 'tool', content: [
+    { type: 'tool_result', callId: 'work-read-contract', ok: true, content: '设计要求已确认的消息在节点替换后仍可恢复；上传对象与引用需要一致。' },
+    { type: 'tool_result', callId: 'work-read-queue', ok: true, content: '当前队列先确认消息、再单独提交对象引用，失败时可能留下可过期的引用。' },
+  ] },
+  { role: 'assistant', content: [{ type: 'thinking', text: '## 独立审查风险\n请另一个视角确认是否还有旧数据误认或清理竞争。' }] },
+  { role: 'assistant', content: [{ type: 'tool_call', callId: 'work-review', name: 'agent', input: { role: 'review', task: '审查对象引用的丢失窗口' }, intent: '独立审查消息确认与过期清理之间的数据丢失风险' }] },
+  { role: 'tool', content: [{ type: 'tool_result', callId: 'work-review', ok: true, content: '<sub_agent session_id="prototype-workstream-review" agent_type="review" intention="独立审查消息确认与过期清理之间的数据丢失风险" status="completed" turns="7" duration_ms="18500"><result>确认存在确认后引用仍可过期的窗口；建议先保护对象，再接受消息。</result></sub_agent>' }] },
+  { role: 'assistant', content: [{ type: 'thinking', text: '## 收敛实现方案\n让消息确认依赖对象引用保护，清理与确认按 Session 顺序执行。' }] },
+  { role: 'assistant', content: [
+    { type: 'tool_call', callId: 'work-edit-contract', name: 'replace_in_file', input: { path: 'docs/storage-contract.md' }, intent: '落实文档与存储路径设计' },
+    { type: 'tool_call', callId: 'work-edit-admission', name: 'replace_in_file', input: { path: 'src/storage/message-queue.ts' }, intent: '将对象引用保护移到消息持久入队之前' },
+    { type: 'tool_call', callId: 'work-edit-cleanup', name: 'replace_in_file', input: { path: 'src/storage/object-cleanup.ts' }, intent: '协调单实例的引用确认与过期清理顺序' },
+  ] },
+  { role: 'tool', content: [
+    { type: 'tool_result', callId: 'work-edit-contract', ok: true, content: '已记录确认边界和仍待解决的跨副本事务问题。' },
+    { type: 'tool_result', callId: 'work-edit-admission', ok: true, content: '可靠消息确认前先保护对象引用。' },
+    { type: 'tool_result', callId: 'work-edit-cleanup', ok: true, content: '同一 Session 的确认和待清理操作按顺序执行。' },
+  ] },
+  { role: 'assistant', content: [{ type: 'thinking', text: '## 验证与交付\n检查失败时不能先入队，且清理不能误删刚确认的对象。' }] },
+  { role: 'assistant', content: [
+    { type: 'tool_call', callId: 'work-typecheck', name: 'shell', input: { command: 'typecheck' }, intent: '验证类型与失败恢复行为' },
+    { type: 'tool_call', callId: 'work-verify', name: 'shell', input: { command: 'test:storage' }, intent: '验证提交失败重试和清理竞争场景' },
+  ] },
+  { role: 'tool', content: [
+    { type: 'tool_result', callId: 'work-typecheck', ok: true, content: '类型检查通过。' },
+    { type: 'tool_result', callId: 'work-verify', ok: true, content: '模拟的失败重试与单实例并发场景通过。' },
+  ] },
+  { role: 'assistant', content: [{ type: 'text', text: '已统一存储确认边界：对象引用先受保护，消息随后可靠入队。单实例内清理与确认不会互相抢先。仍未完成跨副本事务、未使用对象的安全回收和真实外部存储恢复演练，不能宣称高可用验收。' }] },
+]
+const workstreamSummary = sessions.find((entry) => entry.sessionId === 'prototype-workstream')!
+workstreamSummary.eventCount = messageCursor(workstreamMessages)
 
 const activeMessages: Message[] = [
   { role: 'user', content: [{ type: 'text', text: [
@@ -547,6 +600,18 @@ function messageCursor(messages: readonly Message[]): number {
 
 function stateFor(sessionId: string): AgentState {
   const base = createInitialState({ sessionId })
+  if (sessionId === 'prototype-workstream') {
+    return { ...base, messages: workstreamMessages, cursor: messageCursor(workstreamMessages), status: 'done', pendingCalls: [] } as AgentState
+  }
+  if (sessionId === 'prototype-workstream-review') {
+    const messages: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: '独立检查对象引用和消息确认之间的丢失窗口。' }] },
+      { role: 'assistant', content: [{ type: 'tool_call', callId: 'review-source', name: 'read_file', input: { path: 'src/storage/message-queue.ts' }, intent: '检查提交顺序和对象过期条件' }] },
+      { role: 'tool', content: [{ type: 'tool_result', callId: 'review-source', ok: true, content: '消息先持久化，对象引用稍后提交；待提交对象仍会过期。' }] },
+      { role: 'assistant', content: [{ type: 'text', text: '建议先保护对象引用，再确认消息；跨副本清理仍需要数据库围栏。' }] },
+    ]
+    return { ...base, messages, cursor: messageCursor(messages), status: 'done', pendingCalls: [] } as AgentState
+  }
   if (sessionId === 'prototype-subagent-running') {
     return {
       ...base,

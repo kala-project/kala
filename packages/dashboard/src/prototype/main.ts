@@ -9,7 +9,7 @@ const url = new URL(window.location.href)
 const typography = url.searchParams.get('typography')
 document.documentElement.dataset.sidebarTypography = typography === 'noto' || typography === 'lato' ? typography : 'inter'
 if (!url.searchParams.has('sessionId')) {
-  url.searchParams.set('sessionId', 'prototype-active')
+  url.searchParams.set('sessionId', url.searchParams.get('preview') === 'workstream' ? 'prototype-workstream' : 'prototype-active')
   window.history.replaceState(null, '', url)
 }
 

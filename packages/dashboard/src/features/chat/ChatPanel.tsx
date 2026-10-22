@@ -206,6 +206,11 @@ type RenderTranscriptItem = TranscriptItem | {
   seq?: number
   ts?: string
   turnTiming?: import('@agent-kernel/shared').TurnTimingSummary
+} | {
+  kind: 'work_summary'
+  entries: readonly { item: Extract<RenderTranscriptItem, { kind: 'tool_activity' | 'thinking_cluster' }>; hideHeader: boolean }[]
+  firstMessageIndex: number
+  lastMessageIndex: number
 }
 
 type MessageRerunTarget = {
@@ -340,6 +345,10 @@ export function ChatPanel({
   // supplies the authoritative set so an unpaired historical call cannot be
   // mistaken for live work after compaction, interruption, or recovery.
   const activeToolCallIdSet = useMemo(() => activeToolCallIds === undefined ? null : new Set(activeToolCallIds), [activeToolCallIds])
+  // Product prototype only: compare an information hierarchy against the
+  // unchanged production transcript using the same mock protocol messages.
+  const workstreamPreview = import.meta.env.VITE_KALA_PROTOTYPE === '1'
+    && sessionId === 'prototype-workstream' && !activeToolCallIds?.length && !pendingApprovals?.length
 
   // Drop tool messages whose every tool_result is already rendered inline in a
   // grouped assistant tool-call card. Otherwise MessageRow returns null but
@@ -429,13 +438,14 @@ export function ChatPanel({
       hideHeader.push(false)
     }
     const clustered = clusterVisibleThinkingItems(kept, mapping, hideHeader, groupedIds)
+    const visible = workstreamPreview ? foldWorkstreamActivity(clustered) : clustered
     return {
-      transcriptItems: clustered.items,
-      messageIndexByItem: clustered.messageIndexes,
-      hideHeaderByItem: clustered.hideHeaders,
+      transcriptItems: visible.items,
+      messageIndexByItem: visible.messageIndexes,
+      hideHeaderByItem: visible.hideHeaders,
       groupedCallIds: groupedIds,
     }
-  }, [displayItems, intraMessageGroupedCallIds, resultsByCallId, compactStatus, effectiveParentSessionId, toolCardMode])
+  }, [displayItems, intraMessageGroupedCallIds, resultsByCallId, compactStatus, effectiveParentSessionId, toolCardMode, workstreamPreview])
 
   // Translate message-index highlight into item-index so VirtualTranscript
   // can scroll to the right row. -1 means "no highlight" or unresolved.
@@ -445,7 +455,7 @@ export function ChatPanel({
       if (messageIndexByItem[i] === highlightIndex) return i
       const item = transcriptItems[i]
       if (
-        (item?.kind === 'tool_activity' || item?.kind === 'thinking_cluster')
+        (item?.kind === 'tool_activity' || item?.kind === 'thinking_cluster' || item?.kind === 'work_summary')
         && highlightIndex >= item.firstMessageIndex
         && highlightIndex <= item.lastMessageIndex
       ) {
@@ -464,7 +474,7 @@ export function ChatPanel({
         if (messageIndexByItem[index] === match.messageIndex) return index
         const item = transcriptItems[index]
         if (
-          (item?.kind === 'tool_activity' || item?.kind === 'thinking_cluster')
+          (item?.kind === 'tool_activity' || item?.kind === 'thinking_cluster' || item?.kind === 'work_summary')
           && match.messageIndex >= item.firstMessageIndex
           && match.messageIndex <= item.lastMessageIndex
         ) return index
@@ -492,7 +502,7 @@ export function ChatPanel({
   }, [effectiveOnPinnedChange, transcriptRef])
 
   const renderItem = useCallback(
-    (item: RenderTranscriptItem, itemIndex: number): JSX.Element => {
+    (item: RenderTranscriptItem, itemIndex: number, hideHeaderOverride?: boolean): JSX.Element => {
       if (item.kind === 'compact_progress') {
         return item.phase === 'running'
           ? <CompactProgressRow startedAt={Date.parse(item.startedAt)} tokensBefore={item.tokensBefore} />
@@ -504,7 +514,10 @@ export function ChatPanel({
       if (item.kind === 'compact_feedback') {
         return <CompactFeedbackTranscriptRow status={item.status} onDismiss={onDismissCompactStatus} />
       }
-      const hideHeader = hideHeaderByItem[itemIndex] ?? false
+      const hideHeader = hideHeaderOverride ?? hideHeaderByItem[itemIndex] ?? false
+      if (item.kind === 'work_summary') {
+        return <WorkstreamSummaryRow item={item} highlighted={searchItemIndex === itemIndex || (highlightIndex != null && highlightIndex >= item.firstMessageIndex && highlightIndex <= item.lastMessageIndex)} renderDetail={(entry) => renderItem(entry.item, itemIndex, entry.hideHeader)} />
+      }
       if (item.kind === 'tool_activity') {
         return (
           <ToolActivityTranscriptRow
@@ -651,6 +664,8 @@ export function ChatPanel({
           ? `tool-activity-${item.group.firstCallId}`
         : item.kind === 'thinking_cluster'
           ? `thinking-cluster-${item.firstMessageIndex}`
+        : item.kind === 'work_summary'
+          ? `work-summary-${item.firstMessageIndex}`
         : transcriptItemKey(item, itemIndex),
     [],
   )
@@ -1954,6 +1969,56 @@ function clusterVisibleThinkingItems(
   }
 }
 
+function foldWorkstreamActivity(transcript: { items: RenderTranscriptItem[]; messageIndexes: number[]; hideHeaders: boolean[] }): typeof transcript {
+  const items: RenderTranscriptItem[] = []
+  const messageIndexes: number[] = []
+  const hideHeaders: boolean[] = []
+  for (let index = 0; index < transcript.items.length;) {
+    const current = transcript.items[index]!
+    if (current.kind !== 'thinking_cluster' && current.kind !== 'tool_activity') {
+      items.push(current)
+      messageIndexes.push(transcript.messageIndexes[index] ?? -1)
+      hideHeaders.push(transcript.hideHeaders[index] ?? false)
+      index += 1
+      continue
+    }
+    const entries: Extract<RenderTranscriptItem, { kind: 'work_summary' }>['entries'][number][] = []
+    while (index < transcript.items.length) {
+      const activity = transcript.items[index]!
+      if (activity.kind !== 'thinking_cluster' && activity.kind !== 'tool_activity') break
+      entries.push({ item: activity, hideHeader: transcript.hideHeaders[index] ?? false })
+      index += 1
+    }
+    items.push({ kind: 'work_summary', entries, firstMessageIndex: entries[0]!.item.firstMessageIndex, lastMessageIndex: entries.at(-1)!.item.lastMessageIndex })
+    messageIndexes.push(entries[0]!.item.firstMessageIndex)
+    hideHeaders.push(false)
+  }
+  return { items, messageIndexes, hideHeaders }
+}
+
+function WorkstreamSummaryRow({ item, highlighted, renderDetail }: {
+  item: Extract<RenderTranscriptItem, { kind: 'work_summary' }>
+  highlighted: boolean
+  renderDetail: (entry: typeof item.entries[number]) => JSX.Element
+}): JSX.Element {
+  const calls = item.entries.flatMap((entry) => entry.item.kind === 'tool_activity' ? entry.item.group.calls : [])
+  const agentCount = calls.filter((call) => call.name === 'agent').length
+  return (
+    <div className="min-w-0" data-testid="workstream-summary" id={`msg-${item.firstMessageIndex}`} data-message-index={item.firstMessageIndex}>
+      <details className="group" open={highlighted || undefined}>
+        <summary className={cn('flex w-fit cursor-pointer list-none flex-wrap items-center gap-x-3 gap-y-1 py-2 text-xs text-muted-foreground marker:hidden sm:ml-10 [&::-webkit-details-marker]:hidden', highlighted && 'text-primary')} aria-label="切换原始工作记录">
+          <span>已完成 {calls.length} 项操作{agentCount > 0 ? ` · ${agentCount} 次代理审查` : ''}</span>
+          <span className="font-medium text-foreground underline decoration-border underline-offset-4 group-open:hidden">查看过程</span>
+          <span className="hidden font-medium text-foreground underline decoration-border underline-offset-4 group-open:inline">收起过程</span>
+        </summary>
+        <div data-testid="workstream-details">
+          {item.entries.map((entry, index) => <div key={`${entry.item.kind}-${entry.item.firstMessageIndex}-${index}`} className="py-2 last:pb-0 sm:py-3 sm:last:pb-0">{renderDetail(entry)}</div>)}
+        </div>
+      </details>
+    </div>
+  )
+}
+
 function visibleThinkingUpdates(
   item: RenderTranscriptItem,
   groupedCallIds: ReadonlySet<string>,
@@ -2286,7 +2351,7 @@ function MessageRow({
           {!streaming && (ts || turnTiming || (message.role === 'assistant' && assistantActions && !inlineActionsText)) ? (
             <div className={cn(
               'message-metadata-row relative flex min-w-0 max-w-full items-center gap-1 overflow-visible',
-              (assistantActions && !inlineActionsText) || turnTiming ? 'min-h-7' : 'h-0',
+              (assistantActions && !inlineActionsText) || turnTiming ? 'min-h-7' : 'h-0 -mt-3',
             )} data-testid="assistant-message-footer">
               {assistantActions && !inlineActionsText ? <MessageActions
                 align="start"
@@ -2300,7 +2365,7 @@ function MessageRow({
               {turnTiming ? <TurnTimingFooter summary={turnTiming} /> : null}
               <InlineTimestamp ts={ts} className={cn(
                 'absolute right-0 rounded bg-background/90 px-1 backdrop-blur-sm sm:right-auto sm:left-full sm:ml-2',
-                (assistantActions && !inlineActionsText) || turnTiming ? 'bottom-1/2 translate-y-1/2' : 'top-0',
+                (assistantActions && !inlineActionsText) || turnTiming ? 'bottom-1/2 translate-y-1/2' : 'top-3',
               )} />
             </div>
           ) : null}
