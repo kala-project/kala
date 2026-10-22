@@ -32,6 +32,46 @@ describe('PostgresRuntimeResourceOwnerResolver', () => {
   })
 
   it.each([
+    {
+      name: 'live',
+      rows: [{
+        document: { sessionId: 'session_01', organizationId: 'org_acme' },
+        origin: 'https://replica-a.example',
+      }],
+      expected: { status: 'live', binding: { origin: 'https://replica-a.example', replicaId: 'replica-a', generation: 1n } },
+    },
+    {
+      name: 'terminal deleting',
+      rows: [{
+        document: {
+          sessionId: 'session_01', organizationId: 'org_acme',
+          __kalaSessionDeletion: { requestedAt: '2026-10-22T20:08:31.369Z' },
+        },
+        origin: 'https://replica-a.example',
+      }],
+      expected: { status: 'deleting' },
+    },
+    {
+      name: 'relocating without a live owner',
+      rows: [{ document: { sessionId: 'session_01', organizationId: 'org_acme' } }],
+      expected: { status: 'relocating' },
+    },
+    { name: 'missing projection', rows: [], expected: { status: 'missing' } },
+    { name: 'final-deleted null projection', rows: [{ document: null }], expected: { status: 'missing' } },
+  ])('classifies a Session projection as $name', async ({ rows, expected }) => {
+    const resources = executor(rows)
+    const resolver = new PostgresRuntimeResourceOwnerResolver(
+      resources, executor(authority), new Set(['https://replica-a.example']),
+    )
+
+    await expect(resolver.resolveSessionRouteState({ ...scope, sessionId: 'session_01' })).resolves.toEqual(expected)
+    expect(resources.queries[0]).toMatchObject({ values: ['org_acme', 'unit_acme', 'session_01'] })
+    expect(resources.queries[0]!.sql).toContain('LEFT JOIN tenant_runtime_resource_ownerships')
+    expect(resources.queries[0]!.sql).toContain('member.generation = ownership.membership_generation')
+    expect(resources.queries[0]!.sql).toContain('member.membership_token = ownership.membership_token')
+  })
+
+  it.each([
     { name: 'missing control bind', bind: [] },
     { name: 'ambiguous control bind', bind: [...authority, ...authority] },
     {

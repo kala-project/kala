@@ -453,9 +453,16 @@ The repository now contains an **experimental, opt-in** slice toward this target
   usage persists across Runtime replacement. Ambiguous upload failures retain
   conservative allocations until safe operator reconciliation, so the quota
   may temporarily block further uploads rather than undercount S3 objects.
-  Session deletion first persists a `delete_requested` tombstone; the Session
-  becomes unavailable for new work while failed S3 cleanup can be retried on
-  restart. Object registration is
+  For a PG/S3 Session, every user-facing deletion path must first persist an
+  owner-fenced `delete_requested` tombstone, **before** queue cancellation,
+  Executor cleanup, Runtime hooks or S3 deletion. The Gateway must distinguish
+  this terminal state from a retryable owner relocation and never prepare a new
+  route for a deleting Session. A bounded Unit-local recovery pass may acquire
+  a newer owner generation and retry idempotent object cleanup, then commit the
+  final owner-fenced deletion. A process restart is not a prerequisite for
+  recovery. This does not make tree deletion atomic or retract an already
+  dispatched external effect; each Session's tombstone is its own durable
+  boundary. Object registration is
   fenced once deletion starts. Reusing the same Session ID after deletion is
   intentionally unsupported until old writers can be proven terminated.
   The Runtime in this mode does not start its local-file restart coordinator;

@@ -76,6 +76,7 @@ import { mcpToolsForWorkspace, mergeMcpTools } from './mcp-tools.js'
 import { attachDynamicStaticMountHandler, attachEmbeddedStaticHandler, attachJsonRoutes, attachReleaseAssetsHandler, claimRoute, attachRequestHandler, attachStaticHandler, type EmbeddedStaticAsset, type StaticMount, type TenantStorageQuotaEnforcer } from './http/routes.js'
 import { SessionArtifactRegistry, type SessionArtifactStorage } from './session-artifact-registry.js'
 import { MessageAttachmentStore, type MessageAttachmentStorage } from './message-attachment-store.js'
+import { S3MessageAttachmentStore } from './message-attachments/s3-message-attachment-store.js'
 import { validateMessageAttachmentReferences } from './message-attachment-resolver.js'
 import { createLocalImagePublisher } from './local-image-publisher.js'
 import { MemoStore } from './memo-store.js'
@@ -324,6 +325,8 @@ export async function startHostServer(
   let scheduledTaskScheduler: UnitScheduler | undefined
   let detachPublicAccessGate: (() => void) | undefined
   let promptSynchronizationTimer: ReturnType<typeof setTimeout> | undefined
+  let deletionRecoveryTimer: ReturnType<typeof setInterval> | undefined
+  let deletionRecoveryPass: Promise<void> | undefined
   const closeServer = async (): Promise<void> => {
     if (closed) return
     closed = true
@@ -333,6 +336,8 @@ export async function startHostServer(
     // Only the distributed owner protocol requires immediate loss fencing.
     if (options.assertSessionEffectOwner) loop?.abortActiveEffects()
     if (promptSynchronizationTimer) clearTimeout(promptSynchronizationTimer)
+    if (deletionRecoveryTimer) clearInterval(deletionRecoveryTimer)
+    if (deletionRecoveryPass) await deletionRecoveryPass
     detachPublicAccessGate?.()
     for (const batch of tokenDeltaBatches.values()) clearTimeout(batch.timer)
     tokenDeltaBatches.clear()
@@ -436,6 +441,15 @@ export async function startHostServer(
     onStorageChanged: () => storageInventory?.invalidate(),
   })
   await store.initialize()
+  if (store.usesExternalAuthority) {
+    deletionRecoveryTimer = setInterval(() => {
+      if (closed || deletionRecoveryPass) return
+      deletionRecoveryPass = store.recoverPendingDeletions()
+        .catch((error: unknown) => console.warn('[private-cloud] session deletion recovery failed', error))
+        .finally(() => { deletionRecoveryPass = undefined })
+    }, 60_000)
+    deletionRecoveryTimer.unref()
+  }
   // The current inventory and quarantine engine measure/move local Session trees.
   // Do not expose misleading partial results for PostgreSQL or object-backed data;
   // Dashboard RPCs fail explicitly with "storage inventory/cleanup unavailable".
@@ -726,12 +740,11 @@ export async function startHostServer(
       await messageAttachments?.commitReferences(sessionId, content)
       return { accepted: true, committed: true, cursor: record.state.cursor }
     }
-    // The queue can dispatch immediately after its PostgreSQL write. Protect
-    // uploaded S3 objects first, including on HTTP/Gateway admission paths;
-    // never acknowledge a queued message whose pending attachment may expire.
-    // An admission failure after this step conservatively retains the object
-    // until Session deletion rather than risking loss of acknowledged data.
-    await messageAttachments?.commitReferences(sessionId, content)
+    // PG/S3 stores the attachment protection and Queue item in one owner-fenced
+    // transaction. Legacy storage still protects references before enqueue.
+    const atomicAttachments = Boolean(options.sessionAuthority && messageAttachments instanceof S3MessageAttachmentStore
+      && content?.some((block) => block.type === 'file' && 'source' in block && block.source.kind === 'host_ref'))
+    if (!atomicAttachments) await messageAttachments?.commitReferences(sessionId, content)
     if (record.agentRuntime !== 'kernel') {
       const resting = isRestingStatus(record.state.status)
       await messageQueues.enqueue(sessionId, {
@@ -743,7 +756,7 @@ export async function startHostServer(
         ...(content ? { content } : {}),
         ...(effectiveModelForSession(sessionId) ? { model: effectiveModelForSession(sessionId) } : {}),
         ...(shell ? { shell: { ...shell, state: 'queued' as const } } : {}),
-      }, mode === 'steer' ? 'front' : undefined)
+      }, mode === 'steer' ? 'front' : undefined, atomicAttachments ? 'atomic-attachments' : undefined)
       if (mode === 'steer' && !resting) {
         await agentRuntimes!.require(record.agentRuntime).cancel(record)
         await messageQueues.drain(sessionId)
@@ -770,7 +783,7 @@ export async function startHostServer(
       createdAt: new Date().toISOString(),
       ...(content ? { content } : {}),
       ...(shell ? { shell: { ...shell, state: 'queued' as const } } : {}),
-    }, effectiveMode === 'steer' ? 'front' : undefined)
+    }, effectiveMode === 'steer' ? 'front' : undefined, atomicAttachments ? 'atomic-attachments' : undefined)
     if (effectiveMode === 'steer' && !isRestingStatus(record.state.status)) loop.requestStopAtBoundary(sessionId)
     void messageQueues.drain(sessionId)
     const committedCursor = await sessionUserOperationCursor(store, sessionId, shell ? bangShellResultOperationId(operationId) : operationId)
@@ -1272,7 +1285,7 @@ export async function startHostServer(
     async hydrate(sessionId) {
       await loadQueue(sessionId)
     },
-    async enqueue(sessionId, msg, priority) {
+    async enqueue(sessionId, msg, priority, attachmentAdmission) {
       let changed = false
       await withQueueMutation(sessionId, async () => {
         const queue = [...await loadQueue(sessionId)]
@@ -1326,7 +1339,15 @@ export async function startHostServer(
         if (!admission.ok) throw new Error(`Runtime Unit queue limit exceeded (${admission.code})`)
         if (persistentQueue) {
           try {
-            const result = await persistentQueue.enqueue(sessionId, msg, priority === 'front' ? 'front' : 'back')
+            const result = attachmentAdmission === 'atomic-attachments'
+              ? await (async () => {
+                  if (!(messageAttachments instanceof S3MessageAttachmentStore) || !msg.content) throw new Error('PG/S3 atomic attachment admission is unavailable')
+                  const admitted = await messageAttachments.admitQueuedMessage(sessionId, msg.content, msg.operationId,
+                    async (transaction) => await persistentQueue.enqueueWithinTransaction(transaction, sessionId, msg, priority === 'front' ? 'front' : 'back'))
+                  return admitted ?? { state: await persistentQueue.loadOrInitialize(sessionId,
+                    async () => await loadPersistedMessageQueueState(store, sessionId)), changed: false }
+                })()
+              : await persistentQueue.enqueue(sessionId, msg, priority === 'front' ? 'front' : 'back')
             applyQueueState(sessionId, result.state)
             changed = result.changed
             if (!changed && resourceGovernor && resourceUnitId) resourceGovernor.dequeue(resourceUnitId)
@@ -2272,7 +2293,12 @@ export async function startHostServer(
     },
     async deleteSession(actor, sessionId, operationId) {
       const root = await apiRecord(actor, sessionId)
-      if (!root) return
+      if (!root) {
+        if (store.usesExternalAuthority && actor.organizationId) {
+          await store.finishRequestedDeletion(sessionId, actor.organizationId)
+        }
+        return
+      }
       const targetIds = collectSessionDescendants(await store.listSummaries(), sessionId)
       for (const targetSessionId of targetIds) {
         // A different replica may own a descendant even when this Runtime has
@@ -2284,10 +2310,14 @@ export async function startHostServer(
       await scheduledTaskStore.pauseSessionTargets(scheduleOwnerKey(actor), new Set(targetIds))
       for (const targetSessionId of targetIds.reverse()) {
         await options.assertSessionEffectOwner?.(targetSessionId)
+        const record = await apiRecord(actor, targetSessionId)
+        if (store.usesExternalAuthority && !await store.requestDeletion(targetSessionId)) continue
         await messageQueues.stop(targetSessionId)
         await executors.cancelPending(targetSessionId)
-        const record = await apiRecord(actor, targetSessionId)
-        if (!record) continue
+        if (!record) {
+          await store.delete(targetSessionId)
+          continue
+        }
         await agentRuntimes!.get(record.agentRuntime)?.delete?.(record)
         await extensions.sessionDeleted({ deps: loopDeps, record }).catch(() => undefined)
         if (record.workspaceId) {

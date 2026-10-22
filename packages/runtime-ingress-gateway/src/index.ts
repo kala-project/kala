@@ -14,7 +14,12 @@ export type {
   RuntimeResourceOwnerResolver,
   RuntimeResourceOwnerScope,
   RuntimeSessionOwnerInput,
+  RuntimeSessionRouteState,
   RuntimeTaskOwnerInput,
 } from './runtime-origin/postgres-runtime-resource-owner-resolver.js'
 export { RuntimeRoutingTicketResolver } from './runtime-origin/runtime-routing-ticket-resolver.js'
-export type { RuntimeRoutingTicketOrganization, RuntimeRoutingTicketResolverOptions } from './runtime-origin/runtime-routing-ticket-resolver.js'
+export type {
+  RuntimeRoutingTicketOrganization,
+  RuntimeRoutingTicketResolverOptions,
+  SessionRoutingTicketResult,
+} from './runtime-origin/runtime-routing-ticket-resolver.js'

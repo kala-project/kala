@@ -31,7 +31,7 @@ export interface ObjectMetadataLog {
   replay<Payload = unknown>(sessionId: string): Promise<readonly ObjectMetadataEvent<Payload>[]>
   beginSessionDeletion(sessionId: string): Promise<void>
   prepareObject(sessionId: string, objectKey: string): Promise<ObjectOrphanIntent>
-  append<Payload>(sessionId: string, input: { idempotencyKey: string; eventType: string; payload: Payload; intent?: ObjectOrphanIntent; capacity?: ObjectCapacityMutation; allowDuringSessionDeletion?: boolean }): Promise<void>
+  append<Payload>(sessionId: string, input: { idempotencyKey: string; eventType: string; payload: Payload; intent?: ObjectOrphanIntent; capacity?: ObjectCapacityMutation; allowDuringSessionDeletion?: boolean; guard?: (events: readonly ObjectMetadataEvent[]) => void }, sideEffect?: (transaction: HotStateSqlExecutor) => Promise<void>): Promise<void>
   completeObjectCleanup(intent: ObjectOrphanIntent): Promise<void>
 }
 
@@ -190,7 +190,7 @@ export class PostgresObjectMetadataLog implements ObjectMetadataLog {
     await operation
   }
 
-  async append<Payload>(sessionId: string, input: { idempotencyKey: string; eventType: string; payload: Payload; intent?: ObjectOrphanIntent; capacity?: ObjectCapacityMutation; allowDuringSessionDeletion?: boolean }): Promise<void> {
+  async append<Payload>(sessionId: string, input: { idempotencyKey: string; eventType: string; payload: Payload; intent?: ObjectOrphanIntent; capacity?: ObjectCapacityMutation; allowDuringSessionDeletion?: boolean; guard?: (events: readonly ObjectMetadataEvent[]) => void }, sideEffect?: (transaction: HotStateSqlExecutor) => Promise<void>): Promise<void> {
     if (input.intent) this.validateIntent(sessionId, input.intent)
     const predecessor = this.tails.get(sessionId) ?? Promise.resolve()
     const operation = predecessor.then(async () => {
@@ -201,7 +201,17 @@ export class PostgresObjectMetadataLog implements ObjectMetadataLog {
           const token = await this.hotState.acquireLease(this.scope(sessionId), this.ownerId, this.leaseTtlMs,
             this.resourceOwnerForSession ? async (transaction) => await this.assertOwner(transaction, sessionId) : undefined)
           try {
-            await this.hotState.appendEventWithSideEffect(token, input, async (transaction) => {
+            await this.hotState.appendEventWithSideEffect(token, input, async (transaction, event) => {
+              // The PG lease row is locked until commit. Recheck candidate records
+              // against the preceding durable events, never a replica's stale replay.
+              if (input.guard) {
+                const previous = await transaction.query<{ sequence: string; event_type: string; payload: unknown; created_at: Date }>(
+                  `SELECT sequence, event_type, payload, created_at FROM ${this.eventsTable}
+                    WHERE tenant_id = $1 AND scope_type = $2 AND scope_id = $3
+                      AND sequence < $4 AND event_type LIKE 'message_attachment.%'
+                    ORDER BY sequence ASC`, [event.tenantId, event.scopeType, event.scopeId, event.sequence])
+                input.guard(previous.rows.map((row) => ({ sequence: BigInt(row.sequence), eventType: row.event_type, payload: row.payload, createdAt: row.created_at })))
+              }
               if (!input.allowDuringSessionDeletion) {
                 const deletion = await transaction.query(`SELECT 1 FROM ${this.deletionsTable}
                   WHERE tenant_id = $1 AND session_id = $2`, [this.organizationId, sessionId])
@@ -212,6 +222,7 @@ export class PostgresObjectMetadataLog implements ObjectMetadataLog {
                 if (!this.capacity) throw new Error('Object capacity authority is unavailable')
                 await this.capacity.applyMutation(transaction, input.capacity)
               }
+              await sideEffect?.(transaction)
             }, undefined, this.resourceOwnerForSession
               ? async (transaction) => await this.assertOwner(transaction, sessionId)
               : undefined)

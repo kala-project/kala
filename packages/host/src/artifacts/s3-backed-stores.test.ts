@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import type { ArtifactObject, ArtifactObjectStore } from './object-store.js'
 import type { ObjectMetadataEvent, ObjectMetadataLog, ObjectOrphanIntent } from './postgres-object-metadata.js'
+import type { HotStateSqlExecutor } from '../tenant-runtime/postgres-hot-state.js'
 import { S3SessionArtifactRegistry } from './s3-session-artifact-registry.js'
 import { S3MessageAttachmentStore } from '../message-attachments/s3-message-attachment-store.js'
 
@@ -39,13 +40,17 @@ class MemoryMetadata implements ObjectMetadataLog {
     this.intents.set(objectKey, intent)
     return intent
   }
-  async append<Payload>(sessionId: string, input: { idempotencyKey: string; eventType: string; payload: Payload; intent?: ObjectOrphanIntent; allowDuringSessionDeletion?: boolean }): Promise<void> {
+  async append<Payload>(sessionId: string, input: { idempotencyKey: string; eventType: string; payload: Payload; intent?: ObjectOrphanIntent; allowDuringSessionDeletion?: boolean; guard?: (events: readonly ObjectMetadataEvent[]) => void }, sideEffect?: (transaction: HotStateSqlExecutor) => Promise<void>): Promise<void> {
     if (this.failNextAppend) { this.failNextAppend = false; throw new Error('temporary PG failure') }
     if (this.deletingSessions.has(sessionId) && !input.allowDuringSessionDeletion) throw new Error(`Session ${sessionId} is being deleted`)
     if (input.intent && this.intents.get(input.intent.objectKey) !== input.intent) throw new Error('intent unavailable')
     const events = this.events.get(sessionId) ?? []
     const existing = events.find((event) => (event as ObjectMetadataEvent & { idempotencyKey?: string }).idempotencyKey === input.idempotencyKey)
-    if (!existing) events.push({ sequence: BigInt(events.length + 1), eventType: input.eventType, payload: input.payload, createdAt: new Date(), idempotencyKey: input.idempotencyKey } as ObjectMetadataEvent)
+    if (!existing) {
+      input.guard?.(events)
+      await sideEffect?.({} as HotStateSqlExecutor)
+      events.push({ sequence: BigInt(events.length + 1), eventType: input.eventType, payload: input.payload, createdAt: new Date(), idempotencyKey: input.idempotencyKey } as ObjectMetadataEvent)
+    }
     this.events.set(sessionId, events)
     if (input.intent) this.intents.delete(input.intent.objectKey)
   }
@@ -142,6 +147,82 @@ describe('Private Cloud S3-backed stores', () => {
     resume()
     await Promise.all([commit, release])
     expect(await (await attachments.resolve('session-a', file)).read()).toEqual(Buffer.from('preserve'))
+    expect(objects.values.size).toBe(1)
+  })
+
+  it('rolls back attachment protection with failed queue admission and replays a successful retry once', async () => {
+    const objects = new MemoryObjects()
+    const metadata = new MemoryMetadata()
+    const attachments = new S3MessageAttachmentStore('org_acme', objects, metadata)
+    const file = await attachments.register({ sessionId: 'session-a', name: 'notes.txt', data: Buffer.from('preserve') })
+    await expect(attachments.admitQueuedMessage('session-a', [file], 'operation-a', async () => {
+      throw new Error('queue write failed')
+    })).rejects.toThrow('queue write failed')
+    expect((await metadata.replay('session-a')).map((event) => event.eventType)).not.toContain('message_attachment.admitted')
+
+    let queueWrites = 0
+    await attachments.admitQueuedMessage('session-a', [file], 'operation-a', async () => { queueWrites += 1 })
+    expect(await attachments.admitQueuedMessage('session-a', [file], 'operation-a', async () => { queueWrites += 1 })).toBeUndefined()
+    expect(queueWrites).toBe(1)
+    await attachments.releasePending('session-a', [file.source.attachmentId])
+    expect(await (await attachments.resolve('session-a', file)).read()).toEqual(Buffer.from('preserve'))
+  })
+
+  it('fences a stale replica pending release after the attachment and Queue were admitted', async () => {
+    const objects = new MemoryObjects()
+    const metadata = new MemoryMetadata()
+    const sender = new S3MessageAttachmentStore('org_acme', objects, metadata)
+    const staleReplica = new S3MessageAttachmentStore('org_acme', objects, metadata)
+    const file = await sender.register({ sessionId: 'session-a', name: 'notes.txt', data: Buffer.from('protected') })
+    const replay = metadata.replay.bind(metadata)
+    let reachedReplay!: () => void
+    const entered = new Promise<void>((resolve) => { reachedReplay = resolve })
+    let resume!: () => void
+    const gate = new Promise<void>((resolve) => { resume = resolve })
+    let blocked = false
+    vi.spyOn(metadata, 'replay').mockImplementation(async (sessionId) => {
+      if (!blocked) {
+        blocked = true
+        const snapshot = [...await replay(sessionId)]
+        reachedReplay()
+        await gate
+        return snapshot
+      }
+      return await replay(sessionId)
+    })
+    const release = staleReplica.releasePending('session-a', [file.source.attachmentId])
+    await entered
+    await sender.admitQueuedMessage('session-a', [file], 'operation-a', async () => undefined)
+    resume()
+    await release
+    expect(await (await sender.resolve('session-a', file)).read()).toEqual(Buffer.from('protected'))
+    expect(objects.values.size).toBe(1)
+
+    // Reverse the interleaving: a stale sender must not resurrect an attachment
+    // whose pending release committed before its Queue transaction.
+    const pending = await sender.register({ sessionId: 'session-a', name: 'late.txt', data: Buffer.from('released') })
+    let reachedSecondReplay!: () => void
+    const secondEntered = new Promise<void>((resolve) => { reachedSecondReplay = resolve })
+    let resumeSecond!: () => void
+    const secondGate = new Promise<void>((resolve) => { resumeSecond = resolve })
+    let blockedSecond = false
+    vi.spyOn(metadata, 'replay').mockImplementation(async (sessionId) => {
+      if (!blockedSecond) {
+        blockedSecond = true
+        const snapshot = [...await replay(sessionId)]
+        reachedSecondReplay()
+        await secondGate
+        return snapshot
+      }
+      return await replay(sessionId)
+    })
+    const attempted = sender.admitQueuedMessage('session-a', [pending], 'operation-b', async () => {
+      throw new Error('Queue must not run after release')
+    })
+    await secondEntered
+    await staleReplica.releasePending('session-a', [pending.source.attachmentId])
+    resumeSecond()
+    await expect(attempted).rejects.toThrow('unavailable')
     expect(objects.values.size).toBe(1)
   })
 

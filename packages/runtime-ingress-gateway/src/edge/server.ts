@@ -531,8 +531,12 @@ export async function startRuntimeIngressGateway(options: {
       return
     }
     if (url.pathname === '/runtime/route-ticket') {
-      const deny = (status: number, error: string) => {
-        response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      const deny = (status: number, error: string, retryAfter?: number) => {
+        response.writeHead(status, {
+          'content-type': 'application/json',
+          'cache-control': 'no-store',
+          ...(retryAfter !== undefined ? { 'retry-after': String(retryAfter) } : {}),
+        })
         response.end(JSON.stringify({ error }))
       }
       if (request.method !== 'POST') { response.setHeader('allow', 'POST'); deny(405, 'method_not_allowed'); return }
@@ -554,15 +558,20 @@ export async function startRuntimeIngressGateway(options: {
         sessionId = body.sessionId
       } catch { deny(400, 'invalid_request'); return }
       try {
-        const ticket = await options.runtimeRoutingTicketResolver.issueSessionTicketForOrganization(sessionId, {
+        const result = await options.runtimeRoutingTicketResolver.issueSessionTicketResultForOrganization(sessionId, {
           principalId: Buffer.from(`${identity!.issuer}\0${identity!.subject}`, 'utf8').toString('base64url'),
           organizationId: organizationAccess.organization.id,
           unitId: organizationAccess.organization.unitId,
         })
-        if (!ticket) { deny(404, 'session_owner_unavailable'); return }
+        if (result.status !== 'live') {
+          if (result.status === 'deleting') deny(410, 'session_deleting')
+          else if (result.status === 'missing') deny(404, 'session_missing')
+          else deny(503, 'session_relocating', 1)
+          return
+        }
         response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' })
-        response.end(JSON.stringify({ ticket }))
-      } catch { deny(503, 'session_owner_unavailable') }
+        response.end(JSON.stringify({ ticket: result.ticket }))
+      } catch { deny(503, 'session_route_unavailable', 1) }
       return
     }
     if (url.pathname === '/api/v1/openapi.json') {

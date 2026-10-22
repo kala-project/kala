@@ -451,27 +451,70 @@ export class SessionStore {
   private readonly storageCleanupLeases = new Set<string>()
   private readonly pendingStorageMutations = new Map<string, Set<Promise<void>>>()
   private readonly authorityReady: Promise<void> | undefined
+  private deletionRecoveryCursor = ''
+  private deletionRecoveryInFlight: Promise<void> | undefined
 
   constructor(private readonly sessionsDir: string, private readonly options: SessionStoreOptions = {}) {
-    if (options.authority) {
-      this.authorityReady = options.authority.initialize().then(async () => {
-        for (const document of await options.authority!.listDeleting()) {
-          try {
-            await this.finishPostgresDeletion(document.sessionId)
-          } catch (error) {
-            process.emitWarning(
-              `Session deletion recovery remains pending for ${document.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
-              { code: 'KALA_SESSION_DELETION_RECOVERY' },
-            )
-          }
-        }
-      })
-    } else mkdirSync(this.sessionsDir, { recursive: true })
+    if (options.authority) this.authorityReady = options.authority.initialize()
+    else mkdirSync(this.sessionsDir, { recursive: true })
   }
 
-  /** Finish authority initialization and pending deletion recovery before closing its pool. */
+  /** Finish authority initialization and one bounded deletion recovery pass. */
   async initialize(): Promise<void> {
     await this.authorityReady
+    if (this.options.authority) await this.recoverPendingDeletions()
+  }
+
+  get usesExternalAuthority(): boolean { return Boolean(this.options.authority) }
+
+  /** Commit the owner-fenced, globally visible boundary before cleanup side effects. */
+  async requestDeletion(sessionId: string): Promise<boolean> {
+    if (!this.options.authority) throw new Error('Deletion requests require an external Session authority')
+    await this.authorityReady
+    const exists = await this.options.authority.requestDeletion(sessionId)
+    if (exists) {
+      this.evictSessionCaches(sessionId)
+      this.notifyStorageChanged(sessionId)
+    }
+    return exists
+  }
+
+  /** Retry a pending delete for the authenticated tenant; never report incomplete cleanup as success. */
+  async finishRequestedDeletion(sessionId: string, organizationId: string): Promise<boolean> {
+    if (!this.options.authority) return false
+    await this.authorityReady
+    return await this.withStorageMutationLease([sessionId], async () => {
+      const document = await this.options.authority!.loadDeleting(sessionId)
+      if (!document || document.organizationId !== organizationId) return false
+      await this.finishPostgresDeletion(sessionId)
+      return true
+    })
+  }
+
+  /** Cursor-paged recovery; Sessions owned by another replica remain pending for a later pass. */
+  async recoverPendingDeletions(): Promise<void> {
+    if (!this.options.authority) return
+    if (this.deletionRecoveryInFlight) return await this.deletionRecoveryInFlight
+    const pass = (async () => {
+      await this.authorityReady
+      const batch = await this.options.authority!.listDeleting(64, this.deletionRecoveryCursor)
+      for (const document of batch) {
+        this.deletionRecoveryCursor = document.sessionId
+        try {
+          await this.withStorageMutationLease([document.sessionId], async () => {
+            await this.finishPostgresDeletion(document.sessionId)
+          })
+        } catch (error) {
+          process.emitWarning(
+            `Session deletion recovery remains pending for ${document.sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+            { code: 'KALA_SESSION_DELETION_RECOVERY' },
+          )
+        }
+      }
+      if (batch.length < 64) this.deletionRecoveryCursor = ''
+    })()
+    this.deletionRecoveryInFlight = pass
+    try { await pass } finally { this.deletionRecoveryInFlight = undefined }
   }
 
   get dir(): string {
@@ -1663,13 +1706,8 @@ export class SessionStore {
 
   private async deleteUnlocked(sessionId: string): Promise<void> {
     if (this.options.authority) {
-      await this.authorityReady
-      const exists = await this.options.authority.requestDeletion(sessionId)
+      const exists = await this.requestDeletion(sessionId)
       if (!exists) return
-      // The durable authority tombstone is visible to every Runtime before any
-      // object bytes are removed. Evict this process immediately as well.
-      this.evictSessionCaches(sessionId)
-      this.notifyStorageChanged(sessionId)
       await this.finishPostgresDeletion(sessionId)
       return
     }

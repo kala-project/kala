@@ -136,6 +136,7 @@ import { dashboardConnectionMeta, type ConnectionMeta } from './socket-metadata.
 import { OperationDeduper } from './operation-deduper.js'
 import type { AgentRuntimeRegistry } from '../agent-runtime/types.js'
 import { validateMessageAttachmentReferences } from '../message-attachment-resolver.js'
+import { S3MessageAttachmentStore } from '../message-attachments/s3-message-attachment-store.js'
 import { askUserChoiceRequestFromPendingCall, type AskUserChoiceBroker } from '../ask-user-choice.js'
 import type { DagStorage } from '../dag/storage.js'
 import type { StorageInventory } from '../store/storage-inventory.js'
@@ -206,7 +207,7 @@ export type MessageQueueManager = {
   hydrate(sessionId: string): Promise<void>
   isStable(): boolean
   waitForStable(): Promise<void>
-  enqueue(sessionId: string, msg: QueuedUserMessage, priority?: 'front'): Promise<void>
+  enqueue(sessionId: string, msg: QueuedUserMessage, priority?: 'front', admission?: 'atomic-attachments'): Promise<void>
   reorder(sessionId: string, id: string, beforeId?: string | null): Promise<void>
   update(sessionId: string, id: string, text: string, content?: readonly MessageContent[]): Promise<void>
   delete(sessionId: string, id: string): Promise<void>
@@ -1989,12 +1990,12 @@ export function configureDashboardNamespace(
         }
         for (const targetSessionId of targetIds.reverse()) {
           await deps.loopDeps.assertSessionEffectOwner?.(targetSessionId)
-          // Deletion can race Host-owned shell work, which is not represented as
-          // a Loop turn. Tombstone its queue item and cancel the Executor call
-          // before removing Session storage so no late result can recreate it.
+          const record = deps.store.get(targetSessionId) ?? (await deps.store.load(targetSessionId).catch(() => undefined))
+          // The PostgreSQL tombstone is the global routing/write barrier. Commit
+          // it before any non-transactional Queue, Executor or Runtime cleanup.
+          if (deps.store.usesExternalAuthority && !await deps.store.requestDeletion(targetSessionId)) continue
           await deps.messageQueues.stop(targetSessionId)
           await deps.loopDeps.tools.cancelPending(targetSessionId)
-          const record = deps.store.get(targetSessionId) ?? (await deps.store.load(targetSessionId).catch(() => undefined))
           if (record) await deps.agentRuntimes.get(record.agentRuntime)?.delete?.(record)
           if (record && deps.onSessionDeleted) {
             try {
@@ -2455,12 +2456,13 @@ export async function handleUserMessage(
   // background. Awaiting loop.dispatch here made an idle direct send hold its
   // ACK for the entire LLM/tool turn; the dashboard timed out and restored a
   // draft that had already been sent.
-  // Commitment must precede the durable queue snapshot: once enqueue returns,
-  // the item may survive a restart and dispatch without another dashboard call.
-  // commitReferences is idempotent, so retries and HTTP admission's independent
-  // post-enqueue commitment remain safe.
-  await deps.loopDeps.messageAttachments?.commitReferences(p.sessionId, p.content)
-  await deps.messageQueues.enqueue(p.sessionId, queued, mode === 'steer' ? 'front' : undefined)
+  // PG/S3 queues the message and protects its objects in one owner-fenced
+  // transaction. Other storage continues to protect references before enqueue.
+  const atomicAttachments = deps.loopDeps.messageAttachments instanceof S3MessageAttachmentStore
+    && p.content?.some((block) => block.type === 'file' && 'source' in block && block.source.kind === 'host_ref')
+  if (!atomicAttachments) await deps.loopDeps.messageAttachments?.commitReferences(p.sessionId, p.content)
+  await deps.messageQueues.enqueue(p.sessionId, queued, mode === 'steer' ? 'front' : undefined,
+    atomicAttachments ? 'atomic-attachments' : undefined)
   if (record.agentRuntime === 'kernel' && mode === 'steer' && !isRestingStatus(record.state.status)) {
     // Do not truncate an in-flight response/tool. Stop at the next safe boundary
     // and let the persisted front-queued steer become the next user turn.

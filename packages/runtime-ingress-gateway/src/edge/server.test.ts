@@ -746,11 +746,17 @@ describe('Private Cloud edge request path', () => {
       ['session_b', { origin: sessionBOrigin, replicaId: 'replica_b', generation: 7n }],
     ])
     const resolveResourceOwnerBinding = vi.fn(async (input: { resourceId: string }) => owners.get(input.resourceId))
+    const resolveSessionRouteState = vi.fn(async (input: { sessionId: string }) => {
+      if (input.sessionId === 'deleting') return { status: 'deleting' as const }
+      if (input.sessionId === 'relocating') return { status: 'relocating' as const }
+      const binding = owners.get(input.sessionId)
+      return binding ? { status: 'live' as const, binding } : { status: 'missing' as const }
+    })
     const runtimeRoutingTicketResolver = new RuntimeRoutingTicketResolver({
       key,
       audience: 'gateway.internal',
       maxTtlMs: 10_000,
-      ownerResolver: { resolveResourceOwnerBinding },
+      ownerResolver: { resolveResourceOwnerBinding, resolveSessionRouteState },
       now: () => nowMs + 1,
     })
     const runtimeOriginResolver: RuntimeOriginResolver = { async resolve() { return unitOrigin } }
@@ -792,11 +798,21 @@ describe('Private Cloud edge request path', () => {
     expect(issued.headers.get('cache-control')).toBe('no-store')
     const ticketA = (await issued.json() as { ticket: string }).ticket
     const ticketB = issueTicket('session_b')
-    expect(resolveResourceOwnerBinding).toHaveBeenCalledWith({
-      organizationId: owner.organization.id, unitId: owner.organization.unitId,
-      resourceType: 'session', resourceId: 'session_a',
+    expect(resolveSessionRouteState).toHaveBeenCalledWith({
+      organizationId: owner.organization.id, unitId: owner.organization.unitId, sessionId: 'session_a',
     })
-    expect((await postTicket('missing')).status).toBe(404)
+    const missing = await postTicket('missing')
+    expect(missing.status).toBe(404)
+    await expect(missing.json()).resolves.toEqual({ error: 'session_missing' })
+    expect(missing.headers.get('retry-after')).toBeNull()
+    const deleting = await postTicket('deleting')
+    expect(deleting.status).toBe(410)
+    await expect(deleting.json()).resolves.toEqual({ error: 'session_deleting' })
+    expect(deleting.headers.get('retry-after')).toBeNull()
+    const relocating = await postTicket('relocating')
+    expect(relocating.status).toBe(503)
+    await expect(relocating.json()).resolves.toEqual({ error: 'session_relocating' })
+    expect(relocating.headers.get('retry-after')).toBe('1')
     expect((await postTicket('session_a', { origin: 'https://evil.example' })).status).toBe(403)
     expect((await postTicket('session_a', { authorization: 'Bearer forged' })).status).toBe(401)
     expect((await fetch(`${endpoint}/runtime/route-ticket`, { method: 'POST', headers: { origin: endpoint, 'content-type': 'application/json' }, body: '{"sessionId":"session_a"}' })).status).toBe(401)
@@ -806,8 +822,11 @@ describe('Private Cloud edge request path', () => {
       method: 'POST', headers: { cookie: `ak_session=${sessionCookie}`, origin: endpoint, 'content-type': 'application/json' },
       body: JSON.stringify({ sessionId: 'session_a', organizationId: 'org_other', principalId: 'forged' }),
     })).status).toBe(400)
-    resolveResourceOwnerBinding.mockRejectedValueOnce(new Error('postgres unavailable'))
-    expect((await postTicket('session_a')).status).toBe(503)
+    resolveSessionRouteState.mockRejectedValueOnce(new Error('postgres unavailable'))
+    const unavailable = await postTicket('session_a')
+    expect(unavailable.status).toBe(503)
+    await expect(unavailable.json()).resolves.toEqual({ error: 'session_route_unavailable' })
+    expect(unavailable.headers.get('retry-after')).toBe('1')
 
     await openWebSocket(gateway.port, { cookie: `ak_session=${sessionCookie}` }, ticketPath(ticketA))
     await openWebSocket(gateway.port, { cookie: `ak_session=${sessionCookie}` }, ticketPath(ticketB))

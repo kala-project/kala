@@ -5,6 +5,7 @@ import type { MessageContent, ReferencedFileContent } from '@agent-kernel/kernel
 import type { ArtifactObjectStore } from '../artifacts/object-store.js'
 import type { ObjectCapacityLedger, ObjectCapacityReservation } from '../artifacts/postgres-object-capacity.js'
 import type { ObjectMetadataEvent, ObjectMetadataLog, ObjectOrphanIntent } from '../artifacts/postgres-object-metadata.js'
+import type { HotStateSqlExecutor } from '../tenant-runtime/postgres-hot-state.js'
 import {
   MAX_MESSAGE_ATTACHMENT_BYTES,
   MAX_SESSION_ATTACHMENT_BYTES,
@@ -29,10 +30,13 @@ type AttachmentRecord = {
 type AttachmentEvent =
   | { kind: 'registered'; record: AttachmentRecord }
   | { kind: 'committed'; attachmentIds: string[]; committedAt: string }
+  | { kind: 'admitted'; attachmentIds: string[] }
   | { kind: 'delete_requested'; records: AttachmentRecord[] }
   | { kind: 'delete_completed'; objectKeys: string[] }
 
 type AttachmentState = { records: Map<string, AttachmentRecord>; pendingDeletes: Map<string, AttachmentRecord> }
+
+class AttachmentProtectionChangedError extends Error {}
 
 /** Private Cloud attachment storage. All methods that consult PG metadata are asynchronous. */
 export class S3MessageAttachmentStore implements MessageAttachmentStorage {
@@ -104,6 +108,31 @@ export class S3MessageAttachmentStore implements MessageAttachmentStorage {
     await this.serializeSession(normalizeSessionId(sessionId), async () => await this.commitReferencesLocked(sessionId, content, ids))
   }
 
+  /** Commit reference protection and a queued message under one PG owner fence. */
+  async admitQueuedMessage<T>(
+    sessionId: string, content: readonly MessageContent[], operationId: string,
+    enqueue: (transaction: HotStateSqlExecutor) => Promise<T>,
+  ): Promise<T | undefined> {
+    const ids = [...new Set(referencedAttachmentIds(content))].sort()
+    if (ids.length === 0) throw new Error('Atomic attachment admission requires a referenced attachment')
+    return await this.serializeSession(normalizeSessionId(sessionId), async () => {
+      const state = await this.state(sessionId)
+      for (const block of content) if (isHostReference(block)) validateReference(state, sessionId, block)
+      let result: T | undefined
+      await this.metadata.append(sessionId, {
+        idempotencyKey: `message-attachment-admit:${operationId}`,
+        eventType: 'message_attachment.admitted',
+        payload: { kind: 'admitted', attachmentIds: ids } satisfies AttachmentEvent,
+        guard: (events) => {
+          const current = reduceEvents(events as readonly ObjectMetadataEvent<AttachmentEvent>[])
+          for (const block of content) if (isHostReference(block)) validateReference(current, sessionId, block)
+        },
+      }, async (transaction) => { result = await enqueue(transaction) })
+      // An idempotent retry skips the SQL callback: the Queue write already committed.
+      return result
+    })
+  }
+
   private async commitReferencesLocked(sessionId: string, content: readonly MessageContent[] | undefined, ids: readonly string[]): Promise<void> {
     const state = await this.state(sessionId)
     for (const block of content ?? []) {
@@ -115,6 +144,10 @@ export class S3MessageAttachmentStore implements MessageAttachmentStorage {
       idempotencyKey: `message-attachment-commit:${randomUUID()}`,
       eventType: 'message_attachment.committed',
       payload: { kind: 'committed', attachmentIds, committedAt: new Date().toISOString() } satisfies AttachmentEvent,
+      guard: (events) => {
+        const current = reduceEvents(events as readonly ObjectMetadataEvent<AttachmentEvent>[])
+        for (const block of content ?? []) if (isHostReference(block)) validateReference(current, sessionId, block)
+      },
     })
   }
 
@@ -188,12 +221,26 @@ export class S3MessageAttachmentStore implements MessageAttachmentStorage {
   private async deleteRecords(sessionId: string, records: readonly AttachmentRecord[], allowDuringSessionDeletion = false): Promise<void> {
     let state = await this.state(sessionId)
     if (records.length > 0) {
-      await this.metadata.append(sessionId, {
-        idempotencyKey: `message-attachment-delete-request:${randomUUID()}`,
-        eventType: 'message_attachment.delete_requested',
-        payload: { kind: 'delete_requested', records: [...records] } satisfies AttachmentEvent,
-        allowDuringSessionDeletion,
-      })
+      try {
+        await this.metadata.append(sessionId, {
+          idempotencyKey: `message-attachment-delete-request:${randomUUID()}`,
+          eventType: 'message_attachment.delete_requested',
+          payload: { kind: 'delete_requested', records: [...records] } satisfies AttachmentEvent,
+          allowDuringSessionDeletion,
+          ...(!allowDuringSessionDeletion ? { guard: (events: readonly ObjectMetadataEvent[]) => {
+            const current = reduceEvents(events as readonly ObjectMetadataEvent<AttachmentEvent>[])
+            for (const candidate of records) {
+              const record = current.records.get(candidate.attachmentId)
+              if (!record || record.objectKey !== candidate.objectKey || record.committedAt) throw new AttachmentProtectionChangedError()
+            }
+          } } : {}),
+        })
+      } catch (error) {
+        // Another replica admitted or removed a candidate after our replay.
+        // It must never reach S3 deletion based on that stale snapshot.
+        if (error instanceof AttachmentProtectionChangedError) return
+        throw error
+      }
       state = await this.state(sessionId)
     }
     const pending = [...state.pendingDeletes.values()]
@@ -235,6 +282,11 @@ function reduceEvents(events: readonly ObjectMetadataEvent<AttachmentEvent>[]): 
       for (const id of payload.attachmentIds) {
         const record = state.records.get(id)
         if (record) record.committedAt = payload.committedAt
+      }
+    } else if (payload.kind === 'admitted') {
+      for (const id of payload.attachmentIds) {
+        const record = state.records.get(id)
+        if (record) record.committedAt ??= event.createdAt.toISOString()
       }
     } else if (payload.kind === 'delete_requested') {
       for (const record of payload.records) {

@@ -146,6 +146,15 @@ export class PostgresSessionAuthority {
     this.messageQueue = new PostgresMessageQueueStore(hotState.database, tenantId, {
       schema: schemaName,
       schemaManagement: this.#schemaManagement,
+      assertSessionAdmissible: async (transaction, sessionId) => {
+        // FOR SHARE conflicts with the projection UPSERT in requestDeletion.
+        // Admission before it commits is drained by stop(); after it commits
+        // cannot publish a new Queue item, even on the same live owner.
+        const result = await transaction.query<{ document: PersistedSessionDocument | null }>(`SELECT document
+          FROM ${this.#projectionTable} WHERE tenant_id = $1 AND session_id = $2 FOR SHARE`, [this.tenantId, sessionId])
+        const document = result.rows[0]?.document
+        if (!document || sessionDeletion(document)) throw new SessionDeletingError(sessionId)
+      },
       ...(this.#resourceOwnerForSession ? {
         ...(this.#prepareSessionOwner ? { prepareSession: this.#prepareSessionOwner } : {}),
         fenceSession: async (transaction, sessionId) => {
@@ -332,7 +341,7 @@ export class PostgresSessionAuthority {
     })
   }
 
-  async listDeleting(): Promise<readonly PersistedSessionDocument[]> {
+  async listDeleting(limit = 64, afterSessionId = ''): Promise<readonly PersistedSessionDocument[]> {
     // Every delete request updates this projection in the same transaction as
     // its audit event, so recovery can scan only explicit tombstones instead of
     // replaying every Session (and opening an unbounded number of PG clients).
@@ -341,8 +350,17 @@ export class PostgresSessionAuthority {
       WHERE tenant_id = $1
         AND document->$2->>'requestId' IS NOT NULL
         AND document->$2->>'requestedAt' IS NOT NULL
-      ORDER BY session_id`, [this.tenantId, SESSION_DELETION_FIELD])
+        AND session_id > $3
+      ORDER BY session_id LIMIT $4`, [this.tenantId, SESSION_DELETION_FIELD, afterSessionId, limit])
     return result.rows.map(({ document }) => document).filter((document) => Boolean(sessionDeletion(document)))
+  }
+
+  async loadDeleting(sessionId: string): Promise<PersistedSessionDocument | undefined> {
+    validateSessionId(sessionId)
+    const result = await this.hotState.database.query<{ document: PersistedSessionDocument | null }>(`SELECT document
+      FROM ${this.#projectionTable} WHERE tenant_id = $1 AND session_id = $2`, [this.tenantId, sessionId])
+    const document = result.rows[0]?.document
+    return document && sessionDeletion(document) ? document : undefined
   }
 
   async list(): Promise<readonly PersistedSessionDocument[]> {

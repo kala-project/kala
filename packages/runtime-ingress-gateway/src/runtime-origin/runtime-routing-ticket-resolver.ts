@@ -16,6 +16,10 @@ export type RuntimeRoutingTicketOrganization = {
   unitId: string
 }
 
+export type SessionRoutingTicketResult =
+  | { status: 'live'; ticket: string }
+  | { status: 'deleting' | 'missing' | 'relocating' }
+
 /**
  * Optional ticket-to-origin adapter. Edge callers must opt in and pass a single
  * untrusted transport value together with their independently authenticated scope.
@@ -42,23 +46,41 @@ export class RuntimeRoutingTicketResolver {
     sessionId: string,
     organization: RuntimeRoutingTicketOrganization,
   ): Promise<string | undefined> {
-    if (!/^[0-9A-Za-z][0-9A-Za-z_.:-]{0,255}$/u.test(sessionId)) return undefined
-    const owner = await this.#ownerResolver.resolveResourceOwnerBinding({
+    const result = await this.issueSessionTicketResultForOrganization(sessionId, organization)
+    return result.status === 'live' ? result.ticket : undefined
+  }
+
+  async issueSessionTicketResultForOrganization(
+    sessionId: string,
+    organization: RuntimeRoutingTicketOrganization,
+  ): Promise<SessionRoutingTicketResult> {
+    if (!/^[0-9A-Za-z][0-9A-Za-z_.:-]{0,255}$/u.test(sessionId)) return { status: 'missing' }
+    const input = {
       organizationId: organization.organizationId,
       unitId: organization.unitId,
-      resourceType: 'session',
+      resourceType: 'session' as const,
       resourceId: sessionId,
-    })
-    if (!owner) return undefined
-    return issueRuntimeRoutingTicket({
-      audience: this.#audience,
-      principalId: organization.principalId,
-      organizationId: organization.organizationId,
-      unitId: organization.unitId,
-      resourceKind: 'session', resourceId: sessionId,
-      ownerReplicaId: owner.replicaId, ownerGeneration: owner.generation,
-      ttlMs: Math.min(15_000, this.#maxTtlMs),
-    }, { key: this.#key, maxTtlMs: this.#maxTtlMs, nowMs: this.#now() })
+    }
+    const state = this.#ownerResolver.resolveSessionRouteState
+      ? await this.#ownerResolver.resolveSessionRouteState({
+        organizationId: organization.organizationId, unitId: organization.unitId, sessionId,
+      })
+      : await this.#ownerResolver.resolveResourceOwnerBinding(input).then((binding) => binding
+        ? { status: 'live' as const, binding }
+        : { status: 'missing' as const })
+    if (state.status !== 'live') return state
+    return {
+      status: 'live',
+      ticket: issueRuntimeRoutingTicket({
+        audience: this.#audience,
+        principalId: organization.principalId,
+        organizationId: organization.organizationId,
+        unitId: organization.unitId,
+        resourceKind: 'session', resourceId: sessionId,
+        ownerReplicaId: state.binding.replicaId, ownerGeneration: state.binding.generation,
+        ttlMs: Math.min(15_000, this.#maxTtlMs),
+      }, { key: this.#key, maxTtlMs: this.#maxTtlMs, nowMs: this.#now() }),
+    }
   }
 
   async resolveTicketForOrganization(ticket: unknown, organization: RuntimeRoutingTicketOrganization): Promise<string | undefined> {

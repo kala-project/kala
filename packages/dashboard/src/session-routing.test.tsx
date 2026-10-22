@@ -98,8 +98,11 @@ describe('routed Session hook', () => {
 
   it('prepares an existing Session owner again after its routed Runtime fails', async () => {
     const fetchMock = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'session_owner_unavailable' }), { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'session_relocating' }), {
+        status: 503, headers: { 'retry-after': '1' },
+      }))
       .mockResolvedValueOnce(routeResponse('prepared-ticket'))
+      // A rolling-upgrade Gateway still emits the old collapsed response.
       .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'session_owner_unavailable' }), { status: 404 }))
       .mockResolvedValueOnce(routeResponse('takeover-ticket'))
     vi.stubGlobal('fetch', fetchMock)
@@ -139,7 +142,7 @@ describe('routed Session hook', () => {
     let deliver!: (response: Response) => void
     vi.stubGlobal('fetch', vi.fn<typeof fetch>()
       .mockImplementationOnce(() => new Promise<Response>((resolve) => { deliver = resolve }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'session_owner_unavailable' }), { status: 404 })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'session_missing' }), { status: 404 })))
     const control = new FakeSocket()
     const view = renderHook(({ sessionId }) => useSession(sessionOptions(sessionId, control)), {
       initialProps: { sessionId: 'old' },
@@ -149,6 +152,26 @@ describe('routed Session hook', () => {
     await waitFor(() => expect(view.result.current.status).toBe('error'))
     expect(sockets).toHaveLength(0)
     expect(control.emit).not.toHaveBeenCalled()
+    view.unmount()
+  })
+
+  it.each([
+    [410, 'session_deleting'],
+    [404, 'session_missing'],
+  ])('treats terminal route response %s %s as non-retryable', async (status, error) => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ error }), { status }))
+    vi.stubGlobal('fetch', fetchMock)
+    const control = new FakeSocket()
+    control.connected = true
+    const view = renderHook(() => useSession(sessionOptions('terminal-session', control)))
+
+    await waitFor(() => expect(view.result.current.status).toBe('error'))
+    act(() => { window.dispatchEvent(new Event('online')) })
+    await new Promise((resolve) => window.setTimeout(resolve, 10))
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(control.timeout).not.toHaveBeenCalled()
+    expect(control.emit).not.toHaveBeenCalled()
+    expect(sockets).toHaveLength(0)
     view.unmount()
   })
 })

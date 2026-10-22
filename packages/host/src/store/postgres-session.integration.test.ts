@@ -411,7 +411,7 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
       cleanupAttempts += 1
       if (cleanupAttempts === 1) throw new Error('injected object cleanup failure')
     })
-    await fixture.store.create({ sessionId: 'recoverable-delete-session', config })
+    await fixture.store.create({ sessionId: 'recoverable-delete-session', config, organizationId: 'org-a' })
 
     await expect(fixture.store.delete('recoverable-delete-session')).rejects.toThrow('injected object cleanup failure')
     await expect(fixture.authority.load('recoverable-delete-session')).resolves.toBeUndefined()
@@ -426,8 +426,15 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
       eventType: 'session.late_write',
       apply: (current) => current,
     })).rejects.toBeInstanceOf(SessionDeletingError)
+    await expect(fixture.authority.messageQueue.enqueue('recoverable-delete-session', {
+      id: 'late-queue', operationId: 'late-operation', text: 'must not be accepted',
+      mode: 'queue', createdAt: new Date().toISOString(),
+    }, 'back')).rejects.toBeInstanceOf(SessionDeletingError)
+    await expect(fixture.authority.messageQueue.stop('recoverable-delete-session')).resolves.toBeDefined()
+    await expect(fixture.store.finishRequestedDeletion('recoverable-delete-session', 'org-other')).resolves.toBe(false)
 
     const restarted = makeStore('delete-failure-recovery', async () => { cleanupAttempts += 1 })
+    await restarted.store.initialize()
     await expect(restarted.store.listSessionIds()).resolves.not.toContain('recoverable-delete-session')
     await expect(restarted.authority.listDeleting()).resolves.toEqual([])
     expect(cleanupAttempts).toBe(2)

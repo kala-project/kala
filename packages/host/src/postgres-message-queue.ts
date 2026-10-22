@@ -50,6 +50,7 @@ export class PostgresMessageQueueStore {
   readonly #schemaManagement: PostgresSchemaManagement
   readonly #fenceSession?: (transaction: HotStateSqlExecutor, sessionId: string) => Promise<void>
   readonly #prepareSession?: (sessionId: string) => Promise<void>
+  readonly #assertSessionAdmissible?: (transaction: HotStateSqlExecutor, sessionId: string) => Promise<void>
   #ready: Promise<void> | undefined
 
   constructor(
@@ -62,6 +63,8 @@ export class PostgresMessageQueueStore {
       fenceSession?: (transaction: HotStateSqlExecutor, sessionId: string) => Promise<void>
       /** Acquire a server-side Session owner before taking any PG transaction locks. */
       prepareSession?: (sessionId: string) => Promise<void>
+      /** Locks the Session projection so new admissions serialize with deletion tombstones. */
+      assertSessionAdmissible?: (transaction: HotStateSqlExecutor, sessionId: string) => Promise<void>
     } = {},
   ) {
     if (!tenantId) throw new TypeError('tenantId must be a non-empty string')
@@ -75,6 +78,7 @@ export class PostgresMessageQueueStore {
     }
     this.#fenceSession = options.fenceSession
     this.#prepareSession = options.prepareSession
+    this.#assertSessionAdmissible = options.assertSessionAdmissible
   }
 
   initialize(): Promise<void> {
@@ -139,22 +143,46 @@ export class PostgresMessageQueueStore {
     item: QueuedUserMessage,
     priority: 'front' | 'back',
   ): Promise<{ state: PersistedMessageQueueState; changed: boolean }> {
-    return await this.#mutate(sessionId, (row) => {
-      const state = stateFromRow(row)
-      const existing = state.items.find((candidate) => candidate.operationId === item.operationId)
-      if (existing) {
-        assertOperationCompatible(existing, item)
-        return { state, changed: false }
-      }
-      if (state.cancelledOperationIds.includes(item.operationId)) return { state, changed: false }
-      if (priority === 'back') state.items.push(item)
-      else {
-        let insertAt = hasLiveClaim(row) ? 1 : 0
-        while (state.items[insertAt]?.mode === 'steer') insertAt += 1
-        state.items.splice(insertAt, 0, item)
-      }
-      return { state, changed: true }
-    })
+    return await this.#transactionRow(sessionId, async (transaction, row) => {
+      const result = this.#enqueueState(row, item, priority)
+      if (result.changed) await this.#write(transaction, sessionId, result.state, false)
+      return result
+    }, true)
+  }
+
+  /** Called only as a side effect of an attachment metadata event in the same PG transaction. */
+  async enqueueWithinTransaction(
+    transaction: HotStateSqlExecutor, sessionId: string, item: QueuedUserMessage, priority: 'front' | 'back',
+  ): Promise<{ state: PersistedMessageQueueState; changed: boolean }> {
+    validateText(sessionId, 'sessionId')
+    await this.#fenceSession?.(transaction, sessionId)
+    await this.#assertSessionAdmissible?.(transaction, sessionId)
+    await transaction.query(`INSERT INTO ${this.#table} (tenant_id, session_id) VALUES ($1, $2)
+      ON CONFLICT (tenant_id, session_id) DO NOTHING`, [this.tenantId, sessionId])
+    const selected = await transaction.query<QueueRow>(`SELECT *, (claim_expires_at > clock_timestamp()) AS claim_is_live FROM ${this.#table}
+      WHERE tenant_id = $1 AND session_id = $2 FOR UPDATE`, [this.tenantId, sessionId])
+    const row = selected.rows[0]
+    if (!row) throw new Error('message queue row disappeared while locked')
+    const result = this.#enqueueState(row, item, priority)
+    if (result.changed) await this.#write(transaction, sessionId, result.state, false)
+    return result
+  }
+
+  #enqueueState(row: QueueRow, item: QueuedUserMessage, priority: 'front' | 'back'): { state: PersistedMessageQueueState; changed: boolean } {
+    const state = stateFromRow(row)
+    const existing = state.items.find((candidate) => candidate.operationId === item.operationId)
+    if (existing) {
+      assertOperationCompatible(existing, item)
+      return { state, changed: false }
+    }
+    if (state.cancelledOperationIds.includes(item.operationId)) return { state, changed: false }
+    if (priority === 'back') state.items.push(item)
+    else {
+      let insertAt = hasLiveClaim(row) ? 1 : 0
+      while (state.items[insertAt]?.mode === 'steer') insertAt += 1
+      state.items.splice(insertAt, 0, item)
+    }
+    return { state, changed: true }
   }
 
   async reorder(sessionId: string, id: string, beforeId?: string): Promise<{ state: PersistedMessageQueueState; changed: boolean }> {
@@ -344,10 +372,12 @@ export class PostgresMessageQueueStore {
     })
   }
 
-  async #transactionRow<T>(sessionId: string, operation: (transaction: HotStateSqlExecutor, row: QueueRow) => Promise<T>): Promise<T> {
+  async #transactionRow<T>(sessionId: string, operation: (transaction: HotStateSqlExecutor, row: QueueRow) => Promise<T>, admission = false): Promise<T> {
     await this.initialize()
     validateText(sessionId, 'sessionId')
     return await this.#sessionTransaction(sessionId, async (transaction) => {
+      // Lock projection before Queue: delete requests update projection before stopping Queue.
+      if (admission) await this.#assertSessionAdmissible?.(transaction, sessionId)
       await transaction.query(`INSERT INTO ${this.#table} (tenant_id, session_id) VALUES ($1, $2)
         ON CONFLICT (tenant_id, session_id) DO NOTHING`, [this.tenantId, sessionId])
       const selected = await transaction.query<QueueRow>(`SELECT *, (claim_expires_at > clock_timestamp()) AS claim_is_live FROM ${this.#table}

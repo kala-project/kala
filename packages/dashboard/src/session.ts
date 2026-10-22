@@ -159,6 +159,19 @@ export type SessionRouteTicketResult =
   | { kind: 'ticket'; ticket: string }
   | { kind: 'unavailable' }
 
+type SessionRouteFailure = 'deleting' | 'missing' | 'relocating' | 'transient' | 'fatal'
+
+class SessionRouteTicketError extends Error {
+  constructor(
+    message: string,
+    readonly failure: SessionRouteFailure,
+    readonly retryAfterMs = 0,
+  ) {
+    super(message)
+    this.name = 'SessionRouteTicketError'
+  }
+}
+
 export async function requestSessionRouteTicket(input: {
   host: string
   sessionId: string
@@ -177,7 +190,24 @@ export async function requestSessionRouteTicket(input: {
   if (response.status === 404 && body.error === 'route_ticket_unavailable') return { kind: 'unavailable' }
   if (!response.ok) {
     const code = typeof body.error === 'string' ? body.error : `http_${response.status}`
-    throw new Error(`Session route ticket request failed: ${code}`)
+    const retryAfterSeconds = Number(response.headers.get('retry-after'))
+    const retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+      ? Math.min(retryAfterSeconds * 1_000, 30_000)
+      : 0
+    const failure: SessionRouteFailure = response.status === 410 && code === 'session_deleting'
+      ? 'deleting'
+      : response.status === 404 && code === 'session_missing'
+        ? 'missing'
+        : response.status === 503 && code === 'session_relocating'
+          ? 'relocating'
+          // Older Gateways collapse missing, deleting, and relocating to this
+          // error. Preserve takeover behavior during a rolling upgrade.
+          : code === 'session_owner_unavailable'
+            ? 'relocating'
+            : response.status >= 500
+              ? 'transient'
+              : 'fatal'
+    throw new SessionRouteTicketError(`Session route ticket request failed: ${code}`, failure, retryAfterMs)
   }
   if (typeof body.ticket !== 'string' || body.ticket.length === 0) {
     throw new Error('Session route ticket response was invalid')
@@ -605,10 +635,11 @@ export function useSession({
             message: error instanceof Error ? error.message : 'Session route ticket request failed',
           },
         })
-        // A newly created Session may not have a published owner yet; retry
-        // transient ownership and transport failures, never auth/permission errors.
-        const ownerUnavailable = error instanceof Error && error.message.endsWith(': session_owner_unavailable')
-        if (ownerUnavailable && !routePreparationAttempted && sharedSocket?.connected) {
+        // Only an explicit relocating result (or the legacy collapsed owner
+        // error during rolling upgrades) is allowed to request owner takeover.
+        const routeError = error instanceof SessionRouteTicketError ? error : undefined
+        if (routeError?.failure === 'deleting' || routeError?.failure === 'missing') routeReconnectBlocked = true
+        if (routeError?.failure === 'relocating' && !routePreparationAttempted && sharedSocket?.connected) {
           routePreparationAttempted = true
           try {
             const prepared = await sharedSocket.timeout(3_000).emitWithAck('client:prepare_session_route', { sessionId })
@@ -619,13 +650,15 @@ export function useSession({
             // bypass the Gateway ticket on a failed or timed-out RPC.
           }
         }
-        if (error instanceof TypeError || ownerUnavailable) scheduleRoutedReconnect()
+        if (error instanceof TypeError || routeError?.failure === 'relocating' || routeError?.failure === 'transient') {
+          scheduleRoutedReconnect(routeError?.retryAfterMs)
+        }
       }
     }
 
-    const scheduleRoutedReconnect = (): void => {
+    const scheduleRoutedReconnect = (minimumDelayMs = 0): void => {
       if (disposed || routeTicketFallback || routeReconnectBlocked || routeReconnectTimer !== null || routeReconnectAttempts >= 8) return
-      const delay = Math.min(500 * 2 ** routeReconnectAttempts, 30_000)
+      const delay = Math.max(minimumDelayMs, Math.min(500 * 2 ** routeReconnectAttempts, 30_000))
       routeReconnectAttempts += 1
       routeReconnectTimer = window.setTimeout(() => {
         routeReconnectTimer = null
@@ -643,7 +676,7 @@ export function useSession({
     }
 
     const reconnectNow = (): void => {
-      if (disposed || socket?.connected) return
+      if (disposed || routeReconnectBlocked || socket?.connected) return
       if (sessionRouteTickets && !routeTicketFallback) {
         if (routeReconnectTimer !== null) window.clearTimeout(routeReconnectTimer)
         routeReconnectTimer = null
