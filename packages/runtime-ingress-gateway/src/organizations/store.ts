@@ -5,7 +5,8 @@ import { identityKey, inviteKey } from '../assignments/store.js'
 
 export type OrganizationRole = 'owner' | 'admin' | 'member' | 'viewer'
 export type OrganizationPermission = 'runtime:read' | 'runtime:write' | 'workspace:manage' | 'organization:manage' | 'policy:manage'
-export type OrganizationStatus = 'provisioning' | 'active' | 'suspended' | 'closing' | 'closed'
+// `expired` is an effective authorization status, not a persisted organizations.status.
+export type OrganizationStatus = 'provisioning' | 'active' | 'expired' | 'suspended' | 'closing' | 'closed'
 
 export type Organization = { id: string; name: string; unitId: string; status: OrganizationStatus; createdAt: string }
 export type OrganizationMembership = { organizationId: string; identity: AuthenticatedIdentity; role: OrganizationRole; createdAt: string }

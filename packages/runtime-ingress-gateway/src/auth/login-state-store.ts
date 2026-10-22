@@ -2,6 +2,14 @@ import { readJsonFile, writeJsonFile } from '../persistence/atomic-json-file.js'
 
 export type LoginState = { codeVerifier: string; state: string; oidcNonce?: string; redirectUri: string; expiresAt: number; ssoConnectionId?: string; organizationInviteHash?: string; ownerBootstrapHash?: string }
 export interface LoginStateStore { put(nonce: string, state: LoginState): Promise<void>; take(nonce: string): Promise<LoginState | undefined> }
+export type LoginStateStoreKind = 'file' | 'postgres'
+
+export function resolveLoginStateStoreKind(env: NodeJS.ProcessEnv): LoginStateStoreKind {
+  const value = env.KALA_INGRESS_LOGIN_STATE_STORE_KIND?.trim().toLowerCase()
+  if (!value) return 'file'
+  if (value === 'file' || value === 'postgres') return value
+  throw new Error('KALA_INGRESS_LOGIN_STATE_STORE_KIND must be file or postgres')
+}
 
 export class FileLoginStateStore implements LoginStateStore {
   private states = new Map<string, LoginState>()

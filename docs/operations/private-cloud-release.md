@@ -1,22 +1,23 @@
 # Private Cloud public release and operator contract
 
-**Status:** normative
+**Status:** normative release/operator contract, not a claim that a publicly downloadable candidate has passed production certification. The [design/status ledger](../architecture/private-cloud-design-status.md) separates the enterprise target, the installed default and experimental work.
 
 New deployments should follow the [signed-release first-install guide](./private-cloud-first-install.md)
 for the complete operator, identity, first owner, Executor and backup journey.
 
 Private Cloud is the multi-tenant configuration of the self-hosted Platform. Its
-public distribution is a signed, versioned Compose bundle plus three independent
-multi-architecture OCI images: Runtime, Stable Ingress, and Dashboard. An operator
+public distribution is a signed, versioned Linux x64 Compose bundle plus three independent
+Linux amd64 OCI images: Runtime, Stable Ingress, and Dashboard. An operator
 machine needs Docker Engine with Compose v2, the downloaded bundle, deployment
 configuration, and private secrets. It never needs Git, Node.js, pnpm, or source.
 
 ## Immutable release bundle
 
-Every bundle contains `compose.yaml`, supported storage and edge overrides,
+Every bundle contains `compose.yaml`, bundled storage and edge overrides (presence alone does not certify an experimental mode such as NFS),
 `deployment.json`, environment examples, `image-lock.json`, `manifest.json`, and
-the matching Linux x64 or arm64 `kala-private-cloud` native executable (the
-repository `.mjs` entry remains a development/test path). The production Compose model contains
+the Linux x64 `kala-private-cloud` native executable. The repository `.mjs` entry
+remains a development/test path and is rejected by release-mode verification. Linux
+arm64 bundle and image publication is paused and unaccepted. The production Compose model contains
 no `build:` key. Every image, including infrastructure and one-shot jobs, is a
 registry name followed by an exact `@sha256:` digest. `image-lock.json` binds the
 product version, revision, and Runtime, Ingress, and Dashboard digests. The bundle
@@ -26,6 +27,8 @@ manifest binds every shipped file by size and SHA-256.
 It is not a release asset and is never accepted by the public operator.
 
 ## Supported lifecycle
+
+These are Operator command contracts; their availability is not a certification of a particular candidate's upgrade, rollback or production support. See the exact-release evidence below.
 
 ```text
 kala-private-cloud install --bundle DIR --config-dir DIR
@@ -92,16 +95,16 @@ Runtime share a binary lifecycle.
 
 ## Publishing and verification
 
-Release CI builds `linux/amd64` and `linux/arm64` images, merges each component into
-one manifest-list digest, signs those digests with keyless Sigstore identity, emits
-OCI provenance and CycloneDX SBOMs, and then builds the Compose bundle from those
-digests. The tag workflow still publishes the three images and uploads signed
+Release CI currently builds only `linux/amd64` images, signs each component digest
+with keyless Sigstore identity, emits OCI provenance and CycloneDX SBOMs, and then
+builds the Linux x64 native-Operator Compose bundle from those digests. Linux arm64
+images and Operator bundles are paused and have no acceptance claim. The tag workflow still publishes the three images and uploads signed
 Compose bundles to the GitHub Release; publishing alone is **not** proof that a
 specific bundle passed production acceptance. Do not promise a production-ready
 Private Cloud release without a successful clean acceptance artifact for its exact
 archive SHA-256 and commit.
 
-The optional `clean-compose-acceptance` job uses the `linux-x64` signed bundle
+The currently optional, non-certifying predecessor-upgrade `clean-compose-acceptance` job uses the `linux-x64` signed bundle
 transferred from the same `bundle` job, and verifies its Sigstore identity. It
 fetches a previously released, signed predecessor bundle, checks both bundles'
 embedded revisions against their tags, then installs into an isolated Compose
@@ -111,8 +114,8 @@ uploads a minimal digest-bound `rc-evidence.json` Actions artifact. A skipped,
 queued, or failed job produces **no passing evidence**; the existing optional
 product E2E on a preinstalled deployment is not a substitute.
 
-Both beta fresh-install acceptance and the optional predecessor-upgrade job run
-on a new GitHub-hosted `ubuntu-24.04` VM; no self-hosted runner or persistent
+When executed, the beta fresh-install acceptance and optional predecessor-upgrade
+job use a new GitHub-hosted `ubuntu-24.04` VM; no self-hosted runner or persistent
 installation is needed. They check Docker, the browser and the VM environment
 before running the actual signed-asset, browser, Executor and restore tests.
 
@@ -145,10 +148,35 @@ after removing unused preinstalled SDKs. This threshold is a fail-fast guard,
 not proof of peak disk sufficiency; only a successful hosted run establishes
 that for the exact candidate image sizes.
 
-The optional predecessor-upgrade job continues to use externally managed
-configuration. Set `KALA_PRIVATE_CLOUD_UPGRADE_ACCEPTANCE_ENABLED=true` and
-`KALA_PRIVATE_CLOUD_PREDECESSOR_TAG` to the previously signed release; manual
-dispatch may instead provide `predecessor_tag`. Provide
+### Local published-asset replay (2026-10-21; not hosted certification)
+
+The publicly released `v0.3.0-beta.19` Linux x64 bundle (SHA-256
+`8a4f4125440d1bb5e29f112adfbedc33f46879c0326c919d733ea356783a4581`,
+revision `68f81b08660cbb435386055e426425881bd3a326`) and Linux x64
+Executor were downloaded and independently verified against the original
+`xingsy97/kala` Sigstore workflow identities; all three locked OCI image
+signatures were verified. On a local Linux host, the `--fresh-candidate
+--ephemeral-bundled-acceptance` acceptance ran with Chromium and an isolated
+Docker Compose project, generated `linux-x64-compose-fresh` evidence, and
+passed the digest-bound evidence validator. This exercised bundled identity
+users, authenticated model/tool and Executor actions, two-tenant isolation,
+Runtime restart, backup/restore, and related security checks. The local Docker
+project was removed. The harness needed `--same-permissions` when unpacking
+under a restrictive host umask so the signed public Caddyfile retained its
+archived `0644` mode. This replay is **not** a GitHub-hosted clean VM result,
+not evidence for the later uncommitted changes, and not an upgrade or rollback
+from a previously supported Private Cloud release.
+
+No historical Private Cloud release is currently certified as an eligible
+predecessor. The public `v0.2.0` bundle is signed but lacks the bundled-identity
+assets required by the current clean-Compose acceptance contract; historical
+beta.18 references likewise cannot establish an eligible release. The optional
+predecessor-upgrade job therefore produces only
+non-certifying migration evidence and requires a manual workflow dispatch. Set
+`KALA_PRIVATE_CLOUD_UPGRADE_ACCEPTANCE_ENABLED=true`, provide `predecessor_tag`,
+and set `unsupported_predecessor_override` to that exact same tag as the explicit
+acknowledgement. The evidence records `certifying: false` and is not consumed by
+promotion. Provide
 `KALA_RC_PRIVATE_CLOUD_CONFIG_ARCHIVE_B64` as a repository Actions secret
 containing a base64-encoded gzip tar archive with `deployment.env`,
 `runtime-provider-catalog.json` and `secrets/` at its root (and

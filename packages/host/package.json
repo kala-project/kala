@@ -18,6 +18,7 @@
     "kala-host": "./dist/bin/kala-host.js",
     "kala-runtime-service": "./dist/bin/kala-runtime-service.js",
     "kala-postgres-migrate": "./dist/bin/kala-postgres-migrate.js",
+    "kala-fresh-storage-claim": "./dist/bin/kala-fresh-storage-claim.js",
     "kala-dedicated-ingress": "./dist/bin/kala-dedicated-ingress.js",
     "kala-dedicated-deploy-supervisor": "./dist/bin/kala-dedicated-deploy-supervisor.js"
   },

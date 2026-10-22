@@ -32,6 +32,7 @@ describe('message attachment upload route', () => {
       config: createConfig({ tools: [], systemPrompt: 'test' }),
     })
     const messageAttachments = new MessageAttachmentStore(join(root, 'message-attachments'))
+    const acceptedOperations = new Set<string>()
     server = createServer()
     attachJsonRoutes(server, {
       models: [],
@@ -39,8 +40,10 @@ describe('message attachment upload route', () => {
       sessions,
       messageAttachments,
       auth: { sharedToken: 'attachment-token' },
-      enqueueUserMessage: async ({ operationId }) => {
+      enqueueUserMessage: async ({ operationId, sessionId, content }) => {
         if (operationId === 'operation-fail') throw new Error('queue unavailable')
+        await messageAttachments.commitReferences(sessionId, content)
+        acceptedOperations.add(operationId)
         return { committed: true }
       },
     })
@@ -180,14 +183,13 @@ describe('message attachment upload route', () => {
     } as const
     const commitSpy = vi.spyOn(messageAttachments, 'commitReferences').mockRejectedValueOnce(new Error('registry unavailable'))
     const pendingAdmission = await fetch(`http://127.0.0.1:${address.port}/runtime/admission/messages`, admissionRequest)
-    expect(pendingAdmission.status).toBe(503)
-    expect(await pendingAdmission.json()).toMatchObject({
-      operationId: 'operation-attachment',
-      durablyAccepted: true,
-    })
+    expect(pendingAdmission.status).toBe(400)
+    expect(await pendingAdmission.json()).not.toHaveProperty('durablyAccepted')
+    expect(acceptedOperations.has('operation-attachment')).toBe(false)
     const admitted = await fetch(`http://127.0.0.1:${address.port}/runtime/admission/messages`, admissionRequest)
     commitSpy.mockRestore()
     expect(admitted.status).toBe(202)
+    expect(acceptedOperations.has('operation-attachment')).toBe(true)
 
     const released = await fetch(`http://127.0.0.1:${address.port}/runtime/attachments/release`, {
       method: 'POST',

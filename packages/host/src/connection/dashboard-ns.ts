@@ -112,7 +112,7 @@ import type {
   AgentState,
   MessageContent,
 } from '@agent-kernel/kernel'
-import { createInitialState, fold } from '@agent-kernel/kernel'
+import { createInitialState } from '@agent-kernel/kernel'
 import type { Namespace } from 'socket.io'
 import { ulid } from 'ulid'
 
@@ -121,7 +121,6 @@ import { createBuiltinExtensionRegistry } from '../extensions/builtin-registry.j
 import type { ConsolidationOutcome } from '../extensions/memory-consolidation.js'
 import { activeSubAgentFor, interruptSubAgentAfterRuntimeCancel, markSubAgentInterrupted } from '../extensions/agent-tool.js'
 import { resetCompactRuntime } from '../extensions/compaction.js'
-import { readSessionLog } from '../store/log.js'
 import { SessionStore, type SessionRecord } from '../store/session.js'
 import { createExecutorRegistry } from './executor.js'
 import { dirname, resolve as resolvePath, sep } from 'node:path'
@@ -497,6 +496,26 @@ export function configureDashboardNamespace(
       if (!ownerSessionId) return 'invalid temporary workspace terminal identity'
       return validateBgSessionAccess(ownerSessionId, workspaceId)
     }
+    // A connected socket can outlive its SQL lease. Recheck before external effects.
+    const validateEffectOwner = async (targetSessionId: string): Promise<string | undefined> => {
+      try {
+        await deps.loopDeps.assertSessionEffectOwner?.(targetSessionId)
+      } catch (error) {
+        return error instanceof Error ? error.message : 'Session owner is no longer active'
+      }
+      return undefined
+    }
+    const validateWorkspaceEffectOwner = async (workspaceId: string): Promise<string | undefined> => {
+      // Pre-session directory picking is a dedicated, non-ingress feature.
+      // Ingress cannot infer tenant access from a client-supplied workspaceId.
+      if (!deps.loopDeps.assertSessionEffectOwner && auditActor(socket).kind !== 'ingress') return undefined
+      // A workspace-only request cannot select an arbitrary session from a
+      // multiplexed socket in parallel-v1 or another tenant's control socket.
+      if (multiplexed) return 'Workspace effect requires a session-scoped connection'
+      const record = deps.store.get(sessionId) ?? (await deps.store.load(sessionId, { recoverDangling: false }).catch(() => undefined))
+      if (!record || record.workspaceId !== workspaceId) return 'Session is not bound to this workspace'
+      return validateIngressSessionAccess(socket, record) ?? await validateEffectOwner(record.sessionId)
+    }
     const auditScopedAccessDenied = (action: string, targetSessionId: string, workspaceId: string, error: string): void => {
       deps.audit?.log({ action, actor: auditActor(socket), target: { sessionId: targetSessionId, workspaceId }, outcome: 'denied', error })
     }
@@ -507,7 +526,7 @@ export function configureDashboardNamespace(
         'client:create_session', 'client:delete_session', 'client:prepare_storage_cleanup', 'client:execute_storage_cleanup', 'client:update_preferences', 'client:set_cwd',
         'client:prepare_session_route',
         'client:reorder_queued_message', 'client:update_queued_message', 'client:delete_queued_message',
-        'client:rename_session', 'client:rename_workspace', 'client:consolidate_memory', 'bg:kill',
+        'client:rename_session', 'client:rename_workspace', 'client:create_directory', 'client:consolidate_memory', 'bg:kill',
         'client:initialize_dag', 'client:answer_dag_decision',
         'terminal:create', 'terminal:input', 'terminal:resize', 'terminal:kill', 'workspace:exec',
       ] as const
@@ -1412,6 +1431,16 @@ export function configureDashboardNamespace(
           return
         }
       }
+      // Dedicated mode retains pre-session directory picking. Shared Runtimes
+      // require a live bound owner even when the request omits sessionId.
+      const ownerError = p.sessionId
+        ? await validateEffectOwner(p.sessionId)
+        : await validateWorkspaceEffectOwner(p.workspaceId)
+      if (ownerError) {
+        auditScopedAccessDenied('internal_tool.create_directory', p.sessionId ?? sessionId, p.workspaceId, ownerError)
+        deny(ownerError)
+        return
+      }
       deps.audit?.log({ action: 'internal_tool.create_directory', actor: auditActor(socket), target: { workspaceId: p.workspaceId }, outcome: 'ok', metadata: { parentPath: p.parentPath } })
       const result = await deps.executors.createDirectory(p.workspaceId, p.parentPath, p.name, p.requestId)
       ack?.(result)
@@ -1445,7 +1474,7 @@ export function configureDashboardNamespace(
       if (multiplexed && !subscribedWorkspaces.has(raw.workspaceId)) {
         return ack?.({ requestId: raw.requestId, stdout: '', stderr: '', exitCode: null, durationMs: 0, error: { code: 'EACCES', message: 'workspace is not subscribed' } })
       }
-      const workspaceError = await validateWorkspaceSocketAccess(raw.workspaceId)
+      const workspaceError = await validateWorkspaceSocketAccess(raw.workspaceId) ?? await validateWorkspaceEffectOwner(raw.workspaceId)
       if (workspaceError) {
         deps.audit?.log({ action: 'workspace.exec', actor: auditActor(socket), target: { workspaceId: raw.workspaceId }, outcome: 'denied', error: workspaceError })
         return ack?.({ requestId: raw.requestId, stdout: '', stderr: '', exitCode: null, durationMs: 0, error: { code: 'EACCES', message: workspaceError } })
@@ -1538,7 +1567,7 @@ export function configureDashboardNamespace(
     socket.on('bg:kill', async (raw: ClientKillBgTask, ack) => {
       const p = vparse(schema.ClientKillBgTaskSchema, raw, 'bg:kill', (raw as ClientKillBgTask | undefined)?.sessionId)
       if (!p) return
-      const error = await validateBgSessionAccess(p.sessionId, p.workspaceId)
+      const error = await validateBgSessionAccess(p.sessionId, p.workspaceId) ?? await validateEffectOwner(p.sessionId)
       if (error) {
         auditScopedAccessDenied('background_task.kill', p.sessionId, p.workspaceId, error)
         return ack({ requestId: p.requestId, workspaceId: p.workspaceId, sessionId: p.sessionId, taskId: p.taskId, killed: false, error })
@@ -1550,6 +1579,7 @@ export function configureDashboardNamespace(
       const p = vparse(schema.ClientTerminalCreateSchema, raw, 'terminal:create', (raw as ClientTerminalCreate | undefined)?.sessionId)
       if (!p) return
       const error = await validateTerminalSessionAccess(p.sessionId, p.workspaceId)
+        ?? await validateEffectOwner(terminalOwnerSessionId(p.sessionId)!)
       if (error) {
         auditScopedAccessDenied('terminal.create', p.sessionId, p.workspaceId, error)
         return ack({ requestId: p.requestId, workspaceId: p.workspaceId, sessionId: p.sessionId, error })
@@ -1561,6 +1591,7 @@ export function configureDashboardNamespace(
       const p = vparse(schema.ClientTerminalInputSchema, raw, 'terminal:input', (raw as ClientTerminalInput | undefined)?.sessionId)
       if (!p) return
       const error = await validateTerminalSessionAccess(p.sessionId, p.workspaceId)
+        ?? await validateEffectOwner(terminalOwnerSessionId(p.sessionId)!)
       if (error) {
         auditScopedAccessDenied('terminal.input', p.sessionId, p.workspaceId, error)
         return
@@ -1571,6 +1602,7 @@ export function configureDashboardNamespace(
       const p = vparse(schema.ClientTerminalResizeSchema, raw, 'terminal:resize', (raw as ClientTerminalResize | undefined)?.sessionId)
       if (!p) return
       const error = await validateTerminalSessionAccess(p.sessionId, p.workspaceId)
+        ?? await validateEffectOwner(terminalOwnerSessionId(p.sessionId)!)
       if (error) {
         auditScopedAccessDenied('terminal.resize', p.sessionId, p.workspaceId, error)
         return
@@ -1581,6 +1613,7 @@ export function configureDashboardNamespace(
       const p = vparse(schema.ClientTerminalKillSchema, raw, 'terminal:kill', (raw as ClientTerminalKill | undefined)?.sessionId)
       if (!p) return
       const error = await validateTerminalSessionAccess(p.sessionId, p.workspaceId)
+        ?? await validateEffectOwner(terminalOwnerSessionId(p.sessionId)!)
       if (error) {
         auditScopedAccessDenied('terminal.kill', p.sessionId, p.workspaceId, error)
         return ack({ requestId: p.requestId, workspaceId: p.workspaceId, sessionId: p.sessionId, terminalId: p.terminalId, killed: false, error })
@@ -1661,6 +1694,15 @@ export function configureDashboardNamespace(
         return
       }
 
+      const record = deps.store.get(p.sessionId) ?? (await deps.store.load(p.sessionId, { recoverDangling: false }).catch(() => undefined))
+      const accessError = (multiplexed ? !subscribedSessions.has(p.sessionId) : p.sessionId !== sessionId)
+        ? 'session is not subscribed'
+        : !record ? 'unknown session' : validateIngressSessionAccess(socket, record) ?? await validateEffectOwner(p.sessionId)
+      if (accessError) {
+        auditScopedAccessDenied('memory.consolidate', p.sessionId, '', accessError)
+        socket.emit('server:memory_consolidated', { requestId: p.requestId, sessionId: p.sessionId, saved: [], skipped: 0, error: accessError })
+        return
+      }
       const extensions = deps.loopDeps.extensions ?? createBuiltinExtensionRegistry()
       const outcome = await extensions.consolidateMemory(deps.loopDeps, p.sessionId).catch(
         (err: unknown): ConsolidationOutcome => ({
@@ -1866,39 +1908,18 @@ export function configureDashboardNamespace(
         if (!deps.agentRuntimes.require(source.agentRuntime).descriptor().capabilities.fork) {
           throw new Error(`${source.agentRuntime} sessions do not support fork`)
         }
-        if (deps.store.usesPostgresAuthority) {
-          throw new Error('Session fork is unavailable with PostgreSQL Session authority until the initial state is persisted')
-        }
-        const parsed = await readSessionLog(source.logPath)
-        const keptEvents = parsed.events
-          .filter((e) => e.seq <= p.cursor)
-          .map((e) => e.event)
-        const forkedState: AgentState = fold(
-          parsed.header.initialState,
-          keptEvents,
-          parsed.header.config,
-        )
+        const accessError = validateIngressSessionAccess(socket, source)
+        if (accessError) throw new Error(accessError)
+        await deps.loopDeps.assertSessionEffectOwner?.(source.sessionId)
         const newId = p.newSessionId ?? ulid()
-        const record = await deps.store.create({
+        const parentModel = effectiveModelForRecord(deps, source)
+        const record = await deps.store.fork({
+          sourceSessionId: source.sessionId,
+          cursor: p.cursor,
           sessionId: newId,
-          config: source.config,
-          executionMode: source.executionMode,
-          parentSessionId: p.sourceSessionId,
-          parentCursor: p.cursor,
-          initialState: forkedState,
-          ...(source.workspaceId !== undefined
-            ? { workspaceId: source.workspaceId }
-            : {}),
-          ...(source.workspaceName !== undefined
-            ? { workspaceName: source.workspaceName }
-            : {}),
+          ...(parentModel ? { preferences: { selectedModel: parentModel } } : {}),
         })
         await refreshSessionSkillsIfNeeded(deps, record)
-        const parentModel = effectiveModelForRecord(deps, source)
-        if (parentModel) {
-          await deps.store.updatePreferences(record.sessionId, { selectedModel: parentModel })
-          record.preferences = { ...record.preferences, selectedModel: parentModel }
-        }
         if (source.workspaceId) {
           await deps.executors.copyOverflowSession(
             source.workspaceId,

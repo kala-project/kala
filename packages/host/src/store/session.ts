@@ -384,6 +384,13 @@ export type CreateSessionParams = {
   preferences?: SessionPreferences
 }
 
+export type ForkSessionParams = {
+  sourceSessionId: string
+  cursor: number
+  sessionId?: string
+  preferences?: SessionPreferences
+}
+
 export type SessionStoreOptions = {
   runtimeConfig?: AgentConfig | ((context: { executionMode: SessionExecutionMode }) => AgentConfig)
   /** Root used by Host-side artifacts that partition data by Session ID. */
@@ -651,7 +658,58 @@ export class SessionStore {
     }
   }
 
-  private async createRecord(params: CreateSessionParams, sessionId: string): Promise<SessionRecord> {
+  /** Create a child from the durable initial state and exact event prefix of its parent. */
+  async fork(params: ForkSessionParams): Promise<SessionRecord> {
+    const sessionId = params.sessionId ?? ulid()
+    const releaseMutation = this.beginStorageMutation([params.sourceSessionId, sessionId])
+    try {
+      const source = this.get(params.sourceSessionId)
+        ?? await this.load(params.sourceSessionId, { recoverDangling: false })
+      const history = await this.readHistory(source.sessionId)
+      const initialCursor = history.initialState.cursor
+      if (!Number.isSafeInteger(params.cursor) || params.cursor < initialCursor) {
+        throw new Error(`Invalid fork cursor ${params.cursor} for Session ${source.sessionId}`)
+      }
+      let durableCursor = initialCursor
+      const keptEvents: AgentEvent[] = []
+      for (const entry of history.events) {
+        if (entry.seq !== durableCursor + 1) {
+          throw new Error(`Session ${source.sessionId} history is not contiguous at cursor ${durableCursor + 1}`)
+        }
+        durableCursor = entry.seq
+        if (entry.seq <= params.cursor) keptEvents.push(entry.event)
+      }
+      if (params.cursor > durableCursor) {
+        throw new Error(`Invalid fork cursor ${params.cursor} for Session ${source.sessionId}`)
+      }
+      const forkedState = fold(history.initialState, keptEvents, history.config)
+      if (forkedState.cursor !== params.cursor) {
+        throw new Error(`Session ${source.sessionId} history cannot produce fork cursor ${params.cursor}`)
+      }
+      return await this.createRecord({
+        sessionId,
+        config: source.config,
+        executionMode: source.executionMode,
+        parentSessionId: source.sessionId,
+        parentCursor: params.cursor,
+        initialState: forkedState,
+        ...(source.workspaceId !== undefined ? { workspaceId: source.workspaceId } : {}),
+        ...(source.workspaceName !== undefined ? { workspaceName: source.workspaceName } : {}),
+        ...(source.organizationId !== undefined ? { organizationId: source.organizationId } : {}),
+        ...(source.principal !== undefined ? { principal: source.principal } : {}),
+        ...(source.organizationRole !== undefined ? { organizationRole: source.organizationRole } : {}),
+        ...(params.preferences !== undefined ? { preferences: params.preferences } : {}),
+      }, sessionId, source.sessionId)
+    } finally {
+      releaseMutation()
+    }
+  }
+
+  private async createRecord(
+    params: CreateSessionParams,
+    sessionId: string,
+    authorityFenceSessionId?: string,
+  ): Promise<SessionRecord> {
     const initialState =
       params.initialState ??
       createInitialState({
@@ -673,7 +731,11 @@ export class SessionStore {
       await this.authorityReady
       const createdAt = new Date().toISOString()
       const candidate = recordForCreate(params, sessionId, logPath, createdAt, stateWithApproval)
-      const persisted = await this.options.authority.create(persistSessionRecord(candidate))
+      const persisted = await this.options.authority.create(
+        persistSessionRecord(candidate),
+        'session.create',
+        authorityFenceSessionId ? { fenceSessionId: authorityFenceSessionId } : {},
+      )
       const record = restoreSessionRecord(persisted, logPath, params.memoryPolicy)
       this.records.set(sessionId, record)
       this.notifyStorageChanged(sessionId)

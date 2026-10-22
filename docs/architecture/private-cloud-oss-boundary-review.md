@@ -1,6 +1,6 @@
 # Private Cloud OSS Boundary Review
 
-Status: accepted planning decision
+Status: accepted planning decision — **not** a list of services installed by the default Private Cloud Compose bundle. “Adopt now” is an architectural priority; “Adopt before …” is a dependency for the named capability, not evidence of a shipped adapter. The default single-node deployment currently includes PostgreSQL and optional bundled ZITADEL, while OpenBao, S3-backed default storage and the OTel/operator stack are not delivered as a complete default composition. S3/PG Runtime work is opt-in experimental. See the [design/status ledger](./private-cloud-design-status.md), [default Compose](../../deploy/private-cloud/compose.yaml) and [release record](../operations/private-cloud-release.md) before making an installation or support claim.
 
 ## Rules
 

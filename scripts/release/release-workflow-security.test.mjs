@@ -115,7 +115,7 @@ test('Private Cloud release retains image publishing and accepts the exact signe
   const bundle = workflow.slice(workflow.indexOf('  bundle:'), workflow.indexOf('  fresh_beta_candidate_assets:'))
   assert.match(bundle, /setup-node@v5[\s\S]*node-version: 22[\s\S]*pnpm install --frozen-lockfile/u)
   assert.match(bundle, /build-private-cloud-operator\.mjs --target linux-x64 --output release\/kala-private-cloud-linux-x64[\s\S]*build-private-cloud-bundle\.mjs[\s\S]*--operator release\/kala-private-cloud-linux-x64/u)
-  assert.match(workflow, /gh release upload "\$TAG" "\$archive" "\$signature" --clobber/u)
+  assert.match(workflow, /gh release view "\$TAG" --json isDraft --jq \.isDraft[\s\S]*gh release upload "\$TAG" "\$archive" "\$signature" --clobber/u)
   assert.match(workflow, /gh release download "\$TAG"[\s\S]*cmp "\$archive"[\s\S]*cmp "\$signature"/u)
   assert.match(workflow, /Transfer exact signed bundle[\s\S]*actions\/upload-artifact@v5[\s\S]*private-cloud-acceptance-input-/u)
   const staging = workflow.slice(workflow.indexOf('  fresh_beta_candidate_assets:'), workflow.indexOf('  fresh_beta_candidate_acceptance:'))
@@ -152,8 +152,10 @@ test('Private Cloud release retains image publishing and accepts the exact signe
   assert.match(acceptance, /actions\/download-artifact@v5/u)
   assert.equal((acceptance.match(/cosign verify-blob/g) ?? []).length, 3)
   assert.match(acceptance, /git rev-parse "\$TAG\^\{commit\}"/u)
-  assert.match(acceptance, /verify-private-cloud-clean-compose\.mjs[\s\S]*--candidate-archive[\s\S]*--predecessor-archive[\s\S]*--predecessor-tag[\s\S]*--predecessor-revision/u)
-  assert.match(acceptance, /private-cloud-clean-compose-evidence-/u)
+  assert.match(acceptance, /verify-private-cloud-clean-compose\.mjs[\s\S]*--non-certifying-predecessor[\s\S]*--candidate-archive[\s\S]*--predecessor-archive[\s\S]*--predecessor-tag[\s\S]*--predecessor-revision/u)
+  assert.match(acceptance, /private-cloud-noncertifying-predecessor-evidence-/u)
+  assert.match(acceptance, /e\.category!=="private-cloud-predecessor"[\s\S]*e\.certifying!==false/u)
+  assert.doesNotMatch(acceptance, /fs\.writeFileSync/u)
 })
 
 test('release workflow publishes archived metadata and verifies the signed Executor-native inventory', () => {

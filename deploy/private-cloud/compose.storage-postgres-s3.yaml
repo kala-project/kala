@@ -1,0 +1,201 @@
+# Opt-in, single-Runtime PG/S3 data-plane evaluation. Requires operator-managed
+# PostgreSQL (separate owner, DML and read-only roles) and S3-compatible storage.
+# This is not an upgrade from the local/NFS volume profile or an HA release.
+services:
+  # Keep the legacy local-volume services/data intact, but make them inactive in
+  # this profile. Dependencies below are replaced so `compose up` cannot select
+  # them implicitly.
+  init-volumes:
+    profiles: !override [legacy-local-control-disabled]
+
+  control-postgres:
+    profiles: !override [legacy-local-control-disabled]
+
+  init-app-secrets:
+    command: !override
+      - /bin/sh
+      - -ec
+      - |
+        umask 077
+        cp /run/secrets/ingress_secret /host/ingress_secret
+        cp /run/secrets/llm_api_key /host/llm_api_key
+        cp /run/kala-provider-catalog.json /host/runtime-provider-catalog.json
+        cp /run/secrets/ingress_secret /gateway/ingress_secret
+        cp /run/secrets/session_secret /gateway/session_secret
+        cp /run/secrets/oidc_client_id /gateway/oidc_client_id
+        cp /run/secrets/oidc_client_secret /gateway/oidc_client_secret
+        cp /run/secrets/control_postgres_writer_url /gateway/control_database_url
+        rm -f /gateway/oidc_ca.pem
+        if [ -f /run/oidc-ca/ca.pem ]; then cp /run/oidc-ca/ca.pem /gateway/oidc_ca.pem; fi
+        cp /run/secrets/internal_ca /host/internal_ca.pem
+        cp /run/secrets/runtime_host_key /host/runtime_host_key.pem
+        cp /run/secrets/runtime_host_cert /host/runtime_host.pem
+        cp /run/secrets/runtime_health_key /host/runtime_health_key.pem
+        cp /run/secrets/runtime_health_cert /host/runtime_health.pem
+        cp /run/secrets/internal_ca /gateway/internal_ca.pem
+        cp /run/secrets/ingress_client_key /gateway/ingress_client_key.pem
+        cp /run/secrets/ingress_client_cert /gateway/ingress_client.pem
+        chown -R 65532:65532 /host /gateway
+        chmod 700 /host /gateway
+        chmod 400 /host/* /gateway/*
+    secrets: !override [ingress_secret, llm_api_key, session_secret, oidc_client_id, oidc_client_secret, control_postgres_writer_url, internal_ca, runtime_host_key, runtime_host_cert, ingress_client_key, ingress_client_cert, runtime_health_key, runtime_health_cert]
+
+  control-plane-init:
+    command: !override [packages/runtime-ingress-gateway/dist/src/bin/init-control-plane.js]
+    environment:
+      KALA_INGRESS_CONTROL_WRITER_ROLE: ${KALA_CONTROL_DML_ROLE:?set the existing Gateway control DML role}
+      KALA_INGRESS_DATABASE_URL_FILE: /run/secrets/control_postgres_migration_owner_url
+      KALA_INGRESS_MIGRATIONS_DIR: /app/packages/runtime-ingress-gateway/migrations
+      KALA_INGRESS_REQUIRE_EXISTING_DATABASE: "1"
+    secrets: !override [control_postgres_migration_owner_url]
+    volumes: !override []
+    networks: !override [egress]
+    depends_on: !override
+      fresh-storage-claim: { condition: service_completed_successfully }
+
+  fresh-storage-claim:
+    image: ${KALA_RUNTIME_IMAGE:?KALA_RUNTIME_IMAGE must be an immutable name@sha256 digest}
+    user: "0:0"
+    command: [packages/host/dist/bin/kala-fresh-storage-claim.js]
+    environment:
+      KALA_INSTALLATION_ID_FILE: /run/kala-installation/installation-id
+      KALA_FRESH_CLAIM_CONTROL_DATABASE_URL_FILE: /run/secrets/control_postgres_migration_owner_url
+      KALA_FRESH_CLAIM_RUNTIME_DATABASE_URL_FILE: /run/secrets/runtime_postgres_owner_url
+      KALA_FRESH_CLAIM_S3_ACCESS_KEY_ID_FILE: /run/secrets/runtime_s3_access_key_id
+      KALA_FRESH_CLAIM_S3_SECRET_ACCESS_KEY_FILE: /run/secrets/runtime_s3_secret_access_key
+      KALA_FRESH_CLAIM_S3_ENDPOINT: ${KALA_S3_ENDPOINT:?set the S3-compatible endpoint}
+      KALA_FRESH_CLAIM_S3_REGION: ${KALA_S3_REGION:?set the S3 region}
+      KALA_FRESH_CLAIM_S3_BUCKET: ${KALA_S3_BUCKET:?set a new empty S3 bucket}
+      KALA_FRESH_CLAIM_S3_FORCE_PATH_STYLE: ${KALA_S3_FORCE_PATH_STYLE:-false}
+    secrets: [control_postgres_migration_owner_url, runtime_postgres_owner_url, runtime_s3_access_key_id, runtime_s3_secret_access_key]
+    configs:
+      - source: installation_id
+        target: /run/kala-installation/installation-id
+        mode: 0444
+    networks: [egress]
+    restart: "no"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp:rw,noexec,nosuid,size=32m]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+
+  init-storage-secrets:
+    image: alpine@sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412
+    user: "0:0"
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        umask 077
+        cp /run/secrets/runtime_postgres_writer_url /runtime/runtime_postgres_writer_url
+        cp /run/secrets/runtime_state_master_key /runtime/runtime_state_master_key
+        cp /run/secrets/runtime_s3_access_key_id /runtime/runtime_s3_access_key_id
+        cp /run/secrets/runtime_s3_secret_access_key /runtime/runtime_s3_secret_access_key
+        cp /run/secrets/runtime_postgres_reader_url /gateway/runtime_postgres_reader_url
+        chown -R 65532:65532 /runtime /gateway
+        chmod 700 /runtime /gateway
+        chmod 400 /runtime/* /gateway/*
+    secrets: [runtime_postgres_writer_url, runtime_state_master_key, runtime_s3_access_key_id, runtime_s3_secret_access_key, runtime_postgres_reader_url]
+    volumes:
+      - runtime-storage-secrets:/runtime
+      - gateway-storage-secrets:/gateway
+    networks: [runtime]
+    restart: "no"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    read_only: true
+
+  runtime-schema-init:
+    image: ${KALA_RUNTIME_IMAGE:?KALA_RUNTIME_IMAGE must be an immutable name@sha256 digest}
+    user: "0:0"
+    command:
+      - packages/host/dist/bin/kala-postgres-migrate.js
+      - --runtime-role
+      - ${KALA_RUNTIME_DML_ROLE:?set the existing Runtime DML role}
+      - --gateway-runtime-reader-role
+      - ${KALA_RUNTIME_READER_ROLE:?set the existing Gateway reader role}
+    environment:
+      KALA_POSTGRES_MIGRATION_CONNECTION_STRING_FILE: /run/secrets/runtime_postgres_owner_url
+    secrets: [runtime_postgres_owner_url]
+    networks: [egress]
+    restart: "no"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp:rw,noexec,nosuid,size=32m]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+    depends_on:
+      fresh-storage-claim: { condition: service_completed_successfully }
+
+  runtime-host:
+    environment:
+      KALA_RUNTIME_EXPERIMENTAL_DOCKER_STORAGE: "1"
+      KALA_RUNTIME_POSTGRES_SCHEMA_MODE: versioned
+      KALA_RUNTIME_EXPERIMENTAL_SESSION_OWNERSHIP: "1"
+      KALA_RUNTIME_NODE_ID: runtime-host
+      KALA_RUNTIME_NODE_ORIGIN: https://runtime-host:13002
+      KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_FILE: /run/kala-storage/runtime_postgres_writer_url
+      KALA_RUNTIME_EXPERIMENTAL_STATE_MASTER_KEY_FILE: /run/kala-storage/runtime_state_master_key
+      KALA_RUNTIME_EXPERIMENTAL_S3_ENDPOINT: ${KALA_S3_ENDPOINT:?set the S3-compatible endpoint}
+      KALA_RUNTIME_EXPERIMENTAL_S3_REGION: ${KALA_S3_REGION:?set the S3 region}
+      KALA_RUNTIME_EXPERIMENTAL_S3_BUCKET: ${KALA_S3_BUCKET:?set the existing S3 bucket}
+      KALA_RUNTIME_EXPERIMENTAL_S3_ACCESS_KEY_ID_FILE: /run/kala-storage/runtime_s3_access_key_id
+      KALA_RUNTIME_EXPERIMENTAL_S3_SECRET_ACCESS_KEY_FILE: /run/kala-storage/runtime_s3_secret_access_key
+      KALA_RUNTIME_EXPERIMENTAL_S3_MAX_OBJECT_BYTES: ${KALA_S3_MAX_OBJECT_BYTES:-10737418240}
+      KALA_RUNTIME_EXPERIMENTAL_S3_FORCE_PATH_STYLE: ${KALA_S3_FORCE_PATH_STYLE:-false}
+    # Replace the base tenant-data mount rather than merging another volume onto it.
+    # Scratch is disposable: committed Session/Queue/Artifact authority belongs to PG/S3.
+    volumes: !override
+      - host-secrets:/run/kala-secrets:ro
+      - ${KALA_DEPLOYMENT_CONFIG_FILE:-./deployment.json}:/etc/kala/deployment.json:ro
+      - runtime-storage-secrets:/run/kala-storage:ro
+    tmpfs:
+      - /var/lib/kala:rw,noexec,nosuid,size=256m,uid=65532,gid=65532,mode=0700
+    depends_on: !override
+      init-app-secrets: { condition: service_completed_successfully }
+      runtime-schema-init: { condition: service_completed_successfully }
+      init-storage-secrets: { condition: service_completed_successfully }
+
+  runtime-ingress:
+    environment:
+      KALA_INGRESS_LOGIN_STATE_STORE_KIND: postgres
+      KALA_INGRESS_EXPERIMENTAL_DOCKER_STORAGE: "1"
+      KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING_FILE: /run/kala-storage/runtime_postgres_reader_url
+      KALA_INGRESS_EXPERIMENTAL_RUNTIME_ORIGIN_ALLOWLIST: https://runtime-host:13002
+      KALA_INGRESS_EXPERIMENTAL_BOOTSTRAP_RUNTIME_ORIGIN: https://runtime-host:13002
+    volumes: !override
+      - gateway-secrets:/run/kala-secrets:ro
+      - gateway-storage-secrets:/run/kala-storage:ro
+    networks: !override
+      edge: { gw_priority: 1 }
+      runtime: {}
+    depends_on: !override
+      init-app-secrets: { condition: service_completed_successfully }
+      control-plane-init: { condition: service_completed_successfully }
+      init-storage-secrets: { condition: service_completed_successfully }
+      runtime-host: { condition: service_healthy }
+      dashboard: { condition: service_healthy }
+
+volumes:
+  runtime-storage-secrets: {}
+  gateway-storage-secrets: {}
+
+configs:
+  installation_id:
+    file: "${KALA_INSTALLATION_ID_FILE:?set the Operator-generated installation UUID file}"
+
+secrets:
+  control_postgres_migration_owner_url: { file: "${KALA_SECRETS_DIR:-./.secrets}/control_postgres_migration_owner_url" }
+  control_postgres_writer_url: { file: "${KALA_SECRETS_DIR:-./.secrets}/control_postgres_writer_url" }
+  runtime_postgres_owner_url: { file: "${KALA_SECRETS_DIR:-./.secrets}/runtime_postgres_owner_url" }
+  runtime_postgres_writer_url: { file: "${KALA_SECRETS_DIR:-./.secrets}/runtime_postgres_writer_url" }
+  runtime_postgres_reader_url: { file: "${KALA_SECRETS_DIR:-./.secrets}/runtime_postgres_reader_url" }
+  runtime_state_master_key: { file: "${KALA_SECRETS_DIR:-./.secrets}/runtime_state_master_key" }
+  runtime_s3_access_key_id: { file: "${KALA_SECRETS_DIR:-./.secrets}/runtime_s3_access_key_id" }
+  runtime_s3_secret_access_key: { file: "${KALA_SECRETS_DIR:-./.secrets}/runtime_s3_secret_access_key" }

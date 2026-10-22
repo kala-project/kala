@@ -3,7 +3,47 @@ import { fileURLToPath } from 'node:url'
 
 import { describe, expect, it } from 'vitest'
 
+import { grantControlWriter, resolveControlPlaneInitConfig } from './init-control-plane.js'
 import { initializePrivateCloudControlPlane } from './private-cloud-init.js'
+
+describe('control-plane migration connection configuration', () => {
+  it('uses an owner URL file and requires a pre-created external database without an admin credential', async () => {
+    const config = await resolveControlPlaneInitConfig({
+      KALA_INGRESS_DATABASE_URL_FILE: '/run/secrets/control-owner-url',
+      KALA_INGRESS_REQUIRE_EXISTING_DATABASE: '1',
+    }, async (path) => {
+      expect(path).toBe('/run/secrets/control-owner-url')
+      return 'postgresql://migration-owner:secret@db/control\n'
+    })
+
+    expect(config).toEqual({
+      databaseUrl: 'postgresql://migration-owner:secret@db/control',
+      requireExistingDatabase: true,
+    })
+  })
+
+  it('fails closed on ambiguous direct and file credentials', async () => {
+    await expect(resolveControlPlaneInitConfig({
+      KALA_INGRESS_DATABASE_URL: 'postgresql://direct/db',
+      KALA_INGRESS_DATABASE_URL_FILE: '/run/secrets/control-owner-url',
+      KALA_INGRESS_REQUIRE_EXISTING_DATABASE: '1',
+    })).rejects.toThrow('mutually exclusive')
+  })
+})
+
+describe('external control database writer grants', () => {
+  it('grants DML and sequence use but never schema ownership or DDL', async () => {
+    const statements: string[] = []
+    await grantControlWriter({ query: async (sql) => { statements.push(sql) } }, 'kala_control_writer')
+    expect(statements).toEqual([
+      'GRANT CONNECT ON DATABASE runlab_control TO "kala_control_writer"',
+      'GRANT USAGE ON SCHEMA public TO "kala_control_writer"',
+      'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "kala_control_writer"',
+      'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "kala_control_writer"',
+    ])
+    await expect(grantControlWriter({ query: async () => { throw new Error('query must not run') } }, 'writer";DROP TABLE organizations;--')).rejects.toThrow('simple lowercase')
+  })
+})
 
 describe('Private Cloud control-plane initialization', () => {
   it('migrates, restores control-data ownership, then imports a legacy JSON directory without putting the password in an argument', async () => {

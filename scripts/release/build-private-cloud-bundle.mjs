@@ -24,6 +24,7 @@ const files = [
   'deploy/private-cloud/compose.storage-nfs.yaml',
   'deploy/private-cloud/compose.storage-external-nfs.yaml',
   'deploy/private-cloud/compose.storage-local.yaml',
+  'deploy/private-cloud/compose.storage-postgres-s3.yaml',
   'deploy/private-cloud/compose.local.yaml',
   'deploy/private-cloud/compose.cloudflare.yaml',
   'deploy/private-cloud/compose.identity-local.yaml',

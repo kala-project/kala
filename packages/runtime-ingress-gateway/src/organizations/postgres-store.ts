@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import type { AuthenticatedIdentity } from '../assignments/store.js'
 import { identityKey, inviteKey } from '../assignments/store.js'
 import type { SqlExecutor } from '../persistence/postgres.js'
+import { ACTIVE_CONTRACT_SQL } from './contract-access.js'
 import { assertInviteExpiration, normalizeInviteEmail, type CreatedOrganizationInvite, type Organization, type OrganizationAccess, type OrganizationInvite, type OrganizationMembership, type OrganizationRole, type OrganizationStatus, type OrganizationStore } from './store.js'
 
 export class PostgresOrganizationStore implements OrganizationStore {
@@ -16,7 +17,9 @@ export class PostgresOrganizationStore implements OrganizationStore {
 
   async findAccess(identity: AuthenticatedIdentity): Promise<OrganizationAccess | undefined> {
     const result = await this.database.query<AccessRow>(`
-      SELECT o.id, o.name, o.status, o.runtime_unit_id, o.created_at, m.role, m.created_at AS membership_created_at
+      SELECT o.id, o.name,
+        CASE WHEN o.status = 'active' AND NOT ${ACTIVE_CONTRACT_SQL} THEN 'expired' ELSE o.status END AS status,
+        o.runtime_unit_id, o.created_at, m.role, m.created_at AS membership_created_at
       FROM principals p
       JOIN organization_memberships m ON m.principal_id = p.id AND m.status = 'active'
       JOIN organizations o ON o.id = m.organization_id
@@ -106,7 +109,7 @@ export class PostgresOrganizationStore implements OrganizationStore {
       FROM organization_memberships m JOIN principals p ON p.id = m.principal_id
       JOIN organizations o ON o.id = m.organization_id
       WHERE m.organization_id = $2 AND m.status = 'active' AND m.role IN ('owner','admin')
-        AND p.issuer = $7 AND p.subject = $8 AND o.status = 'active'
+        AND p.issuer = $7 AND p.subject = $8 AND o.status = 'active' AND ${ACTIVE_CONTRACT_SQL}
       RETURNING id, organization_id, email_normalized, role, created_at, expires_at, accepted_at, revoked_at`,
     [id, organizationId, normalizedEmail, role, inviteKey(token), expiresAt, createdBy.issuer, createdBy.subject])
     if (!result.rows[0]) throw new Error('invite_creator_not_authorized')
@@ -129,7 +132,9 @@ export class PostgresOrganizationStore implements OrganizationStore {
     if (!identity.email || identity.emailVerified !== true) throw new Error('invite_verified_email_required')
     const normalizedEmail = normalizeInviteEmail(identity.email)
     return this.database.transaction(async (transaction) => {
-      const invitation = await transaction.query<AcceptInviteRow>(`SELECT i.id, i.organization_id, i.email_normalized, i.role, o.name, o.status, o.runtime_unit_id, o.created_at AS organization_created_at
+      const invitation = await transaction.query<AcceptInviteRow>(`SELECT i.id, i.organization_id, i.email_normalized, i.role, o.name,
+        CASE WHEN o.status = 'active' AND NOT ${ACTIVE_CONTRACT_SQL} THEN 'expired' ELSE o.status END AS status,
+        o.runtime_unit_id, o.created_at AS organization_created_at
         FROM organization_invites i JOIN organizations o ON o.id = i.organization_id
         WHERE i.token_hash = $1 AND i.accepted_at IS NULL AND i.revoked_at IS NULL AND i.expires_at > now()
         FOR UPDATE OF i`, [inviteTokenHash])
@@ -167,7 +172,7 @@ export class PostgresOrganizationStore implements OrganizationStore {
   }
 
   async bindExecutorInvite(inviteToken: string, unitId: string): Promise<void> {
-    const organization = await this.database.query<{ id: string }>('SELECT id FROM organizations WHERE runtime_unit_id = $1 AND status = \'active\'', [unitId])
+    const organization = await this.database.query<{ id: string }>(`SELECT o.id FROM organizations o WHERE o.runtime_unit_id = $1 AND o.status = 'active' AND ${ACTIVE_CONTRACT_SQL}`, [unitId])
     if (!organization.rows[0]) throw new Error('organization not found')
     const pool = await this.database.query<{ id: string }>('SELECT id FROM executor_pools WHERE organization_id = $1 ORDER BY created_at LIMIT 1', [organization.rows[0].id])
     if (!pool.rows[0]) throw new Error('executor pool not configured')
@@ -187,7 +192,7 @@ export class PostgresOrganizationStore implements OrganizationStore {
     // validates invite expiry or the already-issued device credential.
     const result = await this.database.query<{ runtime_unit_id: string }>(`SELECT o.runtime_unit_id
       FROM executor_enrollment_tokens t JOIN organizations o ON o.id = t.organization_id
-      WHERE t.token_hash = $1 AND t.revoked_at IS NULL AND o.status = 'active'`, [inviteHash])
+      WHERE t.token_hash = $1 AND t.revoked_at IS NULL AND o.status = 'active' AND ${ACTIVE_CONTRACT_SQL}`, [inviteHash])
     return result.rows[0]?.runtime_unit_id
   }
 

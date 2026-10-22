@@ -1,4 +1,5 @@
 import { createServer, request as httpRequest } from 'node:http'
+import type { Duplex } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { issueRuntimeRoutingTicket } from '@agent-kernel/shared'
 
@@ -501,6 +502,94 @@ describe('Private Cloud edge request path', () => {
     expect(upgrades).toHaveLength(3)
   })
 
+  it('immediately closes an established browser WebSocket on local logout, without waiting for the next recheck', async () => {
+    const upstream = await heldWebSocketUpstream()
+    const gateway = await createGateway(upstream.origin, undefined, { organizations: new TestOrganizationStore(), socketRecheckMs: 60_000 })
+    const login = await fetch(`http://127.0.0.1:${gateway.port}/auth/login`, { redirect: 'manual' })
+    const nonce = cookieValue(login.headers.getSetCookie(), 'ak_login')
+    const callback = await fetch(`http://127.0.0.1:${gateway.port}/auth/callback?code=ok`, { headers: { cookie: `ak_login=${nonce}` }, redirect: 'manual' })
+    const session = cookieValue(callback.headers.getSetCookie(), 'ak_session')
+    const socket = await keepWebSocket(gateway.port, { cookie: `ak_session=${session}` })
+    expect(socket.destroyed).toBe(false)
+    const logout = await fetch(`http://127.0.0.1:${gateway.port}/auth/logout`, { method: 'POST', headers: { cookie: `ak_session=${session}`, origin: `http://127.0.0.1:${gateway.port}` } })
+    expect(logout.status).toBe(204)
+    await vi.waitFor(() => expect(socket.destroyed).toBe(true), { timeout: 1_000 })
+    await vi.waitFor(() => expect(upstream.active()).toBe(0), { timeout: 1_000 })
+  })
+
+  it('immediately tears down an active member WebSocket when an administrator changes its role', async () => {
+    const upstream = await heldWebSocketUpstream()
+    const organizations = new TestOrganizationStore()
+    const owner = { issuer: 'http://identity.example', subject: 'owner' }
+    const alice = { issuer: owner.issuer, subject: 'alice' }
+    const organization = (await organizations.getOrCreateForIdentity(owner)).organization
+    await organizations.addMember(organization.id, alice, 'member')
+    let loginAs: AuthenticatedIdentity = alice
+    const gateway = await createGateway(upstream.origin, undefined, { organizations, callbackIdentity: () => loginAs, socketRecheckMs: 60_000 })
+    const signIn = async () => {
+      const login = await fetch(`http://127.0.0.1:${gateway.port}/auth/login`, { redirect: 'manual' })
+      const nonce = cookieValue(login.headers.getSetCookie(), 'ak_login')
+      const callback = await fetch(`http://127.0.0.1:${gateway.port}/auth/callback?code=ok`, { headers: { cookie: `ak_login=${nonce}` }, redirect: 'manual' })
+      return cookieValue(callback.headers.getSetCookie(), 'ak_session')
+    }
+    const memberToken = await signIn()
+    const socket = await keepWebSocket(gateway.port, { cookie: `ak_session=${memberToken}` })
+    loginAs = owner
+    const ownerToken = await signIn()
+    const response = await fetch(`http://127.0.0.1:${gateway.port}/organization/members`, {
+      method: 'PATCH', headers: { cookie: `ak_session=${ownerToken}`, origin: `http://127.0.0.1:${gateway.port}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ issuer: alice.issuer, subject: alice.subject, role: 'viewer' }),
+    })
+    expect(response.status).toBe(204)
+    await vi.waitFor(() => expect(socket.destroyed).toBe(true), { timeout: 1_000 })
+    await vi.waitFor(() => expect(upstream.active()).toBe(0), { timeout: 1_000 })
+  })
+
+  it('closes an already-upgraded browser WebSocket when an external role or contract change invalidates its authority', async () => {
+    const upstream = await heldWebSocketUpstream()
+    const organizations = new TestOrganizationStore()
+    const owner = await organizations.getOrCreateForIdentity({ issuer: 'http://identity.example', subject: 'owner' })
+    const alice = { issuer: 'http://identity.example', subject: 'alice' }
+    await organizations.addMember(owner.organization.id, alice, 'member')
+    const gateway = await createGateway(upstream.origin, undefined, { organizations, socketRecheckMs: 20 })
+    const login = await fetch(`http://127.0.0.1:${gateway.port}/auth/login`, { redirect: 'manual' })
+    const nonce = cookieValue(login.headers.getSetCookie(), 'ak_login')
+    const callback = await fetch(`http://127.0.0.1:${gateway.port}/auth/callback?code=ok`, { headers: { cookie: `ak_login=${nonce}` }, redirect: 'manual' })
+    const session = cookieValue(callback.headers.getSetCookie(), 'ak_session')
+    const socket = await keepWebSocket(gateway.port, { cookie: `ak_session=${session}` })
+    expect(socket.destroyed).toBe(false)
+    await organizations.updateMemberRole(owner.organization.id, alice, 'viewer')
+    await vi.waitFor(() => expect(socket.destroyed).toBe(true), { timeout: 1_000 })
+    await organizations.updateMemberRole(owner.organization.id, alice, 'member')
+    const nextSocket = await keepWebSocket(gateway.port, { cookie: `ak_session=${session}` })
+    organizations.setStatus(owner.organization.id, 'expired')
+    await vi.waitFor(() => expect(nextSocket.destroyed).toBe(true), { timeout: 1_000 })
+    await vi.waitFor(() => expect(upstream.active()).toBe(0), { timeout: 1_000 })
+  })
+
+  it('terminates only the revoked Executor route and its upstream on the next authorization check', async () => {
+    const upstream = await heldWebSocketUpstream()
+    const directory = new class extends MemoryRuntimeAssignmentStore {
+      readonly blocked = new Set<string>()
+      override async findUnitByExecutorRouteHint(hash: string): Promise<string | undefined> {
+        return this.blocked.has(hash) ? undefined : super.findUnitByExecutorRouteHint(hash)
+      }
+    }()
+    await directory.bindExecutorInvite('executor-a', 'tenant_a')
+    await directory.bindExecutorInvite('executor-b', 'tenant_b')
+    const gateway = await createGateway(upstream.origin, undefined, { directory, socketRecheckMs: 20 })
+    const revoked = await keepWebSocket(gateway.port, { 'x-kala-executor-invite': 'executor-a' })
+    const other = await keepWebSocket(gateway.port, { 'x-kala-executor-route': inviteKey('executor-b') })
+    expect(upstream.active()).toBe(2)
+    directory.blocked.add(inviteKey('executor-a'))
+    await vi.waitFor(() => expect(revoked.destroyed).toBe(true), { timeout: 1_000 })
+    await vi.waitFor(() => expect(upstream.active()).toBe(1), { timeout: 1_000 })
+    expect(other.destroyed).toBe(false)
+    directory.blocked.add(inviteKey('executor-b'))
+    await vi.waitFor(() => expect(other.destroyed).toBe(true), { timeout: 1_000 })
+    await vi.waitFor(() => expect(upstream.active()).toBe(0), { timeout: 1_000 })
+  })
+
   it('discovers opaque active replicas and routes an Executor to the exact current member', async () => {
     const upgrades: Array<{ pod: string; replicaHeader?: string }> = []
     const startRuntime = async (pod: string) => {
@@ -863,6 +952,17 @@ describe('Private Cloud edge request path', () => {
     const runtimeResponse = await fetch(`http://127.0.0.1:${gateway.port}/runtime/capabilities`, { headers: { cookie: `ak_session=${session}` } })
     expect(runtimeResponse.status).toBe(403)
     expect(await runtimeResponse.json()).toEqual({ error: 'organization_not_active', status: 'suspended' })
+    organizations.setStatus(access!.organization.id, 'expired')
+    const expired = await fetch(`http://127.0.0.1:${gateway.port}/runtime/capabilities`, { headers: { cookie: `ak_session=${session}` } })
+    expect(expired.status).toBe(403)
+    expect(await expired.json()).toEqual({ error: 'organization_not_active', status: 'expired' })
+    for (const path of ['/organization', '/api/v1/service-accounts', '/api/v1/workspaces']) {
+      const denied = await fetch(`http://127.0.0.1:${gateway.port}${path}`, { headers: { cookie: `ak_session=${session}` } })
+      expect(denied.status).toBe(403)
+      expect(await denied.json()).toEqual({ error: 'organization_not_active', status: 'expired' })
+    }
+    const expiredMe = await fetch(`http://127.0.0.1:${gateway.port}/auth/me`, { headers: { cookie: `ak_session=${session}` } })
+    expect(await expiredMe.json()).toMatchObject({ authenticated: true, organization: { status: 'expired' } })
     expect(runtimePaths).toEqual([])
   })
 
@@ -969,6 +1069,7 @@ async function createGateway(
     directory?: MemoryRuntimeAssignmentStore
     runtimeOriginResolver?: RuntimeOriginResolver
     runtimeRoutingTicketResolver?: RuntimeRoutingTicketResolver
+    socketRecheckMs?: number
   },
 ): Promise<RuntimeIngressGateway> {
   const dir = mkdtempSync(join(tmpdir(), 'gateway-sessions-'))
@@ -989,6 +1090,7 @@ async function createGateway(
     ...(auth?.organizations ? { organizations: auth.organizations } : {}),
     ...(auth?.rateLimiter ? { rateLimiter: auth.rateLimiter } : {}),
     ...(auth?.serviceAccounts ? { serviceAccounts: auth.serviceAccounts } : {}),
+    ...(auth?.socketRecheckMs ? { socketRecheckMs: auth.socketRecheckMs } : {}),
     directory: auth?.directory ?? new MemoryRuntimeAssignmentStore(),
     loginStates: new MemoryLoginStates(),
     ...(auth?.enterpriseSso ? { enterpriseSso: auth.enterpriseSso } : {}),
@@ -1105,6 +1207,38 @@ class ServiceAccountAuthDatabase implements SqlExecutor {
 
 function sqlResult<Row extends Record<string, unknown>>(rows: Row[], rowCount = rows.length): SqlQueryResult<Row> {
   return { rows, rowCount, command: '', oid: 0, fields: [] }
+}
+
+async function heldWebSocketUpstream(): Promise<{ origin: string; active(): number }> {
+  const sockets = new Set<Duplex>()
+  const upstream = createServer()
+  upstream.on('upgrade', (_request, socket) => {
+    sockets.add(socket)
+    socket.once('close', () => sockets.delete(socket))
+    // A real Socket.IO server tears down the upgrade on inbound EOF; do not
+    // leave a half-open raw test socket that only closes during afterEach.
+    socket.once('end', () => socket.destroy())
+    socket.on('data', () => {})
+    socket.resume()
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
+  })
+  await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve))
+  running.push({ close: async () => {
+    for (const socket of sockets) socket.destroy()
+    await new Promise<void>((resolve) => upstream.close(() => resolve()))
+  } })
+  const address = upstream.address()
+  return { origin: `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`, active: () => sockets.size }
+}
+
+function keepWebSocket(port: number, headers: Record<string, string>): Promise<Duplex> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({ host: '127.0.0.1', port, path: '/socket.io/?EIO=4&transport=websocket', headers: { connection: 'Upgrade', upgrade: 'websocket', ...headers } })
+    request.once('upgrade', (_response, socket) => resolve(socket))
+    request.once('response', (response) => { response.resume(); reject(new Error(`upgrade rejected with HTTP ${response.statusCode ?? 0}`)) })
+    request.once('error', reject)
+    request.end()
+  })
 }
 
 function openWebSocket(port: number, headers: Record<string, string>, path = '/socket.io/?EIO=4&transport=websocket'): Promise<void> {

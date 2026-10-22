@@ -325,6 +325,8 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
       expect.objectContaining({ seq: 1, timing }),
     ])
     await expect(reader.store.readHistory(record.sessionId)).resolves.toEqual({
+      initialState: expect.objectContaining({ sessionId: record.sessionId, cursor: 0 }),
+      config,
       events: [expect.objectContaining({ seq: 1, timing })],
       runtimeMetadata: [
         expect.objectContaining({ action: 'message_queue_snapshot' }),
@@ -340,6 +342,67 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
       FROM tenant_session_latest_projection WHERE tenant_id = $1 AND session_id = $2`, ['tenant-a', record.sessionId])
     expect(projection.rows).toEqual([{ version: '4', cursor: '1' }])
     expect(existsSync(reader.root)).toBe(false)
+  })
+
+  it('forks from the durable event prefix instead of the latest projection and rejects conflicting children', async () => {
+    const writer = makeStore('fork-writer')
+    const parent = await writer.store.create({
+      sessionId: 'fork-parent',
+      config,
+      organizationId: 'org-a',
+      principal: 'principal-a',
+      organizationRole: 'member',
+      workspaceId: 'workspace-a',
+    })
+    const firstEvent = { kind: 'user_message', text: 'first' } as const
+    const first = step(parent.state, firstEvent, parent.config)
+    await writer.store.record(parent.sessionId, firstEvent, first.effects, first.next)
+    const secondEvent = {
+      kind: 'llm_response',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'second' }] },
+      usage: { inputTokens: 1, outputTokens: 1 },
+    } as const
+    const second = step(first.next, secondEvent, parent.config)
+    await writer.store.record(parent.sessionId, secondEvent, second.effects, second.next)
+
+    const child = await writer.store.fork({
+      sourceSessionId: parent.sessionId,
+      cursor: 1,
+      sessionId: 'fork-child',
+      preferences: { selectedModel: 'fork-model' },
+    })
+    expect(child.state).toEqual({ ...first.next, sessionId: child.sessionId })
+    expect(child.state).not.toEqual({ ...second.next, sessionId: child.sessionId })
+    expect(child).toMatchObject({
+      parentSessionId: parent.sessionId,
+      parentCursor: 1,
+      organizationId: 'org-a',
+      principal: 'principal-a',
+      organizationRole: 'member',
+      workspaceId: 'workspace-a',
+      preferences: { selectedModel: 'fork-model' },
+    })
+    expect((await writer.store.load(parent.sessionId)).state).toEqual(second.next)
+
+    await expect(writer.store.fork({
+      sourceSessionId: parent.sessionId,
+      cursor: 3,
+      sessionId: 'invalid-fork-child',
+    })).rejects.toThrow('Invalid fork cursor 3')
+    await expect(writer.authority.load('invalid-fork-child')).resolves.toBeUndefined()
+
+    const firstContender = makeStore('fork-contender-a')
+    const secondContender = makeStore('fork-contender-b')
+    const conflicts = await Promise.allSettled([
+      firstContender.store.fork({ sourceSessionId: parent.sessionId, cursor: 1, sessionId: 'fork-conflict-child' }),
+      secondContender.store.fork({ sourceSessionId: parent.sessionId, cursor: 2, sessionId: 'fork-conflict-child' }),
+    ])
+    expect(conflicts.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    expect(conflicts.filter((result) => result.status === 'rejected')).toHaveLength(1)
+    const conflictEvents = await writer.authority.hotState.replay({
+      tenantId: 'tenant-a', scopeType: 'session', scopeId: 'fork-conflict-child',
+    })
+    expect(conflictEvents.map((event) => event.eventType)).toEqual(['session.created'])
   })
 
   it('tombstones before cleanup and resumes a failed deletion after restart', async () => {

@@ -9,7 +9,10 @@ on:
         description: Product release tag
         required: true
       predecessor_tag:
-        description: Previously released Private Cloud version for clean upgrade and rollback acceptance
+        description: Historical Private Cloud candidate for non-certifying clean upgrade and rollback testing
+        required: false
+      unsupported_predecessor_override:
+        description: Exact predecessor tag acknowledging that the resulting migration evidence is non-certifying
         required: false
       native_operator:
         description: Build an additional native Operator artifact for manual qualification; signed bundles already include it
@@ -374,7 +377,7 @@ jobs:
             --revision "${{ needs.resolve.outputs.revision }}" \
             --operator release/kala-private-cloud-linux-x64 \
             --archive "release/kala-private-cloud-${{ needs.resolve.outputs.version }}-${{ matrix.target }}.tar.gz"
-          node scripts/release/verify-private-cloud-bundle.mjs release/private-cloud
+          node scripts/release/verify-private-cloud-bundle.mjs --release release/private-cloud
       - uses: sigstore/cosign-installer@v3
       - run: cosign sign-blob --yes --bundle release/private-cloud-${{ matrix.target }}.sigstore.json release/kala-private-cloud-${{ needs.resolve.outputs.version }}-${{ matrix.target }}.tar.gz
       - uses: actions/attest-build-provenance@v3
@@ -398,6 +401,7 @@ jobs:
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --draft --title "$TAG" --notes "Release assets are still being assembled." || gh release view "$TAG" >/dev/null
           fi
+          test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true
           gh release upload "$TAG" "$archive" "$signature" --clobber
           published="$(mktemp -d)"
           trap 'rm -rf "$published"' EXIT
@@ -582,6 +586,7 @@ jobs:
       PRIVATE_CLOUD_TEST_BOB_OIDC_ISSUER: ${{ vars.PRIVATE_CLOUD_TEST_BOB_OIDC_ISSUER }}
       PRIVATE_CLOUD_TEST_BOB_OIDC_SUBJECT: ${{ secrets.PRIVATE_CLOUD_TEST_BOB_OIDC_SUBJECT }}
       PREDECESSOR_TAG: ${{ inputs.predecessor_tag || vars.KALA_PRIVATE_CLOUD_PREDECESSOR_TAG }}
+      UNSUPPORTED_PREDECESSOR_OVERRIDE: ${{ inputs.unsupported_predecessor_override }}
       TAG: ${{ needs.resolve.outputs.tag }}
       VERSION: ${{ needs.resolve.outputs.version }}
     steps:
@@ -623,7 +628,8 @@ jobs:
           browser="$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
           test -n "$browser" && test -x "$browser"
           echo "CHROME_PATH=$browser" >> "$GITHUB_ENV"
-          [[ "$PREDECESSOR_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] && test "$PREDECESSOR_TAG" != "$TAG" || { echo 'Configure a distinct released predecessor tag' >&2; exit 1; }
+          [[ "$PREDECESSOR_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] && test "$PREDECESSOR_TAG" != "$TAG" || { echo 'Configure a distinct historical predecessor tag' >&2; exit 1; }
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch && test "$UNSUPPORTED_PREDECESSOR_OVERRIDE" = "$PREDECESSOR_TAG" || { echo 'No Private Cloud predecessor is currently certified; manually dispatch with unsupported_predecessor_override equal to the predecessor tag for non-certifying migration evidence' >&2; exit 1; }
           test -d "$KALA_RC_PRIVATE_CLOUD_CONFIG_TEMPLATE"
           test -x "${CHROME_PATH:-/snap/bin/chromium}"
           for key in PRIVATE_CLOUD_TEST_ALICE_EMAIL PRIVATE_CLOUD_TEST_ALICE_PASSWORD PRIVATE_CLOUD_TEST_ALICE_OIDC_ISSUER PRIVATE_CLOUD_TEST_ALICE_OIDC_SUBJECT PRIVATE_CLOUD_TEST_BOB_EMAIL PRIVATE_CLOUD_TEST_BOB_PASSWORD PRIVATE_CLOUD_TEST_BOB_OIDC_ISSUER PRIVATE_CLOUD_TEST_BOB_OIDC_SUBJECT; do
@@ -661,17 +667,18 @@ jobs:
           set -euo pipefail
           evidence="$RUNNER_TEMP/private-cloud-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.rc-evidence.json"
           node scripts/release/verify-private-cloud-clean-compose.mjs \
+            --non-certifying-predecessor \
             --candidate-archive "candidate/kala-private-cloud-${VERSION}-linux-x64.tar.gz" \
             --predecessor-archive "predecessor/kala-private-cloud-${PREDECESSOR_TAG#v}-linux-x64.tar.gz" \
             --executor executor/kala-executor-linux-x64 \
             --tag "$TAG" --revision "$GITHUB_SHA" \
             --predecessor-tag "$PREDECESSOR_TAG" --predecessor-revision "$PREDECESSOR_REVISION" --output "$evidence"
-          node -e 'const fs=require("node:fs");const e=JSON.parse(fs.readFileSync(process.argv[1]));if(!e.ok||Object.values(e.checks).some(v=>v!==true))process.exit(1)' "$evidence"
+          node -e 'const fs=require("node:fs");const e=JSON.parse(fs.readFileSync(process.argv[1]));if(e.category!=="private-cloud-predecessor"||e.certifying!==false||e.predecessorPolicy!=="unsupported-explicit-override"||!e.ok||Object.values(e.checks).some(v=>v!==true))process.exit(1)' "$evidence"
       - name: Archive digest-bound acceptance result
         if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: private-cloud-clean-compose-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          name: private-cloud-noncertifying-predecessor-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/private-cloud-${{ github.run_id }}-${{ github.run_attempt }}.rc-evidence.json
           if-no-files-found: warn
           retention-days: 30

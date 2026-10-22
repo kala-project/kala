@@ -1,6 +1,6 @@
 # TenantRuntimeUnit and Private Cloud Architecture
 
-**Status:** accepted architecture; Phases 0–6 implemented for the local single-node Private Cloud composition; Phase 7 partial
+**Status:** accepted Runtime architecture; Phases 0–6 implemented for the local single-node Private Cloud composition; Phase 7 partial. Enterprise Organization/RBAC requirements are governed by the [enterprise architecture contract](./private-cloud-enterprise-architecture-contract.md), not the historical first-release assumptions in this record. For target-versus-delivered scope and evidence, see the [design/status ledger](./private-cloud-design-status.md).
 **Normative mode contract:** [`deployment-mode-contract.md`](deployment-mode-contract.md)
 **Decision:** the canonical name is `TenantRuntimeUnit`
 **Scope:** Host-internal multi-tenant isolation and the user-operated Private Cloud control plane; the same Platform architecture supports Dedicated through `single-tenant` configuration
@@ -49,7 +49,7 @@ Each Unit has its own Socket.IO server and therefore its own namespaces, adapter
 
 ### 2.4 One codebase, no Private Cloud fork
 
-Dedicated and Private Cloud use the same Kernel, Host loop, Dashboard, protocol, Session JSONL, Artifact Registry, and Executor implementation. Deployment mode and capabilities change composition, not domain behavior.
+Dedicated and Private Cloud share Kernel, Host loop, Dashboard, Agent/Executor protocols and domain behavior. The current single-node composition uses Session JSONL and local Artifact storage; the enterprise Private Cloud target replaces these persistence authorities with tenant-scoped transactional state and S3-compatible object bytes through storage Ports. Sharing domain semantics does **not** require shipping JSONL or a Unit directory as the HA authority.
 
 ### 2.5 Feature disabling is authoritative
 
@@ -136,7 +136,7 @@ It requires separate `loaded` and `loading` maps so concurrent first requests ca
 
 For the first single-Host Private Cloud release, the external Control Plane is authoritative for whether a tenant exists and its desired lifecycle state; the Host catalog is a durable local materialization used for restart and reconciliation. The catalog must contain a schema version, Unit ID, expected routing-key digest/version, lifecycle generation, desired state, data-root identity, capabilities, and last successfully applied control-plane operation ID. Provision/suspend/delete are idempotent generation-checked operations written atomically before a Unit is published. On restart the Host reports its materialized generations and reconciles them with the Control Plane before accepting tenant traffic.
 
-The local catalog is explicitly not a future multi-node placement authority. A later scheduler must own placement through leases/fencing generations; one Unit generation may be writable on only one Host. No second Host may infer ownership merely from copied catalog files.
+The local catalog is explicitly not a multi-node placement authority. Exclusive-v1 placement fences one Host writer for a Unit generation; the future parallel target may admit multiple Runtime replicas in one Unit while fencing writes by Session/Task/resource owner. Neither protocol lets a second Host infer ownership from copied catalog files. See the [enterprise contract](./private-cloud-enterprise-architecture-contract.md#5-tenantruntimeunit-contract) and section 9.1 for the target versus the operator-gated experiment.
 
 ### 4.3 `TenantRuntimeUnitFactory`
 
@@ -227,12 +227,12 @@ The Gateway is responsible for:
 
 - registration and login integration
 - authenticated browser sessions
-- mapping users to Unit IDs
+- resolving authenticated Organization membership and Workspace authorization to the Organization's logical Unit
 - keeping all tenants on one product Origin
-- resolving the authenticated identity to an opaque internal Unit route
+- resolving the authorized Organization to an opaque internal Unit route
 - provisioning, suspending, and deleting Units
 - proxying HTTP, polling, WebSocket upgrade, and static Dashboard traffic
-- billing/account state, if later added
+- contract state, entitlements, and Organization lifecycle under the enterprise control-plane contract
 
 The Host is responsible for:
 
@@ -242,14 +242,15 @@ The Host is responsible for:
 - routing Unit-scoped executor connections
 - lifecycle, restart, health, and resource governance
 
-First Private Cloud release assumptions:
+Current single-node topology and enterprise scope:
 
-- one user maps to one tenant and one `TenantRuntimeUnit`
-- no teams or RBAC
-- no cross-tenant sharing
-- Agent functionality is enabled
-- Benchmark and Evaluation are disabled
-- all tenants run in one Host process, with process-level failure shared across tenants
+- one Organization (not one user) maps to one logical `TenantRuntimeUnit`; its members have Owner/Admin/Member/Viewer roles and Workspace grants defined by the [enterprise contract](./private-cloud-enterprise-architecture-contract.md)
+- no cross-Organization data access; a user cannot select another Organization by supplying a Unit route
+- Organization/contract provisioning is operator-controlled; first login never auto-creates an Organization
+- Agent functionality is enabled; Benchmark and Evaluation are disabled
+- the current default runs all Units in one Host process, with process-level failure shared across Organizations
+
+The original one-user/no-RBAC assumptions described a discarded first-release scope, **not** the current Private Cloud product contract. Enterprise Pilot acceptance and multi-node readiness are separate from the completed single-node Runtime phases.
 
 ## 7. Product Origin and trusted routing
 
@@ -262,10 +263,10 @@ https://runlab.example.com
 The URL does not contain a tenant slug, hostname, routing key, or Unit ID. The Gateway stores and resolves:
 
 ```text
-authenticated issuer + subject -> opaque Unit ID
+authenticated issuer + subject -> Organization membership + Workspace authorization + placement -> opaque Unit ID
 ```
 
-The browser does not choose the Unit ID. For every HTTP request, Engine.IO poll, and WebSocket upgrade, the Gateway verifies its signed login session, resolves the identity assignment, overwrites internal routing headers, and proxies to private Host ingress.
+The browser does not choose the Unit ID. For every HTTP request, Engine.IO poll, and WebSocket upgrade, the Gateway validates the revocable browser session, resolves Organization membership, Workspace authorization, contract and placement, strips caller-supplied routing headers, and proxies a trusted route to private Host ingress.
 
 Recommended trust model:
 
@@ -358,11 +359,11 @@ Do not silently fall back to one shared Socket.IO server with tenant-prefixed Ro
 
 The Host ingress owns an ephemeral `engineSid -> { unitId, routingKeyVersion }` binding created only after the target Unit accepts the Engine.IO handshake. Later polling POST/GET and upgrade requests resolve through that binding and reject any conflicting route. Bindings expire when Engine.IO closes or its recovery horizon expires; they are never reconstructed from browser input. Unit suspend/delete invalidates new handshakes and drains or terminates existing bindings according to lifecycle policy. After a Host process restart, clients perform a new trusted route handshake; the Host does not pretend that in-memory Engine.IO bindings survived.
 
-The Gateway and Host route must remain stable for the full Engine.IO connection. Future horizontal scaling requires routing a Unit to one Host node or a compatible distributed Socket.IO adapter; it is explicitly out of scope for the first release.
+The Gateway and Host route must remain stable for the full Engine.IO connection. In exclusive placement the whole Unit routes to one Host; in the scalable target independent Sessions may have different owners, so established sockets stay pinned to their authenticated owner and clients reconnect through server-derived placement after takeover. A distributed Socket.IO adapter is an alternative only if it preserves the same authorization, isolation and recovery contract; none of this is part of the current release.
 
 ## 9. Storage isolation
 
-Target layout:
+Current single-host `local-volume` layout (not the multi-node storage target):
 
 ```text
 data/
@@ -387,7 +388,7 @@ Rules:
 - Artifact reads require a session in the same Unit, preserving the existing session-bound rule.
 - Workspace and Executor lookup occurs only in the Unit's registries.
 - Global process caches may contain only immutable shared assets or entries explicitly keyed by Unit ID.
-- Backups, retention, export, and deletion operate on a Unit root, with deletion requiring a drained Unit.
+- For the single-host local-volume profile, backups, retention, export and deletion operate on a Unit root, with deletion requiring a drained Unit. In the enterprise target these operations span transactional PG state, object versions, control-plane records and secrets; a copied Unit directory cannot be treated as a complete backup or migration.
 
 ### 9.1 Final multi-node target (not current behavior)
 
@@ -399,9 +400,12 @@ volume. Session and Task work for that Unit may be placed on any eligible
 Runtime replica, subject to the ownership rules below.
 
 This is an explicit future target, not a description of the repository today.
-The current Private Cloud Compose `runtime-host` mounts `tenant-data`, and the
+The default Private Cloud Compose `runtime-host` mounts `tenant-data`, and the
 Runtime service creates a directory for each Unit beneath its configured data
-root. The production composition remains local and single-node. The opt-in
+root. That beta composition remains local and single-node. A separate opt-in
+single-Runtime [PG/S3 evaluation profile](../operations/private-cloud-postgres-s3-profile.md)
+replaces this Runtime volume with bounded tmpfs scratch and operator-managed PG/S3;
+it is not a release upgrade or HA acceptance. The opt-in
 experiment below adds transactional PostgreSQL state, S3 objects, Gateway live
 Unit placement and database-level fencing; the operator-gated `parallel-v1`
 variant has demonstrated simultaneous **different-Session** work on two real
@@ -525,7 +529,17 @@ The repository now contains an **experimental, opt-in** slice toward this target
   Dashboard and Public API Session-tree deletion precheck every descendant's
   owner before doing external cleanup; this precheck cannot fence a remote
   effect already started or make an entire multi-Session deletion atomic.
-  Other indirect RPCs and non-transactional side effects still require audit.
+  Dashboard workspace command execution, directory creation, background kill,
+  terminal create/input/resize/kill, and memory consolidation now recheck the
+  live Session owner immediately before dispatching to an Executor or model.
+  Temporary terminal IDs resolve to the real Session owner. For parallel-v1,
+  workspace-only mutations on a multiplexed control socket fail closed because
+  they cannot identify a unique owner; directory picking before a Session is
+  bound remains supported only in dedicated mode without tenant ingress.
+  Socket.IO stale-owner regressions assert no Executor/model dispatch, and the isolated Docker
+  two-Runtime takeover regression still passes; the Docker scenario does not
+  independently exercise every external-effect RPC after takeover. Other
+  indirect RPCs and non-transactional side effects still require audit.
   This optional mode requires a trusted Unit ID and an operator-migrated schema;
   v5 adds the mixed-version barrier and v6 adds upload-intent leases, but neither
   proves every-write owner
@@ -682,14 +696,18 @@ autoscaling, or exactly-once in-flight external effects.
 The Runtime is therefore **not fully stateless**. The PG/S3 experiment keeps
 no embedded Executor or its physical workspace, but not every Host path has
 been proven free of local durable state: local trace/message-assembly capture
-is disabled in the PG/S3 experiment, while export paths, capacity/accounting
-and other filesystem or process-local state still need explicit migration or
-fail-closed isolation. Dashboard history now reads authoritative PG events and
-Host metadata; PG-mode fork and local trace artifacts explicitly fail closed
-because the initial fork state and trace files are not yet durable across
-replicas. Export/profile HTTP paths also still assume a local JSONL and are
-not supported as Private Cloud cross-node operations. External Executors must retain
-workspace data and execution receipts outside Runtime Pods. A VAPID key pair,
+is disabled in the PG/S3 experiment, while export/profile/trace capabilities
+are gated rather than made durable. Capacity/accounting and other filesystem or
+process-local state still need explicit migration or fail-closed isolation.
+Dashboard history now reads authoritative PG events and Host metadata. PG-mode
+fork now reads the persisted creation state and exact event prefix, then creates
+the child under source/child ownership fencing before publishing success. This
+is validated for the isolated PG Session slice, not an all-capabilities HA
+guarantee. Local trace artifacts still fail closed; file-based enhancement
+actions, including export/profile/trace, reject PG-backed Sessions even if the
+caller supplies a `rootDir`, rather than returning disposable file paths. They
+are not supported as Private Cloud cross-node operations. External Executors
+must retain workspace data and execution receipts outside Runtime Pods. A VAPID key pair,
 if Push is enabled, needs a stable externally managed secret across all eligible
 nodes. The production Private Cloud Compose still mounts `tenant-data`; the PostgreSQL/S3
 and multi-Runtime experiment switches are not enabled in production. An opt-in
@@ -1034,7 +1052,7 @@ Avoid unbounded high-cardinality public metric labels. Per-Unit detail can live 
 
 ## 16. External Private Cloud components
 
-A complete Private Cloud deployment adds components outside the Host repository boundary or in separate packages:
+Private Cloud also requires components outside the Host's Agent runtime boundary. The Gateway is already implemented in a separate package in this repository; other enterprise components in the target diagram are not necessarily installed by default (see the [design/status ledger](./private-cloud-design-status.md)):
 
 ### 16.1 Private Cloud Gateway/Control Plane
 
@@ -1042,13 +1060,13 @@ Responsibilities:
 
 - OSS identity-provider integration
 - browser login/session handling
-- user-to-Unit mapping
-- single-Origin authenticated Unit assignment
+- Organization membership, Workspace authorization and server-derived Unit placement
+- single-Origin authenticated Organization-to-Unit routing
 - trusted HTTP and Socket.IO proxying
 - Unit provisioning/lifecycle calls
 - account suspension/deletion workflow
 
-Suggested package boundary if maintained in this repository:
+Current Gateway package boundary:
 
 ```text
 packages/runtime-ingress-gateway/
@@ -1062,15 +1080,7 @@ A self-hosted OSS identity provider such as ZITADEL can provide registration, pa
 
 ### 16.3 Deployment
 
-Docker may package the shared Private Cloud services:
-
-```text
-Gateway container
-Host container
-Identity-service container
-Identity database
-Reverse proxy
-```
+The current single-node Compose deployment packages `runtime-ingress` (the Kala application Gateway), `runtime-host`, Dashboard and the control-plane PostgreSQL service. The optional bundled-identity override adds ZITADEL, its database and a Caddy `identity-proxy` **only for identity traffic**; external OIDC does not use that proxy. Remotely published HTTPS/TLS termination requires a separately configured operator ingress and is not implied by the local loopback quick-install. See the [default Compose](../../deploy/private-cloud/compose.yaml) and [first-install guide](../operations/private-cloud-first-install.md).
 
 Docker is not the tenant boundary; `TenantRuntimeUnit` is the Host's logical tenant boundary. Dedicated remains installable without Docker.
 
@@ -1156,11 +1166,11 @@ Before broad refactoring:
 
 - add or deploy the separate Gateway/Control Plane
 - integrate an OSS identity provider outside Host
-- implement user-to-Unit mapping and first-login provisioning
-- resolve each authenticated identity to its private Unit while retaining one product Origin
+- resolve a provisioned Organization and its members to the Organization's logical Unit; first login does not provision an Organization
+- resolve each authenticated and authorized request to its Organization Unit while retaining one product Origin
 - proxy static assets, HTTP, polling, and WebSocket upgrades with stable route binding
 
-**Gate:** end-to-end registration/login creates one Unit, remains on the shared product Origin, runs an Agent session, reconnects, and cannot access a second test user's Unit.
+**Gate (local single-node):** an operator provisions an Organization and verifies the first owner; its authorized members sign in on the shared product Origin, run an Agent session and reconnect, while a second Organization cannot read or mutate their Unit. Login alone never creates an Organization. This gate does not certify the complete enterprise Pilot matrix.
 
 ### Phase 7 — production operations — partial
 

@@ -718,12 +718,20 @@ export async function startHostServer(
     const existingOperation = await store.findOperation(sessionId, operationId, operationScan)
     if (existingOperation?.kind === 'event') {
       assertMessageOperationCompatible(existingOperation.event, text, content)
+      await messageAttachments?.commitReferences(sessionId, content)
       return { accepted: true, committed: true, cursor: existingOperation.cursor }
     }
     if (existingOperation?.kind === 'runtime_metadata') {
       assertCopilotOperationCompatible(existingOperation, text, content)
+      await messageAttachments?.commitReferences(sessionId, content)
       return { accepted: true, committed: true, cursor: record.state.cursor }
     }
+    // The queue can dispatch immediately after its PostgreSQL write. Protect
+    // uploaded S3 objects first, including on HTTP/Gateway admission paths;
+    // never acknowledge a queued message whose pending attachment may expire.
+    // An admission failure after this step conservatively retains the object
+    // until Session deletion rather than risking loss of acknowledged data.
+    await messageAttachments?.commitReferences(sessionId, content)
     if (record.agentRuntime !== 'kernel') {
       const resting = isRestingStatus(record.state.status)
       await messageQueues.enqueue(sessionId, {

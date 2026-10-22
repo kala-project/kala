@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
 import type { SqlExecutor } from '../persistence/postgres.js'
+import { ACTIVE_CONTRACT_SQL } from '../organizations/contract-access.js'
 
 export type ServiceAccountScope = 'organization:read' | 'organization:write' | 'workspace:read' | 'workspace:write' | 'audit:read'
 const SERVICE_ACCOUNT_SCOPES = new Set<ServiceAccountScope>(['organization:read', 'organization:write', 'workspace:read', 'workspace:write', 'audit:read'])
@@ -81,9 +82,10 @@ export class ServiceAccountService {
   async authenticate(token: string): Promise<{ principalId: string; organizationId: string; unitId: string; organizationStatus: string; scopes: readonly ServiceAccountScope[] } | undefined> {
     const result = await this.database.query<{ principal_id: string; organization_id: string; runtime_unit_id: string; organization_status: string; scopes: ServiceAccountScope[] }>(`
       SELECT tokens.principal_id, tokens.organization_id, tokens.scopes,
-             organizations.runtime_unit_id, organizations.status AS organization_status
+             o.runtime_unit_id,
+             CASE WHEN o.status = 'active' AND NOT ${ACTIVE_CONTRACT_SQL} THEN 'expired' ELSE o.status END AS organization_status
       FROM service_account_tokens AS tokens
-      JOIN organizations ON organizations.id = tokens.organization_id
+      JOIN organizations o ON o.id = tokens.organization_id
       WHERE tokens.token_hash=$1 AND tokens.revoked_at IS NULL
         AND (tokens.expires_at IS NULL OR tokens.expires_at>now())
     `, [hash(token)])

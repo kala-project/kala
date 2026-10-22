@@ -1,6 +1,6 @@
 # Private Cloud Enterprise Benchmark Matrix
 
-Status: normative planning input
+Status: normative planning input — decisions and Pilot exit criteria, not proof of implementation or release acceptance. Compare the [enterprise architecture contract](./private-cloud-enterprise-architecture-contract.md) with the [design/status ledger](./private-cloud-design-status.md) and the [release evidence](../operations/private-cloud-release.md) before claiming a capability is shipped.
 Scope: trusted enterprise customers, manually provisioned contracts, customer-managed outbound Executor
 Non-goals: public self-service billing, public untrusted code execution, an in-product ticketing system
 

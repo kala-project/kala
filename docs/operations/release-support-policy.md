@@ -1,10 +1,13 @@
 # Release and support policy
 
 Kala is pre-1.0 software. The supported public channel is the newest stable
-GitHub Release identified by one product tag, currently `v0.2.0`. A release
-remains a draft until the three-platform
-Portable install/reinstall matrix and the release asset and image security gates
-in `public-release-readiness.md` have attached evidence. Source from
+GitHub Release identified by one product tag, currently `v0.2.0`. A publicly
+available beta asset can be signed and downloadable without being part of this
+stable supported channel; see the [Private Cloud release evidence](./private-cloud-release.md)
+and [design/status ledger](../architecture/private-cloud-design-status.md). Promotion
+to the stable supported channel requires the three-platform Portable
+install/reinstall matrix and the release asset and image security gates in
+`public-release-readiness.md` to have attached evidence. Source from
 an arbitrary commit, nightly artifacts, mutable container tags, and development
 Compose overrides are unsupported.
 
@@ -34,7 +37,7 @@ candidate without that evidence. See the [Private Cloud first-install guide](./p
 for the operator-assisted onboarding path. Browser support targets
 the current and previous major Chromium releases.
 
-## Unreleased v0.3.0-beta.19 candidate policy
+## Publicly downloadable v0.3.0-beta.19 candidate (not production-supported)
 
 The immutable `v0.3.0-beta.1` tag remains a failed candidate: its hosted Windows
 version-policy check failed before a public GitHub Release. The immutable
@@ -123,16 +126,25 @@ final evidence assertions on a test-harness mistake: it expected
 HTTP 200 for Bob's successful attachment creation, while the product correctly
 returns HTTP 201. The final quota report and backup/restore gate were not
 accepted, so beta.17 remains an unpublished, unsupported draft. The `v0.3.0-beta.18` record is retained as an unsupported historical candidate;
-its existence or built assets do not establish acceptance or support. Canonical
-package metadata and the exact-tag Portable OCI workflow now identify
-`v0.3.0-beta.19` as the active candidate. Beta.19 is not yet a supported public
-release. Its proposed default asset contract is Linux x64 and macOS x64/arm64
+its existence or built assets do not establish acceptance or support. No Private
+Cloud predecessor is currently certified. A manual migration experiment against
+an historical candidate must use the workflow's exact-tag
+`unsupported_predecessor_override`; its evidence is marked `certifying: false`
+and cannot substitute for mandatory fresh-candidate evidence. Canonical package
+metadata and the exact-tag Portable OCI workflow now identify
+`v0.3.0-beta.19` as the active candidate. Its signed Linux x64 Private Cloud
+bundle is publicly downloadable and passed a local fresh-install replay; that
+is **not** a passing hosted clean-VM certification or production support for
+beta.19. The local evidence and its exact revision are recorded in the
+[Private Cloud release document](./private-cloud-release.md).
+Its proposed default asset contract is Linux x64 and macOS x64/arm64
 OS-native Executor plus Node.js 22+ CJS Portable Host and Dedicated components. Host and Dedicated
 self-contained native binaries are only manual qualification artifacts, not
-part of the signed default inventory. The Private Cloud signed bundle defaults
-to a JS Operator (Node.js 22+ on the installation host) and single-host
-`local-volume` storage. Local NFS requires an explicit experimental choice;
-there is no full-stack NFS acceptance evidence. Windows x64 Portable Host CJS
+part of the signed default inventory. The Private Cloud signed bundle contains a Linux x64 native Operator and its
+three images are Linux amd64 only; Node.js is not required on the installation
+host. Linux arm64 Operator bundles and images are paused and unaccepted. The
+default is single-host `local-volume` storage. Local NFS requires an explicit
+experimental choice; there is no full-stack NFS acceptance evidence. Windows x64 Portable Host CJS
 and OS-native Executor with ConPTY are separate pending runner gates and must
 not be advertised as shipped until both their actual assets and end-to-end
 results pass. For the candidate, Windows Host is **Node.js 22+ CJS**, not an
@@ -150,7 +162,8 @@ source checkout.
 
 Earlier candidates passed signed Portable OCI scanning and hosted Docker
 acceptance, but beta.19 must independently pass its exact-digest gates and
-anonymous full pulls before public promotion. None of these candidate policies
+anonymous full pulls before promotion to the stable supported channel. Public
+beta asset availability alone does not satisfy these gates. None of these candidate policies
 retroactively alters the `v0.2.0` support claim above.
 
 ### Release-state and acceptance contract

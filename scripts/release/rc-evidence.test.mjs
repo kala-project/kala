@@ -21,6 +21,18 @@ test('requires mTLS, cross-Unit limits and restart recovery in Private Cloud acc
   }
 })
 
+test('predecessor evidence is formally validated as non-certifying and cannot enter the promotion matrix', () => {
+  const predecessor = create('private-cloud-predecessor', 'linux-x64-compose')
+  assert.equal(validateRcEvidence(predecessor), predecessor)
+  assert.equal(predecessor.certifying, false)
+  assert.equal(predecessor.predecessorPolicy, 'unsupported-explicit-override')
+  assert.throws(() => validateRcEvidence({ ...predecessor, certifying: true }), /explicitly non-certifying/u)
+  assert.throws(() => validateRcEvidence({ ...predecessor, predecessorPolicy: 'certified' }), /supported predecessor policy/u)
+  const portable = requiredReleaseEvidence.portable.targets.map((target) => create('portable', target))
+  assert.throws(() => verifyRcEvidenceSet([...portable, predecessor], { tag, revision }), /unexpected targets/u)
+  assert.throws(() => validateRcEvidence({ ...create('private-cloud', 'linux-x64-compose-fresh'), certifying: false, predecessorPolicy: 'unsupported-explicit-override' }), /must not declare predecessor/u)
+})
+
 test('fresh Private Cloud evidence requires candidate-first and digest-pinning checks without lifecycle claims', () => {
   const record = create('private-cloud', 'linux-x64-compose-fresh')
   assert.equal(validateRcEvidence(record), record)
@@ -67,6 +79,7 @@ function create(category, target) {
     category, target, tag, version: tag.slice(1), revision, ok: true,
     artifact,
     ...(windows ? { artifacts: windowsNames.map((name) => ({ name, sha256: 'b'.repeat(64) })) } : {}),
+    ...(requiredReleaseEvidence[category].certifying === false ? { certifying: false, predecessorPolicy: requiredReleaseEvidence[category].predecessorPolicy } : {}),
     checks: Object.fromEntries(checks.map((name) => [name, true])),
     generatedAt: '2026-08-21T00:00:00.000Z',
   })

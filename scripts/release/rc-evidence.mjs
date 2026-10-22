@@ -26,9 +26,15 @@ export const requiredReleaseEvidence = Object.freeze({
       'linux-x64-compose-fresh': Object.freeze(['assetIntegrity', 'imageDigestPinning', 'freshCandidateInstall', 'ephemeralBundledAcceptance', 'realBundledIdentities', 'authenticatedModelFixture', 'organizationProvisioning', 'tenantIsolation', 'browser', 'executor', 'mtlsClientRejection', 'unitResourceIsolation', 'runtimeRestartRecovery', 'backupRestore']),
     }),
   }),
+  'private-cloud-predecessor': Object.freeze({
+    targets: Object.freeze(['linux-x64-compose']),
+    checks: Object.freeze(['assetIntegrity', 'cleanInstall', 'organizationProvisioning', 'tenantIsolation', 'browser', 'executor', 'fullUpgrade', 'mtlsClientRejection', 'unitResourceIsolation', 'runtimeRestartRecovery', 'dashboardUpgradeIsolation', 'rollback', 'backupRestore']),
+    certifying: false,
+    predecessorPolicy: 'unsupported-explicit-override',
+  }),
 })
 
-const topLevelFields = new Set(['schemaVersion', 'category', 'tag', 'version', 'revision', 'target', 'artifact', 'artifacts', 'ok', 'checks', 'generatedAt'])
+const topLevelFields = new Set(['schemaVersion', 'category', 'tag', 'version', 'revision', 'target', 'artifact', 'artifacts', 'ok', 'checks', 'generatedAt', 'certifying', 'predecessorPolicy'])
 const windowsPortableArtifacts = Object.freeze([
   'kala-dashboard-with-runtime.cjs',
   'kala-executor-win32-x64.exe',
@@ -53,6 +59,8 @@ export function createRcEvidence(input) {
     target: input.target,
     artifact: input.artifact,
     ...(input.artifacts ? { artifacts: input.artifacts } : {}),
+    ...(input.certifying !== undefined ? { certifying: input.certifying } : {}),
+    ...(input.predecessorPolicy !== undefined ? { predecessorPolicy: input.predecessorPolicy } : {}),
     ok: input.ok,
     checks: input.checks,
     generatedAt: input.generatedAt ?? new Date().toISOString(),
@@ -74,6 +82,11 @@ export function validateRcEvidence(value, expected = {}) {
   validateArtifact(value.artifact, 'release evidence artifact')
   const targetChecks = policy.targetChecks?.[value.target]
   const requiredChecks = targetChecks ?? policy.checks
+  if (policy.certifying === false) {
+    if (value.certifying !== false || value.predecessorPolicy !== policy.predecessorPolicy) throw new Error(value.category + ' evidence must be explicitly non-certifying under the supported predecessor policy')
+  } else if (value.certifying !== undefined || value.predecessorPolicy !== undefined) {
+    throw new Error(value.category + ' evidence must not declare predecessor certification fields')
+  }
   if (value.category === 'portable' && value.target === 'win32-x64') {
     if (!Array.isArray(value.artifacts)) throw new Error('Windows Portable evidence must bind the complete release asset set')
     value.artifacts.forEach((artifact, index) => validateArtifact(artifact, `Windows Portable evidence artifact ${index}`))

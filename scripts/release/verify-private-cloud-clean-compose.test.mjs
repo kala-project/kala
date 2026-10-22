@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 
@@ -61,6 +62,29 @@ test('requires independent exact OIDC subjects and never falls back to owner ema
   assert.match(duplicate.stderr, /distinct exact OIDC issuer\/sub identities/u)
 })
 
+test('restores signed bundle file modes even under a strict host umask', () => {
+  const source = readFileSync(resolve(root, script), 'utf8')
+  assert.match(source, /run\('tar', \['--same-permissions', '-xzf', archive, '-C', destination\]\)/u)
+  const scratch = mkdtempSync(join(tmpdir(), 'kala-bundle-permissions-'))
+  try {
+    const bundle = join(scratch, 'bundle')
+    const output = join(scratch, 'output')
+    mkdirSync(bundle)
+    mkdirSync(output)
+    const caddyfile = join(bundle, 'identity-local.Caddyfile')
+    writeFileSync(caddyfile, 'respond /debug/healthz 200\n')
+    chmodSync(caddyfile, 0o644)
+    const archive = join(scratch, 'bundle.tar.gz')
+    const packed = spawnSync('tar', ['-czf', archive, '-C', bundle, '.'], { encoding: 'utf8' })
+    assert.equal(packed.status, 0, packed.stderr)
+    const extracted = spawnSync('sh', ['-c', 'umask 077; tar --same-permissions -xzf "$1" -C "$2"', 'sh', archive, output], { encoding: 'utf8' })
+    assert.equal(extracted.status, 0, extracted.stderr)
+    assert.equal(statSync(join(output, 'identity-local.Caddyfile')).mode & 0o777, 0o644)
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
 test('installs either the candidate or predecessor before provisioning and first login', () => {
   const source = readFileSync(resolve(root, script), 'utf8')
   const selection = source.indexOf('const initialBundle = freshCandidate ? candidate : predecessor')
@@ -72,11 +96,15 @@ test('installs either the candidate or predecessor before provisioning and first
   assert.match(source, /worktreeOperator = join\(root, 'scripts\/deploy\/kala-private-cloud\.mjs'\)/u)
 })
 
-test('predecessor lifecycle binds signed archive version and revision to the selected tag', () => {
+test('predecessor lifecycle binds signed archive identity and emits formal non-certifying evidence', () => {
   const source = readFileSync(resolve(root, script), 'utf8')
   assert.match(source, /predecessorTag = freshCandidate \? undefined : required\('--predecessor-tag'\)/u)
   assert.match(source, /predecessorManifest\.revision !== predecessorRevision/u)
   assert.match(source, /predecessorManifest\.version !== predecessorTag\.slice\(1\)/u)
+  assert.match(source, /nonCertifyingPredecessor = process\.argv\.includes\('--non-certifying-predecessor'\)/u)
+  assert.match(source, /category = freshCandidate \? 'private-cloud' : 'private-cloud-predecessor'/u)
+  assert.match(source, /certifying: false, predecessorPolicy: 'unsupported-explicit-override'/u)
+  assert.match(source, /verify-private-cloud-bundle\.mjs', '--release', path/u)
 })
 
 test('fresh mode requires no predecessor and proves candidate checks without upgrade or rollback claims', () => {

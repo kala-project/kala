@@ -49,7 +49,7 @@ function required(name: string): string {
 }
 
 async function main(): Promise<void> {
-  const experimentalStorage = readExperimentalDockerStorageConfig()
+  const experimentalStorage = await readExperimentalDockerStorageConfig()
   const sessionOwnershipFlag = process.env.KALA_RUNTIME_EXPERIMENTAL_SESSION_OWNERSHIP
   if (sessionOwnershipFlag !== undefined && sessionOwnershipFlag !== '1') {
     throw new Error('KALA_RUNTIME_EXPERIMENTAL_SESSION_OWNERSHIP must be 1 when set')
@@ -316,26 +316,32 @@ type ExperimentalDockerStorageConfig = {
 }
 
 const EXPERIMENTAL_STORAGE_FLAG = 'KALA_RUNTIME_EXPERIMENTAL_DOCKER_STORAGE'
-const EXPERIMENTAL_STORAGE_ENV = [
+const EXPERIMENTAL_STORAGE_SECRET_ENV = [
   'KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING',
+  'KALA_RUNTIME_EXPERIMENTAL_S3_ACCESS_KEY_ID',
+  'KALA_RUNTIME_EXPERIMENTAL_S3_SECRET_ACCESS_KEY',
+] as const
+const EXPERIMENTAL_STORAGE_ENV = [
   'KALA_RUNTIME_EXPERIMENTAL_S3_ENDPOINT',
   'KALA_RUNTIME_EXPERIMENTAL_S3_REGION',
   'KALA_RUNTIME_EXPERIMENTAL_S3_BUCKET',
-  'KALA_RUNTIME_EXPERIMENTAL_S3_ACCESS_KEY_ID',
-  'KALA_RUNTIME_EXPERIMENTAL_S3_SECRET_ACCESS_KEY',
   'KALA_RUNTIME_EXPERIMENTAL_S3_MAX_OBJECT_BYTES',
   'KALA_RUNTIME_EXPERIMENTAL_S3_FORCE_PATH_STYLE',
   'KALA_RUNTIME_EXPERIMENTAL_STATE_MASTER_KEY_FILE',
 ] as const
 
-function readExperimentalDockerStorageConfig(): ExperimentalDockerStorageConfig | undefined {
+async function readExperimentalDockerStorageConfig(): Promise<ExperimentalDockerStorageConfig | undefined> {
   const enabled = process.env[EXPERIMENTAL_STORAGE_FLAG]
   const configured = EXPERIMENTAL_STORAGE_ENV.some((name) => process.env[name] !== undefined)
+    || EXPERIMENTAL_STORAGE_SECRET_ENV.some((name) => process.env[name] !== undefined || process.env[`${name}_FILE`] !== undefined)
   if (enabled === undefined && !configured) return undefined
   if (enabled !== '1') {
     throw new Error(`${EXPERIMENTAL_STORAGE_FLAG}=1 is required when experimental DB/S3 storage is configured`)
   }
   const values = Object.fromEntries(EXPERIMENTAL_STORAGE_ENV.map((name) => [name, required(name)]))
+  const connectionString = await readRequiredExperimentalStorageSecret('KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING')
+  const accessKeyId = await readRequiredExperimentalStorageSecret('KALA_RUNTIME_EXPERIMENTAL_S3_ACCESS_KEY_ID')
+  const secretAccessKey = await readRequiredExperimentalStorageSecret('KALA_RUNTIME_EXPERIMENTAL_S3_SECRET_ACCESS_KEY')
   const maxObjectBytes = Number(values.KALA_RUNTIME_EXPERIMENTAL_S3_MAX_OBJECT_BYTES)
   if (!Number.isSafeInteger(maxObjectBytes) || maxObjectBytes < 1) {
     throw new Error('KALA_RUNTIME_EXPERIMENTAL_S3_MAX_OBJECT_BYTES must be a positive safe integer')
@@ -353,12 +359,12 @@ function readExperimentalDockerStorageConfig(): ExperimentalDockerStorageConfig 
     throw new Error('KALA_RUNTIME_EXPERIMENTAL_PLACEMENT_TTL_MS must be an integer between 5000 and 120000')
   }
   return {
-    connectionString: values.KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING!,
+    connectionString,
     endpoint: values.KALA_RUNTIME_EXPERIMENTAL_S3_ENDPOINT!,
     region: values.KALA_RUNTIME_EXPERIMENTAL_S3_REGION!,
     bucket: values.KALA_RUNTIME_EXPERIMENTAL_S3_BUCKET!,
-    accessKeyId: values.KALA_RUNTIME_EXPERIMENTAL_S3_ACCESS_KEY_ID!,
-    secretAccessKey: values.KALA_RUNTIME_EXPERIMENTAL_S3_SECRET_ACCESS_KEY!,
+    accessKeyId,
+    secretAccessKey,
     maxObjectBytes,
     forcePathStyle: forcePathStyleValue === 'true',
     nodeId: validateNodeId(required('KALA_RUNTIME_NODE_ID')),
@@ -367,6 +373,13 @@ function readExperimentalDockerStorageConfig(): ExperimentalDockerStorageConfig 
     stateMasterKeyFile: values.KALA_RUNTIME_EXPERIMENTAL_STATE_MASTER_KEY_FILE!,
     schemaManagement: schemaMode === 'versioned' ? 'external' : 'initialize',
   }
+}
+
+async function readRequiredExperimentalStorageSecret(name: typeof EXPERIMENTAL_STORAGE_SECRET_ENV[number]): Promise<string> {
+  if (process.env[name] !== undefined && process.env[`${name}_FILE`] !== undefined) {
+    throw new Error(`${name} and ${name}_FILE are mutually exclusive`)
+  }
+  return readRequiredSecretEnv(name)
 }
 
 async function trustedOrganizationId(catalog: RuntimeUnitMaterializationCatalog, id: TenantRuntimeUnitId): Promise<string> {

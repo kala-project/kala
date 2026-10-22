@@ -829,21 +829,8 @@ export function attachJsonRoutes(
           sessionId: input.data.sessionId, operationId: input.data.operationId, text: input.data.text,
           intent: input.data.intent, mode: input.data.mode ?? 'steer', ...(input.data.content ? { content: input.data.content } : {}),
         })
-        try {
-          await payloads.messageAttachments?.commitReferences(input.data.sessionId, input.data.content)
-        } catch (error) {
-          throw new DurableAdmissionError(input.data.operationId, `message was accepted but attachment commitment must be retried: ${error instanceof Error ? error.message : String(error)}`)
-        }
         sendJsonStatus(req, res, 202, { accepted: true, duplicate: false, operationId: input.data.operationId, sequence: 0, state: outcome.committed ? 'committed' : 'pending', routeGeneration: 0, ...(outcome.cursor !== undefined ? { cursor: outcome.cursor } : {}) })
       }).catch((error) => {
-        if (error instanceof DurableAdmissionError) {
-          sendJsonStatus(req, res, error.status, {
-            error: error.message,
-            operationId: error.operationId,
-            durablyAccepted: true,
-          })
-          return
-        }
         sendError(res, error instanceof HttpRouteError ? error.status : error instanceof SessionNotFoundError ? 404 : 400, error instanceof Error ? error.message : String(error))
       })
       return
@@ -968,11 +955,6 @@ export function attachJsonRoutes(
             return
           }
           throw error
-        }
-        try {
-          await payloads.messageAttachments?.commitReferences(sessionId, content)
-        } catch (error) {
-          throw new HttpRouteError(503, `message was accepted but attachment commitment must be retried: ${error instanceof Error ? error.message : String(error)}`)
         }
         sendJson(req, res, { accepted: outcome.accepted ?? outcome.committed, committed: outcome.committed, operationId, ...(outcome.cursor !== undefined ? { cursor: outcome.cursor } : {}) })
       }).catch((error) => sendError(res, error instanceof HttpRouteError ? error.status : 400, error instanceof Error ? error.message : String(error)))
@@ -1531,6 +1513,13 @@ async function runEnhancementAction(
     await payloads.enqueueUserMessage({ sessionId, text, intent: 'text' })
     return { action, sessionId, queued: true }
   }
+  // All other enhancement actions read or publish local files and paths. A caller-
+  // supplied rootDir can bypass the missing default artifact root in PG/S3 mode,
+  // returning a success path on disposable Runtime scratch. Fail closed until a
+  // durable object-backed enhancement artifact port exists.
+  if (payloads.sessions?.usesPostgresAuthority) {
+    throw new HttpRouteError(409, 'file-based enhancement actions are unavailable with PostgreSQL Session authority')
+  }
   const rootDir = cleanString(body.rootDir) ?? (payloads.artifactRootDir || undefined)
   if (!rootDir) throw new HttpRouteError(400, 'rootDir is required when artifact capture is not configured')
   if (action === 'profile-session') {
@@ -1911,12 +1900,6 @@ export function routeClaimed(req: IncomingMessage): boolean {
 class HttpRouteError extends Error {
   constructor(readonly status: number, message: string) {
     super(message)
-  }
-}
-
-class DurableAdmissionError extends HttpRouteError {
-  constructor(readonly operationId: string, message: string) {
-    super(503, message)
   }
 }
 

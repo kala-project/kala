@@ -15,7 +15,7 @@ import {
   RuntimeResourceOwnershipFencedError,
   type RuntimeResourceOwnership,
 } from '../tenant-runtime/postgres-runtime-resource-ownership.js'
-import type { SessionOperationMatch } from './log.js'
+import type { ParsedHistory, SessionOperationMatch } from './log.js'
 import { PostgresMessageQueueStore } from '../postgres-message-queue.js'
 import type { PostgresSchemaManagement } from '../postgres-migrations.js'
 import { parseTenantRuntimeUnitId, type TenantRuntimeUnitId } from '../tenant-runtime/unit.js'
@@ -29,6 +29,8 @@ export type SessionAuthorityMutation = {
   mutationId: string
   eventType: string
   entry?: EventEntry | RuntimeMetadataEntry
+  /** Internal cross-Session fence used when child creation depends on a parent owned by this Unit. */
+  fenceSessionId?: string
   /** Internal deletion-state transitions are the only writes allowed after tombstoning. */
   allowDeletingSession?: boolean
   apply(current: PersistedSessionDocument | undefined): PersistedSessionDocument | undefined
@@ -185,7 +187,9 @@ export class PostgresSessionAuthority {
     if (!mutation.eventType) throw new TypeError('eventType must be a non-empty string')
     const scope = this.#scope(sessionId)
     await this.#prepareSessionOwner?.(sessionId)
+    if (mutation.fenceSessionId) await this.#prepareSessionOwner?.(mutation.fenceSessionId)
     this.#currentOwner(sessionId)
+    if (mutation.fenceSessionId && this.#resourceOwnerForSession) this.#currentOwner(mutation.fenceSessionId)
     const deadline = Date.now() + this.leaseWaitMs
     for (;;) {
       const token = await this.#acquire(scope, deadline)
@@ -197,6 +201,13 @@ export class PostgresSessionAuthority {
           if (this.#resourceOwnerForSession) {
             await this.hotState.database.transaction(async (transaction) => {
               await this.hotState.assertResourceOwnerForScope(transaction, scope, this.#currentOwner(sessionId)!)
+              if (mutation.fenceSessionId) {
+                await this.hotState.assertResourceOwnerForScope(
+                  transaction,
+                  this.#scope(mutation.fenceSessionId),
+                  this.#currentOwner(mutation.fenceSessionId)!,
+                )
+              }
             })
           }
           if ((await this.#latestEvent(scope))?.eventType === 'session.deleted') {
@@ -246,6 +257,13 @@ export class PostgresSessionAuthority {
           eventType: mutation.eventType,
           payload,
         }, async (transaction, event) => {
+          if (mutation.fenceSessionId && this.#resourceOwnerForSession) {
+            await this.hotState.assertResourceOwnerForScope(
+              transaction,
+              this.#scope(mutation.fenceSessionId),
+              this.#currentOwner(mutation.fenceSessionId)!,
+            )
+          }
           const updated = await transaction.query(`INSERT INTO ${this.#projectionTable}
             (tenant_id, session_id, version, document, updated_at)
             VALUES ($1, $2, $3, $4::jsonb, clock_timestamp())
@@ -268,10 +286,15 @@ export class PostgresSessionAuthority {
     }
   }
 
-  async create(document: PersistedSessionDocument, mutationId = 'session.create'): Promise<PersistedSessionDocument> {
+  async create(
+    document: PersistedSessionDocument,
+    mutationId = 'session.create',
+    options: { fenceSessionId?: string } = {},
+  ): Promise<PersistedSessionDocument> {
     const result = await this.mutate(document.sessionId, {
       mutationId,
       eventType: 'session.created',
+      ...(options.fenceSessionId ? { fenceSessionId: options.fenceSessionId } : {}),
       apply(current) {
         if (current) {
           if (stableJson(current) === stableJson(document)) return current
@@ -381,21 +404,45 @@ export class PostgresSessionAuthority {
     return result.rows.map(({ entry }) => entry)
   }
 
-  async readHistory(sessionId: string): Promise<{ events: EventEntry[]; runtimeMetadata: RuntimeMetadataEntry[] }> {
+  async readHistory(sessionId: string): Promise<ParsedHistory> {
     validateSessionId(sessionId)
-    const result = await this.hotState.database.query<{ entry: EventEntry | RuntimeMetadataEntry }>(`SELECT payload->'entry' AS entry
+    await this.#prepareSessionOwner?.(sessionId)
+    type HistoryRow = {
+      event_type: string
+      payload: SessionDocumentEvent
+      entry: EventEntry | RuntimeMetadataEntry | null
+    }
+    const statement = `SELECT event_type, payload, payload->'entry' AS entry
       FROM ${this.#eventsTable}
       WHERE tenant_id = $1 AND scope_type = 'session' AND scope_id = $2
-        AND payload ? 'entry'
-        AND payload #>> '{entry,kind}' IN ('event', 'runtime_metadata')
-      ORDER BY sequence ASC`, [this.tenantId, sessionId])
+      ORDER BY sequence ASC`
+    const parameters = [this.tenantId, sessionId]
+    const result = this.#resourceOwnerForSession
+      ? await this.hotState.database.transaction(async (transaction) => {
+          await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(sessionId), this.#currentOwner(sessionId)!)
+          return transaction.query<HistoryRow>(statement, parameters)
+        })
+      : await this.hotState.database.query<HistoryRow>(statement, parameters)
+    const created = result.rows[0]
+    if (!created || created.event_type !== 'session.created') throw new Error(`Session ${sessionId} has no creation history`)
+    const initialDocument = applySessionEvent(undefined, created.payload)
+    if (!initialDocument || initialDocument.sessionId !== sessionId
+      || !initialDocument.state || !Number.isSafeInteger(initialDocument.state.cursor)
+      || !initialDocument.config || typeof initialDocument.config !== 'object') {
+      throw new Error(`Session ${sessionId} has invalid creation history`)
+    }
     const events: EventEntry[] = []
     const runtimeMetadata: RuntimeMetadataEntry[] = []
     for (const { entry } of result.rows) {
-      if (entry.kind === 'event') events.push(entry)
-      else if (entry.kind === 'runtime_metadata') runtimeMetadata.push(entry)
+      if (entry?.kind === 'event') events.push(entry)
+      else if (entry?.kind === 'runtime_metadata') runtimeMetadata.push(entry)
     }
-    return { events, runtimeMetadata }
+    return {
+      initialState: initialDocument.state as ParsedHistory['initialState'],
+      config: initialDocument.config as ParsedHistory['config'],
+      events,
+      runtimeMetadata,
+    }
   }
 
   async close(): Promise<void> {

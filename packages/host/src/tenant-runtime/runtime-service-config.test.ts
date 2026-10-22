@@ -1,4 +1,6 @@
 import { spawnSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
@@ -32,6 +34,68 @@ describe('kala-runtime-service experimental Docker storage configuration', () =>
     })
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('KALA_RUNTIME_EXPERIMENTAL_S3_ENDPOINT is required')
+  })
+
+  it('reads the PostgreSQL URL and S3 credentials from secret files', () => {
+    const secretDir = mkdtempSync(join(tmpdir(), 'kala-runtime-config-'))
+    try {
+      const values = completeStorageEnv()
+      const secrets = [
+        ['KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING', 'postgres://file-only-credential'],
+        ['KALA_RUNTIME_EXPERIMENTAL_S3_ACCESS_KEY_ID', 'file-only-access-key'],
+        ['KALA_RUNTIME_EXPERIMENTAL_S3_SECRET_ACCESS_KEY', 'file-only-secret-key'],
+      ] as const
+      for (const [name, value] of secrets) {
+        const file = join(secretDir, name)
+        writeFileSync(file, `${value}\n`, { mode: 0o600 })
+        delete values[name]
+        values[`${name}_FILE`] = file
+      }
+
+      const result = runWithExperimentalEnv(values)
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('KALA_RUNTIME_NODE_ID is required')
+      for (const [, value] of secrets) expect(result.stderr).not.toContain(value)
+    } finally {
+      rmSync(secretDir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects direct and file forms together even when the direct value is blank', () => {
+    const result = runWithExperimentalEnv({
+      ...completeStorageEnv(),
+      KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING: '   ',
+      KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_FILE: '/unused/credential-file',
+    })
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING and KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_FILE are mutually exclusive')
+  })
+
+  it('rejects a whitespace-only secret file', () => {
+    const secretDir = mkdtempSync(join(tmpdir(), 'kala-runtime-config-'))
+    try {
+      const file = join(secretDir, 'postgres-url')
+      writeFileSync(file, '  \n\t', { mode: 0o600 })
+      const values = completeStorageEnv()
+      delete values.KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING
+      values.KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_FILE = file
+
+      const result = runWithExperimentalEnv(values)
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING or KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_FILE is required')
+    } finally {
+      rmSync(secretDir, { recursive: true, force: true })
+    }
+  })
+
+  it('fails closed when a configured secret file is missing', () => {
+    const values = completeStorageEnv()
+    delete values.KALA_RUNTIME_EXPERIMENTAL_S3_SECRET_ACCESS_KEY
+    values.KALA_RUNTIME_EXPERIMENTAL_S3_SECRET_ACCESS_KEY_FILE = '/does/not/exist/s3-secret-key'
+
+    const result = runWithExperimentalEnv(values)
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('ENOENT')
   })
 
   it('refuses Session ownership without the operator-migrated schema before connecting to PG', () => {

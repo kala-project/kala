@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process'
 
 import { composeArgs, root, selectedProfile } from './profile.mjs'
 
+if (selectedProfile() === 'postgres-s3') throw new Error('Local-volume Runtime Unit exports cannot be restored into PG/S3 Runtime authority')
 const input = resolve(process.argv[2] ?? '')
 if (!process.argv[2] || input === '/tmp' || input.startsWith('/tmp/')) {
   throw new Error('usage: restore-runtime-unit.mjs PERSISTENT_EXPORT_DIR')

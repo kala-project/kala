@@ -15,6 +15,7 @@ const profiles = {
   cloudflare: ['deploy/private-cloud/compose.yaml', 'deploy/private-cloud/compose.dev.yaml', 'deploy/private-cloud/compose.storage-nfs.yaml', 'deploy/private-cloud/compose.cloudflare.yaml'],
   acceptance: ['deploy/private-cloud/compose.yaml', 'deploy/private-cloud/compose.dev.yaml', 'deploy/private-cloud/compose.storage-nfs.yaml', 'deploy/private-cloud/compose.local.yaml', 'deploy/private-cloud/local/compose.acceptance.yaml'],
   'local-volume': ['deploy/private-cloud/compose.yaml', 'deploy/private-cloud/compose.dev.yaml', 'deploy/private-cloud/compose.storage-local.yaml', 'deploy/private-cloud/compose.local.yaml'],
+  'postgres-s3': ['deploy/private-cloud/compose.yaml', 'deploy/private-cloud/compose.dev.yaml', 'deploy/private-cloud/compose.storage-local.yaml', 'deploy/private-cloud/compose.local.yaml', 'deploy/private-cloud/compose.storage-postgres-s3.yaml', 'deploy/private-cloud/compose.storage-postgres-s3.dev.yaml'],
   'external-nfs': ['deploy/private-cloud/compose.yaml', 'deploy/private-cloud/compose.dev.yaml', 'deploy/private-cloud/compose.storage-external-nfs.yaml', 'deploy/private-cloud/compose.cloudflare.yaml'],
 }
 process.env.KALA_RUNTIME_IMAGE ??= 'kala-private-cloud-runtime:dev'

@@ -10,7 +10,8 @@ import { PostgresOrganizationStore } from '../organizations/postgres-store.js'
 import { startRuntimeIngressGateway } from '../edge/server.js'
 import { createOidcClient } from '../auth/oidc-client.js'
 import { readRequiredSecretEnv } from '../config/secret-env.js'
-import { FileLoginStateStore } from '../auth/login-state-store.js'
+import { FileLoginStateStore, resolveLoginStateStoreKind } from '../auth/login-state-store.js'
+import { PostgresLoginStateStore } from '../auth/postgres-login-state-store.js'
 import { FileBrowserSessionStore } from '../auth/browser-session-store.js'
 import { PostgresBrowserSessionStore } from '../auth/postgres-browser-session-store.js'
 import { assertControlPlaneSchema, createPostgresControlPlaneDatabase, readControlPlaneMigrations, type ControlPlaneDatabase } from '../persistence/postgres.js'
@@ -48,8 +49,14 @@ async function main(): Promise<void> {
     : new JsonOrganizationStore(resolve(controlPlane.directoryPath))
   if (organizations instanceof JsonOrganizationStore) await organizations.load()
   else await assertControlPlaneSchema(database!, await readControlPlaneMigrations(resolve(process.env.KALA_INGRESS_MIGRATIONS_DIR ?? 'migrations')))
-  const loginStates = new FileLoginStateStore(resolve(await readRequiredSecretEnv('KALA_INGRESS_LOGIN_STATE_STORE')))
-  await loginStates.load()
+  const loginStateStoreKind = resolveLoginStateStoreKind(process.env)
+  if (loginStateStoreKind === 'postgres' && !database) {
+    throw new Error('KALA_INGRESS_LOGIN_STATE_STORE_KIND=postgres requires the PostgreSQL control plane')
+  }
+  const loginStates = loginStateStoreKind === 'postgres'
+    ? new PostgresLoginStateStore(database!)
+    : new FileLoginStateStore(resolve(await readRequiredSecretEnv('KALA_INGRESS_LOGIN_STATE_STORE')))
+  if (loginStates instanceof FileLoginStateStore) await loginStates.load()
   const sessions = database
     ? new PostgresBrowserSessionStore(database)
     : new FileBrowserSessionStore(resolve(process.env.KALA_INGRESS_BROWSER_SESSION_STORE ?? `${await readRequiredSecretEnv('KALA_INGRESS_LOGIN_STATE_STORE')}.sessions`))
@@ -66,7 +73,15 @@ async function main(): Promise<void> {
     ? await loadEnterpriseSsoResolver(resolve(process.env.KALA_INGRESS_ENTERPRISE_SSO_CONFIG))
     : undefined
   const hostOrigin = await readRequiredSecretEnv('KALA_RUNTIME_HOST_ORIGIN')
-  const runtimePlacementConfig = readExperimentalRuntimePlacementConfig(process.env)
+  const readerFile = process.env.KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING_FILE
+  const readerDirect = process.env.KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING
+  if (readerFile !== undefined && readerDirect !== undefined) {
+    throw new Error('Gateway Runtime reader connection string and its _FILE variant are mutually exclusive')
+  }
+  const runtimePlacementConfig = readExperimentalRuntimePlacementConfig(readerFile !== undefined
+    ? { ...process.env, KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING:
+        await readRequiredSecretEnv('KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING') }
+    : process.env)
   if (runtimePlacementConfig && !database) {
     throw new Error('KALA_INGRESS_EXPERIMENTAL_DOCKER_STORAGE=1 requires the PostgreSQL control plane so organization placement can be verified')
   }

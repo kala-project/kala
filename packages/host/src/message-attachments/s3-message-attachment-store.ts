@@ -36,6 +36,8 @@ type AttachmentState = { records: Map<string, AttachmentRecord>; pendingDeletes:
 
 /** Private Cloud attachment storage. All methods that consult PG metadata are asynchronous. */
 export class S3MessageAttachmentStore implements MessageAttachmentStorage {
+  private readonly sessionTails = new Map<string, Promise<void>>()
+
   constructor(
     private readonly organizationId: string,
     private readonly objects: ArtifactObjectStore,
@@ -46,6 +48,10 @@ export class S3MessageAttachmentStore implements MessageAttachmentStorage {
   async load(): Promise<void> { await this.metadata.initialize() }
 
   async register(input: { sessionId: string; name: string; mediaType?: string; data: Buffer }): Promise<ReferencedFileContent> {
+    return await this.serializeSession(normalizeSessionId(input.sessionId), async () => await this.registerLocked(input))
+  }
+
+  private async registerLocked(input: { sessionId: string; name: string; mediaType?: string; data: Buffer }): Promise<ReferencedFileContent> {
     await this.cleanupExpiredPending(input.sessionId)
     const sessionId = normalizeSessionId(input.sessionId)
     const name = safeDisplayName(input.name)
@@ -95,6 +101,10 @@ export class S3MessageAttachmentStore implements MessageAttachmentStorage {
   async commitReferences(sessionId: string, content: readonly MessageContent[] | undefined): Promise<void> {
     const ids = referencedAttachmentIds(content)
     if (ids.length === 0) return
+    await this.serializeSession(normalizeSessionId(sessionId), async () => await this.commitReferencesLocked(sessionId, content, ids))
+  }
+
+  private async commitReferencesLocked(sessionId: string, content: readonly MessageContent[] | undefined, ids: readonly string[]): Promise<void> {
     const state = await this.state(sessionId)
     for (const block of content ?? []) {
       if (isHostReference(block)) validateReference(state, sessionId, block)
@@ -109,9 +119,11 @@ export class S3MessageAttachmentStore implements MessageAttachmentStorage {
   }
 
   async releasePending(sessionId: string, attachmentIds: readonly string[]): Promise<void> {
-    const state = await this.state(sessionId)
-    const records = attachmentIds.map((id) => state.records.get(id)).filter((record): record is AttachmentRecord => Boolean(record && !record.committedAt))
-    await this.deleteRecords(sessionId, records)
+    await this.serializeSession(normalizeSessionId(sessionId), async () => {
+      const state = await this.state(sessionId)
+      const records = attachmentIds.map((id) => state.records.get(id)).filter((record): record is AttachmentRecord => Boolean(record && !record.committedAt))
+      await this.deleteRecords(sessionId, records)
+    })
   }
 
   async resolve(sessionId: string, file: ReferencedFileContent): Promise<ResolvedMessageAttachment> {
@@ -130,12 +142,27 @@ export class S3MessageAttachmentStore implements MessageAttachmentStorage {
   allowsSdkRead(): boolean { return false }
 
   async deleteSession(sessionId: string): Promise<void> {
-    // Fence publication before metadata is hidden or any S3 bytes are removed.
-    // An in-flight put can then only leave a durable orphan intent for the
-    // reconciler; it cannot become a newly visible attachment after cleanup.
-    await this.metadata.beginSessionDeletion(sessionId)
-    const state = await this.state(sessionId)
-    await this.deleteRecords(sessionId, [...state.records.values()], true)
+    await this.serializeSession(normalizeSessionId(sessionId), async () => {
+      // Fence publication before metadata is hidden or any S3 bytes are removed.
+      // An in-flight put can then only leave a durable orphan intent for the
+      // reconciler; it cannot become a newly visible attachment after cleanup.
+      await this.metadata.beginSessionDeletion(sessionId)
+      const state = await this.state(sessionId)
+      await this.deleteRecords(sessionId, [...state.records.values()], true)
+    })
+  }
+
+  /** Single-Runtime ordering; multi-replica deletion still needs a PG-transaction fence. */
+  private async serializeSession<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    const prior = this.sessionTails.get(sessionId) ?? Promise.resolve()
+    let release!: () => void
+    const next = new Promise<void>((resolve) => { release = resolve })
+    this.sessionTails.set(sessionId, next)
+    await prior
+    try { return await operation() } finally {
+      release()
+      if (this.sessionTails.get(sessionId) === next) this.sessionTails.delete(sessionId)
+    }
   }
 
   private resolved(record: AttachmentRecord): ResolvedMessageAttachment {

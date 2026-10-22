@@ -20,8 +20,10 @@ if (process.argv.includes('--internal-inspect-organization-provisioning')) {
   process.exit(0)
 }
 const freshCandidate = process.argv.includes('--fresh-candidate')
+const nonCertifyingPredecessor = process.argv.includes('--non-certifying-predecessor')
 const ephemeralBundledAcceptance = process.argv.includes('--ephemeral-bundled-acceptance')
 if (ephemeralBundledAcceptance && !freshCandidate) throw new Error('--ephemeral-bundled-acceptance requires --fresh-candidate')
+if (nonCertifyingPredecessor === freshCandidate) throw new Error('exactly one of --fresh-candidate or --non-certifying-predecessor is required')
 const candidateArchive = resolve(required('--candidate-archive'))
 const predecessorArchive = freshCandidate ? undefined : resolve(required('--predecessor-archive'))
 const executorAsset = resolve(required('--executor'))
@@ -166,9 +168,11 @@ try {
     await verifyBackupRestore({ operatorBinary: candidateOperator, release: predecessor, config, backup, env })
   }
 
+  const category = freshCandidate ? 'private-cloud' : 'private-cloud-predecessor'
   const target = freshCandidate ? 'linux-x64-compose-fresh' : 'linux-x64-compose'
   const evidence = createRcEvidence({
-    category: 'private-cloud', target, tag, version: tag.slice(1), revision, ok: true,
+    category, target, tag, version: tag.slice(1), revision, ok: true,
+    ...(freshCandidate ? {} : { certifying: false, predecessorPolicy: 'unsupported-explicit-override' }),
     artifact: { name: basename(candidateArchive), sha256: digest(readFileSync(candidateArchive)) },
     checks: freshCandidate
       ? { assetIntegrity: true, imageDigestPinning: true, freshCandidateInstall: true, ...(ephemeralBundledAcceptance ? { ephemeralBundledAcceptance: true, realBundledIdentities: true, authenticatedModelFixture: true } : {}), organizationProvisioning: true, tenantIsolation: true, browser: true, executor: true, mtlsClientRejection: true, unitResourceIsolation: true, runtimeRestartRecovery: true, backupRestore: true }
@@ -176,7 +180,7 @@ try {
   })
   mkdirSync(resolve(output, '..'), { recursive: true, mode: 0o700 })
   writeFileSync(output, JSON.stringify(evidence, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
-  process.stdout.write(JSON.stringify({ ok: true, category: 'private-cloud', target, evidence: basename(output) }) + '\n')
+  process.stdout.write(JSON.stringify({ ok: true, category, target, evidence: basename(output) }) + '\n')
 } finally {
   if (executor) { executor.kill('SIGTERM'); await new Promise((resolveExit) => { const timer = setTimeout(() => { executor.kill('SIGKILL'); resolveExit() }, 5_000); executor.once('exit', () => { clearTimeout(timer); resolveExit() }) }) }
   if (modelFixture) run('docker', ['rm', '-f', modelFixture], true)
@@ -534,10 +538,10 @@ function hasAssistantText(state, text) {
 }
 async function uploadFixtureBytes(page, sessionId, sizes) { return await page.evaluate(async ({ sessionId, sizes }) => { const statuses = []; for (const size of sizes) { const response = await fetch('/runtime/attachments?sessionId=' + encodeURIComponent(sessionId), { method: 'POST', headers: { 'content-type': 'text/plain', 'x-agent-runlab-attachment-name': encodeURIComponent('quota-' + size + '-' + statuses.length + '.txt') }, body: 'x'.repeat(size) }); statuses.push(response.status) }; return statuses }, { sessionId, sizes }) }
 
-function extract(archive, destination) { mkdirSync(destination, { recursive: true }); run('tar', ['-xzf', archive, '-C', destination]); const entries = readdirFlat(destination); const rootEntry = entries.length === 1 && entries[0].directory ? join(destination, entries[0].name) : destination; const manifest = find(rootEntry, 'manifest.json'); return resolve(manifest, '..') }
+function extract(archive, destination) { mkdirSync(destination, { recursive: true }); run('tar', ['--same-permissions', '-xzf', archive, '-C', destination]); const entries = readdirFlat(destination); const rootEntry = entries.length === 1 && entries[0].directory ? join(destination, entries[0].name) : destination; const manifest = find(rootEntry, 'manifest.json'); return resolve(manifest, '..') }
 function readdirFlat(path) { return readdirSync(path, { withFileTypes: true }).map((entry) => ({ name: entry.name, directory: entry.isDirectory() })) }
 function find(rootDir, name) { const queue = [rootDir]; while (queue.length) { const current = queue.shift(); for (const entry of readdirSync(current, { withFileTypes: true })) { const path = join(current, entry.name); if (entry.isFile() && entry.name === name) return path; if (entry.isDirectory()) queue.push(path) } }; throw new Error('archive is missing ' + name) }
-function verify(path) { const result = run(process.execPath, ['scripts/release/verify-private-cloud-bundle.mjs', path]); if (!json(result.stdout).ok) throw new Error('Private Cloud bundle verification failed') }
+function verify(path) { const result = run(process.execPath, ['scripts/release/verify-private-cloud-bundle.mjs', '--release', path]); if (!json(result.stdout).ok) throw new Error('Private Cloud bundle verification failed') }
 function requirePrivateConfig(path) { for (const name of ['deployment.env', 'runtime-provider-catalog.json']) if (!existsSync(join(path, name))) throw new Error('Private Cloud config template is missing ' + name); if (!existsSync(join(path, 'secrets'))) throw new Error('Private Cloud config template is missing secrets') }
 function rewriteDeploymentEnv(path, project) { const lines = readFileSync(path, 'utf8').split(/\r?\n/u).filter((line) => line && !line.startsWith('COMPOSE_PROJECT_NAME=')); lines.push('COMPOSE_PROJECT_NAME=' + project); writeFileSync(path, lines.join('\n') + '\n', { mode: 0o600 }) }
 function bundleOperator(directory) {

@@ -400,6 +400,8 @@ export type ParsedLog = {
 }
 
 export type ParsedHistory = {
+  initialState: AgentState
+  config: AgentConfig
   events: EventEntry[]
   runtimeMetadata: RuntimeMetadataEntry[]
 }
@@ -733,7 +735,7 @@ export async function readSessionHistory(path: string, options?: FullSessionRead
     if (!input.closed) await once(input, 'close')
   }
   if (!header) throw new Error(`Empty log: ${path}`)
-  return { events, runtimeMetadata }
+  return { initialState: header.initialState, config: header.config, events, runtimeMetadata }
 }
 
 export async function readSessionState(path: string, options?: FullSessionReadOptions): Promise<ParsedLog> {

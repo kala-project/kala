@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import type { ArtifactObject, ArtifactObjectStore } from './object-store.js'
 import type { ObjectMetadataEvent, ObjectMetadataLog, ObjectOrphanIntent } from './postgres-object-metadata.js'
@@ -119,6 +119,30 @@ describe('Private Cloud S3-backed stores', () => {
     await expect(artifacts.registerImage({ sessionId: 'session-a', fileName: 'late.png', data: png })).rejects.toThrow('being deleted')
     await expect(attachments.register({ sessionId: 'session-a', name: 'late.txt', data: Buffer.from('late') })).rejects.toThrow('being deleted')
     expect(objects.values.size).toBe(0)
+  })
+
+  it('does not delete an attachment when release races its confirmation on one Runtime', async () => {
+    const objects = new MemoryObjects()
+    const metadata = new MemoryMetadata()
+    const attachments = new S3MessageAttachmentStore('org_acme', objects, metadata)
+    const file = await attachments.register({ sessionId: 'session-a', name: 'notes.txt', data: Buffer.from('preserve') })
+    const replay = metadata.replay.bind(metadata)
+    let entered!: () => void
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    let resume!: () => void
+    const gate = new Promise<void>((resolve) => { resume = resolve })
+    let blocked = false
+    vi.spyOn(metadata, 'replay').mockImplementation(async (sessionId) => {
+      if (!blocked) { blocked = true; entered(); await gate }
+      return await replay(sessionId)
+    })
+    const commit = attachments.commitReferences('session-a', [file])
+    await started
+    const release = attachments.releasePending('session-a', [file.source.attachmentId])
+    resume()
+    await Promise.all([commit, release])
+    expect(await (await attachments.resolve('session-a', file)).read()).toEqual(Buffer.from('preserve'))
+    expect(objects.values.size).toBe(1)
   })
 
   it('runs attachment register, commit, restart read, pending release, and Session deletion through object storage', async () => {

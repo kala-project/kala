@@ -26,8 +26,11 @@ const transitions = new Map([
   ['removed', new Set(['completed', 'failed'])], ['completed', new Set()], ['failed', new Set()],
 ])
 const secretNames = ['control_postgres_password', 'session_secret', 'ingress_secret', 'oidc_client_id', 'oidc_client_secret', 'llm_api_key']
+const postgresS3SecretNames = ['control_postgres_migration_owner_url', 'control_postgres_writer_url', 'runtime_postgres_owner_url', 'runtime_postgres_writer_url', 'runtime_postgres_reader_url', 'runtime_state_master_key', 'runtime_s3_access_key_id', 'runtime_s3_secret_access_key']
 const tlsNames = ['internal_ca_key.pem', 'internal_ca.pem', 'runtime_host_key.pem', 'runtime_host.pem', 'ingress_client_key.pem', 'ingress_client.pem', 'runtime_health_key.pem', 'runtime_health.pem']
 const oidcCaName = 'oidc-ca.pem'
+const configOriginName = 'storage-origin.json'
+const installationIdName = 'installation-id'
 
 main().catch((error) => { process.stderr.write(`${redact(error instanceof Error ? error.message : String(error))}\n`); process.exitCode = 1 })
 
@@ -60,8 +63,8 @@ async function main() {
 function help() { process.stdout.write(`Kala Private Cloud operator
 
 Usage:
-  kala-private-cloud setup --bundle DIR --config-dir DIR --provider-catalog FILE --llm-api-key-file FILE [--identity bundled|external] [--storage nfs|local-volume|external-nfs] [--app-port PORT --identity-port PORT] [--nfs-port PORT] [--oidc-issuer URL --oidc-discovery-origin URL --oidc-client-id-file FILE --oidc-client-secret-file FILE]
-  kala-private-cloud init-config --bundle DIR --config-dir EMPTY_DIR [--profile local|cloudflare] [--identity bundled|external] [--storage nfs|local-volume|external-nfs] [--app-port PORT --identity-port PORT] [--nfs-port PORT]
+  kala-private-cloud setup --bundle DIR --config-dir DIR --provider-catalog FILE --llm-api-key-file FILE [--identity bundled|external] [--storage nfs|local-volume|external-nfs|postgres-s3] [--acknowledge-evaluation --acknowledge-external-backup] [--app-port PORT --identity-port PORT] [--nfs-port PORT] [--oidc-issuer URL --oidc-discovery-origin URL --oidc-client-id-file FILE --oidc-client-secret-file FILE]
+  kala-private-cloud init-config --bundle DIR --config-dir EMPTY_DIR [--profile local|cloudflare] [--identity bundled|external] [--storage nfs|local-volume|external-nfs|postgres-s3] [--acknowledge-evaluation --acknowledge-external-backup] [--app-port PORT --identity-port PORT] [--nfs-port PORT]
   kala-private-cloud preflight --bundle DIR --config-dir DIR
   kala-private-cloud doctor --bundle DIR --config-dir DIR [--allow-private-origin HTTPS_ORIGIN ...]
   kala-private-cloud provision-organization --owner-issuer URL --owner-subject SUBJECT --owner-email EMAIL --organization-name NAME --contract-reference REF --ends-at ISO_DATE --operation-id ID
@@ -88,6 +91,10 @@ before preflight. Bundled identity is available only with --profile local.
 The optional owner bootstrap derives \`sub\` only from a
 validated OIDC callback and still requires explicit local operator confirmation.
 For the compatible manual path, obtain the exact \`sub\`; email is not a substitute.
+postgres-s3 is a fresh-project evaluation only. It requires external OIDC,
+operator-managed PostgreSQL/S3, both acknowledgement flags, and has no Operator
+upgrade, rollback, backup, restore, or uninstall workflow. Its backup acknowledgement
+is an assertion of an external plan, not restore evidence.
 `) }
 
 async function setup() {
@@ -107,6 +114,7 @@ async function setup() {
   } : null
   if (external) { validateSetupSecret(external.clientId); validateSetupSecret(external.clientSecret) }
   const fresh = !existsSync(join(configDir, 'deployment.env'))
+  if (fresh && option('--storage') === 'postgres-s3') throw new Error('postgres-s3 requires init-config first, then supply external PostgreSQL/S3 credentials and run preflight/install; setup cannot create these resources automatically')
   if (fresh) await initConfig()
   else if (deploymentEnv(configDir).KALA_IDENTITY_MODE !== identity) throw new Error('existing configuration uses a different identity mode; do not regenerate identity data')
   if (!fresh && option('--app-port') && validPort(option('--app-port'), '--app-port') !== localPorts(deploymentEnv(configDir)).app) throw new Error('cannot change app port on an existing installation configuration; OIDC redirect and identities must be migrated explicitly')
@@ -161,7 +169,12 @@ async function initConfig() {
   const profile = option('--profile') ?? 'local'
   const identity = option('--identity') ?? 'bundled'
   const storage = option('--storage') ?? 'local-volume'
-  if (!['nfs', 'local-volume', 'external-nfs'].includes(storage)) throw new Error('--storage must be nfs, local-volume, or external-nfs')
+  if (!['nfs', 'local-volume', 'external-nfs', 'postgres-s3'].includes(storage)) throw new Error('--storage must be nfs, local-volume, external-nfs, or postgres-s3')
+  if (storage === 'postgres-s3') {
+    if (identity !== 'external') throw new Error('postgres-s3 evaluation requires --identity external; bundled identity uses a local database')
+    if (!argv.includes('--acknowledge-evaluation')) throw new Error('postgres-s3 requires --acknowledge-evaluation because it is fresh-project evaluation only, not production or an in-place migration')
+    if (!argv.includes('--acknowledge-external-backup')) throw new Error('postgres-s3 requires --acknowledge-external-backup after defining an external PostgreSQL/S3 backup plan; acknowledgement is not restore proof')
+  }
   if (storage !== 'nfs' && option('--nfs-port')) throw new Error('--nfs-port applies only to local NFS storage')
   if (!['local', 'cloudflare'].includes(profile)) throw new Error('--profile must be local or cloudflare')
   if (!['bundled', 'external'].includes(identity)) throw new Error('--identity must be bundled or external')
@@ -182,7 +195,10 @@ async function initConfig() {
   try {
     mkdirSync(join(staging, 'secrets'), { recursive: true, mode: 0o700 })
     copyRequired(join(bundle, `${profile}.env.example`), join(staging, 'deployment.env'))
-    writeFileSync(join(staging, 'deployment.env'), `\nKALA_STORAGE=${storage}\nKALA_PUBLIC_LISTEN=127.0.0.1:${ports.app}\n${profile === 'local' ? `KALA_PUBLIC_URLS=http://localhost:${ports.app}\n` : ''}${nfsPort !== null ? `KALA_NFS_LISTEN_ADDRESS=127.0.0.1\nKALA_NFS_PORT=${nfsPort}\n` : ''}`, { flag: 'a' })
+    writeFileSync(join(staging, 'deployment.env'), `\nKALA_STORAGE=${storage}\nKALA_PUBLIC_LISTEN=127.0.0.1:${ports.app}\n${profile === 'local' ? `KALA_PUBLIC_URLS=http://localhost:${ports.app}\n` : ''}${nfsPort !== null ? `KALA_NFS_LISTEN_ADDRESS=127.0.0.1\nKALA_NFS_PORT=${nfsPort}\n` : ''}${storage === 'postgres-s3' ? `COMPOSE_PROJECT_NAME=kala-private-cloud-pg-s3-eval-${randomUUID().slice(0, 8)}\nKALA_PG_S3_EVALUATION_ACK=1\nKALA_PG_S3_EXTERNAL_BACKUP_ACK=1\n` : ''}`, { flag: 'a' })
+    const installationId = randomUUID()
+    writeFileSync(join(staging, configOriginName), `${JSON.stringify({ schemaVersion: 1, storageMode: storage, installationId })}\n`, { mode: 0o600, flag: 'wx' })
+    if (storage === 'postgres-s3') writeFileSync(join(staging, installationIdName), `${installationId}\n`, { mode: 0o600, flag: 'wx' })
     if (identity === 'bundled') {
       writeFileSync(join(staging, 'deployment.env'), `\nKALA_IDENTITY_MODE=bundled\nKALA_IDENTITY_PORT=${ports.identity}\nOIDC_ISSUER=http://localhost:${ports.identity}\nOIDC_DISCOVERY_ORIGIN=http://identity-proxy:8080\n`, { flag: 'a' })
       mkdirSync(join(staging, 'identity-secrets'), { mode: 0o700 })
@@ -205,24 +221,73 @@ async function initConfig() {
     rmSync(destination, { recursive: true })
     renameSync(staging, destination)
     fsyncDirectory(dirname(destination))
-    output({ ok: true, configDir: destination, profile, identity, storage, ...(nfsPort !== null ? { nfsPort } : {}), ...(profile === 'local' ? { kalaUrl: `http://localhost:${ports.app}` } : {}), ...(identity === 'bundled' ? { identityUrl: `http://localhost:${ports.identity}` } : {}), next: identity === 'bundled' ? ['configure model provider and replace LLM key placeholder', 'run preflight', 'run install; securely retrieve and change the initial identity admin password'] : ['configure external IdP/OIDC client redirect URLs', 'replace OIDC and LLM placeholder secret files', 'run preflight'] })
+    output({ ok: true, configDir: destination, profile, identity, storage, ...(nfsPort !== null ? { nfsPort } : {}), ...(profile === 'local' ? { kalaUrl: `http://localhost:${ports.app}` } : {}), ...(identity === 'bundled' ? { identityUrl: `http://localhost:${ports.identity}` } : {}), next: storage === 'postgres-s3' ? ['configure external IdP/OIDC client redirect URLs and provider key', 'create the required external PostgreSQL/S3 credential files and a preserved 32-byte raw runtime_state_master_key with mode 0600', 'set non-secret database roles and S3 endpoint/region/bucket values in deployment.env', 'run preflight; external service readiness and recoverability remain operator responsibilities'] : identity === 'bundled' ? ['configure model provider and replace LLM key placeholder', 'run preflight', 'run install; securely retrieve and change the initial identity admin password'] : ['configure external IdP/OIDC client redirect URLs', 'replace OIDC and LLM placeholder secret files', 'run preflight'] })
   } finally { rmSync(staging, { recursive: true, force: true }) }
 }
 
 async function preflight() {
   const bundle = bounded(required('--bundle'), 'bundle directory')
   const configDir = bounded(required('--config-dir'), 'configuration directory')
+  const evaluationChecks = await deploymentPreflight(bundle, configDir)
+  output({ ok: true, bundle: { version: requiredJson(join(bundle, 'manifest.json')).version }, configDir, checks: ['bundle-integrity', 'configuration', 'secret-permissions', deploymentEnv(configDir).KALA_IDENTITY_MODE === 'bundled' ? 'bundled-oidc-values' : 'external-oidc-values', 'oidc-private-ca', 'provider-key', 'docker-daemon', 'docker-compose', 'compose-config', 'loopback-ports', ...evaluationChecks] })
+}
+
+async function deploymentPreflight(bundle, configDir) {
   verifyBundle(bundle)
   validateConfig(configDir)
-  const installed = optionalJson(installationPath)
-  if (!installed || installed.configDir !== configDir) await assertPortsAvailable(configDir)
+  const installation = optionalJson(installationPath)
+  if (installation?.configDir === configDir) assertInstallationConfiguration(installation, configDir)
+  if (!installation || installation.configDir !== configDir) await assertPortsAvailable(configDir)
   captureSync('docker', ['--version'])
-  captureSync('docker', ['compose', 'version'])
+  const composeVersion = captureSync('docker', ['compose', 'version', '--short'])
   captureSync('docker', ['info', '--format', '{{json .ServerVersion}}'])
   const release = { dir: bundle, lock: requiredJson(join(bundle, 'image-lock.json')) }
-  const invocation = composeInvocation(release, configDir, ['config', '--quiet'])
-  captureSync(invocation.command, invocation.args, invocation.cwd, invocation.env)
-  output({ ok: true, bundle: { version: requiredJson(join(bundle, 'manifest.json')).version }, configDir, checks: ['bundle-integrity', 'configuration', 'secret-permissions', deploymentEnv(configDir).KALA_IDENTITY_MODE === 'bundled' ? 'bundled-oidc-values' : 'external-oidc-values', 'oidc-private-ca', 'provider-key', 'docker-daemon', 'docker-compose', 'compose-config', 'loopback-ports'] })
+  const postgresS3 = deploymentEnv(configDir).KALA_STORAGE === 'postgres-s3'
+  if (postgresS3 && !requiredJson(join(bundle, 'manifest.json')).files?.['compose.storage-postgres-s3.yaml']) throw new Error('PostgreSQL/S3 evaluation overlay is missing from the bundle')
+  if (!postgresS3) {
+    const invocation = composeInvocation(release, configDir, ['config', '--quiet'])
+    captureSync(invocation.command, invocation.args, invocation.cwd, invocation.env)
+    return []
+  }
+  requireComposeOverrideVersion(composeVersion)
+  const invocation = composeInvocation(release, configDir, ['config', '--format', 'json'])
+  const rendered = JSON.parse(captureSync(invocation.command, invocation.args, invocation.cwd, invocation.env))
+  validatePostgresS3RenderedConfig(rendered, configDir)
+  if (!installation || installation.configDir !== configDir) {
+    const project = composeInvocation(release, configDir, ['ps', '--all', '--quiet'])
+    if (captureSync(project.command, project.args, project.cwd, project.env).trim()) throw new Error('postgres-s3 requires a fresh Compose project with no existing containers; choose a new COMPOSE_PROJECT_NAME and do not stop or migrate the old project')
+    for (const resource of ['volume', 'network']) {
+      const existing = captureSync('docker', [resource, 'ls', '--filter', `label=com.docker.compose.project=${projectName(configDir)}`, '--format', '{{.Name}}']).trim()
+      if (existing) throw new Error(`postgres-s3 requires a fresh Compose project; existing ${resource} resources belong to this project. Do not reuse old volumes or networks`)
+    }
+  }
+  return ['compose-override-version', 'postgres-s3-rendered-topology', 'fresh-evaluation-project']
+}
+function requireComposeOverrideVersion(value) {
+  const match = String(value).match(/(?:^|\s)v?(\d+)\.(\d+)(?:\.\d+)?/u)
+  if (!match || Number(match[1]) < 2 || Number(match[1]) === 2 && Number(match[2]) < 24) throw new Error('postgres-s3 requires Docker Compose 2.24 or newer for !override; upgrade Compose instead of falling back to legacy storage')
+}
+function validatePostgresS3RenderedConfig(config, configDir) {
+  const services = config.services ?? {}
+  for (const name of ['init-volumes', 'control-postgres']) if (services[name]) throw new Error(`postgres-s3 rendered topology must keep legacy ${name} inactive`)
+  const volumeTarget = (volume) => typeof volume === 'string' ? volume.split(':')[1] : volume?.target
+  const secretSource = (secret) => typeof secret === 'string' ? secret : secret?.source
+  const runtime = services['runtime-host']; const ingress = services['runtime-ingress']; const controlInit = services['control-plane-init']; const runtimeInit = services['runtime-schema-init']; const storageInit = services['init-storage-secrets']; const claim = services['fresh-storage-claim']
+  if (!runtime || !ingress || !controlInit || !runtimeInit || !storageInit || !claim) throw new Error('postgres-s3 rendered topology is missing required external storage/claim services')
+  if ((runtime.volumes ?? []).some((volume) => volumeTarget(volume) === '/var/lib/kala' || secretSource(volume) === 'tenant-data')) throw new Error('postgres-s3 runtime-host must not mount tenant-data or any persistent /var/lib/kala volume')
+  const scratch = (runtime.tmpfs ?? []).some((mount) => (typeof mount === 'string' ? mount.split(':')[0] : mount?.target) === '/var/lib/kala')
+  if (!scratch) throw new Error('postgres-s3 runtime-host must use bounded disposable /var/lib/kala tmpfs')
+  if ((ingress.volumes ?? []).some((volume) => volumeTarget(volume) === '/var/lib/kala-control' || secretSource(volume) === 'control-data')) throw new Error('postgres-s3 runtime-ingress must not mount control-data')
+  if (ingress.environment?.KALA_INGRESS_LOGIN_STATE_STORE_KIND !== 'postgres') throw new Error('postgres-s3 OIDC login state must use external control PostgreSQL')
+  if (controlInit.environment?.KALA_INGRESS_REQUIRE_EXISTING_DATABASE !== '1' || Object.keys(controlInit.depends_on ?? {}).join(',') !== 'fresh-storage-claim' || Object.keys(runtimeInit.depends_on ?? {}).join(',') !== 'fresh-storage-claim') throw new Error('postgres-s3 migrations must depend solely on the completed fresh external-storage claim')
+  for (const job of [controlInit, runtimeInit]) if (job.depends_on['fresh-storage-claim']?.condition !== 'service_completed_successfully') throw new Error('postgres-s3 schema jobs must wait for a successful fresh storage claim')
+  if ((claim.volumes ?? []).length || (claim.configs ?? []).map(secretSource).join(',') !== 'installation_id' || config.configs?.installation_id?.file !== join(configDir, installationIdName)) throw new Error('postgres-s3 claim must use the Operator installation UUID without a persistent local receipt')
+  const claimSecrets = (claim.secrets ?? []).map(secretSource).sort()
+  if (JSON.stringify(claimSecrets) !== JSON.stringify(['control_postgres_migration_owner_url', 'runtime_postgres_owner_url', 'runtime_s3_access_key_id', 'runtime_s3_secret_access_key'].sort())) throw new Error('postgres-s3 claim must receive only the two owner URLs and scoped S3 credentials')
+  const controlSecrets = (controlInit.secrets ?? []).map(secretSource); const runtimeInitSecrets = (runtimeInit.secrets ?? []).map(secretSource); const storageSecrets = (storageInit.secrets ?? []).map(secretSource)
+  if (JSON.stringify(controlSecrets) !== JSON.stringify(['control_postgres_migration_owner_url']) || JSON.stringify(runtimeInitSecrets) !== JSON.stringify(['runtime_postgres_owner_url'])) throw new Error('postgres-s3 migration owners must be isolated to their one-shot schema jobs')
+  if (storageSecrets.includes('runtime_postgres_owner_url') || !['runtime_postgres_writer_url', 'runtime_postgres_reader_url', 'runtime_s3_access_key_id', 'runtime_s3_secret_access_key', 'runtime_state_master_key'].every((name) => storageSecrets.includes(name))) throw new Error('postgres-s3 workload secret projection must exclude owner credentials and include restricted Runtime/S3 credentials')
+  if (runtime.environment?.KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_FILE !== '/run/kala-storage/runtime_postgres_writer_url' || ingress.environment?.KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING_FILE !== '/run/kala-storage/runtime_postgres_reader_url') throw new Error('postgres-s3 Runtime writer and Gateway reader credentials are not isolated in the rendered topology')
 }
 
 async function doctor() {
@@ -498,9 +563,10 @@ async function install() {
   if (existsSync(installationPath)) throw new Error('Private Cloud is already installed')
   ensureOperatorRoot()
   const configDir = bounded(required('--config-dir'), 'configuration directory')
-  validateConfig(configDir)
-  await assertPortsAvailable(configDir)
-  const release = stageBundle(required('--bundle'))
+  const bundle = bounded(required('--bundle'), 'bundle directory')
+  await deploymentPreflight(bundle, configDir)
+  const release = stageBundle(bundle)
+  const postgresS3 = deploymentEnv(configDir).KALA_STORAGE === 'postgres-s3'
   let receipt = begin('install', { releaseId: release.id })
   try {
     receipt = move(receipt, 'verified')
@@ -521,11 +587,19 @@ async function install() {
     if (deploymentEnv(configDir).KALA_IDENTITY_MODE === 'bundled') await verifyBundledIdentity(configDir)
     const services = inspectServices(release, configDir)
     receipt = move(receipt, 'ready', { services })
-    const installation = { schemaVersion: 1, installationId: `installation-${randomUUID()}`, installedAt: now(), updatedAt: now(), configDir, projectName: projectName(configDir) }
+    const storageMode = deploymentEnv(configDir).KALA_STORAGE
+    const installation = { schemaVersion: 1, installationId: storageMode === 'postgres-s3' ? requiredJson(join(configDir, configOriginName)).installationId : `installation-${randomUUID()}`, installedAt: now(), updatedAt: now(), configDir, projectName: projectName(configDir), storageMode }
     atomicJson(activePath, releaseRecord(release)); atomicJson(installationPath, installation)
     receipt = move(receipt, 'completed')
     output({ ok: true, installation, active: releaseRecord(release), services, receipt: publicReceipt(receipt) })
-  } catch (error) { try { compose(release, configDir, ['down', '--remove-orphans']) } catch {}; failed(receipt, error); throw error }
+  } catch (error) {
+    // A fresh PG/S3 project has no application data volumes. Remove its disposable
+    // secret projections so the same installation UUID can pass fresh-project
+    // preflight on retry; Compose never removes external PostgreSQL/S3 state.
+    try { compose(release, configDir, ['down', '--remove-orphans', ...(postgresS3 ? ['--volumes'] : [])]) } catch {}
+    failed(receipt, error)
+    throw error
+  }
 }
 
 async function verifyBundledIdentity(configDir) {
@@ -559,7 +633,7 @@ function status() {
 }
 
 function upgrade(dashboardOnly) {
-  const installation = installed(); const current = loadRelease(requiredJson(activePath)); const candidate = stageBundle(required('--bundle'))
+  const installation = installed(); refusePostgresS3Lifecycle(dashboardOnly ? 'upgrade-dashboard' : 'upgrade', installation.configDir); const current = loadRelease(requiredJson(activePath)); const candidate = stageBundle(required('--bundle'))
   if (candidate.id === current.id) throw new Error('candidate release is already active')
   if (dashboardOnly && (candidate.lock.images.runtime !== current.lock.images.runtime || candidate.lock.images.ingress !== current.lock.images.ingress)) throw new Error('Dashboard-only bundle changes Runtime or Ingress digest')
   if (dashboardOnly && candidate.lock.images.dashboard === current.lock.images.dashboard) throw new Error('Dashboard-only bundle does not change the Dashboard digest')
@@ -586,7 +660,7 @@ function upgrade(dashboardOnly) {
 }
 
 function rollback() {
-  const installation = installed(); const current = loadRelease(requiredJson(activePath)); const predecessor = loadRelease(requiredJson(predecessorPath))
+  const installation = installed(); refusePostgresS3Lifecycle('rollback', installation.configDir); const current = loadRelease(requiredJson(activePath)); const predecessor = loadRelease(requiredJson(predecessorPath))
   let receipt = begin('rollback', { from: current.id, to: predecessor.id })
   try {
     receipt = move(receipt, 'verified'); compose(predecessor, installation.configDir, ['pull']); receipt = move(receipt, 'pulled')
@@ -598,7 +672,7 @@ function rollback() {
 }
 
 async function backup() {
-  const installation = installed(); const release = loadRelease(requiredJson(activePath)); const destination = bounded(required('--output'), 'backup output')
+  const installation = installed(); refusePostgresS3Lifecycle('backup', installation.configDir); const release = loadRelease(requiredJson(activePath)); const destination = bounded(required('--output'), 'backup output')
   ensureEmpty(destination); const backupId = `backup-${randomUUID()}`; let receipt = begin('backup', { backupId, destination })
   const bundledIdentity = deploymentEnv(installation.configDir).KALA_IDENTITY_MODE === 'bundled'
   const applicationServices = ['runtime-ingress', 'runtime-host', 'dashboard', ...(bundledIdentity ? ['identity-proxy', 'identity-login', 'identity-zitadel-health', 'identity-zitadel'] : [])]
@@ -619,7 +693,7 @@ async function backup() {
 }
 
 async function restore() {
-  const installation = installed(); const current = loadRelease(requiredJson(activePath)); const backupDir = bounded(required('--backup'), 'backup directory'); const manifest = requiredJson(join(backupDir, 'manifest.json'))
+  const installation = installed(); refusePostgresS3Lifecycle('restore', installation.configDir); const current = loadRelease(requiredJson(activePath)); const backupDir = bounded(required('--backup'), 'backup directory'); const manifest = requiredJson(join(backupDir, 'manifest.json'))
   if (manifest.product !== 'kala-private-cloud-backup' || manifest.installationId !== installation.installationId) throw new Error('backup does not belong to this installation')
   if (required('--confirm') !== `RESTORE:${manifest.backupId}`) throw new Error(`confirmation must equal RESTORE:${manifest.backupId}`)
   const bundledIdentity = deploymentEnv(installation.configDir).KALA_IDENTITY_MODE === 'bundled'
@@ -644,7 +718,7 @@ async function restore() {
 }
 
 function uninstall() {
-  const installation = installed(); if (required('--confirm') !== `UNINSTALL:${installation.installationId}`) throw new Error(`confirmation must equal UNINSTALL:${installation.installationId}`)
+  const installation = installed(); refusePostgresS3Lifecycle('uninstall', installation.configDir); if (required('--confirm') !== `UNINSTALL:${installation.installationId}`) throw new Error(`confirmation must equal UNINSTALL:${installation.installationId}`)
   const release = loadRelease(requiredJson(activePath)); let receipt = begin('uninstall', {})
   try { receipt = move(receipt, 'verified'); compose(release, installation.configDir, ['down', '--remove-orphans']); receipt = move(receipt, 'stopped'); rmSync(installationPath); rmSync(activePath); rmSync(predecessorPath, { force: true }); receipt = move(receipt, 'removed'); receipt = move(receipt, 'completed'); output({ ok: true, preserved: ['volumes', 'configuration', 'secrets', releasesRoot, receiptsRoot], receipt: publicReceipt(receipt) }) }
   catch (error) { failed(receipt, error); throw error }
@@ -694,12 +768,12 @@ function compose(release, configDir, args, options = {}) {
 function composeInvocation(release, configDir, args) { return { command: 'docker', args: ['compose', ...composeFiles(release, configDir), ...args], cwd: release.dir, env: composeEnv(release, configDir) } }
 function composeFiles(release, configDir) {
   const profile = deploymentEnv(configDir).KALA_PROFILE ?? 'cloudflare'; const storage = deploymentEnv(configDir).KALA_STORAGE ?? (profile === 'local' ? 'nfs' : 'nfs')
-  const files = ['compose.yaml', storage === 'external-nfs' ? 'compose.storage-external-nfs.yaml' : storage === 'local-volume' ? 'compose.storage-local.yaml' : 'compose.storage-nfs.yaml', profile === 'local' ? 'compose.local.yaml' : 'compose.cloudflare.yaml']
+  const files = ['compose.yaml', storage === 'external-nfs' ? 'compose.storage-external-nfs.yaml' : storage === 'local-volume' ? 'compose.storage-local.yaml' : storage === 'postgres-s3' ? 'compose.storage-postgres-s3.yaml' : 'compose.storage-nfs.yaml', profile === 'local' ? 'compose.local.yaml' : 'compose.cloudflare.yaml']
   if (deploymentEnv(configDir).KALA_IDENTITY_MODE === 'bundled') files.push('compose.identity-local.yaml')
   if (existsSync(join(configDir, oidcCaName)) && existsSync(join(release.dir, 'compose.oidc-private-ca.yaml'))) files.push('compose.oidc-private-ca.yaml')
   return ['--project-name', projectName(configDir), '--env-file', join(configDir, 'deployment.env'), ...files.flatMap((file) => ['-f', join(release.dir, file)])]
 }
-function composeEnv(release, configDir) { const environment = deploymentEnv(configDir); return { ...process.env, ...environment, ...(environment.KALA_STORAGE === 'nfs' ? { KALA_NFS_LISTEN_ADDRESS: environment.KALA_NFS_LISTEN_ADDRESS ?? '127.0.0.1', KALA_NFS_PORT: String(localPorts(environment).nfs) } : {}), KALA_RUNTIME_IMAGE: release.lock.images.runtime, KALA_INGRESS_IMAGE: release.lock.images.ingress, KALA_DASHBOARD_IMAGE: release.lock.images.dashboard, KALA_SECRETS_DIR: join(configDir, 'secrets'), KALA_IDENTITY_SECRETS_DIR: join(configDir, 'identity-secrets'), KALA_PROVIDER_CATALOG_FILE: join(configDir, 'runtime-provider-catalog.json'), KALA_DEPLOYMENT_CONFIG_FILE: join(release.dir, 'deployment.json'), ...(existsSync(join(configDir, oidcCaName)) ? { KALA_OIDC_CA_FILE: join(configDir, oidcCaName) } : {}) } }
+function composeEnv(release, configDir) { const environment = deploymentEnv(configDir); return { ...process.env, ...environment, ...(environment.KALA_STORAGE === 'nfs' ? { KALA_NFS_LISTEN_ADDRESS: environment.KALA_NFS_LISTEN_ADDRESS ?? '127.0.0.1', KALA_NFS_PORT: String(localPorts(environment).nfs) } : {}), KALA_RUNTIME_IMAGE: release.lock.images.runtime, KALA_INGRESS_IMAGE: release.lock.images.ingress, KALA_DASHBOARD_IMAGE: release.lock.images.dashboard, KALA_SECRETS_DIR: join(configDir, 'secrets'), KALA_IDENTITY_SECRETS_DIR: join(configDir, 'identity-secrets'), KALA_PROVIDER_CATALOG_FILE: join(configDir, 'runtime-provider-catalog.json'), KALA_DEPLOYMENT_CONFIG_FILE: join(release.dir, 'deployment.json'), ...(environment.KALA_STORAGE === 'postgres-s3' ? { KALA_INSTALLATION_ID_FILE: join(configDir, installationIdName) } : {}), ...(existsSync(join(configDir, oidcCaName)) ? { KALA_OIDC_CA_FILE: join(configDir, oidcCaName) } : {}) } }
 function inspectServices(release, configDir) { const invocation = composeInvocation(release, configDir, ['ps', '--format', 'json']); const result = captureSync(invocation.command, invocation.args, invocation.cwd, invocation.env); const rows = result.trim() ? result.trim().split(/\r?\n/u).map((line) => JSON.parse(line)) : []; return Object.fromEntries(rows.map((row) => [row.Service, { containerId: row.ID, image: row.Image, state: row.State, health: row.Health ?? '' }])) }
 function resolveVolumes(release, configDir) { const text = captureSync('docker', ['compose', ...composeFiles(release, configDir), 'config', '--format', 'json'], release.dir, composeEnv(release, configDir)); const config = JSON.parse(text); const identity = deploymentEnv(configDir).KALA_IDENTITY_MODE === 'bundled'; return Object.fromEntries(['tenant-data', 'control-data', ...(identity ? ['identity-zitadel-config', 'identity-zitadel-bootstrap'] : [])].map((name) => [name, config.volumes?.[name]?.name ?? `${projectName(configDir)}_${name}`])) }
 function infrastructure(release, name) { const composeText = readFileSync(join(release.dir, 'compose.yaml'), 'utf8'); const match = composeText.match(new RegExp(`image: (${name}(?::[^\s@]+)?@sha256:[0-9a-f]{64})`, 'u')); if (!match) throw new Error(`missing pinned ${name} infrastructure image`); return match[1] }
@@ -709,13 +783,15 @@ function move(receipt, phase, detail) { if (!transitions.get(receipt.phase)?.has
 function failed(receipt, error) { if (receipt.phase === 'completed' || receipt.phase === 'failed') return receipt; const next = { ...receipt, sequence: receipt.sequence + 1, phase: 'failed', updatedAt: now(), error: redact(error instanceof Error ? error.message : String(error)) }; atomicJson(join(receiptsRoot, `${receipt.operationId}.json`), next); return next }
 function publicReceipt(receipt) { return receipt && { operationId: receipt.operationId, type: receipt.type, sequence: receipt.sequence, phase: receipt.phase, createdAt: receipt.createdAt, updatedAt: receipt.updatedAt, error: receipt.error } }
 
-function installed() { const value = requiredJson(installationPath); if (value.schemaVersion !== 1 || !value.installationId || !value.configDir) throw new Error('invalid installation record'); requireConfig(value.configDir); return value }
+function installed() { const value = requiredJson(installationPath); if (value.schemaVersion !== 1 || !value.installationId || !value.configDir) throw new Error('invalid installation record'); requireConfig(value.configDir); assertInstallationConfiguration(value, value.configDir); return value }
+function assertInstallationConfiguration(installation, configDir) { const environment = deploymentEnv(configDir); if (installation.projectName && installation.projectName !== projectName(configDir)) throw new Error('configuration COMPOSE_PROJECT_NAME differs from the installed project; in-place project switching is forbidden'); if (installation.storageMode && installation.storageMode !== environment.KALA_STORAGE || !installation.storageMode && environment.KALA_STORAGE === 'postgres-s3') throw new Error('configuration storage mode differs from the installation record; use a fresh Operator root/project and leave legacy volumes untouched') }
+function refusePostgresS3Lifecycle(operation, configDir) { if (deploymentEnv(configDir).KALA_STORAGE === 'postgres-s3') throw new Error(`postgres-s3 evaluation refuses ${operation}: the volume lifecycle cannot protect or recover external PostgreSQL, S3, and runtime_state_master_key authority; coordinate and rehearse the external plan without using this command`) }
 function requireConfig(dir) { for (const name of ['deployment.env', 'runtime-provider-catalog.json']) if (!existsSync(join(dir, name))) throw new Error(`configuration is missing ${name}`); if (!existsSync(join(dir, 'secrets'))) throw new Error('configuration is missing secrets directory'); validateOidcCa(dir) }
 function validateConfig(dir, { requireClient = false } = {}) {
   requireConfig(dir)
   const environment = deploymentEnv(dir)
   if (!['local', 'cloudflare'].includes(environment.KALA_PROFILE)) throw new Error('KALA_PROFILE must be local or cloudflare')
-  if (!['nfs', 'external-nfs', 'local-volume'].includes(environment.KALA_STORAGE)) throw new Error('KALA_STORAGE must be nfs, external-nfs, or local-volume')
+  if (!['nfs', 'external-nfs', 'local-volume', 'postgres-s3'].includes(environment.KALA_STORAGE)) throw new Error('KALA_STORAGE must be nfs, external-nfs, local-volume, or postgres-s3')
   if (environment.KALA_STORAGE === 'external-nfs' && !environment.KALA_EXTERNAL_NFS_ADDRESS?.trim()) throw new Error('KALA_EXTERNAL_NFS_ADDRESS is required when KALA_STORAGE=external-nfs')
   if (environment.KALA_STORAGE === 'nfs') {
     const ports = localPorts(environment)
@@ -724,6 +800,8 @@ function validateConfig(dir, { requireClient = false } = {}) {
   projectName(dir)
   const identity = environment.KALA_IDENTITY_MODE ?? 'external'
   if (!['bundled', 'external'].includes(identity)) throw new Error('KALA_IDENTITY_MODE must be bundled or external')
+  validateStorageOrigin(dir, environment.KALA_STORAGE)
+  if (environment.KALA_STORAGE === 'postgres-s3') validatePostgresS3Environment(environment, identity)
   if (identity === 'bundled') {
     const ports = localPorts(environment)
     if (ports.app === ports.identity || environment.KALA_PROFILE !== 'local' || environment.KALA_PUBLIC_URLS !== `http://localhost:${ports.app}` || environment.KALA_PUBLIC_LISTEN !== `127.0.0.1:${ports.app}` || environment.OIDC_ISSUER !== `http://localhost:${ports.identity}` || environment.OIDC_DISCOVERY_ORIGIN !== 'http://identity-proxy:8080') throw new Error('bundled identity requires matching localhost Kala and ZITADEL origins and loopback binding; use external OIDC for other origins')
@@ -747,7 +825,8 @@ function validateConfig(dir, { requireClient = false } = {}) {
   const secretDirectory = lstatSync(secretsDir)
   if (!secretDirectory.isDirectory() || secretDirectory.isSymbolicLink()) throw new Error('secrets must be a real directory, not a symlink')
   if ((secretDirectory.mode & 0o077) !== 0) throw new Error('secrets directory permissions must not allow group or other access (expected 0700)')
-  for (const name of [...secretNames, ...tlsNames]) validateSecretFile(join(secretsDir, name), name)
+  for (const name of [...secretNames.filter((name) => environment.KALA_STORAGE !== 'postgres-s3' || name !== 'control_postgres_password'), ...tlsNames, ...(environment.KALA_STORAGE === 'postgres-s3' ? postgresS3SecretNames.filter((name) => name !== 'runtime_state_master_key') : [])]) validateSecretFile(join(secretsDir, name), name)
+  if (environment.KALA_STORAGE === 'postgres-s3') validatePostgresS3Credentials(secretsDir, environment)
   for (const name of ['oidc_client_id', 'oidc_client_secret', 'llm_api_key']) {
     const value = readFileSync(join(secretsDir, name), 'utf8').trim()
     if (placeholder(value) && (name === 'llm_api_key' || identity === 'external' || requireClient)) throw new Error(`${name} is still a placeholder; supply the real value before deployment`)
@@ -760,6 +839,61 @@ function validateConfig(dir, { requireClient = false } = {}) {
     if (['192.0.2.5', 'example.com', 'localhost'].includes(url.hostname)) throw new Error(`provider ${String(provider.id ?? '<unknown>')} baseUrl is still an example; configure a reachable LLM provider`)
     if (provider.credentialRef !== 'file:llm_api_key') throw new Error(`provider ${String(provider.id ?? '<unknown>')} must use credentialRef file:llm_api_key`)
   }
+}
+function validateStorageOrigin(dir, storageMode) {
+  const path = join(dir, configOriginName)
+  if (!existsSync(path)) {
+    if (storageMode === 'postgres-s3') throw new Error('postgres-s3 requires a new init-config directory with a generated storage-origin record; legacy configuration cannot switch storage')
+    return // Existing legacy installations predate this record; do not invalidate them.
+  }
+  const info = lstatSync(path)
+  if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077)) throw new Error('storage-origin record must be an owner-only regular file')
+  const origin = requiredJson(path)
+  if (origin.schemaVersion !== 1 || !origin.installationId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(origin.installationId)) throw new Error('storage-origin record has an invalid installation identity')
+  if (origin.storageMode !== storageMode) throw new Error('storage mode differs from original configuration; create a new configuration and preserve existing volumes/data')
+  if (storageMode === 'postgres-s3') {
+    const idPath = join(dir, installationIdName)
+    const idFile = lstatSync(idPath)
+    if (!idFile.isFile() || idFile.isSymbolicLink() || (idFile.mode & 0o077) || readFileSync(idPath, 'utf8').trim() !== origin.installationId) throw new Error('postgres-s3 installation-id file must match the original configuration identity')
+  }
+}
+function validatePostgresS3Environment(environment, identity) {
+  if (identity !== 'external') throw new Error('postgres-s3 evaluation requires external OIDC; bundled identity has local database authority')
+  if (environment.KALA_PG_S3_EVALUATION_ACK !== '1') throw new Error('postgres-s3 requires KALA_PG_S3_EVALUATION_ACK=1 acknowledging fresh-project evaluation status')
+  if (environment.KALA_PG_S3_EXTERNAL_BACKUP_ACK !== '1') throw new Error('postgres-s3 requires KALA_PG_S3_EXTERNAL_BACKUP_ACK=1 after defining an external PostgreSQL/S3 backup plan; this is not restore proof')
+  if (!environment.COMPOSE_PROJECT_NAME || environment.COMPOSE_PROJECT_NAME === 'kala-private-cloud') throw new Error('postgres-s3 must use a new dedicated COMPOSE_PROJECT_NAME; in-place switching from local/NFS is forbidden')
+  const roleNames = ['KALA_CONTROL_DML_ROLE', 'KALA_RUNTIME_DML_ROLE', 'KALA_RUNTIME_READER_ROLE']
+  for (const name of roleNames) if (!/^[a-z_][a-z0-9_]*$/u.test(environment[name] ?? '')) throw new Error(`${name} must name an existing lowercase restricted PostgreSQL login role`)
+  if (new Set(roleNames.map((name) => environment[name])).size !== roleNames.length) throw new Error('control writer, Runtime writer, and Runtime reader roles must be distinct')
+  const endpoint = validHttpsOrigin(environment.KALA_S3_ENDPOINT ?? '', 'KALA_S3_ENDPOINT')
+  if (!endpoint || !/^[a-z0-9][a-z0-9._-]*$/u.test(environment.KALA_S3_REGION ?? '') || !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/u.test(environment.KALA_S3_BUCKET ?? '')) throw new Error('postgres-s3 requires a valid HTTPS S3 endpoint, region, and existing DNS-compatible bucket name')
+  for (const name of postgresS3SecretNames) if (Object.hasOwn(environment, name.toUpperCase()) || Object.hasOwn(environment, `KALA_${name.toUpperCase()}`)) throw new Error(`${name} must be supplied only as a mode-0600 file, never in deployment.env`)
+  if (Object.values(environment).some((value) => /postgres(?:ql)?:\/\//iu.test(value))) throw new Error('database URLs must not be stored in deployment.env; use the required mode-0600 secret files')
+}
+function validatePostgresS3Credentials(secretsDir, environment) {
+  const keyPath = join(secretsDir, 'runtime_state_master_key')
+  if (!existsSync(keyPath)) throw new Error('configuration is missing secrets/runtime_state_master_key; create and durably preserve exactly 32 raw random bytes')
+  const keyInfo = lstatSync(keyPath)
+  if (!keyInfo.isFile() || keyInfo.isSymbolicLink() || (keyInfo.mode & 0o077) !== 0 || keyInfo.size !== 32) throw new Error('secrets/runtime_state_master_key must be a private regular file containing exactly 32 raw bytes; the Operator will not generate it')
+  if (readFileSync(keyPath).subarray(0, 8).toString('ascii').startsWith('REPLACE_')) throw new Error('secrets/runtime_state_master_key is a placeholder; supply and durably preserve 32 raw random bytes')
+  for (const name of ['runtime_s3_access_key_id', 'runtime_s3_secret_access_key']) if (placeholder(readFileSync(join(secretsDir, name), 'utf8').trim())) throw new Error(`secrets/${name} is still a placeholder`)
+  const urls = new Map()
+  for (const name of postgresS3SecretNames.filter((entry) => entry.includes('postgres'))) {
+    let url
+    try { url = new URL(readFileSync(join(secretsDir, name), 'utf8').trim()) } catch { throw new Error(`secrets/${name} must contain a valid PostgreSQL URL`) }
+    if (!['postgres:', 'postgresql:'].includes(url.protocol) || !url.hostname || !url.username || !url.password || url.hash) throw new Error(`secrets/${name} must contain a credentialed PostgreSQL URL without a fragment`)
+    urls.set(name, url)
+  }
+  const username = (name) => { try { return decodeURIComponent(urls.get(name).username) } catch { throw new Error(`secrets/${name} has an invalid encoded PostgreSQL login role`) } }
+  const controlOwner = urls.get('control_postgres_migration_owner_url'); const controlWriter = urls.get('control_postgres_writer_url')
+  if (controlOwner.pathname !== '/runlab_control' || controlWriter.pathname !== '/runlab_control' || controlOwner.host !== controlWriter.host) throw new Error('external control PostgreSQL owner and writer URLs must select the same pre-created runlab_control database')
+  if (username('control_postgres_migration_owner_url') === username('control_postgres_writer_url') || username('control_postgres_writer_url') !== environment.KALA_CONTROL_DML_ROLE) throw new Error('control migration owner and Gateway writer must use distinct credentials, and KALA_CONTROL_DML_ROLE must match the writer URL')
+  const runtimeNames = ['runtime_postgres_owner_url', 'runtime_postgres_writer_url', 'runtime_postgres_reader_url']
+  const runtimeUrls = runtimeNames.map((name) => urls.get(name)); const runtimeUsers = runtimeNames.map(username)
+  if (runtimeUrls.some((url) => url.host !== runtimeUrls[0].host || url.pathname !== runtimeUrls[0].pathname) || runtimeUrls[0].pathname === '/') throw new Error('Runtime PostgreSQL owner, writer, and reader URLs must select the same pre-created Runtime database')
+  if (new Set(runtimeUsers).size !== runtimeUsers.length || runtimeUsers[1] !== environment.KALA_RUNTIME_DML_ROLE || runtimeUsers[2] !== environment.KALA_RUNTIME_READER_ROLE) throw new Error('Runtime owner, writer, and reader credentials must be distinct and match the configured workload roles')
+  if (controlOwner.host === runtimeUrls[0].host && controlOwner.pathname === runtimeUrls[0].pathname) throw new Error('control and Runtime PostgreSQL must use separate databases')
+  if (new Set([username('control_postgres_migration_owner_url'), username('control_postgres_writer_url'), ...runtimeUsers]).size !== 5) throw new Error('control and Runtime PostgreSQL login credentials must remain isolated')
 }
 function deploymentEnv(dir) { const result = {}; for (const line of readFileSync(join(dir, 'deployment.env'), 'utf8').split(/\r?\n/u)) { const match = line.match(/^([A-Z][A-Z0-9_]*)=(.*)$/u); if (match) result[match[1]] = match[2] } return result }
 function validPort(value, label) { const port = Number(value); if (!/^[1-9][0-9]{3,4}$/u.test(String(value)) || !Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error(`${label} must be a TCP port from 1024 to 65535`); return port }

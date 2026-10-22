@@ -2,9 +2,12 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import test from 'node:test'
+import { parse as parseYaml } from '../../node_modules/.pnpm/node_modules/yaml/dist/index.js'
 
 const root = resolve(import.meta.dirname, '../..')
 const workflow = async (name) => await readFile(resolve(root, '.github/workflows', name), 'utf8')
+const workflowDocument = async (name) => parseYaml(await workflow(name))
+const namedStep = (job, name) => job.steps.find((step) => step.name === name)
 
 const automaticEvents = (source) => source.match(/^on:\n([\s\S]*?)\n(?:permissions|concurrency|jobs):/mu)?.[1] ?? ''
 
@@ -117,6 +120,58 @@ test('Private Cloud release builds signed Linux x64 images and native bundles', 
   assert.match(release, /check-vulnerabilities\.mjs/u)
   assert.match(release, /image-vulnerability-scan/u)
   assert.doesNotMatch(release, /--draft=false/u)
+})
+
+test('Private Cloud promotion requires exact fresh-candidate evidence and cannot substitute optional predecessor evidence', async () => {
+  const release = await workflowDocument('private-cloud-release.yml')
+  const jobs = release.jobs
+  const bundleRun = namedStep(jobs.bundle, 'Build immutable Compose bundle with native Operator').run
+  assert.match(bundleRun, /verify-private-cloud-bundle\.mjs --release release\/private-cloud/u)
+  const uploadRun = namedStep(jobs.bundle, 'Upload and verify owned Private Cloud release assets').run
+  const draftGuard = uploadRun.indexOf('gh release view "$TAG" --json isDraft --jq .isDraft')
+  const clobber = uploadRun.indexOf('gh release upload "$TAG" "$archive" "$signature" --clobber')
+  assert.ok(draftGuard >= 0 && clobber > draftGuard, 'draft release guard must precede clobber upload')
+
+  assert.deepEqual(jobs.fresh_beta_candidate_assets.needs, ['resolve', 'bundle'])
+  assert.equal(jobs.fresh_beta_candidate_assets.if, "startsWith(github.ref, 'refs/tags/')")
+  const stageRun = namedStep(jobs.fresh_beta_candidate_assets, 'Stage signed draft bundle and exact beta Executor').run
+  assert.match(stageRun, /kala-private-cloud-\$\{VERSION\}-linux-x64\.tar\.gz/u)
+  assert.match(stageRun, /private-cloud-linux-x64\.sigstore\.json/u)
+  const stagedArtifact = jobs.fresh_beta_candidate_assets.steps.find((step) => step.uses === 'actions/upload-artifact@v5')
+  assert.equal(stagedArtifact.with.name, 'private-cloud-beta-draft-assets-${{ github.run_id }}-${{ github.run_attempt }}')
+
+  assert.deepEqual(jobs.fresh_beta_candidate_acceptance.needs, ['resolve', 'bundle', 'fresh_beta_candidate_assets'])
+  assert.equal(jobs.fresh_beta_candidate_acceptance.if, "startsWith(github.ref, 'refs/tags/')")
+  const stagedDownload = jobs.fresh_beta_candidate_acceptance.steps.find((step) => step.uses === 'actions/download-artifact@v5')
+  assert.equal(stagedDownload.with.name, stagedArtifact.with.name)
+  const freshRun = namedStep(jobs.fresh_beta_candidate_acceptance, 'Install the fresh beta candidate before browser, tenant, Executor and restore checks').run
+  assert.match(freshRun, /--fresh-candidate --ephemeral-bundled-acceptance --candidate-archive "\$archive"/u)
+  assert.match(freshRun, /verify-private-cloud-fresh-evidence\.mjs[\s\S]*--archive "\$archive" --tag "\$TAG" --revision "\$GITHUB_SHA"/u)
+  assert.doesNotMatch(freshRun, /predecessor/iu)
+  const freshUpload = jobs.fresh_beta_candidate_acceptance.steps.find((step) => step.uses === 'actions/upload-artifact@v5')
+  assert.equal(freshUpload.if, 'always()')
+  assert.equal(freshUpload.with.name, 'private-cloud-fresh-beta-evidence-${{ github.run_id }}-${{ github.run_attempt }}')
+
+  const predecessor = jobs['clean-compose-acceptance']
+  assert.ok(predecessor.needs.includes('fresh_beta_candidate_acceptance'))
+  assert.match(predecessor.if, /needs\.fresh_beta_candidate_acceptance\.result == 'success'/u)
+  const predecessorGuard = namedStep(predecessor, 'Verify GitHub-hosted VM, predecessor and test identities').run
+  assert.match(predecessorGuard, /UNSUPPORTED_PREDECESSOR_OVERRIDE.*PREDECESSOR_TAG/u)
+  const predecessorRun = namedStep(predecessor, 'Run complete clean Compose acceptance against signed candidate').run
+  assert.match(predecessorRun, /--non-certifying-predecessor/u)
+  assert.match(predecessorRun, /e\.category!=="private-cloud-predecessor"/u)
+  assert.match(predecessorRun, /e\.certifying!==false/u)
+  assert.match(predecessorRun, /unsupported-explicit-override/u)
+  assert.doesNotMatch(predecessorRun, /fs\.writeFileSync|e\.certifying=false/u)
+  const predecessorUpload = predecessor.steps.find((step) => step.uses === 'actions/upload-artifact@v5')
+  assert.match(predecessorUpload.with.name, /^private-cloud-noncertifying-predecessor-evidence-/u)
+
+  const promotion = await workflowDocument('promote-rc.yml')
+  const promotionRuns = promotion.jobs.promote.steps.filter((step) => typeof step.run === 'string').map((step) => step.run).join('\n')
+  assert.match(promotionRuns, /Fresh beta candidate install and restore \(exact signed draft release\).*\.conclusion/u)
+  assert.match(promotionRuns, /private-cloud-fresh-beta-evidence-\$FRESH_RUN_ID-\$FRESH_RUN_ATTEMPT/u)
+  assert.match(promotionRuns, /verify-private-cloud-fresh-evidence\.mjs[\s\S]*--archive "\$archive" --tag "\$TAG" --revision "\$REVISION"/u)
+  assert.doesNotMatch(promotionRuns, /noncertifying-predecessor-evidence|clean-compose-acceptance/u)
 })
 
 test('release requires three POSIX and one Windows hosted Portable acceptances plus signed GHCR/asset workflows', async () => {

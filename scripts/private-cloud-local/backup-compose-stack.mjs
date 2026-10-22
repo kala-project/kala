@@ -6,6 +6,7 @@ import { resolve } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { composeArgs, composeFiles, root, selectedProfile } from './profile.mjs'
 const profile = selectedProfile()
+if (profile === 'postgres-s3') throw new Error('PG/S3 Runtime authority is not captured by the local-volume backup; use a coordinated PostgreSQL + S3 backup with a tested restore')
 const backupRoot = resolve(process.env.KALA_BACKUP_DIR ?? resolve(root, 'deploy/private-cloud/backups'))
 if (backupRoot === '/tmp' || backupRoot.startsWith('/tmp/')) throw new Error('KALA_BACKUP_DIR must be persistent; /tmp is forbidden')
 const out = resolve(process.argv[2] ?? `${backupRoot}/${new Date().toISOString().replace(/[:.]/gu, '-')}`)

@@ -21,12 +21,12 @@ const development=await readFile('deploy/private-cloud/compose.dev.yaml','utf8')
 for(const service of ['runtime-host','runtime-ingress','dashboard'])if(!new RegExp(String.raw`^  ${service}:\n(?:(?!^  [a-z]).)*?^    build:`,'msu').test(development))failures.push(`Development Compose is missing ${service} source build`)
 for(const forbidden of ['privileged: true','network_mode: host','/var/run/docker.sock','0.0.0.0:13001'])if(text.includes(forbidden))failures.push(`forbidden compose setting: ${forbidden}`)
 if(!/host_ip: 127\.0\.0\.1[\s\S]*?target: 13001[\s\S]*?published: "13001"/u.test(text))failures.push('Gateway must bind only to loopback port 13001')
-for(const service of ['init-volumes','init-app-secrets','control-postgres','control-plane-init','runtime-host','dashboard','runtime-ingress']){
+for(const service of ['init-app-secrets','control-plane-init','runtime-host','dashboard','runtime-ingress',...(profile==='postgres-s3'?['init-storage-secrets','runtime-schema-init']:['init-volumes','control-postgres'])]){
  const match=text.match(new RegExp(`^  ${service}:\\n([\\s\\S]*?)(?=^  [a-z][a-z0-9-]*:|^networks:|^volumes:)`,'mu'));const block=match?.[1]??''
  if(!block.includes('no-new-privileges:true'))failures.push(`${service} lacks no-new-privileges`)
  if(!block.includes('cap_drop:\n      - ALL'))failures.push(`${service} does not drop capabilities`)
 }
-if(!/networks:\n  control:[\s\S]*?internal: true/u.test(text)||!/networks:[\s\S]*?\n  runtime:[\s\S]*?internal: true/u.test(text))failures.push('control/runtime networks must be internal')
+if((profile!=='postgres-s3'&&!/networks:\n  control:[\s\S]*?internal: true/u.test(text))||!/networks:[\s\S]*?\n  runtime:[\s\S]*?internal: true/u.test(text))failures.push(profile==='postgres-s3'?'runtime network must be internal':'control/runtime networks must be internal')
 const runtimeHost=text.match(/^  runtime-host:\n([\s\S]*?)(?=^  [a-z][a-z0-9-]*:|^networks:|^volumes:)/mu)?.[1]??''
 if(!runtimeHost.includes('KALA_DEPLOYMENT_CONFIG: /etc/kala/deployment.json'))failures.push('Runtime Host must declare the authoritative deployment config')
 if(runtimeHost.includes('KALA_RUNTIME_HOST_DASHBOARD_DIR'))failures.push('Private Cloud Runtime Host must not serve Dashboard assets')
@@ -35,7 +35,7 @@ const ingress=text.match(/^  runtime-ingress:\n([\s\S]*?)(?=^  [a-z][a-z0-9-]*:|
 if(!ingress.includes('KALA_INGRESS_DASHBOARD_ORIGIN: http://dashboard:8080'))failures.push('Private Cloud Ingress must route to the independent Dashboard service')
 if(profile==='cloudflare'&&!/^\s+KALA_PUBLIC_URLS: https:\/\//mu.test(text))failures.push('Cloudflare profile requires an HTTPS public URL')
 if(profile==='cloudflare'&&!/^\s+OIDC_ISSUER: https:\/\//mu.test(text))failures.push('Cloudflare profile requires an HTTPS issuer')
-if(profile!=='local-volume'){
+if(profile!=='local-volume'&&profile!=='postgres-s3'){
  const storage=await readFile('deploy/private-cloud/compose.storage-nfs.yaml','utf8')
  if(profile!=='external-nfs'&&(!storage.includes('nfs-server:')||!storage.includes('hectorm/nfs-ganesha@sha256:')))failures.push('Docker NFS profile missing pinned server')
 }

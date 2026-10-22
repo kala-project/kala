@@ -8,6 +8,8 @@ import { createConfig } from '@agent-kernel/kernel'
 import type {
   DashboardClientToServerEvents,
   DashboardServerToClientEvents,
+  ExecutorClientToServerEvents,
+  ExecutorServerToClientEvents,
   ServerSubAgentStartedEvent,
   SessionReadyEvent,
 } from '@agent-kernel/shared'
@@ -46,12 +48,72 @@ async function connectDashboard(server: HostServer, sessionId: string): Promise<
 describe('dashboard indirect effect owner guards', () => {
   let server: HostServer | undefined
   let dashboard: Dashboard | undefined
+  let executor: ClientSocket<ExecutorServerToClientEvents, ExecutorClientToServerEvents> | undefined
   let dir: string | undefined
 
   afterEach(async () => {
     dashboard?.close()
+    executor?.close()
     await server?.close()
     if (dir) rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('does not dispatch workspace, terminal, background or memory effects after owner transfer', async () => {
+    dir = mkdtempSync(join(tmpdir(), 'kala-dashboard-owner-executor-'))
+    const sessionId = 'owner-moved-executor-effects'
+    const workspaceId = 'ws-owner-moved-executor'
+    const checked: string[] = []
+    let llmCalls = 0
+    let executorCalls = 0
+    server = await startHostServer({
+      port: 0,
+      sessionsDir: dir,
+      defaultConfig: createConfig({ tools: [] }),
+      llm: { name: 'unexpected-model', async call() { llmCalls++; throw new Error('model must not be called') } },
+      assertSessionEffectOwner: async (checkedId) => {
+        checked.push(checkedId)
+        throw new Error('Session owner moved to another replica')
+      },
+    })
+    await server.store.ensure({ sessionId, workspaceId, defaultConfig: createConfig({ tools: [] }) })
+    dashboard = await connectDashboard(server, sessionId)
+    executor = clientIO(`http://localhost:${server.port}/executor`, {
+      transports: ['websocket'], reconnection: false,
+      auth: { role: 'executor', clientVersion: PROTOCOL_VERSION },
+    }) as ClientSocket<ExecutorServerToClientEvents, ExecutorClientToServerEvents>
+    await new Promise<void>((resolve) => executor!.on('connect', resolve))
+    executor.on('tool:call', (payload, ack) => {
+      executorCalls++
+      ack({ callId: payload.callId, ok: false, content: 'unexpected external effect' })
+    })
+    executor.emit('executor:announce', {
+      executorId: 'ex-owner-moved', workspaceId, workspaceName: 'owner-moved',
+      tools: ['bash', 'write'], sandboxRoots: [dir], runtime: 'node', runtimeVersion: '22',
+    })
+    await vi.waitFor(() => expect(server!.executorsSnapshot().some((item) => item.workspaceId === workspaceId)).toBe(true))
+
+    const exec = await dashboard.timeout(1_000).emitWithAck('workspace:exec', {
+      requestId: 'stale-exec', workspaceId, argv: ['echo', 'forbidden'],
+    })
+    expect(exec.error).toMatchObject({ code: 'EACCES', message: 'Session owner moved to another replica' })
+    const directory = await dashboard.timeout(1_000).emitWithAck('client:create_directory', {
+      requestId: 'stale-mkdir', workspaceId, parentPath: dir, name: 'forbidden',
+    })
+    expect(directory).toMatchObject({ created: false, error: 'Session owner moved to another replica' })
+    const background = await dashboard.timeout(1_000).emitWithAck('bg:kill', {
+      requestId: 'stale-bg', workspaceId, sessionId, taskId: 'test-task',
+    })
+    expect(background).toMatchObject({ killed: false, error: 'Session owner moved to another replica' })
+    const terminal = await dashboard.timeout(1_000).emitWithAck('terminal:create', {
+      requestId: 'stale-terminal', workspaceId, sessionId: `workspace-terminal:${sessionId}:tab-1`,
+    })
+    expect(terminal).toMatchObject({ error: 'Session owner moved to another replica' })
+    const consolidated = new Promise<{ error?: string }>((resolve) => dashboard!.once('server:memory_consolidated', resolve))
+    dashboard.emit('client:consolidate_memory', { requestId: 'stale-memory', sessionId })
+    await expect(consolidated).resolves.toMatchObject({ error: 'Session owner moved to another replica' })
+    expect(checked).toEqual(Array(5).fill(sessionId))
+    expect(executorCalls).toBe(0)
+    expect(llmCalls).toBe(0)
   })
 
   it('does not clear or abort a stream after the Session owner moves', async () => {

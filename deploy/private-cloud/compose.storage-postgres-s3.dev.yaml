@@ -1,0 +1,7 @@
+# Repository development only; not included in signed release bundles.
+services:
+  runtime-schema-init:
+    image: kala-private-cloud-runtime:dev
+    build:
+      context: ../..
+      dockerfile: deploy/private-cloud/images/Dockerfile.runtime-service

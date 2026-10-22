@@ -101,23 +101,23 @@ The current `agent` profile keeps Agent, Workspace, Executor, File, Git, Shell, 
 
 ## 5. Identity and routing
 
-Portable and Dedicated may use local/shared-token authentication and route to their configured Runtime Unit without an end-user tenant selector. Private Cloud uses an external Gateway/identity service to map an authenticated identity to an opaque `TenantRuntimeUnit` assignment.
+Portable and Dedicated may use local/shared-token authentication and route to their configured Runtime Unit without an end-user tenant selector. Private Cloud uses its Gateway/control plane to resolve the *current* Organization membership, permissions and placement to one logical `TenantRuntimeUnit`; identity is not permanently assigned to its own Unit.
 
-For every Private Cloud HTTP request, Engine.IO poll, and WebSocket upgrade, the Gateway:
+For each authenticated browser Runtime request, Engine.IO poll or WebSocket upgrade, the Gateway:
 
-1. verifies the product session;
-2. resolves the immutable identity assignment;
+1. verifies the revocable product session and current Organization permission;
+2. resolves the Organization's Unit and current server-side placement;
 3. removes browser-supplied routing authority;
-4. writes a trusted opaque Unit route and service credential;
-5. keeps that route stable for the connection lifetime.
+4. writes trusted routing and service credentials;
+5. pins an established connection to its chosen owner until closure or reconnect, then re-resolves placement.
 
-The Runtime Host knows Unit tenancy and deployment-boundary credentials, not user profiles, passwords, OIDC tokens, organizations, memberships, billing identity, or RBAC policy.
+Machine Executor credentials and anonymous public paths have distinct authentication rules; neither is a browser session. The Runtime Host knows Unit tenancy and a trusted opaque Organization ID only as a storage namespace, plus deployment-boundary credentials; it does not receive user profiles, passwords, OIDC tokens, memberships, billing identity or RBAC policy.
 
 ## 6. Unit isolation
 
-Each `TenantRuntimeUnit` owns separate Session stores, queues, Workspace/Executor identities, operation receipts, artifacts, notifications, Socket.IO servers, namespaces, adapters, recovery state, caches, timers, and mutable roots. Tests deliberately reuse identifiers across Units and prove no leakage.
+Each logical `TenantRuntimeUnit` owns separate Session stores, queues, Workspace/Executor identities, operation receipts, artifacts and notifications. Its serving Runtime replicas keep Unit-scoped Socket.IO instances, namespaces, recovery buffers, caches and timers; persistence authority need not be a directory or one process. Tests deliberately reuse identifiers across Units and prove no leakage.
 
-Logical process-local isolation is not claimed as container/VM isolation. Multi-node placement requires explicit leases and fencing; copied files do not grant writer ownership.
+Logical Unit isolation is not claimed as container/VM isolation. Multi-node placement requires explicit leases and per-resource fencing; copied files do not grant writer ownership.
 
 ## 7. Release lanes
 
@@ -147,7 +147,7 @@ remain indefinitely on mixed assets merely because Socket.IO still reports conne
 
 ### Private Cloud
 
-- deploy the complete user-operated container/Kubernetes stack behind one product Origin;
+- deploy the complete user-operated container stack behind one product Origin; Kubernetes is an optional orchestrator, not a prerequisite for the Private Cloud product mode or the single-node release;
 - create at least two temporary identities and isolated Units;
 - reuse identifiers across Units and prove Session, Workspace, Executor, File, Shell, Artifact, and notification isolation;
 - prove authentication lifecycle, Gateway bypass denial, HTTP/WebSocket stickiness, backup/restore, upgrade, and cleanup.

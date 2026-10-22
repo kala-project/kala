@@ -7,6 +7,7 @@ import { spawn, spawnSync } from 'node:child_process'
 
 import { composeArgs, root, selectedProfile } from './profile.mjs'
 
+if (selectedProfile() === 'postgres-s3') throw new Error('PG/S3 Runtime Units cannot be exported from the local tenant-data volume')
 const unitId = process.argv[2]
 if (!unitId || !/^[0-9A-Za-z][0-9A-Za-z_-]{0,127}$/u.test(unitId)) {
   throw new Error('usage: export-runtime-unit.mjs UNIT_ID [PERSISTENT_OUTPUT_DIR]')

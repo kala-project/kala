@@ -39,7 +39,7 @@ import { io as clientIO, type Socket as ClientSocket } from 'socket.io-client'
 import type { LLMAdapter } from './llm/adapter.js'
 import { startHostServer, type HostServer } from './server.js'
 import { appendEventEntry, appendRuntimeMetadataEntry, readSessionLog } from './store/log.js'
-import { persistMessageQueueSnapshot } from './message-queue-store.js'
+import { loadPersistedMessageQueueState, persistMessageQueueSnapshot } from './message-queue-store.js'
 import { messageOperationFingerprint } from './message-operation-fingerprint.js'
 import { ExecutorIdentityStore } from './store/executor-identity.js'
 import { UnitResourceGovernor } from './tenant-runtime/resource-governor.js'
@@ -783,6 +783,12 @@ describe('wire protocol', () => {
     })
     expect(exec).toMatchObject({ error: { code: 'EACCES', message: 'tenant_forbidden' } })
 
+    const directory = await dashboard.timeout(1000).emitWithAck('client:create_directory', {
+      requestId: 'cross-workspace-directory', workspaceId: 'workspace-tenant-b',
+      parentPath: '/tmp', name: 'forbidden',
+    })
+    expect(directory).toMatchObject({ created: false, error: 'tenant_forbidden' })
+
     const binary = await dashboard.timeout(1000).emitWithAck('workspace:read_binary', {
       requestId: 'cross-workspace-read',
       workspaceId: 'workspace-tenant-b',
@@ -977,6 +983,37 @@ describe('wire protocol', () => {
       releaseValidation()
       dashboard.close()
     }
+  })
+
+  it('does not persist HTTP admission before its uploaded attachment is protected', async () => {
+    await server.close()
+    const messageAttachments = new MessageAttachmentStore(join(dir, 'admission-message-attachments'))
+    server = await startHostServer({
+      port: 0, sessionsDir: dir, llm: scriptedLlm(), defaultConfig: config,
+      objectStorage: {
+        sessionArtifacts: new SessionArtifactRegistry(join(dir, 'admission-session-artifacts')),
+        messageAttachments,
+      },
+    })
+    url = `http://localhost:${server.port}`
+    const sessionId = 'attachment-admission-fence'
+    await server.store.ensure({ sessionId, defaultConfig: config })
+    const file = await messageAttachments.register({
+      sessionId, name: 'message.txt', mediaType: 'text/plain', data: Buffer.from('durable bytes'),
+    })
+    const commit = vi.spyOn(messageAttachments, 'commitReferences').mockRejectedValueOnce(new Error('metadata unavailable'))
+    const input = { sessionId, operationId: 'attachment-admission-failure', text: '', intent: 'text', mode: 'queue', content: [file] }
+    const request = () => fetch(`${url}/runtime/admission/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input),
+    })
+    const failed = await request()
+    expect(failed.status).toBe(400)
+    expect(await failed.json()).not.toHaveProperty('durablyAccepted')
+    expect((await loadPersistedMessageQueueState(server.store, sessionId)).items).toHaveLength(0)
+    const admitted = await request()
+    expect(admitted.status).toBe(202)
+    expect(commit).toHaveBeenCalledTimes(2)
+    commit.mockRestore()
   })
 
   it('fails startup closed when an injected object store cannot load', async () => {
@@ -4231,6 +4268,20 @@ describe('wire protocol', () => {
     expect(unsupported.status).toBe(400)
   })
 
+  it('never returns an ephemeral enhancement artifact path for a PostgreSQL-backed Session', async () => {
+    Object.defineProperty(server.store, 'usesPostgresAuthority', { value: true })
+    const request = (action: string) => fetch(`${url}/enhancement/action`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action, rootDir: join(dir, 'scratch') }),
+    })
+    for (const action of ['memory-index', 'tool-catalog-diff', 'profile-session', 'artifacts-prune']) {
+      const response = await request(action)
+      expect(response.status).toBe(409)
+      expect(await response.text()).toContain('unavailable with PostgreSQL Session authority')
+    }
+  })
+
   it("rejects removed product evaluation entry points after the clean cutover", async () => {
     const actions = [
       "swebench-resolve-instances",
@@ -4424,6 +4475,53 @@ describe('wire protocol', () => {
 
     dashboard.close()
     executor.close()
+  })
+
+  it('does not create or report a fork after the source Session owner moves', async () => {
+    const isolatedDir = mkdtempSync(join(tmpdir(), 'kala-fork-owner-'))
+    let denyFork = false
+    const isolated = await startHostServer({
+      port: 0,
+      sessionsDir: isolatedDir,
+      defaultConfig: config,
+      llm: scriptedLlm(),
+      assertSessionEffectOwner: async (sessionId) => {
+        if (denyFork && sessionId === 'fork-owner-source') throw new Error('Session owner moved before fork')
+      },
+    })
+    try {
+      await isolated.store.create({ sessionId: 'fork-owner-source', config })
+      const dashboard: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(
+        `http://localhost:${isolated.port}/dashboard`, {
+          transports: ['websocket'],
+          auth: { sessionId: 'fork-owner-source', role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+          reconnection: false,
+        },
+      )
+      try {
+        await new Promise<SessionReadyEvent>((resolve) => dashboard.on('session:ready', resolve))
+        denyFork = true
+        const error = new Promise<{ sessionId: string; message: string }>((resolve) => {
+          dashboard.on('session:error', (payload) => resolve(payload))
+        })
+        dashboard.emit('client:fork', {
+          sourceSessionId: 'fork-owner-source',
+          cursor: 0,
+          newSessionId: 'fork-owner-child',
+        })
+        await expect(error).resolves.toMatchObject({
+          sessionId: 'fork-owner-source',
+          message: 'Session owner moved before fork',
+        })
+        expect((await isolated.store.listSummaries()).map((summary) => summary.sessionId))
+          .toEqual(['fork-owner-source'])
+      } finally {
+        dashboard.close()
+      }
+    } finally {
+      await isolated.close()
+      rmSync(isolatedDir, { recursive: true, force: true })
+    }
   })
 
   it('always cascades session deletion through descendant sessions', async () => {

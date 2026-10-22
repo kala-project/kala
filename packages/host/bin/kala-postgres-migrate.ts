@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import process from 'node:process'
+import { readFile } from 'node:fs/promises'
 
 import { grantPostgresGatewayRuntimeReader, grantPostgresRuntimeDml, migratePostgres } from '../src/postgres-migrations.js'
 
 function usage(): never {
   console.error('Usage: kala-postgres-migrate [--connection-string URL] [--schema NAME] [--runtime-role EXISTING_ROLE] [--gateway-runtime-reader-role EXISTING_ROLE]')
-  console.error('The connection string may instead be supplied in KALA_POSTGRES_MIGRATION_CONNECTION_STRING.')
+  console.error('The connection string may instead be supplied in KALA_POSTGRES_MIGRATION_CONNECTION_STRING or its _FILE variant.')
   process.exit(2)
 }
 
@@ -25,8 +26,10 @@ for (let index = 2; index < process.argv.length; index += 1) {
   index += 1
 }
 
-const connectionString = option('--connection-string')
-  ?? process.env.KALA_POSTGRES_MIGRATION_CONNECTION_STRING?.trim()
+const direct = option('--connection-string') ?? process.env.KALA_POSTGRES_MIGRATION_CONNECTION_STRING?.trim()
+const connectionFile = process.env.KALA_POSTGRES_MIGRATION_CONNECTION_STRING_FILE?.trim()
+if (direct && connectionFile) throw new Error('Migration connection string and its _FILE variant are mutually exclusive')
+const connectionString = direct ?? (connectionFile ? (await readFile(connectionFile, 'utf8')).trim() : undefined)
 if (!connectionString) usage()
 
 const schema = option('--schema')

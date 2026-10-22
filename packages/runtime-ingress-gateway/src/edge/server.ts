@@ -1,6 +1,7 @@
 import { createHmac, randomBytes } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http'
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https'
+import type { Duplex } from 'node:stream'
 
 import httpProxy from 'http-proxy'
 import { parsePublicUrls, validatePublicRequest, type PublicUrlPattern } from '@agent-kernel/shared'
@@ -8,7 +9,7 @@ import { parsePublicUrls, validatePublicRequest, type PublicUrlPattern } from '@
 import type { LoginStateStore } from '../auth/login-state-store.js'
 import type { OidcClient } from '../auth/oidc-client.js'
 import { inviteKey, type AuthenticatedIdentity, type RuntimeAssignmentStore } from '../assignments/store.js'
-import { permits, type OrganizationStore } from '../organizations/store.js'
+import { permits, type OrganizationAccess, type OrganizationStore } from '../organizations/store.js'
 import { browserDeviceFromUserAgent, browserSessionTokenHash, isLive, type BrowserSession, type BrowserSessionStore } from '../auth/browser-session-store.js'
 import type { SessionSecretBox } from '../auth/session-secret-box.js'
 import type { EnterpriseSsoResolver } from '../auth/enterprise-sso.js'
@@ -147,8 +148,75 @@ export async function startRuntimeIngressGateway(options: {
   }
   serviceAccounts?: ServiceAccountService
   rateLimiter?: RateLimiter
+  socketRecheckMs?: number
   provision?(unitId: string): Promise<void>
 }): Promise<RuntimeIngressGateway> {
+  const recheckMs = options.socketRecheckMs ?? 15_000
+  if (!Number.isSafeInteger(recheckMs) || recheckMs < 1) throw new Error('socketRecheckMs must be positive')
+  const browserSockets = new Map<Duplex, { sessionId: string; identity: AuthenticatedIdentity; upstream?: Duplex; timer?: ReturnType<typeof setTimeout> }>()
+  const executorSockets = new Map<Duplex, { routeHash: string; unitId: string; upstream?: Duplex; timer?: ReturnType<typeof setTimeout> }>()
+  const authorizationStillValid = async (check: () => Promise<boolean>): Promise<boolean> => {
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        check(),
+        new Promise<false>((resolve) => { deadline = setTimeout(() => resolve(false), 5_000); deadline.unref() }),
+      ])
+    } catch { return false }
+    finally { if (deadline) clearTimeout(deadline) }
+  }
+  const closeSockets = (predicate: (entry: { sessionId: string; identity: AuthenticatedIdentity }) => boolean) => {
+    for (const [socket, entry] of browserSockets) if (predicate(entry)) {
+      entry.upstream?.destroy()
+      socket.destroy()
+    }
+  }
+  const closeSocketsForIdentity = (identity: AuthenticatedIdentity) => closeSockets((entry) =>
+    entry.identity.issuer === identity.issuer && entry.identity.subject === identity.subject)
+  const closeExecutorSocket = (socket: Duplex) => {
+    executorSockets.get(socket)?.upstream?.destroy()
+    socket.destroy()
+  }
+  const monitorBrowserSocket = (socket: Duplex, session: BrowserSession, access: OrganizationAccess) => {
+    const entry: { sessionId: string; identity: AuthenticatedIdentity; upstream?: Duplex; timer?: ReturnType<typeof setTimeout> } = { sessionId: session.id, identity: session.identity }
+    browserSockets.set(socket, entry)
+    socket.once('close', () => { if (entry.timer) clearTimeout(entry.timer); browserSockets.delete(socket) })
+    const schedule = () => {
+      entry.timer = setTimeout(() => { void recheck() }, recheckMs)
+      entry.timer.unref()
+    }
+    const recheck = async () => {
+      const valid = await authorizationStillValid(async () => {
+        const current = await options.sessions.findByTokenHash(session.tokenHash)
+        if (!current || current.id !== session.id || !isLive(current, Date.now())) return false
+        const latest = await options.organizations!.findAccess(session.identity)
+        return latest?.organization.id === access.organization.id
+          && latest.organization.unitId === access.organization.unitId
+          && latest.organization.status === 'active'
+          && latest.membership.role === access.membership.role
+          && permits(latest.membership.role, 'runtime:write')
+      })
+      if (!valid) closeSockets((candidate) => candidate === entry)
+      if (!socket.destroyed) schedule()
+    }
+    schedule()
+  }
+  const monitorExecutorSocket = (socket: Duplex, routeHash: string, unitId: string) => {
+    const entry: { routeHash: string; unitId: string; upstream?: Duplex; timer?: ReturnType<typeof setTimeout> } = { routeHash, unitId }
+    executorSockets.set(socket, entry)
+    socket.once('close', () => { if (entry.timer) clearTimeout(entry.timer); executorSockets.delete(socket) })
+    const schedule = () => {
+      entry.timer = setTimeout(() => { void recheck() }, recheckMs)
+      entry.timer.unref()
+    }
+    const recheck = async () => {
+      const valid = await authorizationStillValid(async () =>
+        (await options.directory.findUnitByExecutorRouteHint(entry.routeHash)) === entry.unitId)
+      if (!valid) closeExecutorSocket(socket)
+      if (!socket.destroyed) schedule()
+    }
+    schedule()
+  }
   const runtimeAgent = options.runtimeTls
     ? new HttpsAgent({
         ca: options.runtimeTls.ca,
@@ -166,6 +234,19 @@ export async function startRuntimeIngressGateway(options: {
   })
   const dashboardProxy = options.dashboardOrigin ? httpProxy.createProxyServer({ target: options.dashboardOrigin }) : undefined
   proxy.on('error', () => {})
+  // `open` exposes only the upstream socket. `proxyReqWs` also carries the
+  // incoming socket, so bind the specific outgoing upgrade without guessing by
+  // connection order (which can differ under concurrent tenant handshakes).
+  proxy.on('proxyReqWs', (proxyRequest, _request, incomingSocket) => {
+    if (!browserSockets.has(incomingSocket) && !executorSockets.has(incomingSocket)) return
+    proxyRequest.once('upgrade', (_response, upstreamSocket) => {
+      const entry = browserSockets.get(incomingSocket) ?? executorSockets.get(incomingSocket)
+      if (!entry || incomingSocket.destroyed) { upstreamSocket.destroy(); return }
+      entry.upstream = upstreamSocket
+      incomingSocket.once('close', () => upstreamSocket.destroy())
+      upstreamSocket.once('close', () => incomingSocket.destroy())
+    })
+  })
   dashboardProxy?.on('error', () => {})
   const resolveRuntimeOrigin = async (unitId: string): Promise<string> => {
     if (!options.runtimeOriginResolver) return options.hostOrigin
@@ -371,7 +452,10 @@ export async function startRuntimeIngressGateway(options: {
       const origin = request.headers.origin
       if (origin && origin !== requestPublicOrigin(request)) { response.writeHead(403, { 'cache-control': 'no-store' }); response.end(); return }
       const session = await authenticate(request)
-      if (session) await options.sessions.revoke(session.id, 'logout', Date.now())
+      if (session) {
+        await options.sessions.revoke(session.id, 'logout', Date.now())
+        closeSockets((entry) => entry.sessionId === session.id)
+      }
       const formNavigation = request.headers['sec-fetch-mode'] === 'navigate' || (request.headers.accept ?? '').includes('text/html')
       response.writeHead(formNavigation ? 303 : 204, {
         ...(formNavigation ? { location: '/auth/login?prompt=login' } : {}),
@@ -391,6 +475,7 @@ export async function startRuntimeIngressGateway(options: {
       const session = await authenticate(request)
       if (!session) { response.writeHead(401, { 'cache-control': 'no-store' }); response.end(); return }
       await options.sessions.revokeAllForIdentity(session.identity, 'logout_all', Date.now())
+      closeSocketsForIdentity(session.identity)
       response.writeHead(204, { 'cache-control': 'no-store', 'clear-site-data': '"cache"', 'set-cookie': `ak_session=; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=0` })
       response.end(); return
     }
@@ -413,12 +498,19 @@ export async function startRuntimeIngressGateway(options: {
       const owned = (await options.sessions.listForIdentity(session.identity, Date.now())).find((item) => item.id === sessionDelete[1])
       if (!owned) { response.writeHead(404, { 'cache-control': 'no-store' }); response.end(); return }
       await options.sessions.revoke(owned.id, 'remote_logout', Date.now())
+      closeSockets((entry) => entry.sessionId === owned.id)
       response.writeHead(204, { 'cache-control': 'no-store', ...(owned.id === session.id ? { 'set-cookie': `ak_session=; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=0` } : {}) })
       response.end(); return
     }
     const session = await authenticate(request)
     const identity = session?.identity
     const organizationAccess = identity && options.organizations ? await options.organizations.findAccess(identity) : undefined
+    // Apply the effective organization/contract status before management and
+    // generic API handlers too, not only the fallback Runtime proxy.
+    if (organizationAccess && organizationAccess.organization.status !== 'active') {
+      denyInactiveOrganization(response, organizationAccess.organization.status)
+      return
+    }
     if (url.pathname === '/.well-known/kala/executor-replicas') {
       const deny = (status: number, error: string) => {
         response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
@@ -702,6 +794,7 @@ export async function startRuntimeIngressGateway(options: {
       const target = { issuer: raw.issuer, subject: raw.subject, ...(raw.displayName ? { displayName: raw.displayName } : {}), ...(raw.email ? { email: raw.email } : {}) }
       if (request.method === 'PATCH') await options.organizations.updateMemberRole(organizationAccess.organization.id, target, raw.role!)
       else await options.organizations.removeMember(organizationAccess.organization.id, target)
+      closeSocketsForIdentity(target)
       // Authorization changes take effect immediately on every device. Existing
       // cookies cannot retain the removed or previous role until expiry.
       await options.sessions.revokeAllForIdentity(target, 'administrator', Date.now())
@@ -714,6 +807,8 @@ export async function startRuntimeIngressGateway(options: {
       if (!raw.issuer || !raw.subject) { response.writeHead(400, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: 'invalid_member' })); return }
       const nextOwner = { issuer: raw.issuer, subject: raw.subject }
       await options.organizations.transferOwnership(organizationAccess.organization.id, identity!, nextOwner)
+      closeSocketsForIdentity(identity!)
+      closeSocketsForIdentity(nextOwner)
       await Promise.all([
         options.sessions.revokeAllForIdentity(identity!, 'administrator', Date.now()),
         options.sessions.revokeAllForIdentity(nextOwner, 'administrator', Date.now()),
@@ -721,19 +816,11 @@ export async function startRuntimeIngressGateway(options: {
       response.writeHead(204, { 'cache-control': 'no-store' }); response.end(); return
     }
     if ((url.pathname === '/memo' || url.pathname === '/user/session-tabs') && ['GET', 'HEAD', 'PUT'].includes(request.method ?? '') && session && organizationAccess) {
-      if (organizationAccess.organization.status !== 'active') {
-        denyInactiveOrganization(response, organizationAccess.organization.status)
-        return
-      }
       if (!enforceRateLimit(response, options.rateLimiter, `${organizationAccess.organization.id}:${session.identity.issuer}:${session.identity.subject}`)) return
       request.headers['x-agent-runlab-principal'] = Buffer.from(`${session.identity.issuer}\0${session.identity.subject}`, 'utf8').toString('base64url')
       request.headers['x-agent-runlab-organization-id'] = organizationAccess.organization.id
       const runtimeOrigin = await resolveRuntimeOrigin(organizationAccess.organization.unitId)
       proxy.web(request, response, { target: runtimeOrigin }, () => { if (!response.headersSent) response.writeHead(502); response.end() })
-      return
-    }
-    if (organizationAccess && organizationAccess.organization.status !== 'active') {
-      denyInactiveOrganization(response, organizationAccess.organization.status)
       return
     }
     if (session && organizationAccess && !enforceRateLimit(response, options.rateLimiter, `${organizationAccess.organization.id}:${session.identity.issuer}:${session.identity.subject}`)) return
@@ -916,12 +1003,19 @@ export async function startRuntimeIngressGateway(options: {
       request.headers['x-agent-runlab-organization-role'] = organizationAccess.membership.role
       request.headers['x-agent-runlab-principal'] = Buffer.from(`${identity!.issuer}\0${identity!.subject}`, 'utf8').toString('base64url')
     }
+    if (session && organizationAccess && !executorEnrollment) monitorBrowserSocket(socket, session, organizationAccess)
+    else if (executorEnrollment) monitorExecutorSocket(socket, executorInvite ? inviteKey(executorInvite) : routeHint!, unitId)
     proxy.ws(request, socket, head, { target: runtimeOrigin }, () => socket.destroy())
   })().catch(() => socket.destroy()) })
   await new Promise<void>((resolve) => http.listen(options.port, options.listenHost ?? '127.0.0.1', resolve))
   const address = http.address(); const port = typeof address === 'object' && address ? address.port : options.port
   publicUrls ??= parsePublicUrls(publicUrl.port === '0' ? `http://127.0.0.1:${port}` : options.publicOrigin)
-  return { http, port, async close() { proxy.close(); dashboardProxy?.close(); await new Promise<void>((resolve) => http.close(() => resolve())) } }
+  return { http, port, async close() {
+    closeSockets(() => true)
+    for (const socket of executorSockets.keys()) closeExecutorSocket(socket)
+    proxy.close(); dashboardProxy?.close()
+    await new Promise<void>((resolve) => http.close(() => resolve()))
+  } }
 }
 
 export async function requestRuntime(
