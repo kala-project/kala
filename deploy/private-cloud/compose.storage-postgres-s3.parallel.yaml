@@ -1,0 +1,94 @@
+# Source-only, operator-gated parallel-v1 experiment. Overlay AFTER compose.storage-postgres-s3.yaml.
+# Never use on a local-volume/NFS install or before the irreversible per-Unit placement gate.
+services:
+  init-routing-secret:
+    image: alpine@sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412
+    user: "0:0"
+    command: [/bin/sh, -ec, 'umask 077; cp /run/secrets/runtime_routing_ticket_key /gateway/runtime_routing_ticket_key; chown 65532:65532 /gateway/runtime_routing_ticket_key; chmod 400 /gateway/runtime_routing_ticket_key']
+    secrets:
+      - runtime_routing_ticket_key
+    volumes:
+      - gateway-secrets:/gateway
+    networks: [runtime]
+    depends_on:
+      init-app-secrets: { condition: service_completed_successfully }
+    restart: "no"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    read_only: true
+
+  runtime-host-b:
+    image: ${KALA_RUNTIME_IMAGE:?KALA_RUNTIME_IMAGE must be an immutable name@sha256 digest}
+    restart: unless-stopped
+    environment:
+      KALA_RUNTIME_KALA_PORT: 13002
+      KALA_RUNTIME_KALA_BIND_HOST: 0.0.0.0
+      KALA_RUNTIME_HOST_DATA_ROOT: /var/lib/kala
+      KALA_RUNTIME_HOST_MAX_LOADED_UNITS: 100
+      KALA_RUNTIME_HOST_DOCS_DIR: /app/docs
+      KALA_RUNTIME_HOST_RELEASE_ASSETS_DIR: /app/release
+      KALA_RUNTIME_HOST_LLM_CATALOG_FILE: /run/kala-secrets/runtime-provider-catalog.json
+      KALA_RUNTIME_HOST_SECRET_ROOT: /run/kala-secrets
+      KALA_DEPLOYMENT_CONFIG: /etc/kala/deployment.json
+      KALA_ALLOW_ALL_OK: ${KALA_ALLOW_ALL_OK:-1}
+      KALA_INGRESS_SHARED_SECRET_FILE: /run/kala-secrets/ingress_secret
+      KALA_RUNTIME_TLS_CA_FILE: /run/kala-secrets/internal_ca.pem
+      KALA_RUNTIME_TLS_KEY_FILE: /run/kala-secrets/runtime_host_key.pem
+      KALA_RUNTIME_TLS_CERT_FILE: /run/kala-secrets/runtime_host.pem
+      KALA_RUNTIME_UNIT_MAX_CONCURRENT_TURNS: ${KALA_RUNTIME_UNIT_MAX_CONCURRENT_TURNS:-4}
+      KALA_RUNTIME_UNIT_MAX_QUEUED_MESSAGES: ${KALA_RUNTIME_UNIT_MAX_QUEUED_MESSAGES:-100}
+      KALA_RUNTIME_UNIT_MAX_ARTIFACT_BYTES: ${KALA_RUNTIME_UNIT_MAX_ARTIFACT_BYTES:-10737418240}
+      KALA_RUNTIME_EXPERIMENTAL_DOCKER_STORAGE: "1"
+      KALA_RUNTIME_POSTGRES_SCHEMA_MODE: versioned
+      KALA_RUNTIME_EXPERIMENTAL_SESSION_OWNERSHIP: "1"
+      KALA_RUNTIME_NODE_ID: runtime-host-b
+      KALA_RUNTIME_NODE_ORIGIN: https://runtime-host-b.example:13002
+      KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_FILE: /run/kala-storage/runtime_postgres_writer_url
+      KALA_RUNTIME_EXPERIMENTAL_STATE_MASTER_KEY_FILE: /run/kala-storage/runtime_state_master_key
+      KALA_RUNTIME_EXPERIMENTAL_S3_ENDPOINT: ${KALA_S3_ENDPOINT:?set the S3-compatible endpoint}
+      KALA_RUNTIME_EXPERIMENTAL_S3_REGION: ${KALA_S3_REGION:?set the S3 region}
+      KALA_RUNTIME_EXPERIMENTAL_S3_BUCKET: ${KALA_S3_BUCKET:?set the existing S3 bucket}
+      KALA_RUNTIME_EXPERIMENTAL_S3_ACCESS_KEY_ID_FILE: /run/kala-storage/runtime_s3_access_key_id
+      KALA_RUNTIME_EXPERIMENTAL_S3_SECRET_ACCESS_KEY_FILE: /run/kala-storage/runtime_s3_secret_access_key
+      KALA_RUNTIME_EXPERIMENTAL_S3_MAX_OBJECT_BYTES: ${KALA_S3_MAX_OBJECT_BYTES:-10737418240}
+      KALA_RUNTIME_EXPERIMENTAL_S3_FORCE_PATH_STYLE: ${KALA_S3_FORCE_PATH_STYLE:-false}
+    volumes:
+      - host-secrets:/run/kala-secrets:ro
+      - ${KALA_DEPLOYMENT_CONFIG_FILE:-./deployment.json}:/etc/kala/deployment.json:ro
+      - runtime-storage-secrets:/run/kala-storage:ro
+    tmpfs:
+      - /var/lib/kala:rw,noexec,nosuid,size=256m,uid=65532,gid=65532,mode=0700
+      - /tmp:rw,noexec,nosuid,size=128m
+    networks:
+      runtime: { aliases: [runtime-host-b.example] }
+      egress: { gw_priority: 1 }
+    depends_on:
+      init-app-secrets: { condition: service_completed_successfully }
+      runtime-schema-init: { condition: service_completed_successfully }
+      init-storage-secrets: { condition: service_completed_successfully }
+    healthcheck:
+      test: [CMD, /nodejs/bin/node, -e, "require('https').get({host:'127.0.0.1',port:13002,path:'/internal/health',servername:'runtime-host',ca:require('fs').readFileSync('/run/kala-secrets/internal_ca.pem'),cert:require('fs').readFileSync('/run/kala-secrets/runtime_health.pem'),key:require('fs').readFileSync('/run/kala-secrets/runtime_health_key.pem'),headers:{'x-agent-runlab-ingress-secret':require('fs').readFileSync('/run/kala-secrets/ingress_secret','utf8').trim()}},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    pids_limit: 512
+    mem_limit: 2g
+    cpus: 2.0
+
+  runtime-ingress:
+    environment:
+      KALA_INGRESS_EXPERIMENTAL_RUNTIME_ORIGIN_ALLOWLIST: https://runtime-host:13002,https://runtime-host-b.example:13002
+      KALA_INGRESS_RUNTIME_TLS_SERVERNAME: runtime-host
+      KALA_INGRESS_RUNTIME_ROUTING_TICKET_KEY_FILE: /run/kala-secrets/runtime_routing_ticket_key
+      KALA_INGRESS_RUNTIME_ROUTING_TICKET_AUDIENCE: private-cloud-parallel-v1
+      KALA_INGRESS_RUNTIME_ROUTING_TICKET_MAX_TTL_MS: 15000
+    depends_on:
+      init-routing-secret: { condition: service_completed_successfully }
+      runtime-host-b: { condition: service_healthy }
+
+secrets:
+  runtime_routing_ticket_key: { file: "${KALA_SECRETS_DIR:-./.secrets}/runtime_routing_ticket_key" }

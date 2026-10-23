@@ -200,6 +200,7 @@ integrationDescribe('PostgresRuntimeUnitPlacementStore isolated PostgreSQL integ
 
   it('requires an expired legacy lease, admits two v1 replicas, blocks legacy acquire, and rejects unknown versions', async () => {
     const scope = placementScope('unit-protected-parallel')
+    await expect(first.promoteToParallel(scope, 1n)).rejects.toBeInstanceOf(RuntimeUnitPlacementProtocolError)
     const legacyLease = await first.acquire({
       ...scope, nodeId: 'legacy-node', ownerToken: randomUUID(), origin: 'https://legacy.example',
     }, 5_000)
@@ -210,29 +211,14 @@ integrationDescribe('PostgresRuntimeUnitPlacementStore isolated PostgreSQL integ
       scope.unitId, scope.organizationId, PARALLEL_PLACEMENT_BARRIER, PARALLEL_PLACEMENT_BARRIER_ORIGIN,
     ])).rejects.toMatchObject({ code: '55006' })
 
+    await expect(first.promoteToParallel(scope, legacyLease.generation + 1n))
+      .rejects.toBeInstanceOf(RuntimeUnitPlacementHeldError)
     await first.release(legacyLease)
-    const operator = await first.database.connect()
-    let barrierGeneration: string
-    try {
-      await operator.query('BEGIN')
-      const barrier = await operator.query<{ generation: string }>(`UPDATE tenant_runtime_unit_placement_leases
-        SET node_id=$3, owner_token=$3, origin=$4, generation=generation+1,
-            expires_at='infinity', updated_at=clock_timestamp()
-        WHERE unit_id=$1 AND organization_id=$2 RETURNING generation`, [
-        scope.unitId, scope.organizationId, PARALLEL_PLACEMENT_BARRIER, PARALLEL_PLACEMENT_BARRIER_ORIGIN,
-      ])
-      barrierGeneration = barrier.rows[0]!.generation
-      await operator.query(`INSERT INTO tenant_runtime_unit_protocol_gates
-        (organization_id, unit_id, feature_version, barrier_generation) VALUES ($1,$2,1,$3)`, [
-        scope.organizationId, scope.unitId, barrierGeneration,
-      ])
-      await operator.query('COMMIT')
-    } catch (error) {
-      await operator.query('ROLLBACK').catch(() => undefined)
-      throw error
-    } finally {
-      operator.release()
-    }
+    await expect(first.promoteToParallel(scope, legacyLease.generation))
+      .rejects.toBeInstanceOf(RuntimeUnitPlacementFencedError)
+    const promoted = await first.promoteToParallel(scope, legacyLease.generation + 1n)
+    expect(await second.promoteToParallel(scope, promoted.generation)).toEqual(promoted)
+    const barrierGeneration = promoted.generation.toString()
 
     const [replicaA, replicaB] = await Promise.all([
       first.acquire({ ...scope, nodeId: 'new-a', ownerToken: randomUUID(), origin: 'https://new-a.example' }, 5_000),

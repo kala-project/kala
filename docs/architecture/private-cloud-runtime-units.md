@@ -493,8 +493,21 @@ The repository now contains an **experimental, opt-in** slice toward this target
   `TRUNCATE` either table to roll back live replicas. Drain all replicas, preserve
   backups, and use a separately reviewed schema migration for any protocol
   transition; direct owner-level DDL/superuser changes bypass these triggers and
-  are outside this safety guarantee. SQL takeover regressions reject stale Session
-  owner generations while unrelated Sessions remain owned by different replicas.
+  are outside this safety guarantee. Promotion from exclusive placement to
+  `parallel-v1` is **one-way and per logical Unit**: stop/withdraw the Gateway
+  and every old Runtime, verify the exclusive lease and every membership and
+  resource owner have expired, then use an operator-only transaction to lock
+  that placement row and install the permanent barrier plus feature gate at an
+  explicitly acknowledged next generation. An absent placement fails closed:
+  first materialize a new Unit exclusively, then stop it and inspect that
+  lease; never infer safety merely from no active connections on one node.
+  Do not expose a parallel Gateway or start additional replicas until the operator has verified the control-plane
+  Organization→Unit binding, configured unique replica origins with mTLS, and
+  enabled owner-derived Session tickets. A stopped old binary must not be
+  restarted after promotion; reversal requires a separately reviewed migration
+  and coordinated recovery, not deleting the gate. This source-level sequence
+  is experimental and does not constitute an Operator-supported upgrade.
+  SQL takeover regressions reject stale Session owner generations while unrelated Sessions remain owned by different replicas.
   These owner primitives alone still do not make every Session RPC or external
   execution safe for multi-node production.
   HotState event/projection writes now accept an **optional**, exact

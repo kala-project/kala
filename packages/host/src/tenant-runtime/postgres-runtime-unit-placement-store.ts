@@ -109,12 +109,16 @@ export class RuntimeUnitPlacementProtocolError extends Error {
 export class PostgresRuntimeUnitPlacementStore {
   readonly #table: string
   readonly #gateTable: string
+  readonly #membershipsTable: string
+  readonly #ownersTable: string
   #closed = false
 
   constructor(readonly database: RuntimeUnitPlacementDatabase, options: { schema?: string } = {}) {
     const schema = quoteIdentifier(options.schema ?? 'public')
     this.#table = `${schema}.tenant_runtime_unit_placement_leases`
     this.#gateTable = `${schema}.tenant_runtime_unit_protocol_gates`
+    this.#membershipsTable = `${schema}.tenant_runtime_unit_replica_memberships`
+    this.#ownersTable = `${schema}.tenant_runtime_resource_ownerships`
   }
 
   /** Experimental bootstrap only. Production must use a versioned migration. */
@@ -130,6 +134,56 @@ export class PostgresRuntimeUnitPlacementStore {
       updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
       PRIMARY KEY (unit_id, organization_id)
     )`)
+  }
+
+  /** One-way, schema-operator-only promotion after all Runtime replicas have been stopped. */
+  async promoteToParallel(
+    scope: RuntimeUnitPlacementScope,
+    expectedGeneration: bigint,
+  ): Promise<RuntimeUnitPlacementLease> {
+    const normalized = validateScope(scope)
+    if (typeof expectedGeneration !== 'bigint' || expectedGeneration < 1n) {
+      throw new RangeError('expected parallel placement generation must be positive')
+    }
+    return await this.#transaction(async (transaction) => {
+      await transaction.query(`SET LOCAL lock_timeout = '5s'`)
+      // Prevent active memberships/owners from appearing between the check and
+      // the permanent gate commit. The operator must also stop old processes.
+      await transaction.query(`LOCK TABLE ${this.#membershipsTable}, ${this.#ownersTable} IN SHARE ROW EXCLUSIVE MODE`)
+      const selected = await transaction.query<PlacementRow>(`SELECT *, expires_at > clock_timestamp() AS is_live
+        FROM ${this.#table} WHERE unit_id = $1 AND organization_id = $2 FOR UPDATE`, scopeValues(normalized))
+      if (selected.rowCount !== 0 && selected.rowCount !== 1) throw new RuntimeUnitPlacementProtocolError('ambiguous Unit placement')
+      const current = selected.rows[0]
+      const existing = await this.#lookupParallelBarrier(transaction, normalized)
+      if (existing) {
+        if (existing.generation !== expectedGeneration) throw new RuntimeUnitPlacementFencedError()
+        return existing
+      }
+      if (current?.node_id === PARALLEL_PLACEMENT_BARRIER) {
+        throw new RuntimeUnitPlacementProtocolError('parallel barrier exists without its operator gate')
+      }
+      if (current?.is_live) throw new RuntimeUnitPlacementHeldError(current.node_id, current.expires_at)
+      if (!current) throw new RuntimeUnitPlacementProtocolError('absent placement is not a safe promotion source; materialize the Unit exclusively first')
+      const next = BigInt(current.generation) + 1n
+      if (next !== expectedGeneration) throw new RuntimeUnitPlacementFencedError()
+      for (const table of [this.#membershipsTable, this.#ownersTable]) {
+        const live = await transaction.query(`SELECT 1 FROM ${table}
+          WHERE organization_id = $1 AND unit_id = $2 AND expires_at > clock_timestamp() LIMIT 1`, scopeValues(normalized))
+        if (live.rows.length > 0) throw new RuntimeUnitPlacementProtocolError('live replica membership or resource owner prevents parallel promotion')
+      }
+      await transaction.query(`UPDATE ${this.#table}
+        SET node_id = $3, owner_token = $3, origin = $4, generation = $5,
+            expires_at = 'infinity'::timestamptz, updated_at = clock_timestamp()
+        WHERE unit_id = $1 AND organization_id = $2`, [normalized.unitId, normalized.organizationId,
+        PARALLEL_PLACEMENT_BARRIER, PARALLEL_PLACEMENT_BARRIER_ORIGIN, next.toString()])
+      await transaction.query(`INSERT INTO ${this.#gateTable}
+        (organization_id, unit_id, feature_version, barrier_generation) VALUES ($1, $2, $3, $4)`, [
+        normalized.organizationId, normalized.unitId, PARALLEL_FEATURE_VERSION, next.toString(),
+      ])
+      const committed = await this.#lookupParallelBarrier(transaction, normalized)
+      if (!committed) throw new RuntimeUnitPlacementProtocolError('operator gate did not resolve to its permanent barrier')
+      return committed
+    })
   }
 
   async acquire(input: AcquireRuntimeUnitPlacementInput, ttlMs: number): Promise<RuntimeUnitPlacementLease> {
