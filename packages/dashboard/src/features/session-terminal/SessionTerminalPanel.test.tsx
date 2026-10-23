@@ -14,10 +14,12 @@ const inputListeners: Array<(data: string) => void> = []
 let fitCols = 100
 let fitRows = 12
 let terminalOptions: { fontSize: number } | null = null
+const terminalModes = { applicationCursorKeysMode: false }
 
 vi.mock('@xterm/xterm', () => ({
   Terminal: class TerminalMock {
     options = { fontSize: 12 }
+    modes = terminalModes
     cols = 100
     rows = 12
     write = writeMock
@@ -73,6 +75,7 @@ describe('SessionTerminalPanel', () => {
     fitCols = 100
     fitRows = 12
     terminalOptions = null
+    terminalModes.applicationCursorKeysMode = false
     localStorage.clear()
     vi.stubGlobal('ResizeObserver', class ResizeObserverMock {
       constructor(private readonly callback: ResizeObserverCallback) {}
@@ -194,6 +197,26 @@ describe('SessionTerminalPanel', () => {
     expect(clearMock).toHaveBeenCalledOnce()
     unmount()
     expect(mock.emit.mock.calls.filter(([event]) => event === 'terminal:kill')).toHaveLength(0)
+  })
+
+  it('keeps control keys visible and sends touch arrows in xterm cursor mode without stealing focus', async () => {
+    const mock = makeSocket()
+    render(<SessionTerminalPanel socket={mock.socket} workspaceId="ws-1" sessionId="sess-1" autoStart />)
+    await screen.findByText('Running')
+    const keys = screen.getByTestId('terminal-touch-keys')
+    expect(keys.className).not.toContain('hidden')
+    for (const [label, data] of [['Enter', '\r'], ['Ctrl+D', '\u0004'], ['Ctrl+Z', '\u001a'], ['Ctrl+B', '\u0002'], ['↑', '\u001b[A']]) {
+      const button = screen.getByRole('button', { name: label })
+      expect(fireEvent.pointerDown(button)).toBe(false)
+      fireEvent.click(button)
+      expect(mock.emit).toHaveBeenLastCalledWith('terminal:input', expect.objectContaining({ data }))
+    }
+    terminalModes.applicationCursorKeysMode = true
+    for (const [label, data] of [['↑', '\u001bOA'], ['↓', '\u001bOB'], ['←', '\u001bOD'], ['→', '\u001bOC']]) {
+      fireEvent.click(screen.getByRole('button', { name: label }))
+      expect(mock.emit).toHaveBeenLastCalledWith('terminal:input', expect.objectContaining({ data }))
+    }
+    expect(focusMock).toHaveBeenCalled()
   })
 
   it('refits and resizes a preserved PTY when its tab becomes visible', async () => {

@@ -19,10 +19,32 @@ The Terminal tab contains:
 - status and resolved `cwd`;
 - an xterm.js viewport;
 - Start/Restart, Clear, and Kill controls;
-- an iPad touch key row (`Esc`, `Tab`, `Ctrl+C`, and arrows);
+- an always-visible responsive keybar (`Esc`, `Tab`, `Enter`, `Ctrl+C`, `Ctrl+D`, `Ctrl+Z`, `Ctrl+B`, and arrows), on desktop as well as touch devices;
 - explicit states for Workspace offline, starting, running, reconnecting, exited, and error.
 
 Opening the panel does not automatically start a shell. Hiding the panel or switching tabs does not kill it. Switching Sessions attaches to that Session's terminal; the previous Session terminal continues running. Explicit Kill, Session deletion, Executor disconnect/restart, or process exit ends it.
+
+### Keyboard identity and ownership
+
+Physical Enter, virtual-keyboard newline input, and the keybar's Enter send one carriage return (`CR`, `0x0d`, `\r`). Physical `Ctrl+J` sends line feed (`LF`, `0x0a`, `\n`); it is a different terminal input, not an alias for Enter. The Unix `script` PTY fallback must preserve these bytes, just like native `node-pty`. A shell's canonical line discipline can make both execute a command, so shell-only Enter tests cannot establish byte identity; use a raw-mode reader, including inside tmux.
+
+While xterm is focused, physical control keys are handled by xterm rather than Dashboard shortcuts:
+
+| Key | Input byte | Physical keyboard | Keybar |
+| --- | --- | --- | --- |
+| `Ctrl+C` | `0x03` | Yes | Yes |
+| `Ctrl+D` | `0x04` | Yes | Yes |
+| `Ctrl+Z` | `0x1a` | Yes | Yes |
+| `Ctrl+B` | `0x02` | Yes | Yes |
+| `Ctrl+J` | `0x0a` | Yes | No |
+| `Ctrl+K` | `0x0b` | Yes | No |
+| `Ctrl+U` | `0x15` | Yes | No |
+
+These describe transmitted bytes, not guaranteed application actions: a shell may interpret `Ctrl+D` as EOF or `Ctrl+Z` as suspend, whereas a raw application receives the byte. tmux normally consumes `Ctrl+B` as its prefix; with default bindings, `Ctrl+B` twice sends one literal prefix to the pane. Browser/OS-reserved combinations still depend on the browser and platform.
+
+Physical and keybar arrows follow xterm's current application cursor keys mode (DECCKM), as selected by terminal output. Normal mode sends CSI sequences (`ESC [ A/B/D/C` for up/down/left/right); application mode sends SS3 sequences (`ESC O A/B/D/C`). Keybar arrows must not hardcode normal-mode sequences when tmux or another application enables application mode.
+
+Keybar interaction preserves xterm focus. Escape while the xterm textarea is focused is delivered to the terminal without dismissing its modal; Escape on terminal chrome and in ordinary dialogs retains normal dismissal behavior. The footer wraps on narrow screens rather than requiring horizontal scrolling, and workspace terminal dialogs follow the visible viewport's height and top offset so the keybar stays visible when the viewport shortens.
 
 ## 3. Architecture
 
@@ -131,7 +153,29 @@ Unmounting the UI only detaches listeners; it does not send Kill. Kill is reserv
 
 ### Dashboard
 
-- RightPanel tabs and collapse behavior; start, output, input, resize, clear, kill, Session switch, replay, offline/error states, and iPad touch keys.
+- RightPanel tabs and collapse behavior; start, output, input, resize, clear, kill, Session switch, replay, offline/error states, and responsive keybar controls.
+- Physical/virtual Enter, control-byte delivery, toolbar focus retention, normal/application-mode arrows, and terminal-versus-ordinary-dialog Escape ownership.
+
+### Isolated Linux keyboard acceptance
+
+`packages/dashboard/scripts/verify-terminal-keyboard.mjs` exercises real Chrome xterm → Socket.IO → Executor `TerminalManager` → PTY, with a raw Python reader both directly and inside an isolated tmux server. Run with an approved existing Chrome executable and existing dependencies:
+
+```sh
+KALA_TERMINAL_DISABLE_PTY=1 CHROME_PATH=/path/to/chrome node packages/dashboard/scripts/verify-terminal-keyboard.mjs
+CHROME_PATH=/path/to/chrome TERMINAL_EVIDENCE_DIR="$PWD/.artifacts/terminal-keyboard/evidence-preferred" node packages/dashboard/scripts/verify-terminal-keyboard.mjs
+```
+
+The first run forces the Unix `script` fallback; the second allows native `node-pty`. JSON evidence records expected and observed raw bytes, including Enter versus `Ctrl+J`, and footer/button bounds. The fixture uses production workspace terminal dialog sizing and the production visualViewport hook.
+
+Captured evidence in `.artifacts/terminal-keyboard/evidence/` and `evidence-preferred/` contains six screenshots each: desktop, expanded desktop, short desktop visual viewport, mobile, narrow mobile, and mobile with a shortened/offset visual viewport. All twelve were visually inspected: all eleven keybar buttons are visible, with no footer clipping; mobile uses two rows. Shortened visual viewports are simulated in Chrome, not genuine mobile software-keyboard acceptance. This local isolated Linux proof does not establish full Host deployment acceptance; separate Windows native-byte acceptance is recorded below.
+
+### Genuine Windows native-byte acceptance
+
+On 2026-10-24, the owner executed the standalone probe bundled from the current `TerminalManager` in a genuine disposable Windows 11 VM (`10.0.26300`, Node `22.22.1`, x64). All **11/11 byte assertions passed** through `TerminalManager` → real `node-pty`/ConPTY → raw-mode child, with no pipe fallback. The child reported stdin and stdout as TTYs and raw mode enabled. File-backed assertions distinguished Enter CR13 (`0x0d`) from `Ctrl+J` LF10 (`0x0a`) and verified Escape, `Ctrl+D`, `Ctrl+C`, `Ctrl+Z`, `Ctrl+B`, and the four normal-mode arrow sequences.
+
+The owner-run evidence is in the session files at `windows-test/artifacts/windows-terminal-native-report.json` (alternate result: `results/hybridterminal20261024b.json`). An initially missing `probe-cases.cjs` was corrected by staging the complete probe directory; that was a staging issue, not a production fault.
+
+This acceptance proves Windows native PTY byte delivery only. It does **not** establish Windows browser/xterm/Socket.IO keyboard behavior, toolbar or viewport behavior, application-cursor mode, tmux, or full Host deployment acceptance. The existing Linux browser/tmux/viewport evidence remains separately scoped above; the Windows non-PTY pipe fallback is not covered by the native ConPTY result.
 
 ### Release verification
 
@@ -144,3 +188,10 @@ Unmounting the UI only detaches listeners; it does not send Kill. Kill is reserv
 ## 11. Rollout and rollback
 
 The feature reuses the existing terminal protocol and xterm dependencies, reducing blast radius. Deploy after focused tests and build. Existing Inspector remains the default tab. If terminal UI fails, Inspector and the rest of Dashboard remain available; rollback is an immutable release generation switch. No Session data migration is required.
+
+The keyboard fixes require upgrading both components:
+
+- **Executor:** upgrade the Unix PTY fallback byte-preservation fix. Updating only Dashboard cannot stop an older Executor from rewriting Enter's CR into LF. Windows' non-PTY pipe fallback retains its existing CR-to-LF normalization; it is not evidence of full PTY control-key support.
+- **Dashboard:** upgrade the responsive always-visible keybar, additional control buttons, focus preservation, application-mode arrow encoding, and visible-viewport workspace dialog positioning. Updating only Executor does not supply these UI fixes.
+
+No Host protocol change or tmux/user-shell configuration change is required.

@@ -120,7 +120,7 @@ const SourceControlPanel = lazy(() => loadDashboardExport(import('./features/sou
 
 export function workspaceTerminalDialogSizeClass(expanded: boolean): string {
   return cn(
-    '!left-0 !top-0 flex h-[var(--ak-viewport-h,100dvh)] max-h-[var(--ak-viewport-h,100dvh)] w-screen max-w-none !translate-x-0 !translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 p-0 pb-[env(safe-area-inset-bottom)] sm:!left-[50%] sm:!top-[calc(50%+(env(safe-area-inset-top)-env(safe-area-inset-bottom))/2)] sm:!translate-x-[-50%] sm:!translate-y-[-50%] sm:rounded-xl sm:border sm:pb-0 [&_[data-testid=terminal-toolbar]]:pr-24',
+    '!left-0 !top-[var(--ak-viewport-offset-top,0px)] flex h-[var(--ak-viewport-h,100dvh)] max-h-[var(--ak-viewport-h,100dvh)] w-screen max-w-none !translate-x-0 !translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 p-0 pb-[env(safe-area-inset-bottom)] sm:!left-[50%] sm:!top-[calc(var(--ak-viewport-offset-top,0px)+var(--ak-viewport-h,100dvh)/2)] sm:!translate-x-[-50%] sm:!translate-y-[-50%] sm:rounded-xl sm:border sm:pb-0 [&_[data-testid=terminal-toolbar]]:pr-24',
     expanded
       ? 'sm:h-[calc(var(--ak-viewport-h,100dvh)-2rem)] sm:max-h-[calc(var(--ak-viewport-h,100dvh)-2rem)] sm:w-[calc(100vw-2rem)]'
       : 'sm:h-[min(calc(var(--ak-viewport-h,100dvh)-2rem),720px)] sm:max-h-[calc(var(--ak-viewport-h,100dvh)-2rem)] sm:w-[min(calc(100vw-2rem),1100px)]',

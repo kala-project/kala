@@ -285,7 +285,11 @@ export function SessionTerminalPanel({
   const sendKey = (data: string): void => {
     const id = terminalIdRef.current
     if (!socket || !workspaceId || !id || status !== 'running') return
-    socket.emit('terminal:input', { workspaceId, sessionId, terminalId: id, data })
+    // Touch arrows must follow the same DECCKM mode as xterm's physical keys.
+    const input = /^\u001b\[[ABCD]$/.test(data) && terminalRef.current?.modes.applicationCursorKeysMode
+      ? data.replace('[', 'O')
+      : data
+    socket.emit('terminal:input', { workspaceId, sessionId, terminalId: id, data: input })
     terminalRef.current?.focus()
   }
 
@@ -293,7 +297,7 @@ export function SessionTerminalPanel({
   const statusLabel = !online ? t('terminal.offline') : error ? `${t(`terminal.status.${status}`)} · ${error}` : t(`terminal.status.${status}`)
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#0b0f14] text-white" data-testid="session-terminal-panel" data-terminal-status={status}>
+    <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-[#0b0f14] text-white" data-testid="session-terminal-panel" data-terminal-status={status}>
       <div className="relative flex min-h-10 flex-none flex-nowrap items-center gap-1.5 overflow-hidden border-b border-border/35 bg-card/95 px-2 py-1 text-card-foreground sm:px-3" data-testid="terminal-toolbar">
         <span className="inline-flex min-w-0 flex-1 items-center gap-2 truncate text-xs text-muted-foreground" data-testid="terminal-status"><span className={`h-1.5 w-1.5 flex-none rounded-full ${!online || status === 'error' ? 'bg-rose-500' : status === 'running' ? 'bg-emerald-500' : status === 'starting' ? 'animate-pulse bg-amber-500' : 'bg-muted-foreground/50'}`} />{statusLabel}</span>
         <div className="flex flex-none items-center rounded-lg border border-border/45 bg-background/35" data-testid="terminal-font-controls">
@@ -330,9 +334,9 @@ export function SessionTerminalPanel({
         onPointerDown={() => terminalRef.current?.focus()}
         onTouchStart={() => terminalRef.current?.focus()}
       />
-      <div className="flex flex-none gap-1.5 overflow-x-auto border-t border-border/40 bg-card px-2 py-1.5 text-card-foreground md:hidden" data-testid="terminal-touch-keys">
-        {([[t('terminal.keys.esc'), '\u001b'], [t('terminal.keys.tab'), '\t'], ['Ctrl+C', '\u0003'], ['↑', '\u001b[A'], ['↓', '\u001b[B'], ['←', '\u001b[D'], ['→', '\u001b[C']] as const).map(([label, data]) => (
-          <Button key={label} size="sm" variant="outline" className="h-11 min-w-11 flex-none px-2 font-mono text-xs" disabled={status !== 'running'} onClick={() => sendKey(data)}>{label}</Button>
+      <div className="grid flex-none grid-cols-6 gap-1 border-t border-border/40 bg-card px-2 py-1.5 text-card-foreground sm:flex sm:flex-wrap" data-testid="terminal-touch-keys">
+        {([[t('terminal.keys.esc'), '\u001b'], [t('terminal.keys.tab'), '\t'], [t('terminal.keys.enter', { defaultValue: 'Enter' }), '\r'], ['Ctrl+C', '\u0003'], ['Ctrl+D', '\u0004'], ['Ctrl+Z', '\u001a'], ['Ctrl+B', '\u0002'], ['↑', '\u001b[A'], ['↓', '\u001b[B'], ['←', '\u001b[D'], ['→', '\u001b[C']] as const).map(([label, data]) => (
+          <Button key={label} type="button" size="sm" variant="outline" className="h-11 min-w-0 px-1 font-mono text-xs sm:h-8 sm:min-w-10 sm:px-2" disabled={status !== 'running'} onPointerDown={(event) => event.preventDefault()} onClick={() => sendKey(data)}>{label}</Button>
         ))}
       </div>
     </div>

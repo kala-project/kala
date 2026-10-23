@@ -116,11 +116,9 @@ function createFallbackTerminal(input: {
 
   return {
     write(data) {
-      // Windows pipe shells and the last-resort non-PTY path do not have a
-      // terminal line discipline to translate Return (CR) into newline (LF).
-      // Normalize here as well; it is harmless for `script` and makes Enter
-      // execute commands even before an older Executor is upgraded to PTY.
-      child.stdin.write(data.replaceAll('\r', '\n'))
+      // A real PTY owns its line discipline. tmux/raw-mode applications must
+      // receive Return (CR), not Ctrl+J (LF). Only Windows' pipe fallback lacks it.
+      child.stdin.write(process.platform === 'win32' ? data.replaceAll('\r', '\n') : data)
     },
     resize(cols, rows) {
       if (resizePath && !cleaned) writeFileSync(resizePath, `${cols} ${rows}\n`, { mode: 0o600 })

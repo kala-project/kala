@@ -107,7 +107,7 @@ describe('TerminalManager', () => {
     }
     const child = vi.mocked(spawn).mock.results[0]!.value as { stdin: { write: ReturnType<typeof vi.fn> }; stdout: EventEmitter; kill: ReturnType<typeof vi.fn> }
     manager.input({ ...base, terminalId: first.terminalId!, data: 'echo works\r' })
-    expect(child.stdin.write).toHaveBeenCalledWith('echo works\n')
+    expect(child.stdin.write).toHaveBeenCalledWith(process.platform === 'win32' ? 'echo works\n' : 'echo works\r')
     child.stdout.emit('data', Buffer.from('a'.repeat(1_048_576) + 'tail'))
 
     const reused = await manager.create({ ...base, requestId: 'r2', cwd: '/elsewhere' })
@@ -127,9 +127,31 @@ describe('TerminalManager', () => {
     expect(spawn).toHaveBeenCalledTimes(2)
     manager.input({ ...base, terminalId: restarted.terminalId!, data: 'after restart\r' })
     const restartedChild = vi.mocked(spawn).mock.results[1]!.value as { stdin: { write: ReturnType<typeof vi.fn> } }
-    expect(restartedChild.stdin.write).toHaveBeenCalledWith('after restart\n')
+    expect(restartedChild.stdin.write).toHaveBeenCalledWith(process.platform === 'win32' ? 'after restart\n' : 'after restart\r')
 
     manager.closeSession(base)
+  })
+
+  it.each(['linux', 'darwin', 'win32'])('preserves control bytes in the %s fallback, with CR normalization only for Windows pipes', async (platform) => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!
+    process.env.KALA_TERMINAL_DISABLE_PTY = '1'
+    Object.defineProperty(process, 'platform', { ...originalPlatform, value: platform })
+    const manager = createTerminalManager({
+      sandbox: { roots: [], resolve: async (path) => path },
+      emitOutput: vi.fn(),
+      emitExit: vi.fn(),
+    })
+    try {
+      const created = await manager.create({ ...base, requestId: 'raw-bytes', cwd: '/workspace' })
+      expect(created.error).toBeUndefined()
+      const data = '\r\n\u0004\u0003\u001a\u0002\u000b\u0015\t\u001b\u001b[A\u001bOA'
+      manager.input({ ...base, terminalId: created.terminalId!, data })
+      const child = vi.mocked(spawn).mock.results.at(-1)!.value as { stdin: { write: ReturnType<typeof vi.fn> } }
+      expect(child.stdin.write).toHaveBeenCalledWith(platform === 'win32' ? data.replaceAll('\r', '\n') : data)
+    } finally {
+      manager.closeAll()
+      Object.defineProperty(process, 'platform', originalPlatform)
+    }
   })
 
   it.each(['closeSession', 'closeAll'] as const)('cancels a pending native create on %s without leaving a late PTY', async (operation) => {
