@@ -26,6 +26,7 @@ export interface PostgresClaimClient extends PostgresClaimExecutor {
 
 export interface S3ClaimClient {
   send(command: unknown): Promise<unknown>
+  destroy?(): void
 }
 
 export interface FreshInstallationAuthorities {
@@ -108,6 +109,24 @@ export async function claimFreshInstallation(options: FreshInstallationClaimOpti
   return 'claimed'
 }
 
+/** Workload startup check: never create missing markers or accept another installation's restored data. */
+export async function assertPostgresInstallationClaim(
+  executor: PostgresClaimExecutor, installationId: string, label: string,
+): Promise<void> {
+  assertInstallationId(installationId)
+  const marker = await readPostgresMarker(executor)
+  if (marker !== installationId) throw new Error(`${label} installation claim is missing or does not match this installation`)
+}
+
+export async function assertS3InstallationClaim(
+  client: S3ClaimClient, bucket: string, installationId: string,
+): Promise<void> {
+  assertInstallationId(installationId)
+  if (await readS3Marker(client, bucket) !== installationId) {
+    throw new Error('S3 installation claim is missing or does not match this installation')
+  }
+}
+
 export async function assertPostgresEmpty(pool: PostgresClaimPool, label: string): Promise<void> {
   const result = await pool.query<{ has_user_objects: boolean }>(USER_OBJECTS_QUERY)
   if (result.rows.length !== 1 || result.rows[0]?.has_user_objects !== false) {
@@ -161,7 +180,7 @@ async function writePostgresMarker(pool: PostgresClaimPool, installationId: stri
   }
 }
 
-async function readPostgresMarker(pool: PostgresClaimPool): Promise<string | undefined> {
+async function readPostgresMarker(pool: PostgresClaimExecutor): Promise<string | undefined> {
   const present = await pool.query<{ exists: boolean }>(
     `SELECT to_regclass('${INSTALLATION_CLAIM_SCHEMA}.marker') IS NOT NULL AS exists`,
   )
@@ -192,7 +211,8 @@ async function writeS3Marker(client: S3ClaimClient, bucket: string, installation
 }
 
 async function readS3Marker(client: S3ClaimClient, bucket: string): Promise<string | undefined> {
-  let response: { Body?: { transformToString(): Promise<string> } }
+  const maxMarkerBytes = 4_096
+  let response: { ContentLength?: number; Body?: AsyncIterable<Uint8Array> & { destroy?(): void } }
   try {
     response = await client.send(new GetObjectCommand({ Bucket: bucket, Key: INSTALLATION_CLAIM_OBJECT_KEY })) as typeof response
   } catch (error) {
@@ -201,7 +221,19 @@ async function readS3Marker(client: S3ClaimClient, bucket: string): Promise<stri
     throw new Error('S3 installation marker could not be checked', { cause: error })
   }
   if (!response.Body) throw new Error('S3 installation marker has no body')
-  const body = await response.Body.transformToString()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  try {
+    if (response.ContentLength !== undefined && response.ContentLength > maxMarkerBytes) throw new Error('S3 installation marker exceeds size limit')
+    for await (const chunk of response.Body) {
+      size += chunk.byteLength
+      if (size > maxMarkerBytes) throw new Error('S3 installation marker exceeds size limit')
+      chunks.push(chunk)
+    }
+  } finally {
+    response.Body.destroy?.()
+  }
+  const body = Buffer.concat(chunks, size).toString('utf8')
   let marker: { format?: unknown; installationId?: unknown }
   try { marker = JSON.parse(body) } catch { throw new Error('S3 installation marker is invalid') }
   if (marker.format !== 1 || typeof marker.installationId !== 'string') throw new Error('S3 installation marker is invalid')

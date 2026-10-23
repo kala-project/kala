@@ -10,7 +10,7 @@ const failures = []
 const warnings = []
 const secretDir = resolve(root, process.env.KALA_SECRETS_DIR ?? 'deploy/private-cloud/.secrets')
 const requiredSecrets = [...(profile === 'postgres-s3' ? [] : ['control_postgres_password']), 'session_secret', 'ingress_secret', 'oidc_client_id', 'oidc_client_secret', 'llm_api_key',
-  ...(profile === 'postgres-s3' ? ['control_postgres_migration_owner_url', 'control_postgres_writer_url', 'runtime_postgres_owner_url', 'runtime_postgres_writer_url', 'runtime_postgres_reader_url', 'runtime_s3_access_key_id', 'runtime_s3_secret_access_key'] : [])]
+  ...(profile === 'postgres-s3' ? ['control_postgres_migration_owner_url', 'control_postgres_writer_url', 'runtime_postgres_owner_url', 'runtime_postgres_writer_url', 'runtime_postgres_reader_url', 'runtime_s3_access_key_id', 'runtime_s3_secret_access_key', 'installation_claim_s3_access_key_id', 'installation_claim_s3_secret_access_key'] : [])]
 for (const name of requiredSecrets) {
   const path = resolve(secretDir, name)
   try {
@@ -54,6 +54,11 @@ if (profile === 'postgres-s3') {
   if (!process.env.COMPOSE_PROJECT_NAME || process.env.COMPOSE_PROJECT_NAME === 'kala-private-cloud') {
     failures.push('postgres-s3 must use a new, dedicated COMPOSE_PROJECT_NAME; in-place switching from local/NFS has no supported data migration')
   }
+  try {
+    const claimAccess = (await readFile(resolve(secretDir, 'installation_claim_s3_access_key_id'), 'utf8')).trim()
+    const runtimeAccess = (await readFile(resolve(secretDir, 'runtime_s3_access_key_id'), 'utf8')).trim()
+    if (claimAccess === runtimeAccess) failures.push('claim job and Runtime must have distinct S3 access keys; deny Runtime writes/deletes to the installation marker key')
+  } catch { /* Missing credentials are reported by the required-secret check above. */ }
   const masterKey = resolve(secretDir, 'runtime_state_master_key')
   try {
     const info = await stat(masterKey)
@@ -80,6 +85,9 @@ else {
       const ingress = services['runtime-ingress']
       if (ingress?.volumes?.some((volume) => volume.target === '/var/lib/kala-control')) failures.push('postgres-s3 runtime-ingress must not mount control-data')
       if (ingress?.environment?.KALA_INGRESS_LOGIN_STATE_STORE_KIND !== 'postgres') failures.push('postgres-s3 login state must use the external control PostgreSQL database')
+      for (const [name, service, flag] of [['runtime-host', runtime, 'KALA_RUNTIME_REQUIRE_INSTALLATION_CLAIM'], ['runtime-ingress', ingress, 'KALA_INGRESS_REQUIRE_INSTALLATION_CLAIM']]) {
+        if (service?.environment?.[flag] !== '1' || service?.environment?.KALA_INSTALLATION_ID_FILE !== '/run/kala-installation/installation-id' || !service?.configs?.some((entry) => entry.source === 'installation_id' && entry.target === '/run/kala-installation/installation-id')) failures.push(`postgres-s3 ${name} must validate its external installation claim at startup`)
+      }
       for (const name of ['init-volumes', 'control-postgres']) {
         if (services[name]) failures.push(`postgres-s3 must keep legacy ${name} inactive`)
       }
@@ -88,6 +96,9 @@ else {
       const claim = services['fresh-storage-claim']
       if (controlInit?.environment?.KALA_INGRESS_REQUIRE_EXISTING_DATABASE !== '1' || controlInit?.environment?.KALA_INGRESS_CONTROL_WRITER_ROLE !== controlRole || !claim || claim.volumes?.length || !claim.configs?.some((config) => config.source === 'installation_id') || [controlInit, runtimeInit].some((job) => Object.keys(job?.depends_on ?? {}).join(',') !== 'fresh-storage-claim' || job.depends_on['fresh-storage-claim']?.condition !== 'service_completed_successfully')) {
         failures.push('postgres-s3 migrations must wait for a successful fresh external storage claim without local persistent claim state')
+      }
+      if (claim?.environment?.KALA_FRESH_CLAIM_S3_ACCESS_KEY_ID_FILE !== '/run/secrets/installation_claim_s3_access_key_id' || claim?.environment?.KALA_FRESH_CLAIM_S3_SECRET_ACCESS_KEY_FILE !== '/run/secrets/installation_claim_s3_secret_access_key' || !['installation_claim_s3_access_key_id', 'installation_claim_s3_secret_access_key'].every((name) => claim?.secrets?.some((secret) => secret.source === name))) {
+        failures.push('postgres-s3 claim job must use its separate S3 bootstrap credentials')
       }
     }
   }

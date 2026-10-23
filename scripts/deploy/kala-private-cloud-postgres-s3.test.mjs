@@ -48,7 +48,8 @@ test('postgres-s3 is an acknowledged fresh evaluation with strict topology and f
     runtime_postgres_owner_url: 'postgresql://runtime_owner:owner-pass@runtime-db.example.test/kala_runtime?sslmode=require',
     runtime_postgres_writer_url: 'postgresql://kala_runtime_writer:writer-pass@runtime-db.example.test/kala_runtime?sslmode=require',
     runtime_postgres_reader_url: 'postgresql://kala_runtime_reader:reader-pass@runtime-db.example.test/kala_runtime?sslmode=require',
-    runtime_s3_access_key_id: 'fixture-access-key', runtime_s3_secret_access_key: 'fixture-secret-key',
+    runtime_s3_access_key_id: 'fixture-runtime-key', runtime_s3_secret_access_key: 'fixture-runtime-secret',
+    installation_claim_s3_access_key_id: 'fixture-bootstrap-key', installation_claim_s3_secret_access_key: 'fixture-bootstrap-secret',
   }
   for (const [name, value] of Object.entries(secrets)) writeFileSync(join(config, 'secrets', name), value, { mode: 0o600 })
   writeFileSync(join(config, 'secrets', 'runtime_state_master_key'), Buffer.alloc(32, 7), { mode: 0o600 })
@@ -60,12 +61,12 @@ test('postgres-s3 is an acknowledged fresh evaluation with strict topology and f
   const rendered = {
     configs: { installation_id: { file: join(config, 'installation-id') } },
     services: {
-      'fresh-storage-claim': { configs: [{ source: 'installation_id' }], secrets: ['control_postgres_migration_owner_url', 'runtime_postgres_owner_url', 'runtime_s3_access_key_id', 'runtime_s3_secret_access_key'] },
+      'fresh-storage-claim': { configs: [{ source: 'installation_id' }], environment: { KALA_FRESH_CLAIM_S3_ACCESS_KEY_ID_FILE: '/run/secrets/installation_claim_s3_access_key_id', KALA_FRESH_CLAIM_S3_SECRET_ACCESS_KEY_FILE: '/run/secrets/installation_claim_s3_secret_access_key' }, secrets: ['control_postgres_migration_owner_url', 'runtime_postgres_owner_url', 'installation_claim_s3_access_key_id', 'installation_claim_s3_secret_access_key'] },
       'control-plane-init': { environment: { KALA_INGRESS_REQUIRE_EXISTING_DATABASE: '1' }, depends_on: { 'fresh-storage-claim': { condition: 'service_completed_successfully' } }, secrets: [{ source: 'control_postgres_migration_owner_url' }] },
       'runtime-schema-init': { depends_on: { 'fresh-storage-claim': { condition: 'service_completed_successfully' } }, secrets: [{ source: 'runtime_postgres_owner_url' }] },
       'init-storage-secrets': { secrets: ['runtime_postgres_writer_url', 'runtime_postgres_reader_url', 'runtime_state_master_key', 'runtime_s3_access_key_id', 'runtime_s3_secret_access_key'] },
-      'runtime-host': { volumes: [{ source: 'host-secrets', target: '/run/kala-secrets' }], tmpfs: ['/var/lib/kala:rw,noexec,size=256m'], environment: { KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_FILE: '/run/kala-storage/runtime_postgres_writer_url' } },
-      'runtime-ingress': { volumes: [{ source: 'gateway-secrets', target: '/run/kala-secrets' }], environment: { KALA_INGRESS_LOGIN_STATE_STORE_KIND: 'postgres', KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING_FILE: '/run/kala-storage/runtime_postgres_reader_url' } },
+      'runtime-host': { volumes: [{ source: 'host-secrets', target: '/run/kala-secrets' }], tmpfs: ['/var/lib/kala:rw,noexec,size=256m'], configs: [{ source: 'installation_id', target: '/run/kala-installation/installation-id' }], environment: { KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_FILE: '/run/kala-storage/runtime_postgres_writer_url', KALA_RUNTIME_REQUIRE_INSTALLATION_CLAIM: '1', KALA_INSTALLATION_ID_FILE: '/run/kala-installation/installation-id' } },
+      'runtime-ingress': { volumes: [{ source: 'gateway-secrets', target: '/run/kala-secrets' }], configs: [{ source: 'installation_id', target: '/run/kala-installation/installation-id' }], environment: { KALA_INGRESS_LOGIN_STATE_STORE_KIND: 'postgres', KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING_FILE: '/run/kala-storage/runtime_postgres_reader_url', KALA_INGRESS_REQUIRE_INSTALLATION_CLAIM: '1', KALA_INSTALLATION_ID_FILE: '/run/kala-installation/installation-id' } },
     },
   }
   const bin = join(scratch, 'bin'); mkdirSync(bin)

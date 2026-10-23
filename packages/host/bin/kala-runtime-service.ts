@@ -41,6 +41,7 @@ import { PostgresExecutorInstallationStore } from '../src/store/postgres-executo
 import { PostgresExecutorIdentityStore } from '../src/store/postgres-executor-identity.js'
 import { initializePrivateCloudExperimentalStorageSchema } from '../src/store/postgres-private-cloud-storage.js'
 import { checkPostgresSchemaVersion, initializeExperimentalRuntimeResourceOwnershipSchema, type PostgresSchemaManagement } from '../src/postgres-migrations.js'
+import { assertPostgresInstallationClaim, assertS3InstallationClaim, createPostgresClaimPool, createS3ClaimClient } from '../src/storage/fresh-install-claim.js'
 
 function required(name: string): string {
   const value = process.env[name]?.trim()
@@ -62,6 +63,24 @@ async function main(): Promise<void> {
       connectionString: experimentalStorage.connectionString,
       applicationName: 'kala-runtime-schema-check',
     })
+  }
+  if (process.env.KALA_RUNTIME_REQUIRE_INSTALLATION_CLAIM !== undefined) {
+    if (process.env.KALA_RUNTIME_REQUIRE_INSTALLATION_CLAIM !== '1' || !experimentalStorage || experimentalStorage.schemaManagement !== 'external') {
+      throw new Error('Runtime installation claim requires externally migrated PostgreSQL/S3 storage')
+    }
+    const installationId = (await readFile(required('KALA_INSTALLATION_ID_FILE'), 'utf8')).trim()
+    const pool = createPostgresClaimPool(experimentalStorage.connectionString, 'kala-runtime-startup-claim')
+    try {
+      await assertPostgresInstallationClaim(pool, installationId, 'Runtime PostgreSQL')
+    } finally {
+      await pool.end()
+    }
+    const s3 = createS3ClaimClient(experimentalStorage)
+    try {
+      await assertS3InstallationClaim(s3, experimentalStorage.bucket, installationId)
+    } finally {
+      s3.destroy?.()
+    }
   }
   const experimentalStateMasterKey = experimentalStorage
     ? await loadPostgresStateMasterKey(experimentalStorage.stateMasterKeyFile)

@@ -4,6 +4,7 @@ import process from 'node:process'
 import { readFile } from 'node:fs/promises'
 
 import { parsePublicUrls } from '@agent-kernel/shared'
+import { Pool } from 'pg'
 
 import { JsonOrganizationStore } from '../organizations/json-store.js'
 import { PostgresOrganizationStore } from '../organizations/postgres-store.js'
@@ -31,6 +32,23 @@ import {
 } from '../runtime-origin/postgres-runtime-origin-resolver.js'
 import { createPostgresRuntimeResourceOwnerResolver } from '../runtime-origin/postgres-runtime-resource-owner-resolver.js'
 import { RuntimeRoutingTicketResolver } from '../runtime-origin/runtime-routing-ticket-resolver.js'
+
+async function assertPostgresInstallationClaim(connectionString: string, installationId: string, label: string): Promise<void> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(installationId)) {
+    throw new Error('Invalid installation ID')
+  }
+  const pool = new Pool({ connectionString, connectionTimeoutMillis: 5_000, max: 1 })
+  try {
+    const marker = await pool.query<{ installation_id: string }>(
+      'SELECT installation_id FROM kala_installation_claim.marker WHERE singleton = true',
+    )
+    if (marker.rowCount !== 1 || marker.rows[0]?.installation_id !== installationId) {
+      throw new Error(`${label} installation claim is missing or does not match this installation`)
+    }
+  } finally {
+    await pool.end()
+  }
+}
 
 async function main(): Promise<void> {
   const port = Number(process.env.KALA_INGRESS_PORT ?? 13001)
@@ -98,6 +116,16 @@ async function main(): Promise<void> {
     ? runtimeReaderConnectionString(runtimePlacementConfig, routingTicketConfigured)
     : undefined
   if (runtimeReader?.audit) await auditPostgresRuntimeReaderConnection(runtimeReader.connectionString)
+  if (process.env.KALA_INGRESS_REQUIRE_INSTALLATION_CLAIM !== undefined) {
+    if (process.env.KALA_INGRESS_REQUIRE_INSTALLATION_CLAIM !== '1' || controlPlane.kind !== 'postgres' || !runtimeReader) {
+      throw new Error('Gateway installation claim requires control and Runtime PostgreSQL')
+    }
+    const installationIdFile = process.env.KALA_INSTALLATION_ID_FILE?.trim()
+    if (!installationIdFile) throw new Error('KALA_INSTALLATION_ID_FILE is required for the Gateway installation claim')
+    const installationId = (await readFile(installationIdFile, 'utf8')).trim()
+    await assertPostgresInstallationClaim(controlPlane.databaseUrl, installationId, 'Control PostgreSQL')
+    await assertPostgresInstallationClaim(runtimeReader.connectionString, installationId, 'Runtime PostgreSQL')
+  }
   const runtimeOriginResolver = runtimePlacementConfig && runtimeReader
     ? createPostgresRuntimeOriginResolver({
         connectionString: runtimeReader.connectionString,

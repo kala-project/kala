@@ -35,12 +35,16 @@ describe('external control database writer grants', () => {
   it('grants DML and sequence use but never schema ownership or DDL', async () => {
     const statements: string[] = []
     await grantControlWriter({ query: async (sql) => { statements.push(sql) } }, 'kala_control_writer')
-    expect(statements).toEqual([
+    expect(statements.slice(0, 4)).toEqual([
       'GRANT CONNECT ON DATABASE runlab_control TO "kala_control_writer"',
       'GRANT USAGE ON SCHEMA public TO "kala_control_writer"',
       'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "kala_control_writer"',
       'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "kala_control_writer"',
     ])
+    expect(statements).toHaveLength(5)
+    expect(statements[4]).toContain('GRANT USAGE ON SCHEMA kala_installation_claim TO "kala_control_writer"')
+    expect(statements[4]).toContain('GRANT SELECT ON TABLE kala_installation_claim.marker TO "kala_control_writer"')
+    expect(statements[4]).not.toMatch(/GRANT (CREATE|INSERT|UPDATE|DELETE) ON .*kala_installation_claim/iu)
     await expect(grantControlWriter({ query: async () => { throw new Error('query must not run') } }, 'writer";DROP TABLE organizations;--')).rejects.toThrow('simple lowercase')
   })
 })

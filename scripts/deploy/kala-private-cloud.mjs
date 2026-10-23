@@ -26,7 +26,7 @@ const transitions = new Map([
   ['removed', new Set(['completed', 'failed'])], ['completed', new Set()], ['failed', new Set()],
 ])
 const secretNames = ['control_postgres_password', 'session_secret', 'ingress_secret', 'oidc_client_id', 'oidc_client_secret', 'llm_api_key']
-const postgresS3SecretNames = ['control_postgres_migration_owner_url', 'control_postgres_writer_url', 'runtime_postgres_owner_url', 'runtime_postgres_writer_url', 'runtime_postgres_reader_url', 'runtime_state_master_key', 'runtime_s3_access_key_id', 'runtime_s3_secret_access_key']
+const postgresS3SecretNames = ['control_postgres_migration_owner_url', 'control_postgres_writer_url', 'runtime_postgres_owner_url', 'runtime_postgres_writer_url', 'runtime_postgres_reader_url', 'runtime_state_master_key', 'runtime_s3_access_key_id', 'runtime_s3_secret_access_key', 'installation_claim_s3_access_key_id', 'installation_claim_s3_secret_access_key']
 const tlsNames = ['internal_ca_key.pem', 'internal_ca.pem', 'runtime_host_key.pem', 'runtime_host.pem', 'ingress_client_key.pem', 'ingress_client.pem', 'runtime_health_key.pem', 'runtime_health.pem']
 const oidcCaName = 'oidc-ca.pem'
 const configOriginName = 'storage-origin.json'
@@ -283,11 +283,14 @@ function validatePostgresS3RenderedConfig(config, configDir) {
   for (const job of [controlInit, runtimeInit]) if (job.depends_on['fresh-storage-claim']?.condition !== 'service_completed_successfully') throw new Error('postgres-s3 schema jobs must wait for a successful fresh storage claim')
   if ((claim.volumes ?? []).length || (claim.configs ?? []).map(secretSource).join(',') !== 'installation_id' || config.configs?.installation_id?.file !== join(configDir, installationIdName)) throw new Error('postgres-s3 claim must use the Operator installation UUID without a persistent local receipt')
   const claimSecrets = (claim.secrets ?? []).map(secretSource).sort()
-  if (JSON.stringify(claimSecrets) !== JSON.stringify(['control_postgres_migration_owner_url', 'runtime_postgres_owner_url', 'runtime_s3_access_key_id', 'runtime_s3_secret_access_key'].sort())) throw new Error('postgres-s3 claim must receive only the two owner URLs and scoped S3 credentials')
+  if (JSON.stringify(claimSecrets) !== JSON.stringify(['control_postgres_migration_owner_url', 'runtime_postgres_owner_url', 'installation_claim_s3_access_key_id', 'installation_claim_s3_secret_access_key'].sort()) || claim.environment?.KALA_FRESH_CLAIM_S3_ACCESS_KEY_ID_FILE !== '/run/secrets/installation_claim_s3_access_key_id' || claim.environment?.KALA_FRESH_CLAIM_S3_SECRET_ACCESS_KEY_FILE !== '/run/secrets/installation_claim_s3_secret_access_key') throw new Error('postgres-s3 claim must receive only the two owner URLs and its separate scoped S3 credentials')
   const controlSecrets = (controlInit.secrets ?? []).map(secretSource); const runtimeInitSecrets = (runtimeInit.secrets ?? []).map(secretSource); const storageSecrets = (storageInit.secrets ?? []).map(secretSource)
   if (JSON.stringify(controlSecrets) !== JSON.stringify(['control_postgres_migration_owner_url']) || JSON.stringify(runtimeInitSecrets) !== JSON.stringify(['runtime_postgres_owner_url'])) throw new Error('postgres-s3 migration owners must be isolated to their one-shot schema jobs')
-  if (storageSecrets.includes('runtime_postgres_owner_url') || !['runtime_postgres_writer_url', 'runtime_postgres_reader_url', 'runtime_s3_access_key_id', 'runtime_s3_secret_access_key', 'runtime_state_master_key'].every((name) => storageSecrets.includes(name))) throw new Error('postgres-s3 workload secret projection must exclude owner credentials and include restricted Runtime/S3 credentials')
+  if (storageSecrets.includes('runtime_postgres_owner_url') || storageSecrets.some((name) => name.startsWith('installation_claim_s3_')) || !['runtime_postgres_writer_url', 'runtime_postgres_reader_url', 'runtime_s3_access_key_id', 'runtime_s3_secret_access_key', 'runtime_state_master_key'].every((name) => storageSecrets.includes(name))) throw new Error('postgres-s3 workload secret projection must exclude owner credentials and include restricted Runtime/S3 credentials')
   if (runtime.environment?.KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_FILE !== '/run/kala-storage/runtime_postgres_writer_url' || ingress.environment?.KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING_FILE !== '/run/kala-storage/runtime_postgres_reader_url') throw new Error('postgres-s3 Runtime writer and Gateway reader credentials are not isolated in the rendered topology')
+  for (const [name, service, flag] of [['runtime-host', runtime, 'KALA_RUNTIME_REQUIRE_INSTALLATION_CLAIM'], ['runtime-ingress', ingress, 'KALA_INGRESS_REQUIRE_INSTALLATION_CLAIM']]) {
+    if (service.environment?.[flag] !== '1' || service.environment?.KALA_INSTALLATION_ID_FILE !== '/run/kala-installation/installation-id' || !(service.configs ?? []).some((entry) => secretSource(entry) === 'installation_id' && entry.target === '/run/kala-installation/installation-id')) throw new Error(`postgres-s3 ${name} must verify the Operator installation UUID against its external authorities at startup`)
+  }
 }
 
 async function doctor() {
@@ -876,7 +879,8 @@ function validatePostgresS3Credentials(secretsDir, environment) {
   const keyInfo = lstatSync(keyPath)
   if (!keyInfo.isFile() || keyInfo.isSymbolicLink() || (keyInfo.mode & 0o077) !== 0 || keyInfo.size !== 32) throw new Error('secrets/runtime_state_master_key must be a private regular file containing exactly 32 raw bytes; the Operator will not generate it')
   if (readFileSync(keyPath).subarray(0, 8).toString('ascii').startsWith('REPLACE_')) throw new Error('secrets/runtime_state_master_key is a placeholder; supply and durably preserve 32 raw random bytes')
-  for (const name of ['runtime_s3_access_key_id', 'runtime_s3_secret_access_key']) if (placeholder(readFileSync(join(secretsDir, name), 'utf8').trim())) throw new Error(`secrets/${name} is still a placeholder`)
+  for (const name of ['runtime_s3_access_key_id', 'runtime_s3_secret_access_key', 'installation_claim_s3_access_key_id', 'installation_claim_s3_secret_access_key']) if (placeholder(readFileSync(join(secretsDir, name), 'utf8').trim())) throw new Error(`secrets/${name} is still a placeholder`)
+  if (readFileSync(join(secretsDir, 'runtime_s3_access_key_id'), 'utf8').trim() === readFileSync(join(secretsDir, 'installation_claim_s3_access_key_id'), 'utf8').trim()) throw new Error('claim job and Runtime require distinct S3 access keys; forbid Runtime writes/deletes on the installation marker')
   const urls = new Map()
   for (const name of postgresS3SecretNames.filter((entry) => entry.includes('postgres'))) {
     let url

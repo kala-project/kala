@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 
 import {
   assertBucketEmpty,
+  assertPostgresInstallationClaim,
+  assertS3InstallationClaim,
   claimFreshInstallation,
   INSTALLATION_CLAIM_OBJECT_KEY,
   type PostgresClaimClient,
@@ -62,13 +64,32 @@ class FakeS3 implements S3ClaimClient {
     }
     if (typed.constructor.name === 'GetObjectCommand') {
       if (this.marker === undefined) throw Object.assign(new Error('not found'), { name: 'NoSuchKey' })
-      return { Body: { transformToString: async () => this.marker! } }
+      const marker = this.marker
+      return { Body: { async *[Symbol.asyncIterator]() { yield Buffer.from(marker) } } }
     }
     throw new Error(`unexpected command ${typed.constructor.name}`)
   }
 }
 
 describe('fresh PG/S3 installation claim', () => {
+  it('checks existing external identities without writing or repairing a missing, stale or unreadable claim', async () => {
+    const database = new FakePostgres()
+    const objectStore = new FakeS3()
+    await expect(assertPostgresInstallationClaim(database, INSTALLATION_ID, 'Runtime PostgreSQL')).rejects.toThrow('missing or does not match')
+    await expect(assertS3InstallationClaim(objectStore, 'bucket', INSTALLATION_ID)).rejects.toThrow('missing or does not match')
+    database.marker = '123e4567-e89b-42d3-a456-426614174001'
+    objectStore.marker = JSON.stringify({ format: 1, installationId: database.marker })
+    await expect(assertPostgresInstallationClaim(database, INSTALLATION_ID, 'Runtime PostgreSQL')).rejects.toThrow('missing or does not match')
+    await expect(assertS3InstallationClaim(objectStore, 'bucket', INSTALLATION_ID)).rejects.toThrow('missing or does not match')
+    database.marker = INSTALLATION_ID
+    objectStore.marker = JSON.stringify({ format: 1, installationId: INSTALLATION_ID })
+    await expect(assertPostgresInstallationClaim(database, INSTALLATION_ID, 'Runtime PostgreSQL')).resolves.toBeUndefined()
+    await expect(assertS3InstallationClaim(objectStore, 'bucket', INSTALLATION_ID)).resolves.toBeUndefined()
+    expect(database.statements.every((sql) => sql.startsWith('SELECT'))).toBe(true)
+    expect(objectStore.commands.every((command) => command.name === 'GetObjectCommand')).toBe(true)
+    objectStore.marker = `${objectStore.marker}${' '.repeat(5_000)}`
+    await expect(assertS3InstallationClaim(objectStore, 'bucket', INSTALLATION_ID)).rejects.toThrow('size limit')
+  })
   it('claims two empty databases and the entire empty bucket with a fixed conditional marker', async () => {
     const controlDatabase = new FakePostgres()
     const runtimeDatabase = new FakePostgres()

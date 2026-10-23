@@ -14,6 +14,8 @@ class FakeClient {
   readonly statements: string[] = []
   readonly applied: Row[] = []
   privilegeOverrides: Record<string, boolean> = {}
+  claimPresent = false
+  claimWritable = false
   releaseCount = 0
 
   async query<T extends Record<string, unknown> = Record<string, unknown>>(
@@ -23,6 +25,12 @@ class FakeClient {
     this.statements.push(text)
     if (text.startsWith('SELECT version, name, checksum')) {
       return { rows: this.applied.map((row) => ({ ...row })) as T[], rowCount: this.applied.length }
+    }
+    if (text.includes("to_regclass('kala_installation_claim.marker')")) {
+      return { rows: [{ marker: this.claimPresent ? 'kala_installation_claim.marker' : null }] as T[], rowCount: 1 }
+    }
+    if (text.includes("has_schema_privilege($1, 'kala_installation_claim'")) {
+      return { rows: [{ can_create: false, can_write: this.claimWritable, owns_schema: false, owns_marker: false }] as T[], rowCount: 1 }
     }
     if (text.includes('has_schema_privilege')) {
       return { rows: [{ can_create: false, can_create_db: false, elevated: false, migration_write: false, forbidden_dml: false, owns_schema: false, owns_table: false, ...this.privilegeOverrides }] as T[], rowCount: 1 }
@@ -94,6 +102,23 @@ describe('PostgreSQL migrations', () => {
     expect(grants.filter((statement) => statement.includes('SELECT, INSERT, UPDATE, DELETE'))).toHaveLength(21)
     expect(client.statements.at(-1)).toBe('COMMIT')
     await expect(grantPostgresRuntimePrivileges(pool(client), { runtimeRole: 'invalid;role' })).rejects.toThrow('identifier')
+  })
+
+  it('grants both steady-state roles read-only marker access only when the fresh claim exists', async () => {
+    const client = new FakeClient()
+    await runPostgresMigrations(pool(client))
+    client.claimPresent = true
+    client.statements.length = 0
+    await grantPostgresRuntimePrivileges(pool(client), { runtimeRole: 'kala_runtime' })
+    await grantPostgresGatewayRuntimeReaderPrivileges(pool(client), { readerRole: 'kala_gateway_reader' })
+    for (const role of ['kala_runtime', 'kala_gateway_reader']) {
+      expect(client.statements).toContain(`GRANT USAGE ON SCHEMA kala_installation_claim TO "${role}"`)
+      expect(client.statements).toContain(`GRANT SELECT ON TABLE kala_installation_claim.marker TO "${role}"`)
+    }
+    expect(client.statements.filter((statement) => statement.startsWith('GRANT') && statement.includes('kala_installation_claim'))).toHaveLength(4)
+    client.claimWritable = true
+    await expect(grantPostgresRuntimePrivileges(pool(client), { runtimeRole: 'kala_runtime' })).rejects.toThrow('must not own or mutate')
+    expect(client.statements.at(-1)).toBe('ROLLBACK')
   })
 
   it('grants the Gateway reader SELECT on exactly five Runtime tables and rejects existing DML', async () => {

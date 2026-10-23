@@ -41,6 +41,8 @@ services:
       KALA_RUNTIME_UNIT_MAX_ARTIFACT_BYTES: ${KALA_RUNTIME_UNIT_MAX_ARTIFACT_BYTES:-10737418240}
       KALA_RUNTIME_EXPERIMENTAL_DOCKER_STORAGE: "1"
       KALA_RUNTIME_POSTGRES_SCHEMA_MODE: versioned
+      KALA_RUNTIME_REQUIRE_INSTALLATION_CLAIM: "1"
+      KALA_INSTALLATION_ID_FILE: /run/kala-installation/installation-id
       KALA_RUNTIME_EXPERIMENTAL_SESSION_OWNERSHIP: "1"
       KALA_RUNTIME_NODE_ID: runtime-host-b
       KALA_RUNTIME_NODE_ORIGIN: https://runtime-host-b.example:13002
@@ -57,6 +59,10 @@ services:
       - host-secrets:/run/kala-secrets:ro
       - ${KALA_DEPLOYMENT_CONFIG_FILE:-./deployment.json}:/etc/kala/deployment.json:ro
       - runtime-storage-secrets:/run/kala-storage:ro
+    configs:
+      - source: installation_id
+        target: /run/kala-installation/installation-id
+        mode: 0444
     tmpfs:
       - /var/lib/kala:rw,noexec,nosuid,size=256m,uid=65532,gid=65532,mode=0700
       - /tmp:rw,noexec,nosuid,size=128m

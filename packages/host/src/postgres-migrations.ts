@@ -192,6 +192,7 @@ export async function grantPostgresGatewayRuntimeReaderPrivileges(
     for (const table of POSTGRES_GATEWAY_RUNTIME_READER_TABLES) {
       await client.query(`GRANT SELECT ON TABLE ${schema}.${quoteIdentifier(table)} TO ${role}`)
     }
+    await grantInstallationClaimReadIfPresent(client, role, roleName)
     await client.query('COMMIT')
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined)
@@ -239,6 +240,7 @@ export async function grantPostgresRuntimePrivileges(
       const privileges = table === RUNTIME_UNIT_PROTOCOL_GATE_TABLE ? 'SELECT' : 'SELECT, INSERT, UPDATE, DELETE'
       await client.query(`GRANT ${privileges} ON TABLE ${schema}.${quoteIdentifier(table)} TO ${role}`)
     }
+    await grantInstallationClaimReadIfPresent(client, role, roleName)
     await client.query('COMMIT')
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined)
@@ -246,6 +248,23 @@ export async function grantPostgresRuntimePrivileges(
   } finally {
     client.release()
   }
+}
+
+async function grantInstallationClaimReadIfPresent(client: PostgresMigrationClient, role: string, roleName: string): Promise<void> {
+  const marker = await client.query<{ marker: string | null }>(`SELECT to_regclass('kala_installation_claim.marker')::text AS marker`)
+  if (!marker.rows[0]?.marker) return // Legacy/standalone Runtime databases have no fresh-install claim.
+  const rights = await client.query<{ can_create: boolean; can_write: boolean; owns_schema: boolean; owns_marker: boolean }>(`SELECT
+    has_schema_privilege($1, 'kala_installation_claim', 'CREATE') AS can_create,
+    has_table_privilege($1, 'kala_installation_claim.marker', 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') AS can_write,
+    EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'kala_installation_claim'
+      AND pg_has_role($1, pg_get_userbyid(nspowner), 'MEMBER')) AS owns_schema,
+    EXISTS (SELECT 1 FROM pg_class WHERE oid = 'kala_installation_claim.marker'::regclass
+      AND pg_has_role($1, pg_get_userbyid(relowner), 'MEMBER')) AS owns_marker`, [roleName])
+  if (!rights.rows[0] || Object.values(rights.rows[0]).some(Boolean)) {
+    throw new Error('Workload role must not own or mutate the installation claim')
+  }
+  await client.query(`GRANT USAGE ON SCHEMA kala_installation_claim TO ${role}`)
+  await client.query(`GRANT SELECT ON TABLE kala_installation_claim.marker TO ${role}`)
 }
 
 function postgresRuntimeTables(): string[] {
