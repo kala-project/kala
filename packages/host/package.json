@@ -20,6 +20,7 @@
     "kala-postgres-migrate": "./dist/bin/kala-postgres-migrate.js",
     "kala-parallel-placement": "./dist/bin/kala-parallel-placement.js",
     "kala-fresh-storage-claim": "./dist/bin/kala-fresh-storage-claim.js",
+    "kala-recovery-checkpoint": "./dist/bin/kala-recovery-checkpoint.js",
     "kala-dedicated-ingress": "./dist/bin/kala-dedicated-ingress.js",
     "kala-dedicated-deploy-supervisor": "./dist/bin/kala-dedicated-deploy-supervisor.js"
   },

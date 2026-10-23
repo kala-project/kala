@@ -2,6 +2,7 @@
 import { readFile } from 'node:fs/promises'
 import process from 'node:process'
 
+import { initializeRecoveryCheckpoints, readPostgresRecoveryCheckpoint, readS3RecoveryCheckpoint, assertRecoveryCheckpoint, stateKeySha256 } from '../src/storage/recovery-checkpoint.js'
 import {
   claimFreshInstallation,
   createPostgresClaimPool,
@@ -34,6 +35,9 @@ async function main(): Promise<void> {
   const runtimeConnectionString = await readRequiredFile('KALA_FRESH_CLAIM_RUNTIME_DATABASE_URL_FILE')
   const accessKeyId = await readRequiredFile('KALA_FRESH_CLAIM_S3_ACCESS_KEY_ID_FILE')
   const secretAccessKey = await readRequiredFile('KALA_FRESH_CLAIM_S3_SECRET_ACCESS_KEY_FILE')
+  const masterKey = await readFile(required('KALA_FRESH_CLAIM_STATE_MASTER_KEY_FILE'))
+  const checkpoint = { installationId, checkpointId: installationId, keySha256: stateKeySha256(masterKey) }
+  masterKey.fill(0)
   const bucket = required('KALA_FRESH_CLAIM_S3_BUCKET')
   const region = required('KALA_FRESH_CLAIM_S3_REGION')
   const endpoint = process.env.KALA_FRESH_CLAIM_S3_ENDPOINT?.trim() || undefined
@@ -58,6 +62,21 @@ async function main(): Promise<void> {
       bucket,
       authorities: { controlDatabase, runtimeDatabase, objectStore },
     })
+    if (status === 'claimed') {
+      await initializeRecoveryCheckpoints({ control: controlDatabase, runtime: runtimeDatabase, objectStore, bucket, checkpoint })
+    } else {
+      // Existing installations without an externally persisted recovery set cannot be auto-repaired.
+      const [control, runtime, s3] = await Promise.all([
+        readPostgresRecoveryCheckpoint(controlDatabase), readPostgresRecoveryCheckpoint(runtimeDatabase),
+        readS3RecoveryCheckpoint(objectStore, bucket),
+      ])
+      // A later quiesced backup may advance the checkpoint; never reset it to the installation UUID.
+      if (control.installationId !== installationId || control.keySha256 !== checkpoint.keySha256) {
+        throw new Error('control PostgreSQL recovery checkpoint does not match installation or state key')
+      }
+      assertRecoveryCheckpoint(runtime, control, 'Runtime PostgreSQL')
+      assertRecoveryCheckpoint(s3, control, 'S3')
+    }
     process.stdout.write(`${JSON.stringify({ event: 'fresh_storage_claim_ready', status, installationId })}\n`)
   } finally {
     await Promise.allSettled([controlDatabase.end(), runtimeDatabase.end()])

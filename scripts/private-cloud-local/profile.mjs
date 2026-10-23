@@ -15,14 +15,14 @@ const profiles = {
   cloudflare: ['deploy/private-cloud/compose.yaml', 'deploy/private-cloud/compose.dev.yaml', 'deploy/private-cloud/compose.storage-nfs.yaml', 'deploy/private-cloud/compose.cloudflare.yaml'],
   acceptance: ['deploy/private-cloud/compose.yaml', 'deploy/private-cloud/compose.dev.yaml', 'deploy/private-cloud/compose.storage-nfs.yaml', 'deploy/private-cloud/compose.local.yaml', 'deploy/private-cloud/local/compose.acceptance.yaml'],
   'local-volume': ['deploy/private-cloud/compose.yaml', 'deploy/private-cloud/compose.dev.yaml', 'deploy/private-cloud/compose.storage-local.yaml', 'deploy/private-cloud/compose.local.yaml'],
-  'postgres-s3': ['deploy/private-cloud/compose.yaml', 'deploy/private-cloud/compose.dev.yaml', 'deploy/private-cloud/compose.storage-local.yaml', 'deploy/private-cloud/compose.local.yaml', 'deploy/private-cloud/compose.storage-postgres-s3.yaml', 'deploy/private-cloud/compose.storage-postgres-s3.dev.yaml'],
+  'postgres-s3': ['deploy/private-cloud/compose.postgres-s3-base.yaml', 'deploy/private-cloud/compose.dev.yaml', 'deploy/private-cloud/compose.storage-postgres-s3.yaml', 'deploy/private-cloud/compose.storage-postgres-s3.dev.yaml', 'deploy/private-cloud/compose.local.yaml'],
   'external-nfs': ['deploy/private-cloud/compose.yaml', 'deploy/private-cloud/compose.dev.yaml', 'deploy/private-cloud/compose.storage-external-nfs.yaml', 'deploy/private-cloud/compose.cloudflare.yaml'],
 }
 process.env.KALA_RUNTIME_IMAGE ??= 'kala-private-cloud-runtime:dev'
 process.env.KALA_INGRESS_IMAGE ??= 'kala-private-cloud-ingress:dev'
 process.env.KALA_DASHBOARD_IMAGE ??= 'kala-private-cloud-dashboard:dev'
 
-export function selectedProfile() { return process.env.KALA_PROFILE ?? 'local' }
+export function selectedProfile() { return process.env.KALA_PROFILE ?? 'postgres-s3' }
 export function composeFiles(profile = selectedProfile()) {
   const files = profiles[profile]
   if (!files) throw new Error(`unknown KALA_PROFILE ${profile}; expected ${Object.keys(profiles).join(', ')}`)

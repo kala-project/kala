@@ -33,7 +33,8 @@ import {
 import { createPostgresRuntimeResourceOwnerResolver } from '../runtime-origin/postgres-runtime-resource-owner-resolver.js'
 import { RuntimeRoutingTicketResolver } from '../runtime-origin/runtime-routing-ticket-resolver.js'
 
-async function assertPostgresInstallationClaim(connectionString: string, installationId: string, label: string): Promise<void> {
+interface RecoveryCheckpoint { installation_id: string; checkpoint_id: string; key_sha256: string }
+async function assertPostgresInstallationClaim(connectionString: string, installationId: string, label: string): Promise<RecoveryCheckpoint> {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(installationId)) {
     throw new Error('Invalid installation ID')
   }
@@ -45,6 +46,14 @@ async function assertPostgresInstallationClaim(connectionString: string, install
     if (marker.rowCount !== 1 || marker.rows[0]?.installation_id !== installationId) {
       throw new Error(`${label} installation claim is missing or does not match this installation`)
     }
+    const recovery = await pool.query<RecoveryCheckpoint>(
+      'SELECT installation_id, checkpoint_id, key_sha256 FROM kala_installation_claim.recovery_checkpoint WHERE singleton = true',
+    )
+    const row = recovery.rows[0]
+    if (recovery.rowCount !== 1 || row?.installation_id !== installationId
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(row.checkpoint_id)
+      || !/^[0-9a-f]{64}$/i.test(row.key_sha256)) throw new Error(`${label} recovery checkpoint is missing or invalid`)
+    return row
   } finally {
     await pool.end()
   }
@@ -123,8 +132,11 @@ async function main(): Promise<void> {
     const installationIdFile = process.env.KALA_INSTALLATION_ID_FILE?.trim()
     if (!installationIdFile) throw new Error('KALA_INSTALLATION_ID_FILE is required for the Gateway installation claim')
     const installationId = (await readFile(installationIdFile, 'utf8')).trim()
-    await assertPostgresInstallationClaim(controlPlane.databaseUrl, installationId, 'Control PostgreSQL')
-    await assertPostgresInstallationClaim(runtimeReader.connectionString, installationId, 'Runtime PostgreSQL')
+    const controlCheckpoint = await assertPostgresInstallationClaim(controlPlane.databaseUrl, installationId, 'Control PostgreSQL')
+    const runtimeCheckpoint = await assertPostgresInstallationClaim(runtimeReader.connectionString, installationId, 'Runtime PostgreSQL')
+    if (controlCheckpoint.checkpoint_id !== runtimeCheckpoint.checkpoint_id || controlCheckpoint.key_sha256 !== runtimeCheckpoint.key_sha256) {
+      throw new Error('Control and Runtime PostgreSQL recovery checkpoints disagree; mixed recovery sets cannot be served')
+    }
   }
   const runtimeOriginResolver = runtimePlacementConfig && runtimeReader
     ? createPostgresRuntimeOriginResolver({

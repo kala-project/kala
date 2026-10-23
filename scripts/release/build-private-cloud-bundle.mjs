@@ -20,6 +20,7 @@ rmSync(output, { recursive: true, force: true })
 mkdirSync(output, { recursive: true, mode: 0o755 })
 const files = [
   'deploy/private-cloud/compose.yaml',
+  'deploy/private-cloud/compose.postgres-s3-base.yaml',
   'deploy/private-cloud/compose.oidc-private-ca.yaml',
   'deploy/private-cloud/compose.storage-nfs.yaml',
   'deploy/private-cloud/compose.storage-external-nfs.yaml',

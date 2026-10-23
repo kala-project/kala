@@ -1,0 +1,203 @@
+# Independent root for the opt-in single-Runtime PostgreSQL/S3 evaluation.
+# Storage authority and operator-managed credentials are added by
+# compose.storage-postgres-s3.yaml.
+name: kala-private-cloud-pg-s3-eval
+
+services:
+  init-app-secrets:
+    image: alpine@sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412
+    user: "0:0"
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        umask 077
+        cp /run/secrets/ingress_secret /host/ingress_secret
+        cp /run/secrets/llm_api_key /host/llm_api_key
+        cp /run/kala-provider-catalog.json /host/runtime-provider-catalog.json
+        cp /run/secrets/ingress_secret /gateway/ingress_secret
+        cp /run/secrets/session_secret /gateway/session_secret
+        cp /run/secrets/oidc_client_id /gateway/oidc_client_id
+        cp /run/secrets/oidc_client_secret /gateway/oidc_client_secret
+        rm -f /gateway/oidc_ca.pem
+        if [ -f /run/oidc-ca/ca.pem ]; then cp /run/oidc-ca/ca.pem /gateway/oidc_ca.pem; fi
+        cp /run/secrets/internal_ca /host/internal_ca.pem
+        cp /run/secrets/runtime_host_key /host/runtime_host_key.pem
+        cp /run/secrets/runtime_host_cert /host/runtime_host.pem
+        cp /run/secrets/runtime_health_key /host/runtime_health_key.pem
+        cp /run/secrets/runtime_health_cert /host/runtime_health.pem
+        cp /run/secrets/internal_ca /gateway/internal_ca.pem
+        cp /run/secrets/ingress_client_key /gateway/ingress_client_key.pem
+        cp /run/secrets/ingress_client_cert /gateway/ingress_client.pem
+        chown -R 65532:65532 /host /gateway
+        chmod 700 /host /gateway
+        chmod 400 /host/* /gateway/*
+    secrets: [ingress_secret, llm_api_key, session_secret, oidc_client_id, oidc_client_secret, internal_ca, runtime_host_key, runtime_host_cert, ingress_client_key, ingress_client_cert, runtime_health_key, runtime_health_cert]
+    volumes:
+      - host-secrets:/host
+      - gateway-secrets:/gateway
+      - ${KALA_PROVIDER_CATALOG_FILE:-./local/runtime-provider-catalog.json}:/run/kala-provider-catalog.json:ro
+    networks: [runtime]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    read_only: true
+
+  control-plane-init:
+    image: ${KALA_INGRESS_IMAGE:?KALA_INGRESS_IMAGE must be an immutable name@sha256 digest}
+    user: "0:0"
+    networks: [egress]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+
+  runtime-host:
+    image: ${KALA_RUNTIME_IMAGE:?KALA_RUNTIME_IMAGE must be an immutable name@sha256 digest}
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+    environment:
+      KALA_RUNTIME_KALA_PORT: 13002
+      KALA_RUNTIME_KALA_BIND_HOST: 0.0.0.0
+      KALA_RUNTIME_HOST_DATA_ROOT: /var/lib/kala
+      KALA_RUNTIME_HOST_MAX_LOADED_UNITS: 100
+      KALA_RUNTIME_HOST_DOCS_DIR: /app/docs
+      KALA_RUNTIME_HOST_RELEASE_ASSETS_DIR: /app/release
+      KALA_RUNTIME_HOST_LLM_CATALOG_FILE: /run/kala-secrets/runtime-provider-catalog.json
+      KALA_RUNTIME_HOST_SECRET_ROOT: /run/kala-secrets
+      KALA_DEPLOYMENT_CONFIG: /etc/kala/deployment.json
+      KALA_ALLOW_ALL_OK: ${KALA_ALLOW_ALL_OK:-1}
+      KALA_INGRESS_SHARED_SECRET_FILE: /run/kala-secrets/ingress_secret
+      KALA_RUNTIME_TLS_CA_FILE: /run/kala-secrets/internal_ca.pem
+      KALA_RUNTIME_TLS_KEY_FILE: /run/kala-secrets/runtime_host_key.pem
+      KALA_RUNTIME_TLS_CERT_FILE: /run/kala-secrets/runtime_host.pem
+      KALA_RUNTIME_UNIT_MAX_CONCURRENT_TURNS: ${KALA_RUNTIME_UNIT_MAX_CONCURRENT_TURNS:-4}
+      KALA_RUNTIME_UNIT_MAX_QUEUED_MESSAGES: ${KALA_RUNTIME_UNIT_MAX_QUEUED_MESSAGES:-100}
+      KALA_RUNTIME_UNIT_MAX_ARTIFACT_BYTES: ${KALA_RUNTIME_UNIT_MAX_ARTIFACT_BYTES:-10737418240}
+    volumes:
+      - host-secrets:/run/kala-secrets:ro
+      - ${KALA_DEPLOYMENT_CONFIG_FILE:-./deployment.json}:/etc/kala/deployment.json:ro
+    networks:
+      runtime: {}
+      egress: { gw_priority: 1 }
+    depends_on:
+      init-app-secrets: { condition: service_completed_successfully }
+    healthcheck:
+      test: [CMD, /nodejs/bin/node, -e, "require('https').get({host:'127.0.0.1',port:13002,path:'/internal/health',servername:'runtime-host',ca:require('fs').readFileSync('/run/kala-secrets/internal_ca.pem'),cert:require('fs').readFileSync('/run/kala-secrets/runtime_health.pem'),key:require('fs').readFileSync('/run/kala-secrets/runtime_health_key.pem'),headers:{'x-agent-runlab-ingress-secret':require('fs').readFileSync('/run/kala-secrets/ingress_secret','utf8').trim()}},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - "/tmp:rw,noexec,nosuid,size=128m"
+    pids_limit: 512
+    mem_limit: 2g
+    cpus: 2.0
+
+  dashboard:
+    image: ${KALA_DASHBOARD_IMAGE:?KALA_DASHBOARD_IMAGE must be an immutable name@sha256 digest}
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+    networks: [runtime]
+    healthcheck:
+      test: [CMD, /nodejs/bin/node, -e, "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - "/tmp:rw,noexec,nosuid,size=16m"
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.25
+
+  runtime-ingress:
+    image: ${KALA_INGRESS_IMAGE:?KALA_INGRESS_IMAGE must be an immutable name@sha256 digest}
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+    ports:
+      - ${KALA_PUBLIC_LISTEN:-127.0.0.1:13001}:13001
+    environment:
+      KALA_INGRESS_PORT: 13001
+      KALA_INGRESS_LISTEN_HOST: 0.0.0.0
+      KALA_PUBLIC_URLS: ${KALA_PUBLIC_URLS:-http://localhost:13001}
+      KALA_RUNTIME_HOST_ORIGIN: https://runtime-host:13002
+      KALA_INGRESS_RUNTIME_TLS_CA_FILE: /run/kala-secrets/internal_ca.pem
+      KALA_INGRESS_RUNTIME_TLS_KEY_FILE: /run/kala-secrets/ingress_client_key.pem
+      KALA_INGRESS_RUNTIME_TLS_CERT_FILE: /run/kala-secrets/ingress_client.pem
+      KALA_INGRESS_RUNTIME_TLS_SERVERNAME: runtime-host
+      KALA_INGRESS_DASHBOARD_ORIGIN: http://dashboard:8080
+      KALA_INGRESS_IDENTITY_ORIGIN: ${OIDC_DISCOVERY_ORIGIN:?set OIDC_DISCOVERY_ORIGIN in the ignored deployment environment}
+      KALA_INGRESS_DATABASE_URL_FILE: /run/kala-secrets/control_database_url
+      KALA_INGRESS_MIGRATIONS_DIR: /app/packages/runtime-ingress-gateway/migrations
+      KALA_INGRESS_LOGIN_STATE_STORE: /var/lib/kala-control/login-states.json
+      KALA_INGRESS_SESSION_SECRET_FILE: /run/kala-secrets/session_secret
+      KALA_INGRESS_SHARED_SECRET_FILE: /run/kala-secrets/ingress_secret
+      KALA_INGRESS_MAX_SERVICE_ACCOUNTS: ${KALA_INGRESS_MAX_SERVICE_ACCOUNTS:-100}
+      KALA_INGRESS_RETENTION_ENABLED: ${KALA_INGRESS_RETENTION_ENABLED:-1}
+      KALA_INGRESS_RETENTION_INTERVAL_MS: ${KALA_INGRESS_RETENTION_INTERVAL_MS:-86400000}
+      OIDC_ISSUER: ${OIDC_ISSUER:?set OIDC_ISSUER in the ignored deployment environment}
+      KALA_INGRESS_ALLOW_INSECURE_HTTP: ${KALA_ALLOW_INSECURE_HTTP:-0}
+      OIDC_CLIENT_ID_FILE: /run/kala-secrets/oidc_client_id
+      OIDC_CLIENT_SECRET_FILE: /run/kala-secrets/oidc_client_secret
+    volumes:
+      - gateway-secrets:/run/kala-secrets:ro
+    networks:
+      edge: { gw_priority: 1 }
+      runtime: {}
+    depends_on:
+      init-app-secrets: { condition: service_completed_successfully }
+      control-plane-init: { condition: service_completed_successfully }
+      runtime-host: { condition: service_healthy }
+      dashboard: { condition: service_healthy }
+    healthcheck:
+      test: [CMD, /nodejs/bin/node, -e, "const origin=new URL(process.env.KALA_PUBLIC_URLS.split(',')[0]);require('http').get({host:'127.0.0.1',port:13001,path:'/healthz',headers:{host:origin.host}},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - "/tmp:rw,noexec,nosuid,size=64m"
+    pids_limit: 200
+    mem_limit: 512m
+    cpus: 1.0
+
+networks:
+  runtime:
+    internal: true
+  edge: {}
+  egress: {}
+
+volumes:
+  host-secrets: {}
+  gateway-secrets: {}
+
+secrets:
+  session_secret: { file: "${KALA_SECRETS_DIR:-./.secrets}/session_secret" }
+  ingress_secret: { file: "${KALA_SECRETS_DIR:-./.secrets}/ingress_secret" }
+  oidc_client_id: { file: "${KALA_SECRETS_DIR:-./.secrets}/oidc_client_id" }
+  oidc_client_secret: { file: "${KALA_SECRETS_DIR:-./.secrets}/oidc_client_secret" }
+  llm_api_key: { file: "${KALA_SECRETS_DIR:-./.secrets}/llm_api_key" }
+  internal_ca: { file: "${KALA_SECRETS_DIR:-./.secrets}/internal_ca.pem" }
+  runtime_host_key: { file: "${KALA_SECRETS_DIR:-./.secrets}/runtime_host_key.pem" }
+  runtime_host_cert: { file: "${KALA_SECRETS_DIR:-./.secrets}/runtime_host.pem" }
+  ingress_client_key: { file: "${KALA_SECRETS_DIR:-./.secrets}/ingress_client_key.pem" }
+  ingress_client_cert: { file: "${KALA_SECRETS_DIR:-./.secrets}/ingress_client.pem" }
+  runtime_health_key: { file: "${KALA_SECRETS_DIR:-./.secrets}/runtime_health_key.pem" }
+  runtime_health_cert: { file: "${KALA_SECRETS_DIR:-./.secrets}/runtime_health.pem" }

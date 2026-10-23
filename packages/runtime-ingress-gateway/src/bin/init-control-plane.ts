@@ -73,16 +73,20 @@ export async function grantControlWriter(database: { query: (sql: string) => Pro
   // The fresh PG/S3 claim lives outside public; only its immutable marker is readable.
   await database.query(`DO $kala$ BEGIN
     IF to_regclass('kala_installation_claim.marker') IS NOT NULL THEN
+      IF to_regclass('kala_installation_claim.recovery_checkpoint') IS NULL THEN
+        RAISE EXCEPTION 'Installation claim has no coordinated recovery checkpoint';
+      END IF;
       IF has_schema_privilege('${role}', 'kala_installation_claim', 'CREATE')
-        OR has_table_privilege('${role}', 'kala_installation_claim.marker', 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+        OR EXISTS (SELECT 1 FROM unnest(ARRAY['kala_installation_claim.marker', 'kala_installation_claim.recovery_checkpoint']) AS records(table_name)
+          WHERE has_table_privilege('${role}', records.table_name, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'))
         OR EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'kala_installation_claim'
           AND pg_has_role('${role}', pg_get_userbyid(nspowner), 'MEMBER'))
-        OR EXISTS (SELECT 1 FROM pg_class WHERE oid = 'kala_installation_claim.marker'::regclass
+        OR EXISTS (SELECT 1 FROM pg_class WHERE oid IN ('kala_installation_claim.marker'::regclass, 'kala_installation_claim.recovery_checkpoint'::regclass)
           AND pg_has_role('${role}', pg_get_userbyid(relowner), 'MEMBER')) THEN
-        RAISE EXCEPTION 'Gateway writer must not own or mutate the installation claim';
+        RAISE EXCEPTION 'Gateway writer must not own or mutate the installation claim or recovery checkpoint';
       END IF;
       GRANT USAGE ON SCHEMA kala_installation_claim TO "${role}";
-      GRANT SELECT ON TABLE kala_installation_claim.marker TO "${role}";
+      GRANT SELECT ON TABLE kala_installation_claim.marker, kala_installation_claim.recovery_checkpoint TO "${role}";
     END IF;
   END $kala$`)
 }

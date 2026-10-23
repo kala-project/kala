@@ -15,6 +15,7 @@ test('postgres-s3 is an acknowledged fresh evaluation with strict topology and f
   run(process.execPath, ['scripts/release/build-private-cloud-bundle.mjs', '--output', bundle, '--runtime-image', image('runtime', 'a'), '--ingress-image', image('ingress', 'b'), '--dashboard-image', image('dashboard', 'c'), '--revision', '1'.repeat(40)])
   const manifest = JSON.parse(readFileSync(join(bundle, 'manifest.json'), 'utf8'))
   assert.ok(manifest.files['compose.storage-postgres-s3.yaml'])
+  assert.ok(manifest.files['compose.postgres-s3-base.yaml'])
 
   const appPort = await freePort()
   const cli = join(bundle, 'kala-private-cloud.mjs')
@@ -23,13 +24,15 @@ test('postgres-s3 is an acknowledged fresh evaluation with strict topology and f
   const missingAck = run(process.execPath, [...baseArgs, '--config-dir', join(scratch, 'missing-ack')], { env: { ...process.env, KALA_PRIVATE_CLOUD_OPERATOR_ROOT: operatorRoot }, allowFailure: true })
   assert.notEqual(missingAck.status, 0)
   assert.match(missingAck.stderr, /acknowledge-evaluation/u)
-  const bundled = run(process.execPath, [cli, 'init-config', '--bundle', bundle, '--config-dir', join(scratch, 'bundled'), '--storage', 'postgres-s3', '--acknowledge-evaluation', '--acknowledge-external-backup'], { env: { ...process.env, KALA_PRIVATE_CLOUD_OPERATOR_ROOT: operatorRoot }, allowFailure: true })
+  const bundled = run(process.execPath, [cli, 'init-config', '--bundle', bundle, '--config-dir', join(scratch, 'bundled'), '--identity', 'bundled', '--storage', 'postgres-s3', '--acknowledge-evaluation', '--acknowledge-external-backup'], { env: { ...process.env, KALA_PRIVATE_CLOUD_OPERATOR_ROOT: operatorRoot }, allowFailure: true })
   assert.notEqual(bundled.status, 0)
   assert.match(bundled.stderr, /requires --identity external/u)
 
   const config = join(scratch, 'config')
   const initialized = JSON.parse(run(process.execPath, [...baseArgs, '--config-dir', config, '--acknowledge-evaluation', '--acknowledge-external-backup'], { env: { ...process.env, KALA_PRIVATE_CLOUD_OPERATOR_ROOT: operatorRoot } }).stdout)
   assert.equal(initialized.storage, 'postgres-s3')
+  assert.doesNotMatch(readFileSync(join(config, 'deployment.env'), 'utf8'), /KALA_STORAGE=(?:nfs|local-volume)/u)
+  assert.equal(existsSync(join(config, 'secrets', 'control_postgres_password')), false)
   assert.equal(initialized.next.some((entry) => entry.includes('32-byte raw')), true)
   assert.equal(existsSync(join(config, 'secrets', 'runtime_state_master_key')), false)
   const origin = JSON.parse(readFileSync(join(config, 'storage-origin.json'), 'utf8'))
@@ -61,7 +64,7 @@ test('postgres-s3 is an acknowledged fresh evaluation with strict topology and f
   const rendered = {
     configs: { installation_id: { file: join(config, 'installation-id') } },
     services: {
-      'fresh-storage-claim': { configs: [{ source: 'installation_id' }], environment: { KALA_FRESH_CLAIM_S3_ACCESS_KEY_ID_FILE: '/run/secrets/installation_claim_s3_access_key_id', KALA_FRESH_CLAIM_S3_SECRET_ACCESS_KEY_FILE: '/run/secrets/installation_claim_s3_secret_access_key' }, secrets: ['control_postgres_migration_owner_url', 'runtime_postgres_owner_url', 'installation_claim_s3_access_key_id', 'installation_claim_s3_secret_access_key'] },
+      'fresh-storage-claim': { configs: [{ source: 'installation_id' }], environment: { KALA_FRESH_CLAIM_STATE_MASTER_KEY_FILE: '/run/secrets/runtime_state_master_key', KALA_FRESH_CLAIM_S3_ACCESS_KEY_ID_FILE: '/run/secrets/installation_claim_s3_access_key_id', KALA_FRESH_CLAIM_S3_SECRET_ACCESS_KEY_FILE: '/run/secrets/installation_claim_s3_secret_access_key' }, secrets: ['control_postgres_migration_owner_url', 'runtime_postgres_owner_url', 'runtime_state_master_key', 'installation_claim_s3_access_key_id', 'installation_claim_s3_secret_access_key'] },
       'control-plane-init': { environment: { KALA_INGRESS_REQUIRE_EXISTING_DATABASE: '1' }, depends_on: { 'fresh-storage-claim': { condition: 'service_completed_successfully' } }, secrets: [{ source: 'control_postgres_migration_owner_url' }] },
       'runtime-schema-init': { depends_on: { 'fresh-storage-claim': { condition: 'service_completed_successfully' } }, secrets: [{ source: 'runtime_postgres_owner_url' }] },
       'init-storage-secrets': { secrets: ['runtime_postgres_writer_url', 'runtime_postgres_reader_url', 'runtime_state_master_key', 'runtime_s3_access_key_id', 'runtime_s3_secret_access_key'] },
@@ -97,6 +100,8 @@ else if(args.includes('ps')&&args.includes('--format')) for(const row of [{Servi
   assert.equal(installed.receipt.phase, 'completed')
   assert.equal(installed.installation.installationId, origin.installationId)
   const callsBeforeRefusals = readFileSync(capture, 'utf8')
+  assert.match(callsBeforeRefusals, /compose\.postgres-s3-base\.yaml/u)
+  assert.doesNotMatch(callsBeforeRefusals, /"-f","[^"]*\/compose\.yaml"/u)
   for (const [command, args] of [['upgrade', ['--bundle', bundle]], ['upgrade-dashboard', ['--bundle', bundle]], ['rollback', []], ['backup', ['--output', join(scratch, 'backup')]], ['restore', ['--backup', join(scratch, 'missing'), '--confirm', 'RESTORE:missing']], ['uninstall', ['--confirm', `UNINSTALL:${installed.installation.installationId}`]]]) {
     const refused = run(process.execPath, [cli, command, ...args], { env, allowFailure: true })
     assert.notEqual(refused.status, 0, command)

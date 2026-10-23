@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { createServer } from 'node:net'
 import { join, resolve } from 'node:path'
@@ -109,10 +109,10 @@ test('parses service images and rejects wrong lock variables or mutable identity
   writeManifestFile(inherited, 'compose.yaml', inheritedCompose.replace('  init-volumes:\n', '  init-volumes:\n    extends: { file: unverified.yaml, service: image }\n'))
   const inheritedResult = run(process.execPath, ['scripts/release/verify-private-cloud-bundle.mjs', inherited], { allowFailure: true })
   assert.notEqual(inheritedResult.status, 0)
-  assert.match(inheritedResult.stderr, /production Compose contains build or extends/u)
+  assert.match(inheritedResult.stderr, /legacy Compose contains build or extends/u)
 })
 
-test('installs, upgrades Dashboard independently, and rolls back from persisted predecessor', async () => {
+test('preserves an already installed legacy project through Dashboard upgrade and rollback without new volume installation', async () => {
   const scratch = mkdtempSync(join(tmpdir(), 'kala-private-cloud-operator-'))
   const first = join(scratch, 'first'); const second = join(scratch, 'second')
   const shared = { runtime: image('runtime', 'a'), ingress: image('ingress', 'b') }
@@ -147,8 +147,14 @@ else if(args.includes('ps')&&args.includes('--format')){
   const cli = join(first, 'kala-private-cloud.mjs')
   assert.match(readFileSync(cli, 'utf8'), /'runtime-ingress', '\/nodejs\/bin\/node', '-e', bootstrap/u)
   assert.match(readFileSync(cli, 'utf8'), /'stop', 'runtime-ingress', 'runtime-host', 'dashboard', \.\.\.\(bundledIdentity \? \[.*'identity-postgres'.*\] : \[\]\), 'control-postgres'/u)
-  const installed = JSON.parse(run(process.execPath, [cli, 'install', '--bundle', first, '--config-dir', config], { env }).stdout)
-  assert.equal(installed.receipt.phase, 'completed')
+  const refused = run(process.execPath, [cli, 'install', '--bundle', first, '--config-dir', config], { env, allowFailure: true })
+  assert.notEqual(refused.status, 0)
+  assert.match(refused.stderr, /new legacy local-volume\/NFS installations are disabled/u)
+  assert.equal(existsSync(dockerCapture), false)
+  mkdirSync(env.KALA_PRIVATE_CLOUD_OPERATOR_ROOT, { recursive: true })
+  const firstLock = JSON.parse(readFileSync(join(first, 'image-lock.json'), 'utf8'))
+  writeFileSync(join(env.KALA_PRIVATE_CLOUD_OPERATOR_ROOT, 'installation.json'), JSON.stringify({ schemaVersion: 1, installationId: 'installation-existing-legacy', configDir: config, projectName: 'runlab-test', storageMode: 'local-volume' }))
+  writeFileSync(join(env.KALA_PRIVATE_CLOUD_OPERATOR_ROOT, 'active.json'), JSON.stringify({ schemaVersion: 1, releaseId: 'existing-legacy-release', releaseDir: first, version: firstLock.version, revision: firstLock.revision, images: firstLock.images }))
   const provisioned = run(process.execPath, [cli, 'provision-organization', '--owner-issuer', 'https://identity.example.test', '--owner-subject', 'idp-subject-7f2', '--owner-email', 'owner@example.test', '--organization-name', 'Example Org', '--contract-reference', 'contract-2026-001', '--ends-at', '2099-01-01T00:00:00.000Z', '--operation-id', 'provision-example-001'], { env })
   assert.equal(JSON.parse(provisioned.stdout).organizationId, 'org_fixture')
   const provisionInput = JSON.parse(readFileSync(provisionCapture, 'utf8'))
@@ -166,11 +172,11 @@ else if(args.includes('ps')&&args.includes('--format')){
   assert.equal(candidateCalls.every((call) => call.args.some((arg) => arg.endsWith('compose.oidc-private-ca.yaml'))), true)
   assert.equal(upgraded.services['runtime-host'].containerId, 'runtime-fixed')
   assert.equal(upgraded.services['runtime-ingress'].containerId, 'ingress-fixed')
-  assert.notEqual(installed.services.dashboard.containerId, upgraded.services.dashboard.containerId)
+  assert.equal(upgraded.services.dashboard.containerId, 'dashboard-'+image('dashboard', 'd').slice(-8))
   const status = JSON.parse(run(process.execPath, [cli, 'status'], { env }).stdout)
   assert.equal(status.active.images.dashboard, image('dashboard', 'd'))
   assert.equal(status.predecessor.images.dashboard, image('dashboard', 'c'))
-  assert.deepEqual(status.recentOperations.map((entry) => entry.phase), ['completed', 'completed'])
+  assert.deepEqual(status.recentOperations.map((entry) => entry.phase), ['completed'])
   const rolledBack = JSON.parse(run(process.execPath, [cli, 'rollback'], { env }).stdout)
   assert.equal(rolledBack.receipt.phase, 'completed')
   assert.equal(rolledBack.active.images.dashboard, image('dashboard', 'c'))

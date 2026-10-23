@@ -2,15 +2,6 @@
 # PostgreSQL (separate owner, DML and read-only roles) and S3-compatible storage.
 # This is not an upgrade from the local/NFS volume profile or an HA release.
 services:
-  # Keep the legacy local-volume services/data intact, but make them inactive in
-  # this profile. Dependencies below are replaced so `compose up` cannot select
-  # them implicitly.
-  init-volumes:
-    profiles: !override [legacy-local-control-disabled]
-
-  control-postgres:
-    profiles: !override [legacy-local-control-disabled]
-
   init-app-secrets:
     command: !override
       - /bin/sh
@@ -48,7 +39,6 @@ services:
       KALA_INGRESS_MIGRATIONS_DIR: /app/packages/runtime-ingress-gateway/migrations
       KALA_INGRESS_REQUIRE_EXISTING_DATABASE: "1"
     secrets: !override [control_postgres_migration_owner_url]
-    volumes: !override []
     networks: !override [egress]
     depends_on: !override
       fresh-storage-claim: { condition: service_completed_successfully }
@@ -61,13 +51,14 @@ services:
       KALA_INSTALLATION_ID_FILE: /run/kala-installation/installation-id
       KALA_FRESH_CLAIM_CONTROL_DATABASE_URL_FILE: /run/secrets/control_postgres_migration_owner_url
       KALA_FRESH_CLAIM_RUNTIME_DATABASE_URL_FILE: /run/secrets/runtime_postgres_owner_url
+      KALA_FRESH_CLAIM_STATE_MASTER_KEY_FILE: /run/secrets/runtime_state_master_key
       KALA_FRESH_CLAIM_S3_ACCESS_KEY_ID_FILE: /run/secrets/installation_claim_s3_access_key_id
       KALA_FRESH_CLAIM_S3_SECRET_ACCESS_KEY_FILE: /run/secrets/installation_claim_s3_secret_access_key
       KALA_FRESH_CLAIM_S3_ENDPOINT: ${KALA_S3_ENDPOINT:?set the S3-compatible endpoint}
       KALA_FRESH_CLAIM_S3_REGION: ${KALA_S3_REGION:?set the S3 region}
       KALA_FRESH_CLAIM_S3_BUCKET: ${KALA_S3_BUCKET:?set a new empty S3 bucket}
       KALA_FRESH_CLAIM_S3_FORCE_PATH_STYLE: ${KALA_S3_FORCE_PATH_STYLE:-false}
-    secrets: [control_postgres_migration_owner_url, runtime_postgres_owner_url, installation_claim_s3_access_key_id, installation_claim_s3_secret_access_key]
+    secrets: [control_postgres_migration_owner_url, runtime_postgres_owner_url, runtime_state_master_key, installation_claim_s3_access_key_id, installation_claim_s3_secret_access_key]
     configs:
       - source: installation_id
         target: /run/kala-installation/installation-id
@@ -151,11 +142,8 @@ services:
       KALA_RUNTIME_EXPERIMENTAL_S3_SECRET_ACCESS_KEY_FILE: /run/kala-storage/runtime_s3_secret_access_key
       KALA_RUNTIME_EXPERIMENTAL_S3_MAX_OBJECT_BYTES: ${KALA_S3_MAX_OBJECT_BYTES:-10737418240}
       KALA_RUNTIME_EXPERIMENTAL_S3_FORCE_PATH_STYLE: ${KALA_S3_FORCE_PATH_STYLE:-false}
-    # Replace the base tenant-data mount rather than merging another volume onto it.
     # Scratch is disposable: committed Session/Queue/Artifact authority belongs to PG/S3.
-    volumes: !override
-      - host-secrets:/run/kala-secrets:ro
-      - ${KALA_DEPLOYMENT_CONFIG_FILE:-./deployment.json}:/etc/kala/deployment.json:ro
+    volumes:
       - runtime-storage-secrets:/run/kala-storage:ro
     configs:
       - source: installation_id
@@ -177,8 +165,7 @@ services:
       KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING_FILE: /run/kala-storage/runtime_postgres_reader_url
       KALA_INGRESS_EXPERIMENTAL_RUNTIME_ORIGIN_ALLOWLIST: https://runtime-host:13002
       KALA_INGRESS_EXPERIMENTAL_BOOTSTRAP_RUNTIME_ORIGIN: https://runtime-host:13002
-    volumes: !override
-      - gateway-secrets:/run/kala-secrets:ro
+    volumes:
       - gateway-storage-secrets:/run/kala-storage:ro
     configs:
       - source: installation_id

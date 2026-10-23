@@ -42,6 +42,7 @@ import { PostgresExecutorIdentityStore } from '../src/store/postgres-executor-id
 import { initializePrivateCloudExperimentalStorageSchema } from '../src/store/postgres-private-cloud-storage.js'
 import { checkPostgresSchemaVersion, initializeExperimentalRuntimeResourceOwnershipSchema, type PostgresSchemaManagement } from '../src/postgres-migrations.js'
 import { assertPostgresInstallationClaim, assertS3InstallationClaim, createPostgresClaimPool, createS3ClaimClient } from '../src/storage/fresh-install-claim.js'
+import { assertRecoveryCheckpoint, readPostgresRecoveryCheckpoint, readS3RecoveryCheckpoint, stateKeySha256 } from '../src/storage/recovery-checkpoint.js'
 
 function required(name: string): string {
   const value = process.env[name]?.trim()
@@ -64,27 +65,30 @@ async function main(): Promise<void> {
       applicationName: 'kala-runtime-schema-check',
     })
   }
+  const experimentalStateMasterKey = experimentalStorage
+    ? await loadPostgresStateMasterKey(experimentalStorage.stateMasterKeyFile)
+    : undefined
   if (process.env.KALA_RUNTIME_REQUIRE_INSTALLATION_CLAIM !== undefined) {
     if (process.env.KALA_RUNTIME_REQUIRE_INSTALLATION_CLAIM !== '1' || !experimentalStorage || experimentalStorage.schemaManagement !== 'external') {
       throw new Error('Runtime installation claim requires externally migrated PostgreSQL/S3 storage')
     }
     const installationId = (await readFile(required('KALA_INSTALLATION_ID_FILE'), 'utf8')).trim()
     const pool = createPostgresClaimPool(experimentalStorage.connectionString, 'kala-runtime-startup-claim')
-    try {
-      await assertPostgresInstallationClaim(pool, installationId, 'Runtime PostgreSQL')
-    } finally {
-      await pool.end()
-    }
     const s3 = createS3ClaimClient(experimentalStorage)
     try {
+      await assertPostgresInstallationClaim(pool, installationId, 'Runtime PostgreSQL')
       await assertS3InstallationClaim(s3, experimentalStorage.bucket, installationId)
+      const pgCheckpoint = await readPostgresRecoveryCheckpoint(pool)
+      const s3Checkpoint = await readS3RecoveryCheckpoint(s3, experimentalStorage.bucket)
+      if (pgCheckpoint.installationId !== installationId || pgCheckpoint.keySha256 !== stateKeySha256(experimentalStateMasterKey!)) {
+        throw new Error('Runtime recovery checkpoint does not match installation or state master key')
+      }
+      assertRecoveryCheckpoint(s3Checkpoint, pgCheckpoint, 'S3')
     } finally {
+      await pool.end()
       s3.destroy?.()
     }
   }
-  const experimentalStateMasterKey = experimentalStorage
-    ? await loadPostgresStateMasterKey(experimentalStorage.stateMasterKeyFile)
-    : undefined
   // Private Cloud Runtime Units are operator-controlled. Match the Dedicated
   // binary's default while retaining an explicit opt-out.
   if (process.env.KALA_ALLOW_ALL_OK === undefined) process.env.KALA_ALLOW_ALL_OK = '1'

@@ -28,7 +28,17 @@ const lockedServices = {
   'runtime-ingress': 'KALA_INGRESS_IMAGE',
   dashboard: 'KALA_DASHBOARD_IMAGE',
 }
-verifyComposeImages(compose, 'production Compose', lockedServices)
+verifyComposeImages(compose, 'legacy Compose', lockedServices)
+for (const name of ['compose.storage-local.yaml', 'compose.storage-nfs.yaml', 'compose.storage-external-nfs.yaml']) if (!actualNames.includes(name)) fail(`legacy installation recovery asset is missing: ${name}`)
+if (!actualNames.includes('compose.postgres-s3-base.yaml')) fail('independent PostgreSQL/S3 root is missing')
+const postgresS3Base = yaml('compose.postgres-s3-base.yaml')
+verifyComposeImages(postgresS3Base, 'PostgreSQL/S3 root', lockedServices)
+for (const name of ['init-volumes', 'control-postgres', 'nfs-server']) if (postgresS3Base.services?.[name]) fail(`PostgreSQL/S3 root contains legacy authority service: ${name}`)
+for (const name of ['tenant-data', 'control-data', 'control-postgres-data', 'nfs-session-data']) if (postgresS3Base.volumes?.[name]) fail(`PostgreSQL/S3 root contains legacy authority volume: ${name}`)
+for (const name of ['control', 'nfs']) if (postgresS3Base.networks?.[name]) fail(`PostgreSQL/S3 root contains legacy authority network: ${name}`)
+for (const [name, service] of Object.entries(postgresS3Base.services ?? {})) {
+  if ((service.volumes ?? []).some((volume) => typeof volume === 'string' && /(?:tenant-data|control-data|nfs-session-data):|:\/var\/lib\/kala(?::|$)/u.test(volume))) fail(`PostgreSQL/S3 root mounts legacy authority in ${name}`)
+}
 for (const name of ['compose.identity-local.yaml', 'identity-local.Caddyfile', 'bootstrap-private-cloud-identity.mjs']) if (!actualNames.includes(name)) fail(`bundled identity asset is missing: ${name}`)
 if (!actualNames.includes('compose.storage-postgres-s3.yaml')) fail('PostgreSQL/S3 evaluation overlay is missing')
 const postgresS3ComposeSource = readFileSync(join(directory, 'compose.storage-postgres-s3.yaml'), 'utf8')

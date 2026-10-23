@@ -43,7 +43,7 @@ describe('external control database writer grants', () => {
     ])
     expect(statements).toHaveLength(5)
     expect(statements[4]).toContain('GRANT USAGE ON SCHEMA kala_installation_claim TO "kala_control_writer"')
-    expect(statements[4]).toContain('GRANT SELECT ON TABLE kala_installation_claim.marker TO "kala_control_writer"')
+    expect(statements[4]).toContain('GRANT SELECT ON TABLE kala_installation_claim.marker, kala_installation_claim.recovery_checkpoint TO "kala_control_writer"')
     expect(statements[4]).not.toMatch(/GRANT (CREATE|INSERT|UPDATE|DELETE) ON .*kala_installation_claim/iu)
     await expect(grantControlWriter({ query: async () => { throw new Error('query must not run') } }, 'writer";DROP TABLE organizations;--')).rejects.toThrow('simple lowercase')
   })

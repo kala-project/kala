@@ -253,18 +253,21 @@ export async function grantPostgresRuntimePrivileges(
 async function grantInstallationClaimReadIfPresent(client: PostgresMigrationClient, role: string, roleName: string): Promise<void> {
   const marker = await client.query<{ marker: string | null }>(`SELECT to_regclass('kala_installation_claim.marker')::text AS marker`)
   if (!marker.rows[0]?.marker) return // Legacy/standalone Runtime databases have no fresh-install claim.
+  const recovery = await client.query<{ checkpoint: string | null }>(`SELECT to_regclass('kala_installation_claim.recovery_checkpoint')::text AS checkpoint`)
+  if (!recovery.rows[0]?.checkpoint) throw new Error('Installation claim has no coordinated recovery checkpoint')
   const rights = await client.query<{ can_create: boolean; can_write: boolean; owns_schema: boolean; owns_marker: boolean }>(`SELECT
     has_schema_privilege($1, 'kala_installation_claim', 'CREATE') AS can_create,
-    has_table_privilege($1, 'kala_installation_claim.marker', 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') AS can_write,
+    EXISTS (SELECT 1 FROM unnest(ARRAY['kala_installation_claim.marker', 'kala_installation_claim.recovery_checkpoint']) AS records(table_name)
+      WHERE has_table_privilege($1, records.table_name, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')) AS can_write,
     EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'kala_installation_claim'
       AND pg_has_role($1, pg_get_userbyid(nspowner), 'MEMBER')) AS owns_schema,
-    EXISTS (SELECT 1 FROM pg_class WHERE oid = 'kala_installation_claim.marker'::regclass
+    EXISTS (SELECT 1 FROM pg_class WHERE oid IN ('kala_installation_claim.marker'::regclass, 'kala_installation_claim.recovery_checkpoint'::regclass)
       AND pg_has_role($1, pg_get_userbyid(relowner), 'MEMBER')) AS owns_marker`, [roleName])
   if (!rights.rows[0] || Object.values(rights.rows[0]).some(Boolean)) {
-    throw new Error('Workload role must not own or mutate the installation claim')
+    throw new Error('Workload role must not own or mutate the installation claim or recovery checkpoint')
   }
   await client.query(`GRANT USAGE ON SCHEMA kala_installation_claim TO ${role}`)
-  await client.query(`GRANT SELECT ON TABLE kala_installation_claim.marker TO ${role}`)
+  await client.query(`GRANT SELECT ON TABLE kala_installation_claim.marker, kala_installation_claim.recovery_checkpoint TO ${role}`)
 }
 
 function postgresRuntimeTables(): string[] {

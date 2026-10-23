@@ -77,7 +77,9 @@ else {
     const config = spawnSync('docker', ['compose', ...composeArgs(profile), 'config', '--format', 'json'], { cwd: root, encoding: 'utf8', env: process.env })
     if (config.status !== 0) failures.push(`postgres-s3 Compose rendering failed: ${config.stderr.trim()}`)
     else {
-      const services = JSON.parse(config.stdout).services ?? {}
+      const rendered = JSON.parse(config.stdout)
+      const services = rendered.services ?? {}
+      if (['tenant-data', 'control-data', 'control-postgres-data', 'nfs-session-data'].some((name) => rendered.volumes?.[name]) || ['control', 'nfs'].some((name) => rendered.networks?.[name])) failures.push('postgres-s3 must not declare legacy authority volumes or NFS/control networks')
       const runtime = services['runtime-host']
       const persistentRoot = runtime?.volumes?.some((volume) => volume.target === '/var/lib/kala')
       const scratchRoot = runtime?.tmpfs?.some((mount) => mount.split(':', 1)[0] === '/var/lib/kala')
@@ -88,8 +90,8 @@ else {
       for (const [name, service, flag] of [['runtime-host', runtime, 'KALA_RUNTIME_REQUIRE_INSTALLATION_CLAIM'], ['runtime-ingress', ingress, 'KALA_INGRESS_REQUIRE_INSTALLATION_CLAIM']]) {
         if (service?.environment?.[flag] !== '1' || service?.environment?.KALA_INSTALLATION_ID_FILE !== '/run/kala-installation/installation-id' || !service?.configs?.some((entry) => entry.source === 'installation_id' && entry.target === '/run/kala-installation/installation-id')) failures.push(`postgres-s3 ${name} must validate its external installation claim at startup`)
       }
-      for (const name of ['init-volumes', 'control-postgres']) {
-        if (services[name]) failures.push(`postgres-s3 must keep legacy ${name} inactive`)
+      for (const name of ['init-volumes', 'control-postgres', 'nfs-server']) {
+        if (services[name]) failures.push(`postgres-s3 must not include legacy ${name}`)
       }
       const controlInit = services['control-plane-init']
       const runtimeInit = services['runtime-schema-init']
@@ -97,7 +99,7 @@ else {
       if (controlInit?.environment?.KALA_INGRESS_REQUIRE_EXISTING_DATABASE !== '1' || controlInit?.environment?.KALA_INGRESS_CONTROL_WRITER_ROLE !== controlRole || !claim || claim.volumes?.length || !claim.configs?.some((config) => config.source === 'installation_id') || [controlInit, runtimeInit].some((job) => Object.keys(job?.depends_on ?? {}).join(',') !== 'fresh-storage-claim' || job.depends_on['fresh-storage-claim']?.condition !== 'service_completed_successfully')) {
         failures.push('postgres-s3 migrations must wait for a successful fresh external storage claim without local persistent claim state')
       }
-      if (claim?.environment?.KALA_FRESH_CLAIM_S3_ACCESS_KEY_ID_FILE !== '/run/secrets/installation_claim_s3_access_key_id' || claim?.environment?.KALA_FRESH_CLAIM_S3_SECRET_ACCESS_KEY_FILE !== '/run/secrets/installation_claim_s3_secret_access_key' || !['installation_claim_s3_access_key_id', 'installation_claim_s3_secret_access_key'].every((name) => claim?.secrets?.some((secret) => secret.source === name))) {
+      if (claim?.environment?.KALA_FRESH_CLAIM_STATE_MASTER_KEY_FILE !== '/run/secrets/runtime_state_master_key' || claim?.environment?.KALA_FRESH_CLAIM_S3_ACCESS_KEY_ID_FILE !== '/run/secrets/installation_claim_s3_access_key_id' || claim?.environment?.KALA_FRESH_CLAIM_S3_SECRET_ACCESS_KEY_FILE !== '/run/secrets/installation_claim_s3_secret_access_key' || !['runtime_state_master_key', 'installation_claim_s3_access_key_id', 'installation_claim_s3_secret_access_key'].every((name) => claim?.secrets?.some((secret) => secret.source === name))) {
         failures.push('postgres-s3 claim job must use its separate S3 bootstrap credentials')
       }
     }

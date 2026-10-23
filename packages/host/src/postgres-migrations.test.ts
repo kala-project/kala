@@ -26,6 +26,9 @@ class FakeClient {
     if (text.startsWith('SELECT version, name, checksum')) {
       return { rows: this.applied.map((row) => ({ ...row })) as T[], rowCount: this.applied.length }
     }
+    if (text.includes("to_regclass('kala_installation_claim.recovery_checkpoint')")) {
+      return { rows: [{ checkpoint: this.claimPresent ? 'kala_installation_claim.recovery_checkpoint' : null }] as T[], rowCount: 1 }
+    }
     if (text.includes("to_regclass('kala_installation_claim.marker')")) {
       return { rows: [{ marker: this.claimPresent ? 'kala_installation_claim.marker' : null }] as T[], rowCount: 1 }
     }
@@ -113,7 +116,7 @@ describe('PostgreSQL migrations', () => {
     await grantPostgresGatewayRuntimeReaderPrivileges(pool(client), { readerRole: 'kala_gateway_reader' })
     for (const role of ['kala_runtime', 'kala_gateway_reader']) {
       expect(client.statements).toContain(`GRANT USAGE ON SCHEMA kala_installation_claim TO "${role}"`)
-      expect(client.statements).toContain(`GRANT SELECT ON TABLE kala_installation_claim.marker TO "${role}"`)
+      expect(client.statements).toContain(`GRANT SELECT ON TABLE kala_installation_claim.marker, kala_installation_claim.recovery_checkpoint TO "${role}"`)
     }
     expect(client.statements.filter((statement) => statement.startsWith('GRANT') && statement.includes('kala_installation_claim'))).toHaveLength(4)
     client.claimWritable = true
