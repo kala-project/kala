@@ -28,11 +28,36 @@ not contain presentation metadata.
 | `write_file`, `replace_in_file`, `replace_many_in_file`, `apply_file_patch` | Executor | File mutation RPCs |
 | `shell` | Executor | Cross-platform public name mapped to the shell handler; `bash` remains an internal/compatibility implementation name |
 | `memory`, `webfetch` | Executor | Scoped memory and network fetch handlers |
+| `computer_use` | Executor | Explicitly consented real-desktop/browser observations and control |
 | `todo_graph`, `agent`, `websearch`, discovery tools | Host | Host lifecycle/control-plane implementations; Task Graph is the only default planning tool |
 | `__*` internal tools | Executor | Host-initiated direct RPCs; never disclosed to the model |
 
 `read`, `write`, `edit`, and ordinary public `grep` are not part of the current
 model-visible catalog.
+
+## Computer use
+
+`computer_use` requires local opt-in, a live user-renewed Computer-panel lease
+and separate Agent permission. It cannot grant or renew its own authorization.
+
+| Operation | Input | Result |
+| --- | --- | --- |
+| `status` | None | Desktop availability/authorization; no private control tree |
+| `observe` | `backend: browser` or `desktop`; optional `query`; browser `tabId` | Up to 64 bounded elements with scoped refs, supported actions and `snapshotId`; omit browser `tabId` to list existing tabs |
+| `act` | Backend, latest `snapshotId`, 1..8 `{ref, action, value?}` entries | Fresh semantic observation; actions are `invoke`, `setValue`, `toggle`, `select`; only `setValue` takes `value` |
+| `batch` | 1..8 native input actions | Final native PNG image |
+| `screenshot` | None | Native PNG image |
+| `input` | One native input action | Delivery acknowledgement; verify with another observation |
+
+Each batch is ordered and halts at its first error, reporting the failed index
+and skipped count. It is not an atomic transaction or a rollback mechanism.
+Semantic refs expire after 30 seconds and cannot cross observations, navigation,
+takeover or leases. Prefer browser semantics for webpages, native semantics for
+accessible application controls, and screenshots for custom/inaccessible UI.
+Use workspace tools instead of GUI control when the task permits.
+
+See [desktop architecture and setup](../../architecture/desktop/computer-use.md)
+for attachment requirements, platform limits and isolated acceptance.
 
 ## File Read Tools
 

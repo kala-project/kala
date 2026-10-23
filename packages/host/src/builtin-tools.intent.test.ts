@@ -9,6 +9,17 @@ describe('built-in tool intent schema',()=>{
     })
   })
 
+  it('discloses semantic computer observations and bounded batches under the existing approval gate',()=>{
+    const tool=createBuiltinTools().find((candidate)=>candidate.name==='computer_use')!
+    expect(tool).toMatchObject({executionKind:'executor',executionHandler:'computer_use',requiresApproval:true})
+    expect(tool.inputSchema.properties).toMatchObject({
+      operation:{enum:['status','observe','act','batch','screenshot','input']},
+      actions:{type:'array',minItems:1,maxItems:8},
+    })
+    expect(tool.description).toContain('latest observation')
+    expect(tool.description).toContain('Never enable it')
+  })
+
   it('registers multi_grep as a bounded executor read tool',()=>{
     const tool=createBuiltinTools().find((candidate)=>candidate.name==='multi_grep')!
     expect(tool).toMatchObject({executionKind:'executor',executionHandler:'multi_grep',requiresApproval:false})

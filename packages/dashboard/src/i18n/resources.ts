@@ -1794,7 +1794,7 @@ export const resources = {
       computer: {
         title: 'Computer use', refresh: 'Check desktop availability', expand: 'Expand desktop',
         description: 'View and control the actual logged-in desktop on this Workspace. This is not an isolated browser.',
-        consent: 'I authorize sharing and controlling this real desktop. Screens may contain private information. Agent screenshots are sent to the model and retained with this conversation.',
+        consent: 'I authorize sharing and controlling this real desktop and any locally attached browser. Screens and page/control information may contain private data. Agent observations are sent to the model and retained with this conversation.',
         allowAgent: 'Also allow this session’s Agent to observe and operate the desktop.',
         start: 'Share desktop', starting: 'Starting…', stop: 'Stop sharing',
         occupied: 'This desktop is already controlled by another connection. Stop that connection or wait for access to expire.',
@@ -3830,7 +3830,7 @@ export const resources = {
       computer: {
         title: '电脑操控', refresh: '检查桌面可用性', expand: '展开桌面',
         description: '查看和操控此工作区已登录用户的真实桌面，不是隔离浏览器。',
-        consent: '我同意共享和操控这台机器的真实桌面。画面可能包含隐私；Agent 截图会发送给模型并随会话保留。',
+        consent: '我同意共享和操控这台机器的真实桌面及本地接入的浏览器。画面、网页和控件信息可能包含隐私；Agent 观察结果会发送给模型并随会话保留。',
         allowAgent: '同时允许当前会话的 Agent 查看并操控桌面。',
         start: '共享桌面', starting: '正在启动…', stop: '停止共享',
         occupied: '其他连接正在操控这台桌面，请先停止该连接或等待授权过期。',

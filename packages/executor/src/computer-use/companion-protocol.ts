@@ -1,13 +1,14 @@
 import { timingSafeEqual } from 'node:crypto'
 import type { DesktopInputAction, DesktopScreenshot, DesktopStatus } from './desktop-driver.js'
+import { ComputerSemanticRequestSchema, type ComputerSemanticRequest } from '@agent-kernel/shared'
 
 export const COMPANION_MAX_REQUEST = 32 * 1024
 export const COMPANION_MAX_RESPONSE = 46 * 1024 * 1024
 export const COMPANION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 export const COMPANION_TOKEN = /^[0-9a-f]{64}$/
-export type CompanionOperation = 'acquire' | 'status' | 'screenshot' | 'input' | 'release-inputs' | 'release' | 'cancel'
+export type CompanionOperation = 'acquire' | 'status' | 'screenshot' | 'input' | 'semantic' | 'release-inputs' | 'release' | 'cancel'
 export type CompanionRequest = {
-  version: 1; id: string; owner: string; token: string; operation: CompanionOperation; action?: DesktopInputAction; target?: string
+  version: 1; id: string; owner: string; token: string; operation: CompanionOperation; action?: DesktopInputAction; target?: string; request?: ComputerSemanticRequest
 }
 
 function record(value: unknown): asserts value is Record<string, unknown> {
@@ -56,11 +57,13 @@ export function validateCompanionAction(value: unknown): asserts value is Deskto
 
 export function validateCompanionRequest(value: unknown): asserts value is CompanionRequest {
   record(value)
-  fields(value, ['version', 'id', 'owner', 'token', 'operation'], ['action', 'target'])
+  fields(value, ['version', 'id', 'owner', 'token', 'operation'], ['action', 'target', 'request'])
   if (value.version !== 1 || typeof value.id !== 'string' || !COMPANION_ID.test(value.id)
       || typeof value.owner !== 'string' || !COMPANION_ID.test(value.owner)
       || typeof value.token !== 'string' || !COMPANION_TOKEN.test(value.token)
-      || !['acquire', 'status', 'screenshot', 'input', 'release-inputs', 'release', 'cancel'].includes(value.operation as string)) throw new Error('Invalid companion request')
+      || !['acquire', 'status', 'screenshot', 'input', 'semantic', 'release-inputs', 'release', 'cancel'].includes(value.operation as string)) throw new Error('Invalid companion request')
+  if (value.operation === 'semantic') ComputerSemanticRequestSchema.parse(value.request)
+  else if (value.request !== undefined) throw new Error('Unexpected companion semantic request')
   if (value.operation === 'input') validateCompanionAction(value.action)
   else if (value.action !== undefined) throw new Error('Unexpected companion action')
   if (value.operation === 'cancel') {

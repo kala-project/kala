@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { COMPUTER_SCREENSHOT_KIND, type ComputerRequest } from '@agent-kernel/shared'
+import { COMPUTER_SCREENSHOT_KIND, type ComputerRequest, type ComputerObservation } from '@agent-kernel/shared'
 import { ComputerUseManager, COMPUTER_LEASE_MS } from './manager.js'
 
 const screenshot = { mimeType: 'image/png' as const, base64: 'AA==', width: 1280, height: 800, originX: -1280, originY: 0 }
@@ -16,6 +16,9 @@ function fixture(enabled = true, clock: () => number = Date.now) {
     releaseInputs: vi.fn(async () => {}),
     acquire: vi.fn(async () => {}),
     releaseClaim: vi.fn(async () => {}),
+    semantic: vi.fn(async (_request: unknown, _signal?: AbortSignal): Promise<ComputerObservation> => ({
+      backend: 'desktop', snapshotId: crypto.randomUUID(), targetId: 'fixture', title: 'Fixture', elements: [], truncated: false,
+    })),
   }
   return { driver, manager: new ComputerUseManager(driver, enabled, clock) }
 }
@@ -64,6 +67,36 @@ describe('computer desktop authorization', () => {
     await start(manager, true)
     expect(JSON.parse(await manager.agent({ operation: 'screenshot' }, 'session', signal()))).toEqual({ kind: COMPUTER_SCREENSHOT_KIND, screenshot })
     await expect(manager.agent({ operation: 'renew' }, 'session', signal())).rejects.toThrow(/only the user/i)
+    await manager.close()
+  })
+
+  it('applies the same consent, session, cancellation and revocation boundary to semantic control', async () => {
+    const { manager, driver } = fixture()
+    const observe = { operation: 'observe', backend: 'desktop' }
+    await expect(manager.agent(observe, 'session', signal())).rejects.toThrow(/authorization/i)
+    const leaseId = await start(manager, false)
+    await expect(manager.agent(observe, 'session', signal())).rejects.toThrow(/paused/i)
+    await manager.request(request({ operation: 'agent', leaseId, allowAgent: true }), 'owner', signal())
+    expect(JSON.parse(await manager.agent(observe, 'session', signal()))).toMatchObject({ backend: 'desktop', title: 'Fixture' })
+    await expect(manager.agent(observe, 'other-session', signal())).rejects.toThrow(/another session/i)
+    manager.revoke()
+    await expect(manager.agent(observe, 'session', signal())).rejects.toThrow(/authorization/i)
+    expect(driver.semantic).toHaveBeenCalledOnce()
+    await manager.close()
+  })
+
+  it('executes visual batches in order and returns the final image without another model turn', async () => {
+    const { manager, driver } = fixture()
+    await start(manager, true)
+    const actions = [{ type: 'key', key: 'Enter' }, { type: 'key', key: 'Escape' }]
+    expect(JSON.parse(await manager.agent({ operation: 'batch', actions }, 'session', signal()))).toEqual({ kind: COMPUTER_SCREENSHOT_KIND, screenshot })
+    expect(driver.input.mock.calls.map(([action]) => action)).toEqual(actions)
+    expect(driver.screenshot).toHaveBeenCalledOnce()
+    driver.input.mockRejectedValueOnce(new Error('blocked'))
+    await expect(manager.agent({ operation: 'batch', actions }, 'session', signal())).rejects.toThrow('1 later actions skipped')
+    expect(driver.input).toHaveBeenCalledTimes(3)
+    expect(driver.releaseInputs).toHaveBeenCalledOnce()
+    expect(driver.screenshot).toHaveBeenCalledOnce()
     await manager.close()
   })
 

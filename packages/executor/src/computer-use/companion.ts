@@ -3,6 +3,7 @@ import { chmod, lstat } from 'node:fs/promises'
 import { connect, createServer, type Socket } from 'node:net'
 import { resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
+import { ComputerObservationSchema, ComputerSemanticRequestSchema, type ComputerObservation, type ComputerSemanticRequest } from '@agent-kernel/shared'
 import {
   createDesktopDriver, type DesktopDriverOptions, type DesktopInputAction, type DesktopScreenshot, type DesktopStatus,
 } from './desktop-driver.js'
@@ -20,6 +21,7 @@ export type ConfiguredDesktopDriver = {
   status(): Promise<DesktopStatus>
   screenshot(signal?: AbortSignal): Promise<DesktopScreenshot>
   input(action: DesktopInputAction, signal?: AbortSignal): Promise<void>
+  semantic?(request: ComputerSemanticRequest, signal?: AbortSignal): Promise<ComputerObservation>
   releaseInputs(): Promise<void>
   close(): Promise<void>
   acquire?(): Promise<void>
@@ -151,6 +153,12 @@ export async function serveDesktopCompanion(configPath: string, options: Desktop
       await driver.input(request.action!, signal)
       checkSignal(signal)
       return null
+    }
+    if (request.operation === 'semantic') {
+      if (!driver.semantic) throw new CompanionError('UNAVAILABLE', 'Upgrade the interactive companion to enable semantic desktop/browser control')
+      const observation = await driver.semantic(request.request!, signal)
+      checkSignal(signal)
+      return ComputerObservationSchema.parse(observation)
     }
     throw new CompanionError('BAD_REQUEST', 'Unsupported companion operation')
   }
@@ -351,12 +359,12 @@ export function createConfiguredDesktopDriver(options: ConfiguredDesktopOptions 
     try { return await connecting } catch (error) { connecting = undefined; throw error }
     finally { if (socket && !socket.destroyed) connecting = undefined }
   }
-  const request = async (operation: CompanionOperation, action?: DesktopInputAction, signal?: AbortSignal): Promise<unknown> => {
+  const request = async (operation: CompanionOperation, action?: DesktopInputAction, signal?: AbortSignal, semantic?: ComputerSemanticRequest): Promise<unknown> => {
     checkSignal(signal)
     const current = await getSocket()
     checkSignal(signal)
     const id = randomUUID()
-    const message: CompanionRequest = { version: 1, id, owner, token: config!.token, operation, ...(action ? { action } : {}) }
+    const message: CompanionRequest = { version: 1, id, owner, token: config!.token, operation, ...(action ? { action } : {}), ...(semantic ? { request: semantic } : {}) }
     const frame = Buffer.from(`${JSON.stringify(message)}\n`)
     if (frame.length > COMPANION_MAX_REQUEST) throw new Error('Desktop companion request exceeds bounds')
     return new Promise((resolveRequest, reject) => {
@@ -415,6 +423,14 @@ export function createConfiguredDesktopDriver(options: ConfiguredDesktopOptions 
         checkSignal(signal)
         if (!claimed) throw new Error('Acquire the desktop companion claim before screenshot or input')
         await request('input', copy, signal)
+      })
+    },
+    semantic: (input, signal) => {
+      const parsed = ComputerSemanticRequestSchema.parse(input)
+      return serialize(async () => {
+        checkSignal(signal)
+        if (!claimed) throw new Error('Acquire the desktop companion claim before semantic observation or input')
+        return ComputerObservationSchema.parse(await request('semantic', undefined, signal, parsed))
       })
     },
     releaseInputs: () => serialize(async () => {

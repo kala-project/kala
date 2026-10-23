@@ -1,11 +1,14 @@
+import { WINDOWS_ACCESSIBILITY_SCRIPT } from './windows-accessibility-script.js'
+
 // Fixed script only: requests arrive as JSON on stdin, never as PowerShell source.
 // A service must launch this in the logged-in user's session (not Session 0).
-export const WINDOWS_DESKTOP_SCRIPT = String.raw`
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
+const ENCODING = String.raw`
 [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-try {
+`
+const BOOTSTRAP = String.raw`
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 Add-Type -AssemblyName System.Drawing
 Add-Type -TypeDefinition @'
 using System;
@@ -51,6 +54,8 @@ public static class KalaDesktop {
   [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
   static extern bool GetUserObjectInformation(IntPtr obj, int index, StringBuilder info, uint length, out uint needed);
   [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  public static IntPtr Foreground() { return GetForegroundWindow(); }
   [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
   [DllImport("user32.dll", SetLastError=true)] static extern bool SetProcessDpiAwarenessContext(IntPtr context);
   [DllImport("wtsapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
@@ -206,8 +211,11 @@ public static class KalaDesktop {
   }
 }
 '@ -ReferencedAssemblies System.Drawing, System
-$r = [Console]::In.ReadToEnd() | ConvertFrom-Json
+`
+const DISPATCH = String.raw`
 if ($r.operation -eq 'release') {
+  $script:KalaRefs = @{}
+  $script:KalaSnapshot = $null
   [KalaDesktop]::Release([string[]]$r.buttons, [System.UInt16[]]$r.keys, [string]$r.text)
   $result = @{ok=$true}
 } elseif ($r.operation -eq 'status') {
@@ -217,13 +225,46 @@ if ($r.operation -eq 'release') {
   $image = [KalaDesktop]::Capture()
   $result = @{ok=$true; bounds=[KalaDesktop]::Bounds(); base64=$image}
 } elseif ($r.operation -eq 'input') {
+  $script:KalaRefs = @{}
+  $script:KalaSnapshot = $null
   $a=$r.action
   [KalaDesktop]::Act([string]$a.type,[int]$a.x,[int]$a.y,[string]$a.button,[bool]$a.down,[int]$a.clickCount,[int]$a.deltaX,[int]$a.deltaY,[int]$a.toX,[int]$a.toY,[string]$a.text,[System.UInt16[]]$r.keys)
   $result = @{ok=$true}
+} elseif ($r.operation -eq 'semantic') {
+  $observation = Invoke-KalaSemantic $r.request
+  $result = @{ok=$true; observation=$observation}
 } else { throw 'Invalid desktop operation.' }
+`
+
+// Kept for native diagnostic/acceptance jobs. Production uses the warm worker.
+export const WINDOWS_DESKTOP_SCRIPT = ENCODING + BOOTSTRAP + String.raw`
+try {
+$r = [Console]::In.ReadToEnd() | ConvertFrom-Json
+` + DISPATCH + String.raw`
 [Console]::Out.Write(($result | ConvertTo-Json -Compress -Depth 4))
 } catch {
   [Console]::Error.Write('Native desktop operation failed: ' + $_.Exception.Message)
   exit 1
 }
+`
+
+export const WINDOWS_DESKTOP_WORKER_SCRIPT = BOOTSTRAP + WINDOWS_ACCESSIBILITY_SCRIPT + String.raw`
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+  $r = $null
+  try {
+    if ($line.Length -gt 32768) { throw 'Desktop request exceeded bounds.' }
+    $r = $line | ConvertFrom-Json
+` + DISPATCH + String.raw`
+    $result.id = $r.id
+  } catch {
+    $result = @{id=$r.id; ok=$false; error=$_.Exception.Message}
+  }
+  [Console]::Out.WriteLine(($result | ConvertTo-Json -Compress -Depth 8))
+}
+`
+
+// Set encoding before the first read; resetting Console.In afterwards can
+// discard request bytes already buffered while reading the fixed bootstrap.
+export const WINDOWS_DESKTOP_WORKER_COMMAND = ENCODING + String.raw`
+& ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadLine()))))
 `

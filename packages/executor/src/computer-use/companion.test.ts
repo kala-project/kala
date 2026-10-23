@@ -4,6 +4,7 @@ import { connect, Server, type Socket } from 'node:net'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { ComputerObservation, ComputerSemanticRequest } from '@agent-kernel/shared'
 import {
   createConfiguredDesktopDriver, serveDesktopCompanion, type ConfiguredDesktopDriver,
 } from './companion.js'
@@ -24,6 +25,10 @@ const rawSockets: Socket[] = []
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7UkAAAAASUVORK5CYII='
 const screenshot = { mimeType: 'image/png' as const, base64: png, width: 1, height: 1, originX: 0, originY: 0 }
 const delay = (ms: number) => new Promise<void>((done) => setTimeout(done, ms))
+const observation: ComputerObservation = {
+  backend: 'desktop', snapshotId: randomUUID(), targetId: 'fixture', title: 'Fixture',
+  elements: [{ ref: 'e1', role: 'button', name: 'Save', enabled: true, actions: ['invoke'] }], truncated: false,
+}
 
 afterEach(async () => {
   for (const socket of rawSockets.splice(0)) socket.destroy()
@@ -37,6 +42,7 @@ function native() {
     status: vi.fn(async () => ({ available: true, platform: 'linux' })),
     screenshot: vi.fn(async (_signal?: AbortSignal) => ({ ...screenshot })),
     input: vi.fn(async (_action: DesktopInputAction, _signal?: AbortSignal) => {}),
+    semantic: vi.fn(async (_request: ComputerSemanticRequest, _signal?: AbortSignal): Promise<ComputerObservation> => observation),
     releaseInputs: vi.fn(async () => {}),
     close: vi.fn(async () => {}),
   }
@@ -123,6 +129,37 @@ describe('desktop companion real local IPC with injected native driver (not desk
     await second.acquire!()
     await expect(second.screenshot()).resolves.toEqual(screenshot)
     await expect(first.screenshot()).rejects.toThrow('Acquire')
+  })
+
+  it('requires the owning claim for semantic IPC and validates native observations', async () => {
+    const { configPath, driver } = await start()
+    const first = proxy(configPath), second = proxy(configPath)
+    const request = { operation: 'observe', backend: 'desktop' } as const
+    await expect(first.semantic!(request)).rejects.toThrow('Acquire')
+    expect(driver.semantic).not.toHaveBeenCalled()
+    await first.acquire!()
+    await expect(second.semantic!(request)).rejects.toThrow('Acquire')
+    await expect(first.semantic!(request)).resolves.toEqual(observation)
+    expect(driver.semantic).toHaveBeenCalledWith(request, expect.any(AbortSignal))
+    driver.semantic.mockResolvedValueOnce({ ...observation, title: 'x'.repeat(161) })
+    await expect(first.semantic!(request)).rejects.toThrow(/title|Too big/)
+  })
+
+  it('cancels semantic IPC before another operation is allowed to execute', async () => {
+    const { configPath, driver } = await start()
+    driver.semantic.mockImplementationOnce(async (_request, signal) => new Promise((_, reject) => {
+      signal!.addEventListener('abort', () => reject(new DOMException('cancel', 'AbortError')), { once: true })
+    }))
+    const client = proxy(configPath)
+    await client.acquire!()
+    const controller = new AbortController()
+    const result = client.semantic!({ operation: 'observe', backend: 'desktop' }, controller.signal)
+    const rejected = expect(result).rejects.toThrow(/cancel/i)
+    await until(() => driver.semantic.mock.calls.length === 1)
+    controller.abort()
+    await rejected
+    await until(() => driver.releaseInputs.mock.calls.length > 0)
+    await expect(client.semantic!({ operation: 'observe', backend: 'desktop' })).resolves.toEqual(observation)
   })
 
   it('releaseInputs retains ownership for Agent pause; releaseClaim relinquishes it for stop', async () => {

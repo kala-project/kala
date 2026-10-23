@@ -1,7 +1,11 @@
 import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { WINDOWS_DESKTOP_SCRIPT } from './windows-desktop-script.js'
+import { ComputerObservationSchema, ComputerSemanticRequestSchema, type ComputerObservation, type ComputerSemanticRequest } from '@agent-kernel/shared'
+import { WINDOWS_DESKTOP_SCRIPT, WINDOWS_DESKTOP_WORKER_COMMAND, WINDOWS_DESKTOP_WORKER_SCRIPT } from './windows-desktop-script.js'
+import { LINUX_ACCESSIBILITY_SCRIPT } from './linux-accessibility-script.js'
+import { createNativeWorker } from './native-worker.js'
+import { createBrowserDriver } from './browser-driver.js'
 
 export type DesktopInputAction =
   | { type: 'move'; x: number; y: number }
@@ -186,12 +190,25 @@ export function createDesktopDriver(options: DesktopDriverOptions = {}) {
   let pendingWindowsKeys: number[] = []
   let pendingText = ''
   let scrotChecked = false
+  let windowsWorker: ReturnType<typeof createNativeWorker> | undefined
+  let accessibilityWorker: ReturnType<typeof createNativeWorker> | undefined
+  const browser = createBrowserDriver(env.KALA_COMPUTER_BROWSER_ENDPOINT, async (signal) => {
+    if (platform === 'win32') await ps({ operation: 'status' }, signal)
+    else await geometry(signal)
+  })
 
   const command = (file: string, args: readonly string[], signal?: AbortSignal, maxOutputBytes = 4096, stdin?: string) =>
     run(file, args, { env, signal, maxOutputBytes, timeoutMs, stdin })
   const ps = async (request: object, signal?: AbortSignal, image = false): Promise<Record<string, unknown>> => {
     // SystemRoot is provided by the native Windows process environment, not a request.
     const executable = join(env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    if (!options.run) {
+      windowsWorker ??= createNativeWorker(executable, [
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+        Buffer.from(WINDOWS_DESKTOP_WORKER_COMMAND, 'utf16le').toString('base64'),
+      ], env, timeoutMs, WINDOWS_DESKTOP_WORKER_SCRIPT)
+      return windowsWorker.request(request, signal)
+    }
     const output = await command(executable, [
       '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
       Buffer.from(WINDOWS_DESKTOP_SCRIPT, 'utf16le').toString('base64'),
@@ -249,6 +266,13 @@ export function createDesktopDriver(options: DesktopDriverOptions = {}) {
     return work
   }
   const release = async () => {
+    browser.disconnect()
+    await accessibilityWorker?.close()
+    accessibilityWorker = undefined
+    // Invalidate native refs on every takeover/revocation, including without held input.
+    if (platform === 'win32' && windowsWorker && !heldButtons.size && !pendingKeys.length && !pendingText) {
+      await ps({ operation: 'release', buttons: [], keys: [], text: '' })
+    }
     if (!heldButtons.size && !pendingKeys.length && !pendingText) return
     if (platform === 'win32') {
       await ps({ operation: 'release', buttons: [...heldButtons], keys: [...pendingWindowsKeys].reverse(), text: pendingText })
@@ -311,6 +335,9 @@ export function createDesktopDriver(options: DesktopDriverOptions = {}) {
       const copy = action.type === 'type' ? { ...action, text: action.text.replace(/\r\n?/g, '\n') } : { ...action }
       return serialize(async () => {
         assertPlatform()
+        browser.invalidate()
+        await accessibilityWorker?.close()
+        accessibilityWorker = undefined
         const keys = copy.type === 'key' ? parseKey(copy.key) : undefined
         try {
           if (platform === 'linux') {
@@ -388,9 +415,35 @@ export function createDesktopDriver(options: DesktopDriverOptions = {}) {
         }
       }, signal)
     },
+    semantic: (request: ComputerSemanticRequest, signal?: AbortSignal): Promise<ComputerObservation> => {
+      const parsed = ComputerSemanticRequestSchema.parse(request)
+      return serialize(async () => {
+        assertPlatform()
+        if (platform === 'win32') await ps({ operation: 'status' }, signal)
+        else await geometry(signal)
+        const observation = parsed.backend === 'browser'
+          ? await browser.semantic(parsed, signal)
+          : platform === 'win32'
+            ? (await ps({ operation: 'semantic', request: parsed }, signal)).observation
+            : await (async () => {
+              accessibilityWorker ??= createNativeWorker('/usr/bin/python3', ['-u', '-c', LINUX_ACCESSIBILITY_SCRIPT], env, timeoutMs)
+              return (await accessibilityWorker.request({ operation: 'semantic', request: parsed }, signal)).observation
+            })()
+        aborted(signal)
+        if (platform === 'win32') await ps({ operation: 'status' }, signal)
+        return ComputerObservationSchema.parse(observation)
+      }, signal)
+    },
     close: (): Promise<void> => {
       closing = true
-      const work = tail.then(async () => { await release(); closed = true })
+      const work = tail.then(async () => {
+        try { await release() } finally {
+          await windowsWorker?.close()
+          await accessibilityWorker?.close()
+          browser.disconnect()
+          closed = true
+        }
+      })
       tail = work.catch(() => {})
       return work
     },

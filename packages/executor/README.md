@@ -62,6 +62,10 @@ For an Executor already running in the logged-in Linux X11 desktop, install
 `xdotool` and `scrot >= 1.7` from the operating-system vendor, then start that
 Executor with `KALA_COMPUTER_USE_ENABLED=1`. Preserve the user's `DISPLAY` and
 `XAUTHORITY`; do not start a substitute display. Wayland is not supported.
+For semantic native controls, also install the OS-vendor `python3-pyatspi`
+package and preserve the logged-in desktop's `DBUS_SESSION_BUS_ADDRESS` and
+`XDG_RUNTIME_DIR`. Missing accessibility support produces an explicit error;
+visual control remains available.
 
 Windows service processes run in Session 0 and cannot directly control a user's
 desktop. Start the local companion as the **normal logged-in desktop user**, not
@@ -93,6 +97,24 @@ input and prevents further control. A locked/secure Windows desktop is rejected.
 Abruptly terminating the companion cannot guarantee synthesized input cleanup.
 User screenshots may contain secrets; Agent observations are sent to the model
 and retained as conversation/tool data. Do not share unrelated private windows.
+
+Agents can use bounded native accessibility observations/actions (Windows UIA
+or Linux AT-SPI), with screenshots/native input for inaccessible controls.
+Windows keeps its native bridge warm instead of starting/compiling it per action.
+Semantic and visual action batches stop at the first error and return a fresh
+observation after success. Existing workspace tools remain preferable for
+non-GUI tasks.
+
+For an explicitly approved, already-running Chromium browser, set
+`KALA_COMPUTER_BROWSER_ENDPOINT=http://127.0.0.1:<debug-port>/` or its canonical
+loopback browser WebSocket endpoint in the interactive Executor/companion
+environment. Kala uses pinned upstream Puppeteer/CDP, never downloads a browser
+or launches a replacement profile, and detaches without closing existing tabs.
+The browser must already permit debugging; default-profile restrictions are
+not bypassed. There is no browser extension or automatic port discovery.
+Keep debugging local: other local processes may control a browser exposing an
+unauthenticated debugging endpoint. Browser observations/actions require the
+same active desktop lease and separate Agent consent as native control.
 
 See [computer-use architecture](../../docs/architecture/desktop/computer-use.md)
 and [wire protocol](../../docs/protocol/wire-protocol.md).

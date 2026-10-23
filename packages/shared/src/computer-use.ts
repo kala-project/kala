@@ -3,16 +3,54 @@ import { z } from 'zod'
 const coordinate = z.number().int().min(-32768).max(32767)
 const button = z.enum(['left', 'middle', 'right'])
 export const COMPUTER_TYPE_MAX_LENGTH = 512
+const desktopText = z.string().max(COMPUTER_TYPE_MAX_LENGTH).refine(
+  (text) => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]|\p{Surrogate}/u.test(text),
+  'Only well-formed Unicode text without control characters other than newline and tab is allowed',
+)
 export const ComputerInputActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('move'), x: coordinate, y: coordinate }).strict(),
   z.object({ type: z.literal('click'), x: coordinate, y: coordinate, button, clickCount: z.union([z.literal(1), z.literal(2)]).optional() }).strict(),
   z.object({ type: z.literal('button'), x: coordinate, y: coordinate, button, down: z.boolean() }).strict(),
   z.object({ type: z.literal('scroll'), x: coordinate, y: coordinate, deltaX: z.number().int().min(-12000).max(12000), deltaY: z.number().int().min(-12000).max(12000) }).strict(),
   z.object({ type: z.literal('key'), key: z.string().min(1).max(100).regex(/^[A-Za-z0-9+_ -]+$/u) }).strict(),
-  z.object({ type: z.literal('type'), text: z.string().min(1).max(COMPUTER_TYPE_MAX_LENGTH).refine((text) => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text), 'Control characters other than newline and tab are not allowed') }).strict(),
+  z.object({ type: z.literal('type'), text: desktopText.min(1) }).strict(),
   z.object({ type: z.literal('drag'), fromX: coordinate, fromY: coordinate, toX: coordinate, toY: coordinate }).strict(),
 ])
 export type ComputerInputAction = z.infer<typeof ComputerInputActionSchema>
+
+export const ComputerSemanticActionSchema = z.object({
+  ref: z.string().regex(/^e[0-9]{1,3}$/u),
+  action: z.enum(['invoke', 'setValue', 'toggle', 'select']),
+  value: desktopText.optional(),
+}).strict().refine((action) => action.action === 'setValue' ? action.value !== undefined : action.value === undefined,
+  'Only setValue requires a value')
+export const ComputerSemanticRequestSchema = z.discriminatedUnion('operation', [
+  z.object({
+    operation: z.literal('observe'), backend: z.enum(['browser', 'desktop']),
+    tabId: z.string().min(1).max(128).optional(),
+    query: z.string().min(1).max(80).optional(),
+  }).strict(),
+  z.object({
+    operation: z.literal('act'), backend: z.enum(['browser', 'desktop']),
+    snapshotId: z.string().uuid(), actions: z.array(ComputerSemanticActionSchema).min(1).max(8),
+  }).strict(),
+])
+export type ComputerSemanticRequest = z.infer<typeof ComputerSemanticRequestSchema>
+export const ComputerObservationSchema = z.object({
+  backend: z.enum(['browser', 'desktop']),
+  snapshotId: z.string().uuid(),
+  targetId: z.string().max(128),
+  title: z.string().max(160),
+  elements: z.array(z.object({
+    ref: z.string().regex(/^e[0-9]{1,3}$/u), role: z.string().max(80),
+    name: z.string().max(160), value: z.string().max(160).optional(),
+    enabled: z.boolean(),
+    actions: z.array(z.enum(['invoke', 'setValue', 'toggle', 'select'])).max(4),
+  }).strict()).max(64),
+  truncated: z.boolean(),
+  tabs: z.array(z.object({ id: z.string().max(128), title: z.string().max(160) }).strict()).max(32).optional(),
+}).strict()
+export type ComputerObservation = z.infer<typeof ComputerObservationSchema>
 
 const identity = {
   requestId: z.string().min(1).max(128),

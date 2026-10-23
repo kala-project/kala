@@ -849,6 +849,9 @@ importers:
       proper-lockfile:
         specifier: 4.1.2
         version: 4.1.2
+      puppeteer-core:
+        specifier: 25.3.0
+        version: 25.3.0
       socket.io-client:
         specifier: 4.8.4
         version: 4.8.4

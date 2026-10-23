@@ -1,15 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto'
 import {
   ComputerInputActionSchema, ComputerRequestSchema, ComputerScreenshotSchema,
+  ComputerSemanticRequestSchema, ComputerObservationSchema,
   COMPUTER_SCREENSHOT_KIND,
   type ComputerRequest, type ComputerResponse, type ComputerStatus,
 } from '@agent-kernel/shared'
-import { createDesktopDriver } from './desktop-driver.js'
-import { createConfiguredDesktopDriver } from './companion.js'
+import { createConfiguredDesktopDriver, type ConfiguredDesktopDriver } from './companion.js'
 import { ToolError, type Tool } from '../tools/registry.js'
 
 export const COMPUTER_LEASE_MS = 30_000
-type Driver = ReturnType<typeof createDesktopDriver> & { acquire?: () => Promise<void>; releaseClaim?: () => Promise<void> }
+type Driver = ConfiguredDesktopDriver
 type Lease = {
   id: string
   sessionId: string
@@ -195,19 +195,46 @@ export class ComputerUseManager {
   async agent(input: Record<string, unknown>, sessionId: string, signal: AbortSignal): Promise<string> {
     if (input.operation === 'status') return JSON.stringify(await this.status())
     return this.serialized(async () => {
+      await this.releasing
+      if (this.releaseError) throw new ToolError('EACCES', this.releaseError)
       const lease = this.authorized(sessionId)
       const combined = AbortSignal.any([signal, lease.controller.signal, lease.agentController.signal])
-      if (combined.aborted) throw new ToolError('ECANCELED', 'Desktop action cancelled')
+      const check = () => {
+        if (combined.aborted || this.authorized(sessionId) !== lease) throw new ToolError('ECANCELED', 'Desktop action cancelled')
+      }
+      check()
       if (input.operation === 'screenshot') {
         const screenshot = ComputerScreenshotSchema.parse(await this.driver.screenshot(combined))
-        this.authorized(sessionId)
+        check()
         return JSON.stringify({ kind: COMPUTER_SCREENSHOT_KIND, screenshot })
       }
-      if (input.operation !== 'input') throw new ToolError('EINVAL', 'Use status, screenshot, or input; only the user can grant or renew desktop access')
+      if (input.operation === 'observe' || input.operation === 'act') {
+        const request = ComputerSemanticRequestSchema.safeParse(input)
+        if (!request.success) throw new ToolError('EINVAL', request.error.message)
+        if (!this.driver.semantic) throw new ToolError('ENOTSUP', 'Upgrade this Executor and its interactive companion for semantic control; screenshot/input remain available')
+        const observation = ComputerObservationSchema.parse(await this.driver.semantic(request.data, combined))
+        check()
+        return JSON.stringify(observation)
+      }
+      if (input.operation === 'batch') {
+        if (!Array.isArray(input.actions) || input.actions.length < 1 || input.actions.length > 8) throw new ToolError('EINVAL', 'A visual batch requires 1 to 8 input actions')
+        const actions = input.actions.map((action) => ComputerInputActionSchema.parse(action))
+        for (let i = 0; i < actions.length; i++) {
+          try { check(); await this.driver.input(actions[i]!, combined); check() }
+          catch (error) {
+            await this.driver.releaseInputs()
+            throw new ToolError('EIO', `Visual batch stopped at action ${i + 1}; ${actions.length - i - 1} later actions skipped. ${error instanceof Error ? error.message : 'Desktop action failed'}`)
+          }
+        }
+        const screenshot = ComputerScreenshotSchema.parse(await this.driver.screenshot(combined))
+        check()
+        return JSON.stringify({ kind: COMPUTER_SCREENSHOT_KIND, screenshot })
+      }
+      if (input.operation !== 'input') throw new ToolError('EINVAL', 'Use status, observe, act, batch, screenshot, or input; only the user can grant or renew desktop access')
       const action = ComputerInputActionSchema.safeParse(input.action)
       if (!action.success) throw new ToolError('EINVAL', action.error.message)
       await this.driver.input(action.data, combined)
-      this.authorized(sessionId)
+      check()
       return 'Desktop input delivered. Take a fresh screenshot before deciding the next action.'
     })
   }
