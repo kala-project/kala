@@ -10,6 +10,7 @@ import type { Sandbox } from '../sandbox.js'
 import type { NetworkAuditEvent, NetworkPolicy } from '@agent-kernel/shared'
 
 export type ToolContext = {
+  readonly origin?: 'host'
   readonly sessionId: string
   readonly callId: string
   readonly sandbox: Sandbox

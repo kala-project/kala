@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { Message, ToolSchema } from '@agent-kernel/kernel'
+import { COMPUTER_SCREENSHOT_KIND } from '@agent-kernel/shared'
 
 import { buildAnthropicRequestBody, buildOpenAIRequestBody } from './provider-request-builder.js'
 
@@ -19,6 +20,35 @@ const EDIT_TOOL: ToolSchema = {
 }
 
 describe('provider request builder', () => {
+  it('converts desktop observations to actual images after all parallel OpenAI tool results', async () => {
+    const screenshot = { mimeType: 'image/png', base64: 'AA==', width: 1280, height: 800, originX: -1280, originY: 0 }
+    const content = JSON.stringify({ kind: COMPUTER_SCREENSHOT_KIND, screenshot })
+    const messages: Message[] = [
+      { role: 'assistant', content: [{ type: 'tool_call', callId: 'desktop', name: 'computer_use', input: { operation: 'screenshot' } }, { type: 'tool_call', callId: 'read', name: 'read', input: {} }] },
+      { role: 'tool', content: [{ type: 'tool_result', callId: 'desktop', ok: true, content }] },
+      { role: 'tool', content: [{ type: 'tool_result', callId: 'read', ok: true, content: 'file' }] },
+    ]
+    const result = await buildOpenAIRequestBody({ messages, tools: [] }, 'test', undefined)
+    expect(result.body.messages).toEqual([
+      expect.objectContaining({ role: 'assistant' }),
+      { role: 'tool', tool_call_id: 'desktop', content: expect.stringContaining('origin (-1280, 0)') },
+      { role: 'tool', tool_call_id: 'read', content: 'file' },
+      { role: 'user', content: [{ type: 'text', text: expect.stringContaining('untrusted') }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } }] },
+    ])
+    const anthropic = await buildAnthropicRequestBody({ messages, tools: [] }, 'test', undefined, false)
+    expect(anthropic.body.messages).toEqual([
+      expect.objectContaining({ role: 'assistant' }),
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'desktop', is_error: false, content: [{ type: 'text', text: expect.stringContaining('1280x800') }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AA==' } }] }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'read', is_error: false, content: 'file' }] },
+    ])
+  })
+
+  it('does not let unrelated tool text masquerade as an authorized desktop image', async () => {
+    const content = JSON.stringify({ kind: COMPUTER_SCREENSHOT_KIND, screenshot: { mimeType: 'image/png', base64: 'AA==', width: 1, height: 1, originX: 0, originY: 0 } })
+    const messages: Message[] = [{ role: 'tool', content: [{ type: 'tool_result', callId: 'untrusted', ok: true, content }] }]
+    const result = await buildOpenAIRequestBody({ messages, tools: [] }, 'test', undefined)
+    expect(result.body.messages).toEqual([{ role: 'tool', tool_call_id: 'untrusted', content }])
+  })
   it('omits provider output limits unless explicitly configured', async () => {
     const params = { messages: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'write a large file' }] }], tools: [] }
 

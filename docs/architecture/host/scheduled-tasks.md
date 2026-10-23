@@ -91,6 +91,17 @@ These mechanisms reduce duplicate local admission; they do not promise exactly-o
 
 The dialog explains target routing: Session tasks join the existing queue; workspace tasks create a fresh Session. History shows `claimed`, `enqueued`, `failed`, `needs review`, or `skipped`, the scheduled time, an error when present, and a link to the occurrence Session when one is known.
 
+The top-right **Scheduled runs** inbox shows the immutable occurrence's task label
+(the prompt's first line, capped at 200 characters), target workspace or Session,
+scheduled time, dispatch-claim time, status-update time, and available dispatch
+error (capped at 2,000 characters). It retains this context after task edits or
+deletion. `Queued` means message admission only: completion and agent results are
+not tracked by the scheduler. `Needs review` means admission is uncertain, not
+successful execution. Older Hosts without these context fields show explicit
+fallbacks. The inbox's existing task callback opens task management; its optional
+`onOpenSession(sessionId)` callback can connect the **Open conversation** action
+to the application's existing Session navigation.
+
 A task must be paused before deletion and cannot be deleted while it has a claimed occurrence. Pause prevents future claims; it does not revoke an occurrence already admitted to a Session queue.
 
 ## Public API
@@ -107,6 +118,8 @@ All routes are under `/api/v1` and use the Host's normal authentication and tena
 | `POST` | `/scheduled-tasks/{id}/resume` | Resume |
 | `DELETE` | `/scheduled-tasks/{id}` | Delete a paused, unclaimed task |
 | `GET` | `/scheduled-tasks/{id}/history` | List newest-first run history |
+| `GET` | `/scheduled-tasks/inbox` | Principal-isolated occurrence notifications and unread count |
+| `POST` | `/scheduled-tasks/inbox/seen` | Acknowledge only the supplied visible occurrence IDs |
 
 Example Session task:
 
@@ -147,6 +160,48 @@ Example workspace task:
 ## Current verification status
 
 On 2026-10-02, the focused scheduler/store suite (13 tests), scheduled-task API test, Dashboard dialog suite (5 tests), and Dashboard client suite (2 tests) passed in this workspace. These runs validate the current branch state but are not release or deployment evidence.
+
+For full product acceptance against an authorized disposable Linux VM, use
+`scripts/product-e2e/verify-git-inbox.mjs` with `GIT_INBOX_E2E_ISOLATED=1`,
+`GIT_INBOX_E2E_CREDENTIALS` pointing to a private `{ origin, token }` JSON file,
+`GIT_INBOX_E2E_WORKSPACE_ID`, and an existing `CHROME_PATH`. The optional
+`GIT_INBOX_E2E_VM`, `GIT_INBOX_E2E_WORKSPACE_ROOT`, and
+`PRODUCT_E2E_EVIDENCE_ROOT` select the test VM, workspace, and evidence location.
+The script creates its own Git fixture and Sessions, exercises browser→Host→Executor
+commit pagination/root/rename/content diffs, dispatches real scheduled tasks,
+causes a genuine directory-validation failure, and verifies notification detail
+plus task/Session navigation. It neither mocks HTTP responses nor interprets
+queue admission as agent completion. Its fixtures remain in the disposable VM
+for inspection; it must not be pointed at a production instance.
+
+For a Windows Workspace, first obtain the Windows test owner's handoff; preparation
+does not authorize queueing jobs or modifying its Executor service. Run
+`prepare-git-inbox-windows.ps1` **later**, inside the disposable VM, with
+`GIT_INBOX_E2E_ISOLATED=1` and a private `-ManifestPath`. It uses existing Git only,
+creates an independent fixture under `C:\KalaTest\workspace`, and reports
+`git_unavailable` without installing anything if Git is missing. The eventual
+browser runner accepts that manifest via `GIT_INBOX_E2E_WINDOWS_FIXTURE_MANIFEST`,
+the Windows workspace ID via `GIT_INBOX_E2E_WORKSPACE_ID`, and the existing private
+worker's directory via `GIT_INBOX_E2E_WINDOWS_WORKER_ROOT`. During that explicitly
+started run, it queues exactly one directory-removal job for its own fixture;
+the remaining browser checks use the real Host/Windows Executor. The Linux path
+is unchanged when no Windows manifest is supplied. Git must be resolvable in the
+Executor service's environment, not merely in the fixture preparer's shell.
+
+Only after a real missing-tool failure may the coordinator consider the pinned
+official PortableGit asset in `scripts/product-e2e/fixtures/git-for-windows-portable.json`.
+Its SHA-256 was cross-checked against both the official release checksum table
+and asset digest; the selected cooled release's bytes and valid Authenticode were
+also checked on the isolated Windows 11 VM after an actual missing-Git failure.
+The manifest records the signer and rejection of a newer release that had not
+yet cooled for 24 hours. This older release is limited to offline fixture use;
+review the newer security release after cooling before Git network operations.
+The verification-only
+`verify-git-windows-portable.ps1` performs no downloads, extraction, service changes,
+or PATH edits. It requires both that checksum and a `Valid` Windows Authenticode
+result before a self-extracting executable can be considered for execution.
+No detached signature for this asset is listed in the release metadata; do not
+mistake signatures for unrelated MSYS2 packages for a PortableGit signature.
 
 Automated coverage present in the branch includes:
 

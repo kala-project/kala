@@ -97,6 +97,25 @@ describe('SourceControlPanel', () => {
     await waitFor(() => expect(screen.getByTestId('source-control-view-mode-toggle').getAttribute('data-view-mode')).toBe('tree'))
     expect(screen.getByTestId('source-control-dir').textContent).toBe('src')
   })
+
+  it('offers commit history even when the working tree has no changes', async () => {
+    const hash = 'a'.repeat(40)
+    const socket = makeWorkspaceExecSocket({
+      onExec: (argv) => {
+        if (argv.includes('--show-toplevel')) return { stdout: `${REPO_ROOT}\n` }
+        if (argv.includes('--verify')) return { stdout: `${hash}\n` }
+        if (argv.includes('status')) return { stdout: '## main\0' }
+        if (argv.includes('log')) return { stdout: [hash, '', 'Ada', 'ada@example.invalid', '2026-10-01T00:00:00Z', 'Ada', 'ada@example.invalid', '2026-10-01T00:00:00Z', 'Initial commit\n', ''].join('\0') }
+        return { stdout: '' }
+      },
+    })
+    render(<SourceControlPanel socket={socket.asDashboardSocket()} workspaceId="ws-1" />)
+    expect(await screen.findByText('No changes.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('tab', { name: 'Commit history' }))
+    expect(await screen.findByRole('button', { name: /Initial commit/ })).toBeTruthy()
+    expect(screen.queryByText('No changes.')).toBeNull()
+    expect(screen.getByRole('tab', { name: 'Commit history' }).getAttribute('aria-selected')).toBe('true')
+  })
 })
 
 type ExecStub = Partial<Omit<WorkspaceExecResponse, 'requestId'>>

@@ -51,6 +51,11 @@ export type ScheduledInboxItem = {
   updatedAt: string
   seen: boolean
   sessionId?: string
+  /** First line of the immutable task prompt, not a separately configured title. */
+  taskLabel: string
+  target: ScheduledTaskTarget
+  claimedAt: string
+  error?: string
 }
 
 export type ScheduledInbox = {

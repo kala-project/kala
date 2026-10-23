@@ -38,6 +38,7 @@ import type {
 } from '@agent-kernel/kernel'
 import type { LLMTrace } from '@agent-kernel/shared'
 import { estimateMessageTokens } from '@agent-kernel/shared/token-estimation'
+import { parseComputerScreenshotResult } from '@agent-kernel/shared'
 import {
   createArtifactStore,
   validateCompactionSummary,
@@ -1054,6 +1055,11 @@ function prepareCompactionInputWithLimit(
     ...message,
     content: message.content.map((content: MessageContent) => {
       if (content.type === 'tool_result') {
+        const screenshot = content.ok ? parseComputerScreenshotResult(content.content) : undefined
+        if (screenshot) return {
+          ...content,
+          content: `[Earlier desktop screenshot: ${screenshot.width}x${screenshot.height}, origin (${screenshot.originX}, ${screenshot.originY}). Image omitted during compaction; take a fresh authorized screenshot before further input.]`,
+        }
         if (content.content.length <= limits.toolResultChars) return content
         return {
           ...content,

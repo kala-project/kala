@@ -132,6 +132,42 @@ describe('TerminalManager', () => {
     manager.closeSession(base)
   })
 
+  it.each(['closeSession', 'closeAll'] as const)('cancels a pending native create on %s without leaving a late PTY', async (operation) => {
+    let complete!: (native: unknown) => void
+    const delayed = new Promise((resolve) => { complete = resolve })
+    ptySpawn.mockReturnValueOnce(delayed)
+    const native = { write: vi.fn(), resize: vi.fn(), kill: vi.fn(), onData: vi.fn(), onExit: vi.fn() }
+    const manager = createTerminalManager({ sandbox: { roots: [], resolve: async (path) => path }, emitOutput: vi.fn(), emitExit: vi.fn() })
+    const pending = manager.create({ ...base, requestId: 'pending', cwd: '/workspace' })
+    await vi.waitFor(() => expect(ptySpawn).toHaveBeenCalledOnce())
+    if (operation === 'closeSession') manager.closeSession(base)
+    else manager.closeAll()
+    complete(native)
+    await expect(pending).resolves.toMatchObject({ error: 'terminal create cancelled' })
+    expect(native.kill).toHaveBeenCalledOnce()
+    expect(manager.activeCount()).toBe(0)
+  })
+
+  it('does not close a replacement terminal when an older cancelled create finishes', async () => {
+    let complete!: (native: unknown) => void
+    const delayed = new Promise((resolve) => { complete = resolve })
+    const oldNative = { write: vi.fn(), resize: vi.fn(), kill: vi.fn(), onData: vi.fn(), onExit: vi.fn() }
+    const newNative = { write: vi.fn(), resize: vi.fn(), kill: vi.fn(), onData: vi.fn(), onExit: vi.fn() }
+    ptySpawn.mockReturnValueOnce(delayed).mockReturnValueOnce(newNative)
+    const manager = createTerminalManager({ sandbox: { roots: [], resolve: async (path) => path }, emitOutput: vi.fn(), emitExit: vi.fn() })
+    const pending = manager.create({ ...base, requestId: 'old', cwd: '/workspace' })
+    await vi.waitFor(() => expect(ptySpawn).toHaveBeenCalledOnce())
+    manager.closeSession(base)
+    const replacement = await manager.create({ ...base, requestId: 'new', cwd: '/workspace' })
+    complete(oldNative)
+    await expect(pending).resolves.toMatchObject({ error: 'terminal create cancelled' })
+    expect(oldNative.kill).toHaveBeenCalledOnce()
+    expect(newNative.kill).not.toHaveBeenCalled()
+    manager.input({ ...base, terminalId: replacement.terminalId!, data: 'still alive\r' })
+    expect(newNative.write).toHaveBeenCalledWith('still alive\r')
+    manager.closeAll()
+  })
+
   it('caps live terminal output and terminates chatty sessions', async () => {
     process.env.KALA_TERMINAL_DISABLE_PTY = '1'
     const emitOutput = vi.fn()

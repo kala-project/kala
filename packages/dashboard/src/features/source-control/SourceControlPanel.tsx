@@ -23,6 +23,7 @@ import {
 import { cn } from '../../lib/utils.js'
 import { gitDiff, gitStatus } from '../../lib/git-client.js'
 import { useTranslation } from 'react-i18next'
+import { CommitHistory } from './CommitHistory.js'
 
 type DashboardSocket = Socket<DashboardServerToClientEvents, DashboardClientToServerEvents>
 
@@ -68,18 +69,22 @@ function SourceControlPanelImpl({ socket, workspaceId, sessionId, cwd, fontSizeP
   const resourceKey = `${workspaceId ?? 'offline'}\0${cwd ?? ''}`
   const [status, setStatus] = useState<GitStatusResult | null>(null)
   const [loading, setLoading] = useState(false)
+  const [tab, setTab] = useState<'changes' | 'history'>('changes')
   const [selected, setSelected] = useState<{ file: GitFileChange; staged: boolean } | null>(null)
   const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(() => new Set())
   const [viewMode, setViewMode] = useState<GitViewMode>(() => readGitViewMode(sourceControlViewModeKey(sessionId, workspaceId)))
+  const statusGeneration = useRef(0)
   const sessionIdRef = useRef(sessionId)
   sessionIdRef.current = sessionId
-  const online = Boolean(socket && workspaceId)
+  const online = Boolean(socket && workspaceId && socket.connected !== false)
   const viewModeKey = sourceControlViewModeKey(sessionId, workspaceId)
 
   const refresh = useCallback(async (): Promise<void> => {
     if (!socket || !workspaceId) return
+    const generation = ++statusGeneration.current
     setLoading(true)
     const result = await requestGitStatus(socket, { workspaceId, sessionId: sessionIdRef.current ?? undefined, cwd })
+    if (statusGeneration.current !== generation) return
     setStatus(result)
     setCollapsedDirs(new Set())
     setLoading(false)
@@ -88,8 +93,10 @@ function SourceControlPanelImpl({ socket, workspaceId, sessionId, cwd, fontSizeP
   useEffect(() => {
     setStatus(null)
     setSelected(null)
+    setLoading(false)
     if (online) void refresh()
-  }, [online, resourceKey])
+    return () => { statusGeneration.current++ }
+  }, [online, resourceKey, refresh])
   useEffect(() => { setViewMode(readGitViewMode(viewModeKey)) }, [viewModeKey])
 
   const groups = useMemo(() => groupGitFiles(status?.files ?? [], t), [status, t])
@@ -136,8 +143,12 @@ function SourceControlPanelImpl({ socket, workspaceId, sessionId, cwd, fontSizeP
           {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
         </Button>
       </div>
+      <div className="flex gap-3 border-b border-sidebar-border/40 px-3 py-2 text-xs" role="tablist" aria-label={t('sourceControl.repository')}>
+        <button type="button" role="tab" aria-selected={tab === 'changes'} onClick={() => setTab('changes')} className={cn(tab === 'changes' && 'font-semibold text-primary')}>{t('sourceControl.workingChanges')}</button>
+        <button type="button" role="tab" aria-selected={tab === 'history'} onClick={() => setTab('history')} className={cn(tab === 'history' && 'font-semibold text-primary')}>{t('sourceControl.history')}</button>
+      </div>
       <div className="min-h-0 flex-1 overflow-auto p-1.5" style={{ fontSize: `${fontSizePx / 16}rem` }}>
-        {!online ? (
+        {tab === 'history' ? <CommitHistory socket={socket} workspaceId={workspaceId} cwd={cwd} /> : !online ? (
           <EmptyState message={t('sourceControl.offline')} />
         ) : loading && !status ? (
           <div className="flex min-h-28 items-center justify-center gap-2 p-3 text-xs text-sidebar-foreground/60"><Loader2 className="h-3.5 w-3.5 animate-spin" /> {t('sourceControl.loadingChanges')}</div>
@@ -452,12 +463,20 @@ function DiffError({ message }: { message: string }): JSX.Element {
 
 async function requestGitStatus(socket: DashboardSocket, payload: { workspaceId: string; sessionId?: string; cwd?: string }): Promise<GitStatusResult> {
   const requestId = randomId()
-  return await gitStatus(socket, { requestId, ...payload })
+  try {
+    return await gitStatus(socket, { requestId, ...payload })
+  } catch (error) {
+    return { requestId, workspaceId: payload.workspaceId, files: [], error: { code: 'executor_unavailable', message: error instanceof Error ? error.message : 'Workspace Executor is unavailable.' } }
+  }
 }
 
 async function requestGitDiff(socket: DashboardSocket, payload: { workspaceId: string; sessionId?: string; cwd?: string; path: string; staged: boolean }): Promise<GitDiffResult> {
   const requestId = randomId()
-  return await gitDiff(socket, { requestId, ...payload })
+  try {
+    return await gitDiff(socket, { requestId, ...payload })
+  } catch (error) {
+    return { requestId, workspaceId: payload.workspaceId, error: { code: 'executor_unavailable', message: error instanceof Error ? error.message : 'Workspace Executor is unavailable.' } }
+  }
 }
 
 function formatBytes(bytes: number): string {

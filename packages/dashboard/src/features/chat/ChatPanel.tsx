@@ -67,6 +67,7 @@ import type {
   ToolResultContent,
 } from '@agent-kernel/kernel'
 import type { ApprovalRequiredEvent, ChapterReadingMode, ToolCardMode } from '@agent-kernel/shared'
+import { parseComputerScreenshotResult } from '@agent-kernel/shared'
 
 import { Button } from '../../components/ui/button.js'
 import {
@@ -3389,7 +3390,8 @@ function ToolResultBlock({
 
   const displayContent =
     fullOutput.state === 'loaded' ? fullOutput.content : result.content
-  const displayOutput = parseToolResultDisplay(displayContent)
+  const desktopImage = useMemo(() => result.ok && toolName === 'computer_use' ? parseComputerScreenshotResult(displayContent) : undefined, [result.ok, toolName, displayContent])
+  const displayOutput = desktopImage ? { content: '', metadata: null } : parseToolResultDisplay(displayContent)
 
   return (
     <div className="min-w-0 max-w-full">
@@ -3453,10 +3455,13 @@ function ToolResultBlock({
               Failed to read full output: {fullOutput.error}
             </div>
           ) : null}
-          <ToolResultContentView
+          {desktopImage ? <figure className="p-2">
+            <img src={`data:${desktopImage.mimeType};base64,${desktopImage.base64}`} alt={t('computer.screen')} className="h-auto max-w-full rounded" loading="lazy" />
+            <figcaption className="mt-1 text-xs text-muted-foreground">{desktopImage.width} × {desktopImage.height} · ({desktopImage.originX}, {desktopImage.originY})</figcaption>
+          </figure> : <ToolResultContentView
             content={displayOutput.content}
             rawClassName="px-3 py-2"
-          />
+          />}
           {displayOutput.metadata ? (
             <ToolResultMetadataFields metadata={displayOutput.metadata} />
           ) : null}

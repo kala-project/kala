@@ -350,6 +350,10 @@ function inboxFor(state: State, ownerKey: string, principal: string): ScheduledI
       scheduledFor: run.scheduledFor,
       updatedAt: run.updatedAt,
       seen: seen.has(run.occurrenceId),
+      taskLabel: run.task.prompt.trim().split(/\r?\n/u)[0]!.slice(0, 200),
+      target: clone(run.task.target),
+      claimedAt: run.claimedAt,
+      ...(run.error ? { error: run.error.slice(0, 2_000) } : {}),
       ...(run.sessionId ? { sessionId: run.sessionId } : {}),
     }))
   return { items, unreadCount: items.reduce((count, item) => count + (item.seen ? 0 : 1), 0) }

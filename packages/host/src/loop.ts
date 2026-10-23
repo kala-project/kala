@@ -34,7 +34,7 @@ import { activeToolsFor } from './extensions/tool-catalog.js'
 import { intentActivatedTools, toolCatalogRevision, visibleTools } from './tool-disclosure.js'
 import { TurnTimingTracker, timedSpan } from './turn-timing.js'
 import type { LLMAdapter } from './llm/adapter.js'
-import { redactLlmTrace, type LLMTrace } from '@agent-kernel/shared'
+import { parseComputerScreenshotResult, redactLlmTrace, type LLMTrace } from '@agent-kernel/shared'
 import { estimateMessageTokens, estimateStringTokens, estimateToolSchemaTokens } from '@agent-kernel/shared/token-estimation'
 import {
   createArtifactStore,
@@ -1261,7 +1261,8 @@ async function dispatchToolResult(
 ): Promise<void> {
   const write = async (): Promise<void> => {
     const record = deps.store.get(sessionId)
-    const capped = capToolResultForContext(content, contextLimitForSession(deps, sessionId, record))
+    const desktopImage = ok && record?.state.pendingCalls.some((call) => call.callId === callId && call.name === 'computer_use') && parseComputerScreenshotResult(content)
+    const capped = desktopImage ? content : capToolResultForContext(content, contextLimitForSession(deps, sessionId, record))
     await dispatchOne(
       deps,
       sessionId,

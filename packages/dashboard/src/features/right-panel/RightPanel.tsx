@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Bug, CalendarClock, Files, GitBranch, PanelRightClose, SquareTerminal } from 'lucide-react'
+import { Bug, CalendarClock, Files, GitBranch, Monitor, PanelRightClose, SquareTerminal } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { RightPanelTab } from '@agent-kernel/shared'
 
@@ -17,6 +17,7 @@ export function RightPanel({
   terminal,
   inspector,
   scheduledTasks,
+  computer,
   headerHelp,
 }: {
   activeTab: RightPanelTab
@@ -27,6 +28,7 @@ export function RightPanel({
   terminal: ReactNode
   inspector: ReactNode
   scheduledTasks: ReactNode
+  computer?: ReactNode
   headerHelp?: ReactNode
 }): JSX.Element {
   const { t } = useTranslation()
@@ -39,7 +41,7 @@ export function RightPanel({
     if (!tabs || !measure || tabs.clientWidth <= 0) return
     setShowLabels(measure.scrollWidth <= tabs.clientWidth)
   }, [])
-  const tabLabels = [t('rightPanel.files'), t('rightPanel.git'), t('rightPanel.terminal'), t('rightPanel.inspector'), t('rightPanel.scheduledTasks')]
+  const tabLabels = [t('rightPanel.files'), t('rightPanel.git'), t('rightPanel.terminal'), t('rightPanel.inspector'), t('rightPanel.scheduledTasks'), t('rightPanel.computer')]
   const tabLabelsKey = tabLabels.join('\u0000')
   useEffect(() => {
     updateLabelVisibility()
@@ -54,7 +56,7 @@ export function RightPanel({
   return (
     <div className="flex h-full min-h-0 flex-col bg-card/80 text-card-foreground" data-testid="right-panel">
       <div className="flex h-14 min-w-0 flex-none items-center gap-1 overflow-hidden border-b border-border/35 bg-card/70 px-2 backdrop-blur sm:h-12">
-        <div ref={tabsRef} className="ak-segmented-control relative grid min-w-0 flex-1 grid-cols-5 gap-0.5" data-testid="right-panel-tabs" data-labels-visible={showLabels} role="tablist" aria-label={t('rightPanel.tools')}>
+        <div ref={tabsRef} className="ak-segmented-control relative grid min-w-0 flex-1 grid-cols-6 gap-0.5" data-testid="right-panel-tabs" data-labels-visible={showLabels} role="tablist" aria-label={t('rightPanel.tools')}>
           <div ref={measureRef} className="pointer-events-none invisible absolute left-0 top-0 flex w-max gap-0.5" aria-hidden="true">
             {tabLabels.map((label) => <span key={label} className="inline-flex h-8 items-center gap-1 px-1.5 text-caption font-medium"><span className="h-3.5 w-3.5" />{label}</span>)}
           </div>
@@ -63,6 +65,7 @@ export function RightPanel({
           <TabButton active={activeTab === 'terminal'} onClick={() => onTabChange('terminal')} icon={<SquareTerminal className="h-3.5 w-3.5" />} label={tabLabels[2]!} showLabel={showLabels} testId="right-panel-terminal-tab" />
           <TabButton active={activeTab === 'inspector'} onClick={() => onTabChange('inspector')} icon={<Bug className="h-3.5 w-3.5" />} label={tabLabels[3]!} showLabel={showLabels} testId="right-panel-inspector-tab" />
           <TabButton active={activeTab === 'scheduledTasks'} onClick={() => onTabChange('scheduledTasks')} icon={<CalendarClock className="h-3.5 w-3.5" />} label={tabLabels[4]!} showLabel={showLabels} testId="right-panel-scheduled-tasks-tab" />
+          <TabButton active={activeTab === 'computer'} onClick={() => onTabChange('computer')} icon={<Monitor className="h-3.5 w-3.5" />} label={tabLabels[5]!} showLabel={showLabels} testId="right-panel-computer-tab" />
         </div>
         {headerHelp}
         <span className="ml-1 h-5 w-px flex-none bg-border/40" aria-hidden="true" />
@@ -74,6 +77,7 @@ export function RightPanel({
         <PanelContent active={activeTab === 'terminal'} testId="right-panel-terminal-content">{terminal}</PanelContent>
         <PanelContent active={activeTab === 'inspector'} testId="right-panel-inspector-content">{inspector}</PanelContent>
         <PanelContent active={activeTab === 'scheduledTasks'} testId="right-panel-scheduled-tasks-content">{scheduledTasks}</PanelContent>
+        <PanelContent active={activeTab === 'computer'} testId="right-panel-computer-content">{computer}</PanelContent>
       </div>
     </div>
   )

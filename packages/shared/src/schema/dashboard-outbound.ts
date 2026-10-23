@@ -1176,7 +1176,7 @@ export const MetadataEntrySchema = z.object({
   selectedModel: z.string().optional(),
   toolCardMode: z.enum(['dots', 'standard']).optional(),
   transcriptViewStart: z.number().int().nonnegative().max(10_000_000).optional(),
-  rightPanelTab: z.enum(['files', 'git', 'terminal', 'inspector', 'scheduledTasks']).optional(),
+  rightPanelTab: z.enum(['files', 'git', 'terminal', 'inspector', 'scheduledTasks', 'computer']).optional(),
   chapterReadingMode: z.enum(['chapters', 'continuous']).nullable().optional(),
 }) satisfies z.ZodType<MetadataEntry>
 

@@ -9,6 +9,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest'
+import { TERMINAL_CREATE_ACK_TIMEOUT_MS } from '@agent-kernel/shared'
 
 import type { CallToolEffect } from '@agent-kernel/kernel'
 import type {
@@ -678,9 +679,42 @@ describe('ExecutorRegistry', () => {
       reg.closeSessionTerminals({ workspaceId: 'ws', sessionId: 'session' })
       await vi.advanceTimersByTimeAsync(5_000)
 
-      await expect(create).resolves.toMatchObject({ error: 'terminal create acknowledgement timed out' })
       await expect(kill).resolves.toMatchObject({ killed: false, error: 'terminal kill acknowledgement timed out' })
       expect(sock.emitted.at(-1)).toMatchObject({ event: 'terminal:close_session', payload: { workspaceId: 'ws', sessionId: 'session' } })
+      await vi.advanceTimersByTimeAsync(TERMINAL_CREATE_ACK_TIMEOUT_MS - 5_000)
+      await expect(create).resolves.toMatchObject({ error: 'terminal create acknowledgement timed out' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('allows delayed native terminal startup and disposes fresh ACKs after timeout or cancellation', async () => {
+    vi.useFakeTimers()
+    try {
+      const reg = createExecutorRegistry(fakeIo() as never, makeResolver())
+      const sock = makeFakeSocket('delayed-terminal')
+      reg.attach(sock as never, announceOf('e-delayed-terminal', 'ws'))
+      const payload = { requestId: 'delayed', workspaceId: 'ws', sessionId: 'session' }
+      const first = reg.createTerminal(payload)
+      await vi.advanceTimersByTimeAsync(10_000)
+      sock.emitted[0]!.ack!({ ...payload, terminalId: 'ready-terminal' } as never)
+      await expect(first).resolves.toMatchObject({ terminalId: 'ready-terminal' })
+      expect(sock.emitted.filter((call) => call.event === 'terminal:kill')).toHaveLength(0)
+
+      const late = reg.createTerminal({ ...payload, requestId: 'late' })
+      const lateAck = sock.emitted.at(-1)!.ack!
+      await vi.advanceTimersByTimeAsync(TERMINAL_CREATE_ACK_TIMEOUT_MS)
+      await expect(late).resolves.toMatchObject({ error: 'terminal create acknowledgement timed out' })
+      lateAck({ ...payload, terminalId: 'late-terminal' } as never)
+      expect(sock.emitted.at(-1)).toMatchObject({ event: 'terminal:kill', payload: { terminalId: 'late-terminal' } })
+
+      const controller = new AbortController()
+      const cancelled = reg.createTerminal({ ...payload, requestId: 'cancelled' }, controller.signal)
+      const cancelledAck = sock.emitted.at(-1)!.ack!
+      controller.abort()
+      await expect(cancelled).resolves.toMatchObject({ error: 'terminal create cancelled' })
+      cancelledAck({ ...payload, terminalId: 'cancelled-terminal' } as never)
+      expect(sock.emitted.at(-1)).toMatchObject({ event: 'terminal:kill', payload: { terminalId: 'cancelled-terminal' } })
     } finally {
       vi.useRealTimers()
     }

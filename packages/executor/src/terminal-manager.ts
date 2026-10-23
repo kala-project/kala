@@ -46,10 +46,9 @@ function terminalDiagnostic(phase: string): void {
 }
 
 function terminateTerminal(terminal: TerminalProcess): void {
-  // node-pty's Windows ConPTY implementation rejects every explicit signal.
-  // Unix PTYs and pipe-backed shells retain the existing SIGTERM behavior.
-  if (process.platform === 'win32') terminal.kill()
-  else terminal.kill('SIGTERM')
+  // node-pty defaults to SIGHUP on Unix: interactive shells may ignore SIGTERM.
+  // ConPTY rejects explicit signals; the pipe fallback supplies its own SIGTERM.
+  terminal.kill()
 }
 
 async function tryLoadNodePty(): Promise<NodePtyModule | undefined> {
@@ -218,7 +217,7 @@ export function createTerminalManager(input: {
   }
   const terminals = new Map<string, TerminalRecord>()
   const sessionTerminals = new Map<string, TerminalRecord>()
-  const pendingCreates = new Map<string, Promise<TerminalCreateResult>>()
+  const pendingCreates = new Map<string, { promise: Promise<TerminalCreateResult>; state: { cancelled: boolean } }>()
 
   const keyOf = (workspaceId: string, sessionId: string, terminalId: string): string => `${workspaceId}:${sessionId}:${terminalId}`
   const sessionKeyOf = (workspaceId: string, sessionId: string): string => `${workspaceId}:${sessionId}`
@@ -251,14 +250,16 @@ export function createTerminalManager(input: {
       }
       const pending = pendingCreates.get(sessionKey)
       if (pending) {
-        const result = await pending
+        const result = await pending.promise
         return { ...result, requestId: payload.requestId, reused: result.terminalId !== undefined }
       }
+      const state = { cancelled: false }
       const creating = (async (): Promise<TerminalCreateResult> => {
         const requestedCwd = payload.cwd?.trim() || process.cwd()
         try {
         terminalDiagnostic('resolving sandbox cwd')
         const cwd = await input.sandbox.resolve(requestedCwd)
+        if (state.cancelled) return { requestId: payload.requestId, workspaceId: payload.workspaceId, sessionId: payload.sessionId, error: 'terminal create cancelled' }
         terminalDiagnostic('sandbox cwd resolved')
         const terminalId = ulid()
         const shell = process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/sh')
@@ -272,6 +273,10 @@ export function createTerminalManager(input: {
             TERM: process.env.TERM || 'xterm-256color',
           },
         })
+        if (state.cancelled) {
+          terminateTerminal(terminal)
+          return { requestId: payload.requestId, workspaceId: payload.workspaceId, sessionId: payload.sessionId, error: 'terminal create cancelled' }
+        }
         const record: TerminalRecord = { workspaceId: payload.workspaceId, sessionId: payload.sessionId, terminalId, cwd, terminal, exited: false, replay: Buffer.alloc(0), outputBytes: 0, outputTruncated: false }
         terminals.set(keyOf(payload.workspaceId, payload.sessionId, terminalId), record)
         sessionTerminals.set(sessionKey, record)
@@ -317,11 +322,11 @@ export function createTerminalManager(input: {
           }
         }
       })()
-      pendingCreates.set(sessionKey, creating)
+      pendingCreates.set(sessionKey, { promise: creating, state })
       try {
         return await creating
       } finally {
-        if (pendingCreates.get(sessionKey) === creating) pendingCreates.delete(sessionKey)
+        if (pendingCreates.get(sessionKey)?.promise === creating) pendingCreates.delete(sessionKey)
       }
     },
     input(payload) {
@@ -350,18 +355,19 @@ export function createTerminalManager(input: {
     },
     closeSession(payload) {
       const sessionKey = sessionKeyOf(payload.workspaceId, payload.sessionId)
+      const pending = pendingCreates.get(sessionKey)
+      if (pending) {
+        pending.state.cancelled = true
+        pendingCreates.delete(sessionKey)
+      }
       const record = sessionTerminals.get(sessionKey)
       if (record) {
         closeRecord(record)
-        return
       }
-      const pending = pendingCreates.get(sessionKey)
-      if (pending) void pending.then(() => {
-        const created = sessionTerminals.get(sessionKey)
-        if (created) closeRecord(created)
-      })
     },
     closeAll() {
+      for (const pending of pendingCreates.values()) pending.state.cancelled = true
+      pendingCreates.clear()
       for (const record of [...terminals.values()]) closeRecord(record)
       terminals.clear()
       sessionTerminals.clear()

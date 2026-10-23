@@ -196,6 +196,7 @@ export const ServerTerminalExitSchema = z.object({
 // ============================================================================
 
 export const ToolCallMessageSchema = z.object({
+  origin: z.literal('host').optional(),
   sessionId: SessionIdSchema,
   callId: WireIdSchema,
   name: z.string(),

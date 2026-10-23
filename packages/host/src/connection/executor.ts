@@ -16,6 +16,7 @@
  */
 
 import type { Server, Socket } from 'socket.io'
+import { createTerminalRequestManager, TERMINAL_CREATE_ACK_TIMEOUT_MS } from '@agent-kernel/shared'
 
 import type {
   CallToolEffect,
@@ -60,6 +61,8 @@ import type {
   TerminalCreateResult,
   TerminalKillResult,
   ToolResultAck,
+  ComputerRequest,
+  ComputerResponse,
 } from '@agent-kernel/shared'
 
 import type { ToolDispatcher } from '../loop.js'
@@ -109,6 +112,7 @@ type PublishLocalImageRequest = { requestId: string; path: string; cwd?: string 
 type PublishLocalImageResponse = { requestId: string; path: string; base64?: string; mediaType?: string; size?: number; error?: string }
 
 export type ExecutorLookup = {
+  computerRequest(payload: ComputerRequest, owner: string): Promise<ComputerResponse>
   executorForSession(sessionId: string): AttachedExecutor | undefined
   listDirs(workspaceId: string, path: string | undefined, requestId: string): Promise<DirListResult>
   createDirectory(workspaceId: string, parentPath: string, name: string, requestId: string): Promise<CreateDirectoryResult>
@@ -119,7 +123,7 @@ export type ExecutorLookup = {
   listBg(payload: ClientListBgTasks): Promise<BgListResult>
   readBg(payload: ClientReadBgOutput): Promise<BgOutputResult>
   killBg(payload: ClientKillBgTask): Promise<BgKillResult>
-  createTerminal(payload: ClientTerminalCreate): Promise<TerminalCreateResult>
+  createTerminal(payload: ClientTerminalCreate, signal?: AbortSignal): Promise<TerminalCreateResult>
   inputTerminal(payload: ClientTerminalInput): void
   resizeTerminal(payload: ClientTerminalResize): void
   killTerminal(payload: ClientTerminalKill): Promise<TerminalKillResult>
@@ -175,6 +179,7 @@ export function createExecutorRegistry(
     pending: Map<string, Pending>
   }
   const byExecutor = new Map<string, Bind>()
+  const terminalCreates = new WeakMap<Bind, ReturnType<typeof createTerminalRequestManager>>()
   const socketToExecutor = new Map<string, string>()
   const listeners = new Set<ExecutorChangeListener>()
   // Retain names after removal so active Session snapshots fail before dispatch.
@@ -379,6 +384,7 @@ export function createExecutorRegistry(
       bind.socket.emit(
         'tool:call',
         {
+          origin: 'host',
           sessionId: `__internal:${workspaceId}`,
           callId,
           name,
@@ -910,7 +916,7 @@ export function createExecutorRegistry(
         }),
       )
     },
-    async createTerminal(payload) {
+    async createTerminal(payload, signal) {
       const bind = findBindByWorkspace(payload.workspaceId)
       if (!bind) {
         return {
@@ -920,19 +926,28 @@ export function createExecutorRegistry(
           error: 'workspace offline',
         }
       }
-      return await new Promise<TerminalCreateResult>((resolve) => {
-        let settled = false
-        const timer = setTimeout(() => {
-          settled = true
-          resolve({ requestId: payload.requestId, workspaceId: payload.workspaceId, sessionId: payload.sessionId, error: 'terminal create acknowledgement timed out' })
-        }, TERMINAL_ACK_TIMEOUT_MS)
-        bind.socket.emit('terminal:create', payload, (result) => {
-          if (settled) return
-          settled = true
-          clearTimeout(timer)
-          resolve(result)
+      let requests = terminalCreates.get(bind)
+      if (!requests) {
+        requests = createTerminalRequestManager({
+          timeoutMs: TERMINAL_CREATE_ACK_TIMEOUT_MS,
+          emit: (body, ack) => { bind.socket.emit('terminal:create', body, ack) },
+          dispose: (body, result) => {
+            bind.socket.emit('terminal:kill', { requestId: body.requestId, workspaceId: body.workspaceId, sessionId: body.sessionId, terminalId: result.terminalId! }, () => {})
+          },
         })
-      })
+        terminalCreates.set(bind, requests)
+      }
+      if (signal?.aborted) return { requestId: payload.requestId, workspaceId: payload.workspaceId, sessionId: payload.sessionId, error: 'terminal create cancelled' }
+      const request = requests.request(payload)
+      const onAbort = (): void => request.cancel()
+      signal?.addEventListener('abort', onAbort, { once: true })
+      try {
+        const result = await request.result
+        request.accept()
+        return result
+      } finally {
+        signal?.removeEventListener('abort', onAbort)
+      }
     },
     inputTerminal(payload) {
       const bind = findBindByWorkspace(payload.workspaceId)
@@ -971,6 +986,13 @@ export function createExecutorRegistry(
     closeSessionTerminals(payload) {
       const bind = findBindByWorkspace(payload.workspaceId)
       bind?.socket.emit('terminal:close_session', payload)
+    },
+    async computerRequest(payload, owner) {
+      const fail = (message: string): ComputerResponse => ({ requestId: payload.requestId, error: { code: 'unavailable', message } })
+      const bind = findBindByWorkspace(payload.workspaceId)
+      if (!bind) return fail('Workspace is offline')
+      if (!bind.announcement.tools.includes('__computer_use')) return fail('This Executor needs an update before it can share its desktop')
+      return await callInternalTool<ComputerResponse>(bind, payload.workspaceId, '__computer_use', { request: payload, owner }, fail)
     },
     async workspaceExec(payload) {
       const bind = findBindByWorkspace(payload.workspaceId)

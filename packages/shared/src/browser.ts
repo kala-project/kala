@@ -1,6 +1,8 @@
 // Browser-safe counterpart to index.ts: routing ticket signing and verification
 // require node:crypto and must never be included in Dashboard bundles.
 export * from './protocol.js'
+export * from './terminal-create.js'
+export * from './computer-use.js'
 export * from './deployment.js'
 export * from './log.js'
 export * from './redaction.js'

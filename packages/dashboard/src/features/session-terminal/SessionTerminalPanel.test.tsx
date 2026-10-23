@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ServerTerminalOutput } from '@agent-kernel/shared'
 import { SessionTerminalPanel } from './SessionTerminalPanel.js'
 import type { DashboardSocket } from '../../session.js'
+import { TERMINAL_CREATE_CLIENT_TIMEOUT_MS } from '@agent-kernel/shared'
 
 const writeMock = vi.fn()
 const clearMock = vi.fn()
@@ -83,9 +84,84 @@ describe('SessionTerminalPanel', () => {
     height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600)
   })
   afterEach(() => {
+    vi.useRealTimers()
     width.mockRestore()
     height.mockRestore()
     vi.unstubAllGlobals()
+  })
+
+  it('remains starting beyond five seconds and accepts a delayed native create ACK', async () => {
+    vi.useFakeTimers()
+    const mock = makeSocket()
+    let acknowledge!: (result: unknown) => void
+    mock.emit.mockImplementation((event, _payload, ack) => {
+      if (event === 'terminal:create') acknowledge = ack!
+    })
+    render(<SessionTerminalPanel socket={mock.socket} workspaceId="ws-1" sessionId="sess-1" autoStart />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+    expect(screen.getByTestId('session-terminal-panel').getAttribute('data-terminal-status')).toBe('starting')
+    await act(async () => acknowledge({ terminalId: 'delayed', cwd: '/repo' }))
+    expect(screen.getByTestId('session-terminal-panel').getAttribute('data-terminal-status')).toBe('running')
+  })
+
+  it('cleans a fresh create after UI cancellation even when keep-running defaults on', async () => {
+    const mock = makeSocket()
+    let acknowledge!: (result: unknown) => void
+    mock.emit.mockImplementation((event, payload, ack) => {
+      if (event === 'terminal:create') acknowledge = ack!
+      if (event === 'terminal:kill') ack?.({ ...payload, killed: true })
+    })
+    const { unmount } = render(<SessionTerminalPanel socket={mock.socket} workspaceId="ws-1" sessionId="sess-1" autoStart />)
+    unmount()
+    await act(async () => acknowledge({ terminalId: 'cancelled-create' }))
+    expect(mock.emit).toHaveBeenCalledWith('terminal:kill', expect.objectContaining({ terminalId: 'cancelled-create' }), expect.any(Function))
+  })
+
+  it('cleans a fresh ACK after the client deadline without adopting it into the UI', async () => {
+    vi.useFakeTimers()
+    const mock = makeSocket()
+    let acknowledge!: (result: unknown) => void
+    mock.emit.mockImplementation((event, payload, ack) => {
+      if (event === 'terminal:create') acknowledge = ack!
+      if (event === 'terminal:kill') ack?.({ ...payload, killed: true })
+    })
+    render(<SessionTerminalPanel socket={mock.socket} workspaceId="ws-1" sessionId="sess-1" autoStart />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(TERMINAL_CREATE_CLIENT_TIMEOUT_MS) })
+    expect(screen.getByTestId('session-terminal-panel').getAttribute('data-terminal-status')).toBe('error')
+    await act(async () => acknowledge({ terminalId: 'late-create' }))
+    expect(mock.emit).toHaveBeenCalledWith('terminal:kill', expect.objectContaining({ terminalId: 'late-create' }), expect.any(Function))
+    expect(screen.getByTestId('session-terminal-panel').getAttribute('data-terminal-status')).toBe('error')
+  })
+
+  it('cancels an old identity without adopting its terminal into the replacement panel', async () => {
+    const mock = makeSocket()
+    const acknowledgements: Array<(result: unknown) => void> = []
+    mock.emit.mockImplementation((event, payload, ack) => {
+      if (event === 'terminal:create') acknowledgements.push(ack!)
+      if (event === 'terminal:kill') ack?.({ ...payload, killed: true })
+    })
+    const { rerender } = render(<SessionTerminalPanel socket={mock.socket} workspaceId="ws-1" sessionId="sess-1" autoStart />)
+    rerender(<SessionTerminalPanel socket={mock.socket} workspaceId="ws-1" sessionId="sess-2" autoStart />)
+    await act(async () => acknowledgements[0]!({ terminalId: 'old-terminal' }))
+    expect(mock.emit).toHaveBeenCalledWith('terminal:kill', expect.objectContaining({ sessionId: 'sess-1', terminalId: 'old-terminal' }), expect.any(Function))
+    expect(screen.getByTestId('session-terminal-panel').getAttribute('data-terminal-status')).toBe('starting')
+    await act(async () => acknowledgements[1]!({ terminalId: 'new-terminal' }))
+    expect(screen.getByTestId('session-terminal-panel').getAttribute('data-terminal-status')).toBe('running')
+  })
+
+  it('does not kill a fresh late result reused by a reopened modal', async () => {
+    const mock = makeSocket()
+    const acknowledgements: Array<(result: unknown) => void> = []
+    mock.emit.mockImplementation((event, _payload, ack) => {
+      if (event === 'terminal:create') acknowledgements.push(ack!)
+    })
+    const first = render(<SessionTerminalPanel socket={mock.socket} workspaceId="ws-1" sessionId="sess-1" autoStart />)
+    first.unmount()
+    render(<SessionTerminalPanel socket={mock.socket} workspaceId="ws-1" sessionId="sess-1" autoStart />)
+    await act(async () => acknowledgements[0]!({ terminalId: 'shared-result' }))
+    await act(async () => acknowledgements[1]!({ terminalId: 'shared-result', reused: true }))
+    expect(screen.getByTestId('session-terminal-panel').getAttribute('data-terminal-status')).toBe('running')
+    expect(mock.emit.mock.calls.filter(([event]) => event === 'terminal:kill')).toHaveLength(0)
   })
 
   it('starts, filters output, sends xterm and touch input, resizes, clears, and does not kill on unmount', async () => {

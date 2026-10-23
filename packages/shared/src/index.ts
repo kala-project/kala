@@ -1,4 +1,6 @@
 export * from './protocol.js'
+export * from './terminal-create.js'
+export * from './computer-use.js'
 export * from './deployment.js'
 export * from './log.js'
 export * from './redaction.js'

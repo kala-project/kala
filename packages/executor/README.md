@@ -52,6 +52,51 @@ await startExecutor({
 })
 ```
 
+## Real-desktop computer use
+
+Desktop access is disabled by default. It requires local machine opt-in **and**
+explicit Dashboard consent for a short-lived, session-bound lease. Agent control
+is a separate permission. Stop sharing or close the Computer tab to revoke it.
+
+For an Executor already running in the logged-in Linux X11 desktop, install
+`xdotool` and `scrot >= 1.7` from the operating-system vendor, then start that
+Executor with `KALA_COMPUTER_USE_ENABLED=1`. Preserve the user's `DISPLAY` and
+`XAUTHORITY`; do not start a substitute display. Wayland is not supported.
+
+Windows service processes run in Session 0 and cannot directly control a user's
+desktop. Start the local companion as the **normal logged-in desktop user**, not
+as a service or another elevated account:
+
+```powershell
+kala-executor desktop serve
+```
+
+The command prints the location of its private connection file, not its secret.
+Configure the service's environment with `KALA_COMPUTER_USE_ENABLED=1` and
+`KALA_COMPUTER_USE_COMPANION_CONFIG=<that absolute file path>`, then restart the
+service. Keep the companion running in the interactive user session. A custom
+`--config` path must be inside a dedicated private directory, not an existing
+general-purpose folder. Its ACL grants access only to that user and SYSTEM.
+The same companion command can bridge a Linux service to a user's X11 desktop.
+
+Never send the connection file to another person or include it in diagnostics.
+Local IPC only exposes validated desktop operations, not arbitrary shell commands.
+On Windows the companion binds an ephemeral TCP port exclusively on IPv4
+`127.0.0.1`; its private connection file contains `tcp://127.0.0.1:<port>` and
+a random authentication token. Wildcard/remote addresses, hostnames, IPv6 aliases
+and named-pipe endpoints are rejected, with no pipe fallback or SMB transport.
+Every response requires token authentication; screenshots/input also require the
+exclusive socket-bound claim. Other local processes can reach the TCP port but
+cannot use it without the secret. Linux retains its owner-only Unix socket.
+Gracefully closing the companion, losing its client connection, or expiring its claim releases
+input and prevents further control. A locked/secure Windows desktop is rejected.
+Abruptly terminating the companion cannot guarantee synthesized input cleanup.
+User screenshots may contain secrets; Agent observations are sent to the model
+and retained as conversation/tool data. Do not share unrelated private windows.
+
+See [computer-use architecture](../../docs/architecture/desktop/computer-use.md)
+and [wire protocol](../../docs/protocol/wire-protocol.md).
+
 ## References
 
 - Tool contracts: [`docs/reference/executor/tools.md`](../../docs/reference/executor/tools.md)

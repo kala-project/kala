@@ -98,6 +98,7 @@ import {
   validateClientMessagePayload,
   validateInlineMessageFiles,
   validateInlineMessageImages,
+  ComputerRequestSchema,
 } from '@agent-kernel/shared'
 import { SUB_AGENT_ROLE_TEMPLATES } from '@agent-kernel/shared/enhancement'
 import type { RuntimeMetadataEntry } from '@agent-kernel/shared'
@@ -1466,6 +1467,63 @@ export function configureDashboardNamespace(
     // difference is the actor (human at a dashboard button, not the LLM).
     // Audit records argv.slice(0, 3) so post-hoc review has a searchable
     // shape without unbounded metadata size.
+    const desktopLeases = new Map<string, { workspaceId: string; sessionId: string; leaseId: string }>()
+    let desktopWindow = Date.now()
+    let desktopRequests = 0
+    let desktopCapturePending = false
+    const stopDesktopLease = async (lease: { workspaceId: string; sessionId: string; leaseId: string }) => {
+      try {
+        const result = await deps.executors.computerRequest({ ...lease, operation: 'stop', requestId: ulid() }, socket.id)
+        if (result.error) throw new Error(result.error.message)
+      } catch (error) {
+        deps.audit?.log({ action: 'computer.disconnect', actor: auditActor(socket), target: { sessionId: lease.sessionId, workspaceId: lease.workspaceId }, outcome: 'error', error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    socket.on('disconnect', () => {
+      for (const lease of desktopLeases.values()) {
+        void stopDesktopLease(lease)
+      }
+      desktopLeases.clear()
+    })
+    socket.on('computer:request', async (raw, ack) => {
+      if (typeof ack !== 'function') return
+      const parsed = ComputerRequestSchema.safeParse(raw)
+      if (!parsed.success) return ack({ requestId: typeof raw?.requestId === 'string' ? raw.requestId : '', error: { code: 'invalid_request', message: 'Invalid desktop request' } })
+      const request = parsed.data
+      const deny = (message: string) => ack({ requestId: request.requestId, error: { code: 'denied', message } })
+      if (socket.data.readOnly === true) return deny('Desktop access requires runtime:write')
+      const error = await validateBgSessionAccess(request.sessionId, request.workspaceId) ?? await validateEffectOwner(request.sessionId)
+      if (error) {
+        auditScopedAccessDenied('computer.request', request.sessionId, request.workspaceId, error)
+        return deny(error)
+      }
+      if (!socket.connected) return deny('The desktop controller disconnected')
+      const urgent = request.operation === 'stop' || (request.operation === 'agent' && !request.allowAgent)
+      if (!urgent) {
+        if (Date.now() - desktopWindow >= 1_000) { desktopWindow = Date.now(); desktopRequests = 0 }
+        if (++desktopRequests > 60) return deny('Desktop request rate exceeded')
+        if (request.operation === 'capture' && desktopCapturePending) return deny('A desktop capture is already in progress')
+      }
+      if (request.operation === 'capture') desktopCapturePending = true
+      try {
+        const result = await deps.executors.computerRequest(request, socket.id)
+        if (request.operation === 'start' && result.leaseId) {
+          const lease = { workspaceId: request.workspaceId, sessionId: request.sessionId, leaseId: result.leaseId }
+          if (socket.connected) desktopLeases.set(request.workspaceId, lease)
+          else await stopDesktopLease(lease)
+        }
+        if (request.operation === 'stop' && !result.error) desktopLeases.delete(request.workspaceId)
+        if (request.operation !== 'capture' && request.operation !== 'status' && request.operation !== 'renew') {
+          deps.audit?.log({ action: `computer.${request.operation}`, actor: auditActor(socket), target: { sessionId: request.sessionId, workspaceId: request.workspaceId }, outcome: result.error ? 'error' : 'ok', metadata: { ...(request.operation === 'input' ? { inputType: request.action.type } : {}), ...(request.operation === 'start' || request.operation === 'agent' ? { allowAgent: request.allowAgent } : {}) } })
+        }
+        ack(result)
+      } catch (error) {
+        deps.audit?.log({ action: 'computer.request', actor: auditActor(socket), target: { sessionId: request.sessionId, workspaceId: request.workspaceId }, outcome: 'error', error: error instanceof Error ? error.message : String(error) })
+        ack({ requestId: request.requestId, error: { code: 'execution_error', message: 'Desktop request failed' } })
+      } finally {
+        if (request.operation === 'capture') desktopCapturePending = false
+      }
+    })
     socket.on('workspace:exec', async (raw: WorkspaceExecRequest, ack) => {
       // No zod schema in shared yet; validate minimally by hand.
       if (!raw || typeof raw !== 'object' || typeof raw.requestId !== 'string' || typeof raw.workspaceId !== 'string' || !Array.isArray(raw.argv) || raw.argv.length === 0) {
@@ -1585,8 +1643,16 @@ export function configureDashboardNamespace(
         auditScopedAccessDenied('terminal.create', p.sessionId, p.workspaceId, error)
         return ack({ requestId: p.requestId, workspaceId: p.workspaceId, sessionId: p.sessionId, error })
       }
-      const result = await deps.executors.createTerminal(p)
-      ack(result)
+      const controller = new AbortController()
+      const onDisconnect = (): void => controller.abort()
+      socket.once('disconnect', onDisconnect)
+      try {
+        if (!socket.connected) controller.abort()
+        const result = await deps.executors.createTerminal(p, controller.signal)
+        ack(result)
+      } finally {
+        socket.off('disconnect', onDisconnect)
+      }
     })
     socket.on('terminal:input', async (raw: ClientTerminalInput) => {
       const p = vparse(schema.ClientTerminalInputSchema, raw, 'terminal:input', (raw as ClientTerminalInput | undefined)?.sessionId)

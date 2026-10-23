@@ -7,12 +7,13 @@ import '@xterm/xterm/css/xterm.css'
 import { Eraser, Loader2, Minus, Pin, PinOff, Play, Plus, RefreshCw, Square } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
-import type { ServerTerminalExit, ServerTerminalOutput, TerminalCreateResult, TerminalKillResult } from '@agent-kernel/shared'
+import type { ServerTerminalExit, ServerTerminalOutput } from '@agent-kernel/shared'
 import { Button } from '../../components/ui/button.js'
-import { randomId } from '../../lib/random-id.js'
 import type { DashboardSocket } from '../../session.js'
 import { useInterfaceScale } from '../../lib/interface-scale.js'
 import { DASHBOARD_PREFERENCES, useBooleanPref, useNumberPref } from '../../lib/prefs.js'
+import { installTerminalLineBreakInput } from './terminal-keyboard.js'
+import { createTerminal, killTerminal } from './terminal-rpc.js'
 
 type TerminalStatus = 'idle' | 'starting' | 'running' | 'exited' | 'error'
 type TerminalPreferenceScope = 'session' | 'workspace'
@@ -68,6 +69,7 @@ export function SessionTerminalPanel({
   const inputContextRef = useRef({ socket, workspaceId, sessionId, status })
   const autoStartedRef = useRef(false)
   const disposedRef = useRef(false)
+  const pendingCreateRef = useRef<ReturnType<typeof createTerminal> | null>(null)
   const keepRunningRef = useRef(keepRunning)
   const fitFrameRef = useRef<number | null>(null)
   const lastSizeRef = useRef<{ terminalId: string; cols: number; rows: number } | null>(null)
@@ -121,11 +123,14 @@ export function SessionTerminalPanel({
         data,
       })
     })
+    let disposeLineBreakInput = (): void => {}
     if (hostRef.current) {
       term.open(hostRef.current)
+      disposeLineBreakInput = installTerminalLineBreakInput(term)
       fit.fit()
     }
     return () => {
+      disposeLineBreakInput()
       inputDisposable.dispose()
       term.dispose()
       terminalRef.current = null
@@ -154,6 +159,9 @@ export function SessionTerminalPanel({
   useEffect(() => {
     const identity = `${workspaceId ?? ''}:${sessionId}`
     if (identityRef.current === identity) return
+    pendingCreateRef.current?.cancel()
+    pendingCreateRef.current = null
+    autoStartedRef.current = false
     identityRef.current = identity
     setTerminalId(null)
     setStatus('idle')
@@ -208,18 +216,20 @@ export function SessionTerminalPanel({
   }, [scheduleFitAndResize])
 
   const start = useCallback(async (): Promise<void> => {
-    if (!socket || !workspaceId || !online) return
+    if (!socket || !workspaceId || !online || pendingCreateRef.current) return
     setStatus('starting')
     setError(null)
     fitRef.current?.fit()
     const term = terminalRef.current
-    const result = await createTerminal(socket, { workspaceId, sessionId, cwd, cols: term?.cols ?? 100, rows: term?.rows ?? 12 })
-    if (disposedRef.current) {
-      if (result.terminalId && !keepRunningRef.current) {
-        void killTerminal(socket, { workspaceId, sessionId, terminalId: result.terminalId })
-      }
+    const request = createTerminal(socket, { workspaceId, sessionId, cwd, cols: term?.cols ?? 100, rows: term?.rows ?? 12 })
+    pendingCreateRef.current = request
+    const result = await request.result
+    if (disposedRef.current || pendingCreateRef.current !== request || identityRef.current !== `${workspaceId}:${sessionId}`) {
+      request.cancel()
       return
     }
+    pendingCreateRef.current = null
+    request.accept()
     if (result.error || !result.terminalId) {
       setStatus('error')
       setError(result.error ?? t('terminal.startFailed'))
@@ -243,6 +253,11 @@ export function SessionTerminalPanel({
     disposedRef.current = false
     return () => {
       disposedRef.current = true
+      if (pendingCreateRef.current) {
+        pendingCreateRef.current.cancel()
+        pendingCreateRef.current = null
+        autoStartedRef.current = false
+      }
       const id = terminalIdRef.current
       if (!keepRunningRef.current && socket && workspaceId && id) {
         void killTerminal(socket, { workspaceId, sessionId, terminalId: id })
@@ -322,26 +337,4 @@ export function SessionTerminalPanel({
       </div>
     </div>
   )
-}
-
-async function createTerminal(socket: DashboardSocket, payload: { workspaceId: string; sessionId: string; cwd?: string; cols: number; rows: number }): Promise<TerminalCreateResult> {
-  return await new Promise((resolve) => {
-    const requestId = randomId()
-    const timer = window.setTimeout(() => resolve({ requestId, workspaceId: payload.workspaceId, sessionId: payload.sessionId, error: 'timed out' }), 5000)
-    socket.emit('terminal:create', { requestId, ...payload }, (result) => {
-      window.clearTimeout(timer)
-      resolve(result)
-    })
-  })
-}
-
-async function killTerminal(socket: DashboardSocket, payload: { workspaceId: string; sessionId: string; terminalId: string }): Promise<TerminalKillResult> {
-  return await new Promise((resolve) => {
-    const requestId = randomId()
-    const timer = window.setTimeout(() => resolve({ requestId, workspaceId: payload.workspaceId, sessionId: payload.sessionId, terminalId: payload.terminalId, killed: false, error: 'timed out' }), 5000)
-    socket.emit('terminal:kill', { requestId, ...payload }, (result) => {
-      window.clearTimeout(timer)
-      resolve(result)
-    })
-  })
 }

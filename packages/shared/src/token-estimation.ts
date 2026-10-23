@@ -1,4 +1,5 @@
 import type { Message, ToolSchema } from '@agent-kernel/kernel'
+import { parseComputerScreenshotResult } from './computer-use.js'
 
 export type TokenEstimateBreakdown = {
   tokens: number
@@ -73,6 +74,11 @@ function estimateContentTokens(content: Message['content'][number]): number {
     return estimateStringTokens(content.name) + estimateStringTokens(content.callId) + estimateStringTokens(JSON.stringify(content.input)) + 16
   }
   if (content.type === 'tool_result') {
+    const image = content.ok ? parseComputerScreenshotResult(content.content) : undefined
+    if (image) {
+      const tiles = Math.ceil(image.width / 512) * Math.ceil(image.height / 512)
+      return Math.max(85 + 170 * tiles, Math.ceil(image.width * image.height / 750)) + 128
+    }
     return estimateStringTokens(content.callId) + estimateStringTokens(content.content) + 16
   }
   if (content.type === 'file') {

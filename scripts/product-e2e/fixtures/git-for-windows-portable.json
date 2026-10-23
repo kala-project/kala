@@ -1,0 +1,29 @@
+{
+  "repository": "git-for-windows/git",
+  "releaseTag": "v2.56.0.windows.2",
+  "publishedAt": "2026-10-05T21:42:10Z",
+  "releaseUrl": "https://github.com/git-for-windows/git/releases/tag/v2.56.0.windows.2",
+  "metadataUrl": "https://api.github.com/repos/git-for-windows/git/releases/tags/v2.56.0.windows.2",
+  "asset": "PortableGit-2.56.0.2-64-bit.7z.exe",
+  "downloadUrl": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.2/PortableGit-2.56.0.2-64-bit.7z.exe",
+  "size": 60027568,
+  "sha256": "075e158ef8e1f0ab80b347e245405d3eca735c2dc88fd8e032e137d0ca61f61b",
+  "checksumVerification": "Matched both the official release-body SHA-256 table and GitHub release asset digest on 2026-10-23. Downloaded bytes were verified on the staging host and actual isolated Windows 11 VM after genuine missing-Git failures.",
+  "detachedSignatureAssetProvided": false,
+  "authenticodeVerification": {
+    "status": "Valid",
+    "method": "Get-AuthenticodeSignature on the actual isolated Windows 11 VM",
+    "signerSubject": "CN=Johannes Schindelin, O=Johannes Schindelin, L=Bruehl, C=DE",
+    "signerThumbprint": "C4BA1DE1C1B6049CF0E3FB393640685052199AEB",
+    "timestampSigner": "Microsoft Public RSA Time Stamping Authority",
+    "verifiedDate": "2026-10-23"
+  },
+  "minimumReleaseAgeHours": 24,
+  "newerReleaseRejected": {
+    "tag": "v2.56.0.windows.3",
+    "publishedAt": "2026-10-22T19:10:21Z",
+    "reason": "Less than 24 hours old at selection time on 2026-10-23."
+  },
+  "usageConstraint": "Isolated offline Git fixture operations only. The newer release includes security fixes; review it after cooling before permitting any Git network operations.",
+  "installationGate": "Do not download or extract before an actual missing-Git failure and explicit isolated-fixture ownership handoff. Reverify SHA-256 and Authenticode on each target. This manifest grants no permission to change Executor service configuration or PATH."
+}

@@ -64,6 +64,7 @@ import { deriveAgentProgress } from './features/chat/agent-progress.js'
 import { ApprovalCard } from './features/chat/ApprovalCard.js'
 import { AskUserChoiceCard } from './features/chat/AskUserChoiceCard.js'
 import { BackgroundShellsButton } from './features/chat/BackgroundTerminalPanel.js'
+import { TerminalDialogContent } from './features/session-terminal/TerminalDialogContent.js'
 import { ChatPanel, type WorkspaceFileTarget } from './features/chat/ChatPanel.js'
 import { recentEmptyStateSessions } from './features/chat/recent-empty-sessions.js'
 import { APPROVAL_MODES, Composer } from './features/chat/Composer.js'
@@ -113,6 +114,7 @@ const PipelinePage = lazy(() => loadDashboardExport(import('./features/pipeline/
 const SettingsDialog = lazy(() => loadDashboardExport(import('./features/settings/SettingsDialog.js'), 'SettingsDialog', 'SettingsDialog'))
 const SessionFilesPanel = lazy(() => loadDashboardExport(import('./features/session-files/SessionFilesPanel.js'), 'SessionFilesPanel', 'SessionFilesPanel'))
 const SessionTerminalPanel = lazy(() => loadDashboardExport(import('./features/session-terminal/SessionTerminalPanel.js'), 'SessionTerminalPanel', 'SessionTerminalPanel'))
+const ComputerPanel = lazy(() => loadDashboardExport(import('./features/computer-use/ComputerPanel.js'), 'ComputerPanel', 'ComputerPanel'))
 const WorkspaceFileViewDialog = lazy(() => loadDashboardExport(import('./features/session-files/SessionFilesPanel.js'), 'WorkspaceFileViewDialog', 'SessionFilesPanel'))
 const SourceControlPanel = lazy(() => loadDashboardExport(import('./features/source-control/SourceControlPanel.js'), 'SourceControlPanel', 'SourceControlPanel'))
 
@@ -2684,7 +2686,7 @@ export function App(): JSX.Element {
                         activeTab={rightPanelTab}
                         onTabChange={setRightPanelTab}
                         onCollapse={() => setInspectorOpen(false)}
-                        headerHelp={<ScheduledTaskInbox host={hostEndpoint.url} {...(config.token ? { token: config.token } : {})} onOpenTask={(taskId) => { void openScheduledTaskFromInbox(taskId) }} />}
+                        headerHelp={<ScheduledTaskInbox host={hostEndpoint.url} {...(config.token ? { token: config.token } : {})} onOpenTask={(taskId) => { void openScheduledTaskFromInbox(taskId) }} onOpenSession={selectSession} />}
                         inspector={<InspectorPanel
                         state={session.state}
                         config={session.config}
@@ -2708,6 +2710,7 @@ export function App(): JSX.Element {
                       />}
                         files={<Suspense fallback={<PageLoadingFallback compact />}><SessionFilesPanel mode="sidebar" socket={workspaceExplorerBinding.socket} workspaceId={fileExplorerWorkspaceId} sessionId={workspaceExplorerBinding.sessionId} cwd={currentCwd} fontSizePx={fileExplorerFontSizePx} /></Suspense>}
                         git={<Suspense fallback={<PageLoadingFallback compact />}><SourceControlPanel socket={workspaceExplorerBinding.socket} workspaceId={fileExplorerWorkspaceId} sessionId={workspaceExplorerBinding.sessionId} cwd={currentCwd} /></Suspense>}
+                        computer={<Suspense fallback={<PageLoadingFallback compact />}><ComputerPanel socket={session.socket} workspaceId={currentSession?.workspaceId} sessionId={activeSessionId} visible={rightPanelTab === 'computer' && inspectorOpen} /></Suspense>}
                         terminal={activeSessionId && currentSession?.workspaceId ? <Suspense fallback={<PageLoadingFallback compact />}><SessionTerminalPanel key={`${currentSession.workspaceId}:${activeSessionId}`} socket={session.socket} workspaceId={currentSession.workspaceId} sessionId={activeSessionId} cwd={currentCwd} online={sessionWorkspaceOnline} visible={rightPanelTab === 'terminal'} /></Suspense> : <div className="p-4 text-xs text-muted-foreground">{t('terminal.workspaceRequired')}</div>}
                         scheduledTasks={<ScheduledTasksPanel
                           target={activeSessionId ? { kind: 'session', sessionId: activeSessionId } : null}
@@ -2768,6 +2771,9 @@ export function App(): JSX.Element {
       </Dialog>
       <Dialog open={inspectorDrawerOpen && !wideLayout && hasSelectedSession} onOpenChange={setInspectorDrawerOpen}>
         <DialogContent
+          onEscapeKeyDown={(event) => {
+            if (event.target instanceof Element && event.target.closest('[data-computer-input="true"]')) event.preventDefault()
+          }}
           className="ak-drawer-right right-0 top-0 h-[var(--ak-viewport-h,100dvh)] max-h-[var(--ak-viewport-h,100dvh)] w-screen max-w-none !left-auto translate-x-0 translate-y-0 gap-0 overflow-hidden border-0 bg-card p-0 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] pr-[env(safe-area-inset-right)] shadow-2xl sm:w-[26rem] sm:rounded-l-3xl"
           data-testid="inspector-drawer-mobile"
         >
@@ -2777,7 +2783,7 @@ export function App(): JSX.Element {
           </DialogHeader>
           <div className="h-full min-h-0 pb-[env(safe-area-inset-bottom)]">
             <RightPanel
-              headerHelp={<ScheduledTaskInbox host={hostEndpoint.url} {...(config.token ? { token: config.token } : {})} onOpenTask={(taskId) => { void openScheduledTaskFromInbox(taskId) }} />}
+              headerHelp={<ScheduledTaskInbox host={hostEndpoint.url} {...(config.token ? { token: config.token } : {})} onOpenTask={(taskId) => { void openScheduledTaskFromInbox(taskId) }} onOpenSession={(id) => { selectSession(id); setInspectorDrawerOpen(false) }} />}
               activeTab={rightPanelTab}
               onTabChange={setRightPanelTab}
               onCollapse={() => setInspectorDrawerOpen(false)}
@@ -2806,6 +2812,7 @@ export function App(): JSX.Element {
             />}
               files={<Suspense fallback={<PageLoadingFallback compact />}><SessionFilesPanel mode="sidebar" socket={workspaceExplorerBinding.socket} workspaceId={fileExplorerWorkspaceId} sessionId={workspaceExplorerBinding.sessionId} cwd={currentCwd} fontSizePx={fileExplorerFontSizePx} /></Suspense>}
               git={<Suspense fallback={<PageLoadingFallback compact />}><SourceControlPanel socket={workspaceExplorerBinding.socket} workspaceId={fileExplorerWorkspaceId} sessionId={workspaceExplorerBinding.sessionId} cwd={currentCwd} /></Suspense>}
+              computer={<Suspense fallback={<PageLoadingFallback compact />}><ComputerPanel socket={session.socket} workspaceId={currentSession?.workspaceId} sessionId={activeSessionId} visible={rightPanelTab === 'computer' && inspectorDrawerOpen && !wideLayout} /></Suspense>}
               terminal={activeSessionId && currentSession?.workspaceId ? <Suspense fallback={<PageLoadingFallback compact />}><SessionTerminalPanel key={`${currentSession.workspaceId}:${activeSessionId}`} socket={session.socket} workspaceId={currentSession.workspaceId} sessionId={activeSessionId} cwd={currentCwd} online={sessionWorkspaceOnline} visible={rightPanelTab === 'terminal'} /></Suspense> : <div className="p-4 text-xs text-muted-foreground">{t('terminal.workspaceRequired')}</div>}
               scheduledTasks={<ScheduledTasksPanel
                 target={activeSessionId ? { kind: 'session', sessionId: activeSessionId } : null}
@@ -3013,7 +3020,7 @@ export function App(): JSX.Element {
           setWorkspaceTerminalExpanded(false)
         }
       }}>
-        <DialogContent
+        <TerminalDialogContent
           className={workspaceTerminalDialogSizeClass(workspaceTerminalExpanded)}
           data-expanded={workspaceTerminalExpanded ? 'true' : 'false'}
           data-testid="workspace-terminal-dialog"
@@ -3057,7 +3064,7 @@ export function App(): JSX.Element {
               </Suspense>
             ) : <PageLoadingFallback />}
           </div>
-        </DialogContent>
+        </TerminalDialogContent>
       </Dialog>
       <Suspense fallback={null}>
         <WorkspaceFileViewDialog

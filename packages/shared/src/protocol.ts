@@ -19,6 +19,7 @@ import type {
 import type { ContextUsageSnapshot } from './context-usage/types.js'
 import type { LLMTrace } from './log.js'
 import type { DagGraphPatch, DagRun } from './dag.js'
+import type { ComputerRequest, ComputerResponse } from './computer-use.js'
 
 export type AgentRuntimeId = 'kernel' | 'copilot'
 export type SessionExecutionMode = 'chat' | 'dag'
@@ -242,7 +243,7 @@ export type SessionReadyEvent = {
  * threshold overrides, editor language, UI density, etc.
  */
 export type ToolCardMode = 'dots' | 'standard'
-export type RightPanelTab = 'files' | 'git' | 'terminal' | 'inspector' | 'scheduledTasks'
+export type RightPanelTab = 'files' | 'git' | 'terminal' | 'inspector' | 'scheduledTasks' | 'computer'
 export type ChapterReadingMode = 'chapters' | 'continuous'
 
 export type SessionPreferences = {
@@ -1448,6 +1449,8 @@ export type ConsolidateMemoryResult = {
 // ============================================================================
 
 export type ToolCallMessage = {
+  /** Host-owned internal RPC marker; never copied from model tool arguments. */
+  origin?: 'host'
   sessionId: string
   callId: string
   name: string
@@ -2022,6 +2025,7 @@ export type RpcAck<T = undefined> =
   | { ok: false; error: string }
 
 export type DashboardClientToServerEvents = {
+  'computer:request': (payload: ComputerRequest, ack: (result: ComputerResponse) => void) => void
   'client:connection_ping': (sentAt: number, ack: (serverAt: number) => void) => void
   'client:executor_ping': (workspaceId: string, ack: (result: { rttMs?: number; error?: string }) => void) => void
   'client:user_message': (payload: ClientUserMessage, ack?: (result: RpcAck) => void) => void

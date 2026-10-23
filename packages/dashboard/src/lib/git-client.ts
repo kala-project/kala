@@ -1,5 +1,5 @@
 /**
- * Client-side git status / diff, built on top of workspace:exec.
+ * Client-side git status, diff, and read-only commit history on workspace:exec.
  *
  * Domain-of-one-package rule (see docs/planning/roadmap-notes/workspace-
  * exec-refactor.md): the executor no longer parses porcelain v1; that
@@ -16,6 +16,11 @@
  *   the empty side.
  * - Same caps: 1000 files, 512KB per diff side, 5s status timeout,
  *   8s diff timeout.
+ * - History reads 30 commits per page from a pinned HEAD, with 2MB command
+ *   output caps and 8s timeouts. Commit patches are capped at 512KB/10,000 lines and
+ *   never shown partially. Roots compare with the empty tree; merges
+ *   compare with their first parent. No shell, pager, external diff, or
+ *   text conversion is used by the history queries.
  */
 
 import type {
@@ -34,6 +39,158 @@ const DIFF_TIMEOUT_MS = 8_000
 const STATUS_MAX_BYTES = 2 * 1024 * 1024
 const DIFF_MAX_BYTES = 512 * 1024
 const MAX_STATUS_FILES = 1_000
+
+export type GitReadError = {
+  code: 'not_git_repo' | 'git_unavailable' | 'executor_unavailable' | 'timeout' | 'too_large' | 'invalid_request' | 'internal_error'
+  message: string
+}
+export type GitReadResult<T> = { ok: true; value: T } | { ok: false; error: GitReadError }
+export type GitCommit = {
+  hash: string
+  parents: string[]
+  authorName: string
+  authorEmail: string
+  authoredAt: string
+  committerName: string
+  committerEmail: string
+  committedAt: string
+  message: string
+}
+export type GitHistoryPage = { commits: GitCommit[]; anchor?: string; nextOffset?: number }
+export type GitCommitFile = { path: string; oldPath?: string; status: string }
+export type GitCommitDetails = { commit: GitCommit; files: GitCommitFile[]; filesTruncated: boolean }
+export type GitCommitPatch = { text: string; binary: boolean; truncated: boolean }
+type GitReadOptions = { workspaceId: string; cwd?: string }
+const HISTORY_PAGE_SIZE = 30
+const MAX_PATCH_LINES = 10_000
+const COMMIT_FORMAT = '%H%x00%P%x00%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B'
+const HASH_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u
+// Never invoke a configured pager, external diff helper, or text conversion.
+const READ_GIT = ['git', '--no-pager', '--literal-pathspecs', '-c', 'color.ui=false', '-c', 'core.quotePath=true', '-c', 'i18n.logOutputEncoding=UTF-8']
+
+async function gitReadCommand(socket: WorkspaceSocket, options: GitReadOptions, args: string[], maxOutputBytes = STATUS_MAX_BYTES, exitErrorCode: GitReadError['code'] = 'internal_error'): Promise<GitReadResult<string>> {
+  if (socket.connected === false) return { ok: false, error: { code: 'executor_unavailable', message: 'Workspace connection is offline.' } }
+  try {
+    const result = await workspaceExec(socket, options.workspaceId, [...READ_GIT, ...args], {
+      cwd: options.cwd, timeoutMs: DIFF_TIMEOUT_MS, maxOutputBytes,
+    })
+    if (result.error) {
+      const code = result.error.code === 'ETIMEDOUT' ? 'timeout'
+        : result.error.code === 'ENOENT' ? 'git_unavailable'
+          : result.error.code === 'EACCES' ? 'executor_unavailable' : 'internal_error'
+      return { ok: false, error: { code, message: result.error.message.slice(0, 500) } }
+    }
+    if (result.truncated) return { ok: false, error: { code: 'too_large', message: 'Git output exceeds the display limit.' } }
+    if (result.exitCode !== 0) return { ok: false, error: { code: exitErrorCode, message: result.stderr.trim().slice(0, 500) || 'Git read failed.' } }
+    return { ok: true, value: result.stdout }
+  } catch (error) {
+    return { ok: false, error: { code: 'executor_unavailable', message: error instanceof Error ? error.message.slice(0, 500) : 'Workspace Executor is unavailable.' } }
+  }
+}
+
+async function gitReadRoot(socket: WorkspaceSocket, options: GitReadOptions): Promise<GitReadResult<string>> {
+  const root = await gitReadCommand(socket, options, ['rev-parse', '--show-toplevel'], STATUS_MAX_BYTES, 'not_git_repo')
+  return root.ok ? { ok: true, value: root.value.replace(/\r?\n$/u, '') } : root
+}
+
+function invalidGitRequest(): GitReadResult<never> {
+  return { ok: false, error: { code: 'invalid_request', message: 'Invalid commit, pagination, or file selection.' } }
+}
+
+export function parseGitCommits(raw: string): GitCommit[] {
+  const fields = raw.split('\0')
+  const commits: GitCommit[] = []
+  for (let i = 0; i + 8 < fields.length; i += 9) {
+    const hash = fields[i]!.trim()
+    if (!HASH_PATTERN.test(hash)) continue
+    commits.push({
+      hash, parents: fields[i + 1]!.split(' ').filter(Boolean),
+      authorName: fields[i + 2]!, authorEmail: fields[i + 3]!, authoredAt: fields[i + 4]!,
+      committerName: fields[i + 5]!, committerEmail: fields[i + 6]!, committedAt: fields[i + 7]!,
+      message: fields[i + 8]!,
+    })
+  }
+  return commits
+}
+
+export async function gitHistory(socket: WorkspaceSocket, options: GitReadOptions & { anchor?: string; offset?: number }): Promise<GitReadResult<GitHistoryPage>> {
+  const offset = options.offset ?? 0
+  if (!Number.isSafeInteger(offset) || offset < 0 || (options.anchor && !HASH_PATTERN.test(options.anchor))) return invalidGitRequest()
+  const root = await gitReadRoot(socket, options)
+  if (!root.ok) return root
+  const rooted = { ...options, cwd: root.value }
+  let anchor = options.anchor
+  if (!anchor) {
+    const head = await gitReadCommand(socket, rooted, ['rev-parse', '--verify', '--quiet', 'HEAD'])
+    if (!head.ok) {
+      // --quiet emits no stderr only when HEAD does not yet name a commit.
+      if (head.error.code === 'internal_error' && head.error.message === 'Git read failed.') return { ok: true, value: { commits: [] } }
+      return head
+    }
+    anchor = head.value.trim()
+    if (!HASH_PATTERN.test(anchor)) return invalidGitRequest()
+  }
+  const log = await gitReadCommand(socket, rooted, ['log', '--no-show-signature', '-z', `--format=${COMMIT_FORMAT}`, `--max-count=${HISTORY_PAGE_SIZE + 1}`, `--skip=${offset}`, anchor, '--'])
+  if (!log.ok) return log
+  const commits = parseGitCommits(log.value)
+  return { ok: true, value: { commits: commits.slice(0, HISTORY_PAGE_SIZE), anchor, ...(commits.length > HISTORY_PAGE_SIZE ? { nextOffset: offset + HISTORY_PAGE_SIZE } : {}) } }
+}
+
+export function parseGitCommitFiles(raw: string): GitCommitFile[] {
+  const fields = raw.split('\0')
+  const files: GitCommitFile[] = []
+  for (let i = 0; i < fields.length - 1;) {
+    const status = fields[i++]!.trim()
+    if (!status) continue
+    const firstPath = fields[i++]
+    if (firstPath === undefined) break
+    if (/^[RC]/u.test(status)) {
+      const path = fields[i++]
+      if (path === undefined) break
+      files.push({ status, oldPath: firstPath, path })
+    } else files.push({ status, path: firstPath })
+  }
+  return files
+}
+
+export async function gitCommitDetails(socket: WorkspaceSocket, options: GitReadOptions & { hash: string }): Promise<GitReadResult<GitCommitDetails>> {
+  if (!HASH_PATTERN.test(options.hash)) return invalidGitRequest()
+  const root = await gitReadRoot(socket, options)
+  if (!root.ok) return root
+  const rooted = { ...options, cwd: root.value }
+  const metadata = await gitReadCommand(socket, rooted, ['log', '-1', '--no-show-signature', '-z', `--format=${COMMIT_FORMAT}`, options.hash, '--'])
+  if (!metadata.ok) return metadata
+  const commit = parseGitCommits(metadata.value)[0]
+  if (!commit) return invalidGitRequest()
+  // A merge is compared with its first parent; a root is compared with the empty tree.
+  const revisions = commit.parents[0] ? [commit.parents[0], commit.hash] : [commit.hash]
+  const changed = await gitReadCommand(socket, rooted, ['diff-tree', '--root', '--no-commit-id', '-r', '--no-ext-diff', '--no-textconv', '-M', '--name-status', '-z', ...revisions, '--'])
+  if (!changed.ok) return changed
+  const files = parseGitCommitFiles(changed.value)
+  return { ok: true, value: { commit, files: files.slice(0, MAX_STATUS_FILES), filesTruncated: files.length > MAX_STATUS_FILES } }
+}
+
+export async function gitCommitDiff(socket: WorkspaceSocket, options: GitReadOptions & { hash: string; file: GitCommitFile }): Promise<GitReadResult<GitCommitPatch>> {
+  const details = await gitCommitDetails(socket, options)
+  if (!details.ok) return details
+  const file = details.value.files.find((entry) => entry.path === options.file.path && entry.oldPath === options.file.oldPath)
+  if (!file) return invalidGitRequest()
+  const root = await gitReadRoot(socket, options)
+  if (!root.ok) return root
+  const commit = details.value.commit
+  const revisions = commit.parents[0] ? [commit.parents[0], commit.hash] : [commit.hash]
+  const patch = await gitReadCommand(socket, { ...options, cwd: root.value }, [
+    'diff-tree', '--root', '--no-commit-id', '-r', '-p', '-M', '--no-ext-diff', '--no-textconv', '--no-color',
+    '--unified=3', ...revisions, '--', ...(file.oldPath ? [file.oldPath] : []), file.path,
+  ], DIFF_MAX_BYTES)
+  // An incomplete patch is not presented as a complete diff.
+  if (!patch.ok) {
+    if (patch.error.code === 'too_large') return { ok: true, value: { text: '', binary: false, truncated: true } }
+    return patch
+  }
+  if (patch.value.split('\n', MAX_PATCH_LINES + 1).length > MAX_PATCH_LINES) return { ok: true, value: { text: '', binary: false, truncated: true } }
+  return { ok: true, value: { text: patch.value, binary: /^Binary files .* differ$/mu.test(patch.value) || /^GIT binary patch$/mu.test(patch.value), truncated: false } }
+}
 
 export async function gitStatus(socket: WorkspaceSocket, payload: ClientGitStatus): Promise<GitStatusResult> {
   const base = { requestId: payload.requestId, workspaceId: payload.workspaceId }

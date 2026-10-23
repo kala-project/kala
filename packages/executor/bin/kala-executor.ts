@@ -58,6 +58,7 @@ import { spawn } from 'node:child_process'
 import { homedir, hostname, tmpdir } from 'node:os'
 import { ulid } from 'ulid'
 import { parseMcpServerDeclaration, parseMcpServers, type McpServerConfig } from '../src/mcp-config.js'
+import { serveDesktopCompanion } from '../src/computer-use/companion.js'
 
 const logger = createRuntimeLogger('kala-executor')
 
@@ -164,6 +165,7 @@ Usage:
   kala-executor --host <url> [options]
   kala-executor service status|logs|start|stop|restart|uninstall [--system|--user]
   kala-executor update apply|rollback --config <path>
+  kala-executor desktop serve [--config <private-connection-file>]
 
 Options:
   -h, --help                 Show this help and exit.
@@ -430,6 +432,26 @@ async function runServiceCommand(command: Command): Promise<{ code: number; stdo
 }
 
 async function main(argv = process.argv.slice(2)): Promise<void> {
+  if (argv[0] === 'desktop') {
+    if (argv[1] !== 'serve') throw new Error('Usage: kala-executor desktop serve [--config <private-connection-file>]')
+    let configPath = join(homedir(), '.kala', 'desktop-bridge', 'connection.json')
+    for (let index = 2; index < argv.length; index += 1) {
+      if (argv[index] !== '--config' || !argv[index + 1]) throw new Error('Usage: kala-executor desktop serve [--config <private-connection-file>]')
+      configPath = resolve(argv[++index]!)
+    }
+    const companion = await serveDesktopCompanion(configPath)
+    process.stdout.write(`Kala desktop companion is sharing the current interactive user session locally.\nPrivate connection file: ${companion.configPath}\nConfigure the Executor with KALA_COMPUTER_USE_ENABLED=1 and KALA_COMPUTER_USE_COMPANION_CONFIG pointing to that file.\nStop this process to revoke access. Never share the connection file or its contents.\n`)
+    let stopping = false
+    const stop = async () => {
+      if (stopping) return
+      stopping = true
+      try { await companion.close(); process.exit(0) }
+      catch (error) { logger.error({ err: error }, 'desktop companion shutdown failed'); process.exit(1) }
+    }
+    process.once('SIGINT', () => { void stop() })
+    process.once('SIGTERM', () => { void stop() })
+    return
+  }
   const internalIndex = argv.findIndex((arg) => arg === '--internal-installer')
   if (internalIndex >= 0) {
     await runInternalInstaller()

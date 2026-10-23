@@ -50,6 +50,10 @@ import { failureForToolError } from './tool-failure.js'
 import { McpClientManager, type McpToolDescriptor } from './mcp-client.js'
 import { parseDashboardMcpServers, type DashboardMcpServerConfig, type McpServerConfig } from './mcp-config.js'
 import { readDashboardMcpServers, writeDashboardMcpServers } from './mcp-managed-config.js'
+import { ComputerUseManager, computerUseTools } from './computer-use/manager.js'
+
+let desktopManager: ComputerUseManager | undefined
+let desktopManagerUsers = 0
 
 const noopLogger: Pick<RuntimeLogger, 'debug' | 'info' | 'warn'> = {
   debug() {},
@@ -224,7 +228,9 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
   const logger = options.logger ?? noopLogger
   const sandboxRoots = options.sandboxRoots ?? []
   const sandbox: Sandbox = createSandbox({ roots: sandboxRoots })
-  const tools = createToolRegistry(options.tools ?? defaultTools)
+  const computer = desktopManager ??= new ComputerUseManager()
+  desktopManagerUsers += 1
+  const tools = createToolRegistry(options.tools ?? [...defaultTools, ...computerUseTools(computer)])
   const executorId = options.executorId ?? ulid()
   const workspaceId = options.workspaceId ?? loadOrCreateWorkspaceId()
   const workspaceName = options.workspaceName ?? hostname()
@@ -349,6 +355,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
     logger.debug({ ...summary, diagnostic: compactDiagnostic(err) }, 'host connection failure diagnostic')
   })
   socket.on('disconnect', (reason) => {
+    computer.revoke()
     logger.info({ reason }, 'socket disconnected')
     // Interactive terminals cannot be safely resumed after losing their output
     // transport. Close them eagerly so shells do not continue consuming CPU or
@@ -441,7 +448,8 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
     localInFlight.add(key)
     inFlightAcks.set(key, [ack])
     const started = performance.now()
-    logger.info({ sessionId: payload.sessionId, callId: payload.callId, tool: payload.name, internal, ...(!knownMcpToolNames.has(payload.name) ? { input: safeToolInput(payload.input) } : {}), ...(payload.cwd ? { cwd: payload.cwd } : {}) }, 'tool execution started')
+    const desktopCall = payload.name === 'computer_use' || payload.name === '__computer_use'
+    logger.info({ sessionId: payload.sessionId, callId: payload.callId, tool: payload.name, internal, ...(!desktopCall && !knownMcpToolNames.has(payload.name) ? { input: safeToolInput(payload.input) } : {}), ...(payload.cwd ? { cwd: payload.cwd } : {}) }, 'tool execution started')
     const rawResult = await runOne(tools, sandbox, controller.signal, payload, overflowConfig, options.networkPolicy, async (event) => {
       await new Promise<void>((resolve, reject) => socket.timeout(5_000).emit('executor:network_audit', event, (error, result) => error || !result?.accepted ? reject(error ?? new Error('network audit rejected')) : resolve()))
     })
@@ -449,7 +457,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
     let replyResult = result
     try {
       if (!internal) await receiptStore?.set(key, result)
-      rememberCompleted(key, result)
+      if (payload.name !== '__computer_use') rememberCompleted(key, result)
     } catch (error) {
       logger.warn({ err: error, sessionId: payload.sessionId, callId: payload.callId, tool: payload.name, durationMs: result.durationMs }, 'tool result durability failed; returning an explicit failure instead of timing out')
       replyResult = {
@@ -636,7 +644,12 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
     beginDrain() { drainRequested = true },
     resume() { drainRequested = false },
     async close() {
+      if (executorClosing) return
       executorClosing = true
+      computer.revoke()
+      desktopManagerUsers -= 1
+      const closeDesktop = desktopManagerUsers === 0
+      if (closeDesktop) desktopManager = undefined
       unsubscribeBg()
       terminals.closeAll()
       for (const key of localInFlight) {
@@ -648,6 +661,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
       await mcpConfigQueue
       await Promise.allSettled([...allMcpManagers].map((manager) => manager.close()))
       allMcpManagers.clear()
+      if (closeDesktop) await computer.close()
     },
   }
 }
@@ -697,6 +711,7 @@ function parseBuildInfo(value: unknown): BuildMetadata | null {
 }
 
 const OVERFLOW_EXEMPT_TOOLS: ReadonlySet<string> = new Set([
+  'computer_use',
   'memory',
   'bash_output',
 ])
@@ -720,6 +735,7 @@ async function runOne(
   }
   try {
     const content = await tool.run(payload.input, {
+      ...(payload.origin === 'host' ? { origin: 'host' as const } : {}),
       sessionId: payload.sessionId,
       callId: payload.callId,
       sandbox,

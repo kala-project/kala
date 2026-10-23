@@ -5,7 +5,7 @@ import '@fontsource-variable/inter/wght.css'
 import '@fontsource-variable/noto-sans-sc/wght.css'
 import '../index.css'
 import { Dialog, DialogContent, DialogDescription, DialogTitle, dialogMobileSheetClassName } from '../components/ui/dialog.js'
-import { RightPanel } from '../features/right-panel/RightPanel.js'
+import { RightPanel, type RightPanelTab } from '../features/right-panel/RightPanel.js'
 import { i18n } from '../i18n/index.js'
 import { initializeTheme } from '../lib/theme.js'
 
@@ -27,7 +27,7 @@ const runs = [
 
 function Preview(): JSX.Element {
   const [scope, setScope] = useState<Scope>('session')
-  const [tab, setTab] = useState<'scheduledTasks' | 'files' | 'git' | 'terminal' | 'inspector'>('scheduledTasks')
+  const [tab, setTab] = useState<RightPanelTab>('scheduledTasks')
   const [selectedTask, setSelectedTask] = useState<Task | null>(null)
   const [detailTab, setDetailTab] = useState<'details' | 'history'>('details')
   const [editing, setEditing] = useState(false)

@@ -107,7 +107,10 @@ integrationDescribe('Private Cloud PostgreSQL scheduled task store', () => {
 
     await second.start('unit-recovery')
     expect((await second.history('organization:acme', task.id))?.[0]).toMatchObject({ occurrenceId: run!.occurrenceId, status: 'enqueued' })
-    expect((await second.inbox('organization:acme', 'alice')).items[0]).toMatchObject({ occurrenceId: run!.occurrenceId, seen: true })
+    expect((await second.inbox('organization:acme', 'alice')).items[0]).toMatchObject({
+      occurrenceId: run!.occurrenceId, seen: true, taskLabel: 'daily report',
+      target: { kind: 'session', sessionId: 'session-a' }, claimedAt: run!.claimedAt,
+    })
     await second.close()
   })
 

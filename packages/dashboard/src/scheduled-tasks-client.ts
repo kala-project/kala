@@ -49,6 +49,11 @@ export type ScheduledTaskInboxItem = {
   updatedAt: string
   seen: boolean
   sessionId?: string
+  /** Immutable occurrence context; optional for compatibility with older Hosts. */
+  taskLabel?: string
+  target?: ScheduledTaskTarget
+  claimedAt?: string
+  error?: string
 }
 
 export type ScheduledTaskInbox = {

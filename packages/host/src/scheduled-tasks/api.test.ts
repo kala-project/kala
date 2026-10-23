@@ -139,10 +139,11 @@ describe('scheduled task product API', () => {
         generation: 1,
         ownerKey: input.ownerKey,
         createdBy: input.principal,
-        prompt: `private prompt for ${input.principal}`,
+        prompt: `Task for ${input.principal}\nprivate prompt for ${input.principal}`,
         target: { kind: 'session', sessionId: `session-${input.occurrenceId}` },
       },
       sessionId: `session-${input.occurrenceId}`,
+      ...(input.status === 'failed' ? { error: 'Executor is offline.' } : {}),
     })
     await writeFile(join(scheduledDirectory, 'state.json'), JSON.stringify({
       schemaVersion: 1,
@@ -186,9 +187,9 @@ describe('scheduled task product API', () => {
     const first = await (await fetch(`${base}/scheduled-tasks/inbox`, { headers: headers('org-a', 'member', 'alice') })).json()
     expect(first).toEqual({
       items: [
-        { occurrenceId: 'occ_alice_review', taskId: 'deleted-occ_alice_review', status: 'needs_review', scheduledFor: '2026-09-30T12:00:00.000Z', updatedAt: '2026-10-01T12:03:00.000Z', seen: false, sessionId: 'session-occ_alice_review' },
-        { occurrenceId: 'occ_alice_failed', taskId: 'deleted-occ_alice_failed', status: 'failed', scheduledFor: '2026-09-30T12:00:00.000Z', updatedAt: '2026-10-01T12:02:00.000Z', seen: false, sessionId: 'session-occ_alice_failed' },
-        { occurrenceId: 'occ_alice_enqueued', taskId: 'deleted-occ_alice_enqueued', status: 'enqueued', scheduledFor: '2026-09-30T12:00:00.000Z', updatedAt: '2026-10-01T12:01:00.000Z', seen: false, sessionId: 'session-occ_alice_enqueued' },
+        { occurrenceId: 'occ_alice_review', taskId: 'deleted-occ_alice_review', status: 'needs_review', scheduledFor: '2026-09-30T12:00:00.000Z', updatedAt: '2026-10-01T12:03:00.000Z', seen: false, sessionId: 'session-occ_alice_review', taskLabel: 'Task for alice', target: { kind: 'session', sessionId: 'session-occ_alice_review' }, claimedAt: '2026-09-30T12:00:00.000Z' },
+        { occurrenceId: 'occ_alice_failed', taskId: 'deleted-occ_alice_failed', status: 'failed', scheduledFor: '2026-09-30T12:00:00.000Z', updatedAt: '2026-10-01T12:02:00.000Z', seen: false, sessionId: 'session-occ_alice_failed', taskLabel: 'Task for alice', target: { kind: 'session', sessionId: 'session-occ_alice_failed' }, claimedAt: '2026-09-30T12:00:00.000Z', error: 'Executor is offline.' },
+        { occurrenceId: 'occ_alice_enqueued', taskId: 'deleted-occ_alice_enqueued', status: 'enqueued', scheduledFor: '2026-09-30T12:00:00.000Z', updatedAt: '2026-10-01T12:01:00.000Z', seen: false, sessionId: 'session-occ_alice_enqueued', taskLabel: 'Task for alice', target: { kind: 'session', sessionId: 'session-occ_alice_enqueued' }, claimedAt: '2026-09-30T12:00:00.000Z' },
       ],
       unreadCount: 3,
     })

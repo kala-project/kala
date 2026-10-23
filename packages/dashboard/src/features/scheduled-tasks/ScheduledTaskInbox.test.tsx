@@ -55,11 +55,35 @@ describe('ScheduledTaskInbox', () => {
     expect(await screen.findByRole('button', { name: 'Scheduled run inbox, 0 unread' })).toBeTruthy()
     fireEvent.click(within(popover).getByRole('button', { name: 'Newer' }))
 
-    const firstRun = within(popover).getAllByRole('button').find((button) => button.textContent?.includes('Run started'))
+    const firstRun = within(popover).getAllByRole('button').find((button) => button.textContent?.includes('Queued'))
     expect(firstRun).toBeTruthy()
     fireEvent.click(firstRun!)
     expect(onOpenTask).toHaveBeenCalledWith('task-1')
     expect(screen.queryByRole('dialog', { name: 'Scheduled runs' })).toBeNull()
+  })
+
+  it('shows immutable task context, dispatch times and errors without claiming agent completion, and opens the known session', async () => {
+    const item = {
+      ...makeItem(1), taskLabel: 'Morning repository review',
+      target: { kind: 'workspace', workspaceId: 'ws-1', workspaceName: 'Payments', cwd: '/repo' },
+      claimedAt: '2026-10-04T01:00:02.000Z', sessionId: 'session-1',
+    }
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockImplementation(async (_url, init) => new Response(JSON.stringify(init?.method === 'POST'
+      ? { acknowledged: ['occ-1'], unreadCount: 0 }
+      : { items: [item, { ...makeItem(3), error: 'Workspace Executor is offline.' }], unreadCount: 2 }), { status: 200 })))
+    const onOpenSession = vi.fn()
+    render(<ScheduledTaskInbox host="https://runlab.example" onOpenTask={() => {}} onOpenSession={onOpenSession} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Scheduled run inbox, 2 unread' }))
+    expect(screen.getByText('Morning repository review')).toBeTruthy()
+    expect(screen.getByText('Workspace: Payments')).toBeTruthy()
+    expect(screen.getByText('/repo')).toBeTruthy()
+    expect(screen.getByText(/Claimed for dispatch:/)).toBeTruthy()
+    expect(screen.getAllByText(/Status updated:/)).toHaveLength(2)
+    expect(screen.getByText('Message queued for the session. Completion and results are not tracked here.')).toBeTruthy()
+    expect(screen.getByText('Workspace Executor is offline.')).toBeTruthy()
+    expect(screen.queryByText('Run started')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Open conversation' }))
+    expect(onOpenSession).toHaveBeenCalledWith('session-1')
   })
 
   it('polls every 30 seconds and aborts overlapping and unmounted requests without leaving timers', () => {

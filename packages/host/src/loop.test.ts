@@ -185,6 +185,34 @@ describe('host loop', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  it.each([
+    { name: 'computer_use', ok: true, valid: true, preserved: true },
+    { name: 'read', ok: true, valid: true, preserved: false },
+    { name: 'computer_use', ok: false, valid: true, preserved: false },
+    { name: 'computer_use', ok: true, valid: false, preserved: false },
+  ])('preserves bounded image bytes only for successful desktop results: $name/$ok/$valid', async ({ name, ok, valid, preserved }) => {
+    const record = await store.create({ sessionId: 'desktop-image-result', config: createConfig({ tools: [{ ...READ, name }], systemPrompt: 'sys' }) })
+    const content = JSON.stringify({
+      kind: 'kala.computer-use.screenshot.v1',
+      screenshot: { mimeType: 'image/png', base64: 'A'.repeat(100_000), width: valid ? 1280 : 0, height: 800, originX: 0, originY: 0 },
+    })
+    const loop = runHostLoop({
+      store,
+      llm: scriptedLlm([
+        { message: { role: 'assistant', content: [{ type: 'tool_call', callId: 'desktop-image', name, input: { operation: 'screenshot' } }] } },
+        { message: { role: 'assistant', content: [{ type: 'text', text: 'Observed result.' }] } },
+      ]),
+      tools: nullTools({ callTool: async () => ({ ok, content }) }),
+      broadcast: silentBroadcast(),
+    })
+    await loop.dispatch(record.sessionId, { kind: 'user_message', text: 'Observe the authorized desktop.' })
+    const result = store.get(record.sessionId)!.state.messages.flatMap((message) => message.content).find((block) => block.type === 'tool_result' && block.callId === 'desktop-image')
+    expect(result?.type).toBe('tool_result')
+    if (result?.type !== 'tool_result') throw new Error('Desktop result was not dispatched')
+    if (preserved) expect(result.content).toBe(content)
+    else expect(result.content).toContain('omitted from tool result before entering LLM context')
+  })
+
   it('does not call the model if the Session owner gate rejects before a turn effect', async () => {
     const call = vi.fn(async () => ({ message: { role: 'assistant' as const, content: [{ type: 'text' as const, text: 'unsafe' }] } }))
     const gate = vi.fn(async () => { throw new Error('Session owner lost') })

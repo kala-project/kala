@@ -1348,6 +1348,56 @@ Returns the currently-loaded agent-type registry (built-ins + workspace `.kala/a
 
 ---
 
+### 4.5 Real-desktop control plane
+
+Dashboard sends `computer:request` with an ACK callback. The shared strict
+`ComputerRequestSchema` is authoritative. Every request contains `requestId`,
+`workspaceId`, `sessionId` and one operation:
+
+| Operation | Additional fields |
+|---|---|
+| `status` | none |
+| `start` | `consent: true`, `allowAgent: boolean` |
+| `renew`, `stop`, `capture` | `leaseId: UUID` |
+| `input` | `leaseId`, `action: ComputerInputAction` |
+| `agent` | `leaseId`, `allowAgent: boolean` |
+
+The ACK is `{requestId, status?, leaseId?, screenshot?, error?}`. Errors contain
+`{code, message}`, where code is `unavailable`, `denied`, `busy`, `expired`,
+`invalid_request`, or `execution_error`. Legacy routing/runtime middleware can
+instead reject with a generic `{ok:false,error:string}`; clients must display it.
+Status contains `available`, `platform`, `active`, `allowAgent`, optional
+`reason`, `sessionId` and `expiresAt` (Unix milliseconds).
+
+`ComputerInputAction` is a strict `type`-discriminated union:
+`move{x,y}`, `click{x,y,button,clickCount?}`, `button{x,y,button,down}`,
+`scroll{x,y,deltaX,deltaY}`, `key{key}`, `type{text}`, or
+`drag{fromX,fromY,toX,toY}`. Buttons are `left|middle|right`; click count is 1 or 2.
+Coordinates are physical desktop integers, including negative monitor origins.
+Scroll deltas are wheel units (120 per notch, positive Y down), not pixels.
+Typing is bounded to 512 UTF-16 code units and supports newline/tab but no other
+control characters.
+
+A screenshot is `{mimeType:'image/png',base64,width,height,originX,originY}`.
+Base64 is bounded to 6 MiB so the RPC fits the existing 8 MiB transport limit.
+The image occupies `(originX,originY,width,height)` on the physical desktop.
+
+The Host requires workspace/session channel access, tenant/session/workspace
+authorization, writable Dashboard access and active Runtime ownership. It derives
+the controller identity from `socket.id`, never request arguments, and forwards
+the request to the announced `__computer_use` Executor tool with `origin:'host'`.
+The Executor also requires local machine opt-in. Its single controller lease is
+bound to that socket and session, expires after 30 seconds without Dashboard
+renewal, and is revoked on disconnect. Stop and Agent pause can cancel queued
+desktop work. Manual input pauses Agent control. The model's `computer_use`
+tool can only check status, capture a screenshot or send input under a currently
+authorized Agent-enabled lease; it cannot manage authorization.
+
+Manual screenshots are transient, not transcript entries. Agent screenshots
+use the bounded JSON carrier `{kind:'kala.computer-use.screenshot.v1',screenshot}`
+inside the existing string tool result; model adapters convert it into image
+blocks. Do not send the base64 carrier as ordinary prompt text.
+
 ## 5. Executor-specific events
 
 Executor is a pure RPC responder. It receives commands from Host, executes them, and replies. It never originates state-changing events. **An executor is a daemon**: one process serves N sessions. It has no session binding at connect time; Host routes each `tool:call` to it based on the session's `workspaceId` (see §5.1).
@@ -1432,6 +1482,7 @@ or decide whether the result enters the agent transcript.
   callId: string
   name: string
   input: Record<string, unknown>
+  origin?: 'host'             // Set only by Host-internal RPC construction. Never copy model input into this authorization marker.
   cwd?: string                // session's current working directory, copied from state.cwd. Executor merges it into the tool input as the default cwd.
   timeoutMs?: number          // Host's soft deadline. Executor SHOULD respect it.
 }
@@ -1452,8 +1503,9 @@ For kernel-originated calls, Host translates the reply into
 `{ kind: 'tool_result', callId, ok, content }` and feeds it to `step`. For
 host-internal RPCs such as `__fs_list_dirs`, `__fs_read_file`, `__bg_list`, and
 `__bg_kill`, Host parses the ACK and returns it only to the original dashboard
-or HTTP caller. This distinction is host-local and MUST NOT appear in the
-executor protocol.
+or HTTP caller. Transcript routing remains Host-local. The optional `origin`
+marker authenticates management operations such as `__computer_use`; it does
+not independently decide transcript routing.
 
 #### `tool:cancel`
 
