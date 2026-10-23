@@ -1,4 +1,5 @@
 import { createServer } from 'node:http'
+import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,6 +8,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { attachExecutorInstallationRoutes } from './executor-installation-routes.js'
 import { ExecutorInstallationStore } from '../store/executor-installation.js'
 import { ExecutorIdentityStore } from '../store/executor-identity.js'
+
+const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh'
+const hasPowerShell = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'], { encoding: 'utf8' }).status === 0
 
 describe('executor installation routes', () => {
   const servers: ReturnType<typeof createServer>[] = []
@@ -114,6 +118,14 @@ describe('executor installation routes', () => {
     expect(script).toContain('/install/assets/install-executor.ps1')
     expect(script.indexOf('/install/assets/install-executor.ps1')).toBeLessThan(script.indexOf('/install/session'))
     expect(script).toContain('& $installer --internal-installer')
+    const preflight = script.indexOf('Assert-KalaInstallPrivileges $env:KALA_INSTALL_MODE')
+    expect(preflight).toBeGreaterThan(0)
+    expect(preflight).toBeLessThan(script.indexOf('Invoke-WebRequest'))
+    expect(preflight).toBeLessThan(script.indexOf('Invoke-RestMethod'))
+    const authoritativePreflight = script.indexOf('Assert-KalaInstallPrivileges $claim.env.EXECUTOR_INSTALL_MODE')
+    expect(authoritativePreflight).toBeGreaterThan(script.indexOf('Invoke-RestMethod'))
+    expect(authoritativePreflight).toBeLessThan(script.indexOf('[Environment]::SetEnvironmentVariable'))
+    expect(script).toContain('Run as administrator')
     expect(script).not.toMatch(/& \$installer\r?\n/u)
     expect(script).not.toMatch(/winget|KALA_INSTALL_NODE|kala-executor\.cjs/iu)
 
@@ -132,6 +144,42 @@ describe('executor installation routes', () => {
     expect(rejected.status).toBe(405)
     expect(rejected.headers.get('allow')).toBe('GET, HEAD')
     expect((await fetch(`${url}/install/invite.ps1?invite=forbidden`)).status).toBe(400)
+  })
+
+  it.skipIf(!hasPowerShell)('executes service elevation preflight without downloading assets or claiming a setup code', async () => {
+    const { url } = await start('single-tenant', true)
+    const script = await fetch(`${url}/install.ps1`).then((response) => response.text())
+    for (const scenario of [
+      { mode: 'service', administrator: false, blocked: true },
+      { mode: 'SERVICE', administrator: false, blocked: true },
+      { mode: 'service', administrator: true, blocked: false },
+      { mode: 'temporary', administrator: false, blocked: false },
+      { mode: '', administrator: false, blocked: false },
+    ]) {
+      const command = [
+        "$ErrorActionPreference = 'Stop'",
+        "$testPrincipal = [PSCustomObject]@{}",
+        `$testPrincipal | Add-Member -MemberType ScriptMethod -Name IsInRole -Value { return $${scenario.administrator} }`,
+        "function New-Object { param($TypeName, $ArgumentList); if ($TypeName -ne 'Security.Principal.WindowsPrincipal') { throw 'Unexpected type' }; return $testPrincipal }",
+        // Replace only the Windows identity acquisition; execute the served bootstrap.
+        "function Invoke-WebRequest { throw 'Reached installer download' }",
+        "function Invoke-RestMethod { throw 'Unexpected setup code claim' }",
+        script.replace('[Security.Principal.WindowsIdentity]::GetCurrent()', '$null'),
+      ].join('\n')
+      const result = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], {
+        encoding: 'utf8',
+        env: { ...process.env, KALA_INSTALL_MODE: scenario.mode, KALA_SETUP_CODE: 'ABCDEF1234' },
+      })
+      expect(result.status, result.stderr).not.toBe(0)
+      const output = `${result.stdout}\n${result.stderr}`
+      expect(output).not.toContain('Unexpected setup code claim')
+      if (scenario.blocked) {
+        expect(output).toContain('requires an elevated Administrator PowerShell')
+        expect(output).not.toContain('Reached installer download')
+      } else {
+        expect(output).toContain('Reached installer download')
+      }
+    }
   })
 
   it('rejects invalid input but never exposes server filesystem paths after a persistence fault', async () => {

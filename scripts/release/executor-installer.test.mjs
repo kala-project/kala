@@ -132,6 +132,53 @@ test('release builder emits the four-target RC manifest with the Windows native 
   assert.doesNotMatch(builder, /writeExecutorUpdateManifest/)
 })
 
+test('Windows installer architecture detection supports PowerShell 5.1 without RuntimeInformation', () => {
+  const ps1 = generateExecutorInstallerPowerShell({ repo: 'owner/repo', tag: 'v1.2.3' })
+  assert.doesNotMatch(ps1, /Runtime\.InteropServices|::OSArchitecture/u)
+  assert.match(ps1, /\[Environment\]::OSVersion\.Platform -ne \[PlatformID\]::Win32NT/u)
+  assert.match(ps1, /\$nativeArchitecture = if \(\$env:PROCESSOR_ARCHITEW6432\) \{ \$env:PROCESSOR_ARCHITEW6432 \} else \{ \$env:PROCESSOR_ARCHITECTURE \}/u)
+  assert.match(ps1, /-not \[Environment\]::Is64BitOperatingSystem -or \$nativeArchitecture -ine 'AMD64'/u)
+})
+
+const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh'
+const hasPowerShell = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'], { encoding: 'utf8' }).status === 0
+
+test('Windows architecture guard accepts AMD64 and rejects unsupported native architectures', { skip: !hasPowerShell }, () => {
+  const ps1 = generateExecutorInstallerPowerShell({ repo: 'owner/repo', tag: 'v1.2.3' })
+  const start = ps1.indexOf('if ([Environment]::OSVersion.Platform')
+  const end = ps1.indexOf("$asset = 'kala-executor-win32-x64.exe'")
+  assert.ok(start > 0 && end > start)
+  const guard = ps1.slice(start, end)
+    .replace('[Environment]::OSVersion.Platform', '$testOSPlatform')
+    .replace('[Environment]::Is64BitOperatingSystem', '$testOS64Bit')
+  for (const scenario of [
+    { name: 'reported PowerShell 5.1 AMD64', process: 'AMD64', native: '', os64: true, accepted: true },
+    { name: 'case-insensitive AMD64', process: 'amd64', native: '', os64: true, accepted: true },
+    { name: '32-bit PowerShell on x64', process: 'x86', native: 'AMD64', os64: true, accepted: true },
+    { name: 'native ARM64', process: 'ARM64', native: '', os64: true, accepted: false },
+    { name: 'AMD64 emulation on ARM64', process: 'AMD64', native: 'ARM64', os64: true, accepted: false },
+    { name: '32-bit Windows', process: 'x86', native: '', os64: false, accepted: false },
+    { name: '32-bit OS with inconsistent environment', process: 'AMD64', native: '', os64: false, accepted: false },
+    { name: 'unknown native architecture', process: '', native: '', os64: true, accepted: false },
+    { name: 'non-Windows OS', process: 'AMD64', native: '', os64: true, windows: false, accepted: false },
+  ]) {
+    const command = [
+      "$ErrorActionPreference = 'Stop'",
+      `$testOSPlatform = [PlatformID]::${scenario.windows === false ? 'Unix' : 'Win32NT'}`,
+      `$testOS64Bit = $${scenario.os64}`,
+      guard,
+      "Write-Output 'architecture accepted'",
+    ].join('\n')
+    const result = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], {
+      encoding: 'utf8',
+      env: { ...process.env, PROCESSOR_ARCHITECTURE: scenario.process, PROCESSOR_ARCHITEW6432: scenario.native },
+    })
+    assert.equal(result.status === 0, scenario.accepted, `${scenario.name}: ${result.stdout}\n${result.stderr}`)
+    if (scenario.accepted) assert.match(result.stdout, /architecture accepted/u)
+    else assert.match(result.stderr, /This installer requires Windows/u)
+  }
+})
+
 test('generated run.sh executes the checksummed Node fallback from a real release directory', () => {
   const dir = mkdtempSync(join(tmpdir(), 'runlab-installer-e2e-'))
   const release = join(dir, 'release')

@@ -274,6 +274,13 @@ function renderShellBootstrap(origin: string): string {
 }
 function renderPowerShellBootstrap(origin: string): string {
   return `$ErrorActionPreference = 'Stop'
+function Assert-KalaInstallPrivileges([string]$mode) {
+  if ($mode -eq 'service') {
+    $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Windows service installation requires an elevated Administrator PowerShell. Open PowerShell with Run as administrator, then run the installation command again.' }
+  }
+}
+Assert-KalaInstallPrivileges $env:KALA_INSTALL_MODE
 $code = $env:KALA_SETUP_CODE
 if ([string]::IsNullOrWhiteSpace($code)) { $code = Read-Host 'Kala setup code' }
 if ([string]::IsNullOrWhiteSpace($code)) { throw 'Kala setup code is required' }
@@ -286,6 +293,7 @@ try {
   Write-Host '[2/4] Validating setup code...'
   $claim = Invoke-RestMethod -Method Post -ContentType 'application/json' -Headers @{ Accept = 'application/json' } -Body (@{ setupCode = $code } | ConvertTo-Json -Compress) -Uri ${quotePs(`${origin}/install/session`)}
   if ($null -eq $claim -or $null -eq $claim.env) { throw 'Kala Host returned an invalid installation session' }
+  Assert-KalaInstallPrivileges $claim.env.EXECUTOR_INSTALL_MODE
   $properties = $claim.env.PSObject.Properties
   if ($null -eq $properties -or $properties.Count -eq 0) { throw 'Kala Host returned an empty installation environment' }
   $properties | ForEach-Object { [Environment]::SetEnvironmentVariable($_.Name, [string]$_.Value, 'Process') }

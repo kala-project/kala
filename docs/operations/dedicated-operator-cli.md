@@ -61,6 +61,39 @@ Rollback names the completed deployment whose verified predecessor is required.
 The Supervisor owns continuation, admission reconciliation, candidate activation,
 route fencing, health verification, and rollback recovery.
 
+### Windows Workspace installers
+
+A Linux-only local Runtime build does not include native Windows Executor assets.
+Updating Runtime or Dashboard alone therefore does not enable Windows in Add
+Workspace. `/api/executor-install-capabilities` reports Windows available only
+when the Host can verify `kala-executor-win32-x64.exe`,
+`kala-executor-service-host-win32-x64.exe`, `node-pty-win32-x64.tar.gz`, and
+`install-executor.ps1` against its served `SHA256SUMS`.
+
+For local builds, provision a persistent, read-only installer directory from a
+verified official release and set `KALA_RELEASE_ASSETS_DIR` for both Runtime
+slots through the private environment configuration or a systemd template
+drop-in. Include the matching Linux/macOS installers and Executor assets as well:
+an external checksum index must not describe different versions of fallback
+embedded assets. Keep this directory outside immutable Runtime release roots,
+and activate configuration changes through a Supervisor-owned deployment.
+Verify Windows readiness and the actual served payload hashes after cutover;
+never remove the Dashboard availability guard to compensate for missing assets.
+The Windows installer supports Windows PowerShell 5.1: architecture detection uses
+the native Windows environment and OS bitness, not the optional .NET
+`RuntimeInformation.OSArchitecture` property. An AMD64 OS is supported even from
+a 32-bit PowerShell process; ARM64 and 32-bit Windows remain unsupported.
+Windows **service** installation requires an elevated PowerShell window, even
+when the signed-in account is named `admin` or belongs to Administrators. Open
+PowerShell with **Run as administrator**, then paste the generated command.
+The bootstrap checks the command's service-mode hint before downloads or setup
+code consumption and rechecks the authoritative mode returned by the Host before
+starting the Executor. Temporary mode does not require elevation. A setup code
+already claimed by an older installer must be regenerated after a failed attempt.
+Script and Linux-side checks do not establish Windows service acceptance: that
+requires a real Windows run covering installation, SCM startup, Host connection,
+ConPTY operation, and uninstallation.
+
 ## 4. Backup state machine
 
 Backups are offline-consistent transactions, not best-effort live tar files:

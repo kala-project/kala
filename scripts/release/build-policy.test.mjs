@@ -114,6 +114,7 @@ test('release verifier enforces the exact four-platform default while builder ex
   for (const section of ['Improvements', 'Fixes', 'Known issues', 'Installation', 'Supported platforms', 'Verification', 'Full changelog']) assert.match(builder, new RegExp(section))
   assert.match(verifier, /supportedNativeTargets = \['linux-x64', 'darwin-x64', 'darwin-arm64', 'win32-x64'\]/)
   assert.match(verifier, /acceptedWindows/)
+  assert.match(verifier, /const acceptedWindows = new Set\(\[[\s\S]*?\n    WINDOWS_PORTABLE_MANAGER,/u)
   assert.match(verifier, /linux-arm64/)
   assert.match(verifier, /assertSupportedReleaseAssetName\(asset\?\.path, 'embedded Host assets'\)/)
   assert.match(verifier, /executor-update-/)

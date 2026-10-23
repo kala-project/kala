@@ -11,6 +11,17 @@ const roots: string[] = []
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 describe('installer flow', () => {
+  it('checks Windows service elevation before progress, pairing, identity creation, or token redemption', () => {
+    const cli = readFileSync(new URL('../bin/kala-executor.ts', import.meta.url), 'utf8')
+    const flow = cli.slice(cli.indexOf('async function runInternalInstaller()'), cli.indexOf('async function runInviteInstaller()'))
+    expect(flow).toContain("if (env.EXECUTOR_INSTALL_MODE === 'service' && process.platform === 'win32')")
+    const check = flow.indexOf('await assertElevatedWindowsAdministrator()')
+    expect(check).toBeGreaterThan(0)
+    for (const operation of ['await reportInstallation(', 'await waitForApproval(', 'loadOrCreateWorkspaceId()', 'await redeemInstallation(']) {
+      expect(flow.indexOf(operation)).toBeGreaterThan(check)
+    }
+  })
+
   it('validates environment and writes private sessions atomically', () => {
     const env = bootstrapEnvironment({ HOST_URL: 'https://host', EXECUTOR_INSTALL_ID: 'inst', EXECUTOR_INSTALL_BOOTSTRAP: 'boot', EXECUTOR_INSTALL_MODE: 'service', EXECUTOR_INSTALL_ROOT: '/repo', EXECUTOR_PRIVILEGE_MODE: 'privileged' })
     expect(env.EXECUTOR_INSTALL_MODE).toBe('service')

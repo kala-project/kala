@@ -481,6 +481,7 @@ function assertSupportedReleaseAssetName(name, location) {
     'node-pty-win32-x64.tar.gz',
     WINDOWS_SERVICE_HOST.asset,
     'install-executor.ps1',
+    WINDOWS_PORTABLE_MANAGER,
     'kala-copilot-runtime-win32-x64',
     'kala-copilot-runtime-node-win32-x64.node',
   ])

@@ -257,6 +257,9 @@ async function acquireLocalLock(
 async function runInternalInstaller(): Promise<void> {
   const env = bootstrapEnvironment(process.env)
   assertSupportedInstallerPrivileges(env, process.getuid?.() === 0)
+  if (env.EXECUTOR_INSTALL_MODE === 'service' && process.platform === 'win32') {
+    await assertElevatedWindowsAdministrator()
+  }
   await reportInstallation(env, 'asset_verified')
   await reportInstallation(env, 'pairing_pending')
   await waitForApproval(env)

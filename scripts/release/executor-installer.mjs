@@ -113,8 +113,11 @@ if ($env:KALA_RELEASE_TRUST -eq 'host') {
   $publicRelease = $false
   $hostRelease = $true
 }
-if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) { throw 'This installer requires Windows' }
-if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.InteropServices.Architecture]::X64) { throw 'This installer requires Windows x64' }
+if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'This installer requires Windows' }
+# Windows PowerShell 5.1 can expose RuntimeInformation without OSArchitecture.
+# PROCESSOR_ARCHITEW6432 identifies the native OS when running under emulation.
+$nativeArchitecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+if (-not [Environment]::Is64BitOperatingSystem -or $nativeArchitecture -ine 'AMD64') { throw "This installer requires Windows x64 (detected native architecture: $nativeArchitecture)" }
 $asset = 'kala-executor-win32-x64.exe'
 $companion = 'node-pty-win32-x64.tar.gz'
 $serviceHost = '${WINDOWS_SERVICE_HOST.asset}'
