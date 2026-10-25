@@ -2004,6 +2004,14 @@ export async function startHostServer(
           contextSnapshot,
           ...(record.turnStartedAt ? { turnStartedAt: record.turnStartedAt } : {}),
         })
+        // Copilot sends finish asynchronously, outside the kernel Loop's
+        // broadcast hook. Wake accepted follow-ups after the durable resting
+        // projection, allowing the current SDK/projection tail to unwind first.
+        if (!closed && isRestingStatus(state.status) && messageQueues.pending(record.sessionId) > 0) {
+          setTimeout(() => {
+            void messageQueues.drain(record.sessionId)
+          }, 0)
+        }
       },
       onTokenDelta(sessionId, text) {
         broadcast.onTokenDelta?.(sessionId, text)

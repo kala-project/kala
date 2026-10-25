@@ -6484,6 +6484,79 @@ describe('wire protocol', () => {
     dashboard.close()
   })
 
+  it.each([false, true])('drains Copilot queued follow-ups in FIFO order after completion (dashboard disconnected: %s)', async (disconnect) => {
+    await server.close()
+    const sessionId = 'wire-copilot-queue-completion'
+    const seen: string[] = []
+    const listeners = new Set<(event: unknown) => void>()
+    let releaseFirst!: () => void
+    const firstTurn = new Promise<void>((resolve) => { releaseFirst = resolve })
+    copilotSdk.createSession = () => ({
+      rpc: { model: { async getCurrent() { return { modelId: 'gpt-5.4-mini' } } } },
+      async getEvents() { return [] },
+      on(listener: (event: unknown) => void) {
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      },
+      async sendAndWait(message: { prompt: string }) {
+        seen.push(message.prompt)
+        const turn = seen.length
+        if (turn === 1) await firstTurn
+        return { id: `copilot-queue-answer-${turn}`, type: 'assistant.message', data: { content: `answer ${turn}` } }
+      },
+      async abort() { releaseFirst() },
+      async setModel() {},
+      async disconnect() {},
+    })
+    const http = createServer()
+    await new Promise<void>((resolve) => http.listen(0, resolve))
+    server = await startHostServer({
+      port: (http.address() as AddressInfo).port,
+      sessionsDir: dir,
+      defaultConfig: config,
+      httpServer: http,
+      llm: scriptedLlm(),
+      copilot: { enabled: true },
+    })
+    url = `http://localhost:${server.port}`
+    await server.store.create({
+      sessionId, agentRuntime: 'copilot', agentRuntimeVersion: '1.0.11', externalSessionId: sessionId, config,
+    })
+    const dashboard: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(`${url}/dashboard`, {
+      transports: ['websocket'], forceNew: true, reconnection: false,
+      auth: { sessionId, role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+    })
+    try {
+      await new Promise<SessionReadyEvent>((resolve) => dashboard.once('session:ready', resolve))
+      for (const [index, text] of ['first', 'q-one', 'q-two'].entries()) {
+        expect(await dashboard.timeout(2000).emitWithAck('client:user_message', {
+          intent: 'text', sessionId, text, mode: index === 0 ? 'steer' : 'queue', operationId: `copilot-queue-${index}`,
+        })).toEqual({ ok: true })
+        if (index === 0) await vi.waitFor(() => expect(seen).toEqual(['first']))
+      }
+      expect((await loadPersistedMessageQueueState(server.store, sessionId)).items.map((item) => item.text)).toEqual(['q-one', 'q-two'])
+      // A raw SDK idle event is not permission to overlap an unfinished sendAndWait.
+      for (const listener of listeners) listener({ id: 'intermediate-idle', type: 'session.idle', data: {} })
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      expect(seen).toEqual(['first'])
+      expect(server.store.get(sessionId)!.state.status).toBe('thinking')
+      if (disconnect) dashboard.close()
+      releaseFirst()
+      // No reconnect, refresh or additional message may be needed to wake the queue.
+      await vi.waitFor(() => expect(seen).toEqual(['first', 'q-one', 'q-two']), { timeout: 2000, interval: 10 })
+      await vi.waitFor(async () => {
+        expect(server.store.get(sessionId)!.state.status).toBe('done')
+        expect((await loadPersistedMessageQueueState(server.store, sessionId)).items).toEqual([])
+      }, { timeout: 2000, interval: 10 })
+      const state = server.store.get(sessionId)!.state
+      expect(state.messages.filter((message) => message.role === 'user')).toHaveLength(3)
+      expect(state.messages.filter((message) => message.role === 'assistant')).toHaveLength(3)
+    } finally {
+      releaseFirst()
+      dashboard.close()
+    }
+  })
+
   it('queues user messages while a turn is running and dispatches them after rest', async () => {
     const sessionId = 'wire-message-queue'
     await server.close()
