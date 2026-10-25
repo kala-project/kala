@@ -530,7 +530,13 @@ describe('Composer', () => {
     renderComposer({ onSubmit })
 
     fireEvent.click(screen.getByTestId('send-mode-toggle'))
-    fireEvent.click(screen.getByTestId('send-mode-queue'))
+    // The composer lives inside a transformed flip face and clipped panels.
+    // Synthetic clicks alone succeed even when the real menu is unpainted.
+    const menu = screen.getByTestId('send-mode-menu')
+    expect(menu.getAttribute('popover')).toBe('manual')
+    expect(menu.className).toContain('fixed')
+    fireEvent.pointerDown(screen.getByTestId('send-mode-queue'))
+    expect(screen.queryByTestId('send-mode-menu')).toBeNull()
     fireEvent.change(screen.getByTestId('composer-input'), {
       target: { value: 'later' },
     })

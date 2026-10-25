@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Archive, ArrowRight, AtSign, Bot, Check, ChevronDown, ChevronUp, Cloud, CornerDownRight, Eraser, FileText, GripVertical, ListChecks, LoaderCircle, LockKeyhole, Maximize2, Mic, Navigation, PanelTopClose, PanelTopOpen, Paperclip, Pencil, Plus, RefreshCw, ShieldCheck, SlidersHorizontal, Square, Trash2, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
@@ -1966,14 +1966,63 @@ function SendButton({
   const { t } = useTranslation()
   const [menuOpen, setMenuOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const showingStop = Boolean(stop)
+  useLayoutEffect(() => {
+    if (!menuOpen) return
+    if (showingStop || !allowQueue) {
+      setMenuOpen(false)
+      return
+    }
+    const menu = menuRef.current
+    const anchor = containerRef.current
+    if (!menu || !anchor) return
+    // Match HelpHint's native top layer: escape flip transforms and panel
+    // clipping without moving the menu out of its face's inert/focus scope.
+    menu.setAttribute('popover', 'manual')
+    menu.showPopover?.()
+    const rect = anchor.getBoundingClientRect()
+    const width = Math.min(288, window.innerWidth - 16)
+    const above = Math.max(0, rect.top - 16)
+    const below = Math.max(0, window.innerHeight - rect.bottom - 16)
+    menu.style.width = `${width}px`
+    const useAbove = above >= Math.min(menu.getBoundingClientRect().height, below)
+    menu.style.maxHeight = `${useAbove ? above : below}px`
+    menu.style.left = `${Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8))}px`
+    menu.style.top = `${useAbove ? Math.max(8, rect.top - menu.getBoundingClientRect().height - 8) : rect.bottom + 8}px`
+    return () => { if (menu.isConnected) menu.hidePopover?.() }
+  }, [menuOpen, showingStop, allowQueue])
   useEffect(() => {
     if (!menuOpen) return
-    const onDocClick = (e: MouseEvent): void => {
+    const onDocClick = (e: Event): void => {
       if (!containerRef.current) return
       if (!containerRef.current.contains(e.target as Node)) setMenuOpen(false)
     }
+    const close = (): void => setMenuOpen(false)
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      if (menuRef.current?.contains(document.activeElement)) {
+        containerRef.current?.querySelector<HTMLButtonElement>('[data-testid="send-mode-toggle"]')?.focus()
+      }
+      close()
+    }
+    const onScroll = (event: Event): void => {
+      if (!(event.target instanceof Node) || !menuRef.current?.contains(event.target)) close()
+    }
     document.addEventListener('mousedown', onDocClick)
-    return () => document.removeEventListener('mousedown', onDocClick)
+    document.addEventListener('focusin', onDocClick)
+    window.addEventListener('keydown', onKey, true)
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', close)
+    return () => {
+      document.removeEventListener('mousedown', onDocClick)
+      document.removeEventListener('focusin', onDocClick)
+      window.removeEventListener('keydown', onKey, true)
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', close)
+    }
   }, [menuOpen])
 
   const ModeIcon = sendMode === 'steer' ? Navigation : ListChecks
@@ -2046,7 +2095,9 @@ function SendButton({
       </button> : null}
       {menuOpen ? (
         <div
-          className="absolute right-0 bottom-full z-20 mb-2 min-w-[15rem] w-[min(18rem,calc(100vw-1rem))] max-w-[calc(100vw-1rem)] overflow-hidden overflow-x-hidden rounded-lg border border-border/60 bg-popover text-xs shadow-lg"
+          ref={menuRef}
+          className="fixed z-50 m-0 max-w-[calc(100vw-1rem)] overflow-y-auto overflow-x-hidden rounded-lg border border-border/60 bg-popover text-xs shadow-lg"
+          style={{ inset: 'auto', margin: 0 }}
           role="listbox"
           data-testid="send-mode-menu"
         >
