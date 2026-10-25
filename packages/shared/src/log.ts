@@ -29,6 +29,8 @@ export type HeaderEntry = {
   externalSessionId?: string
   parentSessionId?: string
   parentCursor?: number
+  /** Durable delegation authority depth. Fork ancestry alone does not increment it. */
+  delegationDepth?: number
   /** Parent tool_call id when this session was spawned by the `agent` tool. */
   parentCallId?: string
   /** Display/type label requested for the sub-agent, when provided. */

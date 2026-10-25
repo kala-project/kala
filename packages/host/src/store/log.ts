@@ -46,6 +46,7 @@ export type WriteHeaderParams = {
   initialState: AgentState
   parentSessionId?: string
   parentCursor?: number
+  delegationDepth?: number
   parentCallId?: string
   agentType?: string
   subAgentStartedAt?: string
@@ -77,6 +78,9 @@ export async function writeHeader(params: WriteHeaderParams): Promise<HeaderEntr
       : {}),
     ...(params.parentCursor !== undefined
       ? { parentCursor: params.parentCursor }
+      : {}),
+    ...(params.delegationDepth !== undefined
+      ? { delegationDepth: params.delegationDepth }
       : {}),
     ...(params.parentCallId !== undefined
       ? { parentCallId: params.parentCallId }

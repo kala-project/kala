@@ -1,7 +1,9 @@
+import { createElement } from 'react'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { createSessionWithAck, useDashboardControlSocket, useSession } from './session.js'
+import { createSessionWithAck, SessionInspectionContext, useDashboardControlSocket, useSession } from './session.js'
+import { useSubAgentSession } from './features/chat/useSubAgentSession.js'
 import { workspaceExec } from './lib/workspace-exec.js'
 
 const sockets: FakeSocket[] = []
@@ -95,6 +97,32 @@ describe('routed Session hook', () => {
       .toHaveBeenCalledWith('client:create_session', expect.objectContaining({ sessionId: 'placed-session' }))
     expect(placement.closed).toBe(true)
     expect(shared.emit).not.toHaveBeenCalled()
+  })
+
+  it.each(['dedicated', 'private-cloud'])('inspects a %s child on its own lazy owner connection, never the parent capability', async (mode) => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(routeResponse('child-ticket'))
+    vi.stubGlobal('fetch', fetchMock)
+    const control = new FakeSocket()
+    const parent = new FakeSocket()
+    const transport = { host: window.location.origin, socket: control as never, sessionScoped: mode === 'dedicated', sessionRouteTickets: mode === 'private-cloud' }
+    const view = renderHook(({ expanded }) => useSubAgentSession({
+      socket: parent as never, parentSessionId: 'parent', parentCallId: 'call', initialChildSessionId: 'child', mirrorMessages: expanded,
+    }), { initialProps: { expanded: false }, wrapper: ({ children }) => createElement(SessionInspectionContext.Provider, { value: transport }, children) })
+    expect(sockets).toHaveLength(0)
+    view.rerender({ expanded: true })
+    await waitFor(() => expect(sockets).toHaveLength(1))
+    const child = sockets[0]!
+    expect(socketOptions[0]).toMatchObject({ forceNew: true, transports: ['websocket'], auth: { sessionId: 'child' } })
+    expect(parent.emit.mock.calls.some(([name]) => name === 'client:subscribe_channels')).toBe(false)
+    if (mode === 'private-cloud') expect(JSON.parse(fetchMock.mock.calls[0]![1]!.body as string)).toEqual({ sessionId: 'child' })
+    else expect(fetchMock).not.toHaveBeenCalled()
+    act(() => child.serverEmit('session:error', { sessionId: 'child', scope: 'host', message: 'child owner unavailable' }))
+    await waitFor(() => expect(view.result.current.transcriptError).toBe('child owner unavailable'))
+    view.rerender({ expanded: false })
+    expect(child.closed).toBe(true)
+    expect(parent.closed).toBe(false)
+    expect(control.closed).toBe(false)
+    view.unmount()
   })
 
   it('waits for its ticket, binds an independent websocket, then refreshes the ticket on disconnect', async () => {

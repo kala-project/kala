@@ -28,7 +28,7 @@ import {
 } from '@agent-kernel/shared/enhancement'
 import { ulid } from 'ulid'
 
-import type { SessionRecord, SessionStore } from '../store/session.js'
+import { effectiveDelegationDepth, type SessionRecord, type SessionStore } from '../store/session.js'
 import type { HostLoopDeps, LoopHandle, ModelResolver } from '../loop-types.js'
 import { dispatchOne } from '../loop.js'
 
@@ -255,7 +255,7 @@ export async function runAgentTool(
   if (typeof prompt !== 'string' || prompt.trim().length === 0) {
     return { ok: false, content: 'agent prompt is required' }
   }
-  const depth = depthOf(deps.store, parent)
+  const depth = effectiveDelegationDepth(parent)
   const maxDepth = Math.min(parent.config.maxAgentDepth ?? DEFAULT_MAX_AGENT_DEPTH, DEFAULT_MAX_AGENT_DEPTH)
   const maxFanOut = parent.config.maxAgentFanOut ?? DEFAULT_MAX_AGENT_FANOUT
   const admission = reserveSubAgentSlot(parentSessionId, effect.callId, maxFanOut)
@@ -336,6 +336,7 @@ export async function runAgentTool(
       ...(parent.agentRuntime !== 'kernel' ? { externalSessionId: childSessionId } : {}),
       parentSessionId,
       parentCursor: parent.state.cursor,
+      delegationDepth: depth + 1,
       parentCallId: effect.callId,
       ...(agentType !== undefined ? { agentType } : {}),
       subAgentStartedAt: startedAt.toISOString(),
@@ -655,16 +656,6 @@ function filteredAgentConfig(
     maxAgentDepth: Math.min(config.maxAgentDepth ?? DEFAULT_MAX_AGENT_DEPTH, DEFAULT_MAX_AGENT_DEPTH),
     tools: config.tools.filter((t) => t.name !== AGENT_TOOL_NAME && (!allowed || allowed.has(t.name))),
   }
-}
-
-function depthOf(store: SessionStore, record: SessionRecord): number {
-  let depth = 0
-  let cur: SessionRecord | undefined = record
-  while (cur?.parentSessionId) {
-    depth++
-    cur = store.get(cur.parentSessionId)
-  }
-  return depth
 }
 
 function finalAssistantText(state: AgentState): string {

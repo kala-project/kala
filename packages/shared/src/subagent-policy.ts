@@ -57,11 +57,13 @@ export type SubAgentRoleTemplate = {
   purpose: string
   defaultAllowedTools: readonly string[]
   defaultMaxTurns: number
+  /** Legacy workload-sizing guidance, never an explicit caller-budget floor. */
   minimumMaxTurns: number
   maximumMaxTurns: number
   defaultIdleTimeoutMs: number
   defaultToolIdleTimeoutMs: number
   defaultTimeoutMs: number
+  /** Legacy workload-sizing guidance, never an explicit caller-budget floor. */
   minimumTimeoutMs: number
   maximumTimeoutMs: number
   defaultGracePeriodMs: number
@@ -183,23 +185,21 @@ export function resolveSubAgentPolicy({
   if (input?.maxTurns !== undefined && input.maxTurns > bounds.maximumMaxTurns) {
     maxTurns = bounds.maximumMaxTurns
     reasons.push('policy_max_turns_capped')
-  } else if (input?.maxTurns !== undefined && input.maxTurns < bounds.minimumMaxTurns) {
-    maxTurns = bounds.minimumMaxTurns
-    reasons.push('policy_max_turns_raised')
   }
 
   let timeoutMs = input?.timeoutMs ?? bounds.defaultTimeoutMs
   if (input?.timeoutMs !== undefined && input.timeoutMs > bounds.maximumTimeoutMs) {
     timeoutMs = bounds.maximumTimeoutMs
     reasons.push('policy_timeout_capped')
-  } else if (input?.timeoutMs !== undefined && input.timeoutMs < bounds.minimumTimeoutMs) {
-    timeoutMs = bounds.minimumTimeoutMs
-    reasons.push('policy_timeout_raised')
   }
 
   const idleTimeoutMs = bounds.defaultIdleTimeoutMs
   const toolIdleTimeoutMs = bounds.defaultToolIdleTimeoutMs
-  const gracePeriodMs = bounds.defaultGracePeriodMs
+  // Caller-specified ceilings must not expand to a role floor or an extra
+  // five-minute grace. Defaults retain their existing long-work behavior.
+  const gracePeriodMs = input?.maxTurns !== undefined || input?.timeoutMs !== undefined
+    ? 0
+    : bounds.defaultGracePeriodMs
   const expectedOutput = input?.expectedOutput ?? template?.defaultExpectedOutput
 
   if (

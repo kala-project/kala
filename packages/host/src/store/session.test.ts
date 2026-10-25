@@ -1124,6 +1124,9 @@ describe('SessionStore.ensure', () => {
     const persisted = await readSessionLog(created.logPath)
     expect(persisted.header.config.tools.map((tool) => tool.name)).toEqual(['read'])
 
+    const cached = await writer.load(sessionId, { runtimeConfig: newConfig })
+    expect(cached.config.tools.map((tool) => tool.name)).toEqual(['read_file'])
+
     const reader = new SessionStore(dir, { runtimeConfig: newConfig })
     const loaded = await reader.load(sessionId)
     expect(loaded.config.tools.map((tool) => tool.name)).toEqual(['read_file'])
@@ -1134,6 +1137,104 @@ describe('SessionStore.ensure', () => {
     if (effects[0]?.kind === 'call_llm') {
       expect(effects[0].tools.map((tool) => tool.name)).toEqual(['read_file'])
     }
+  })
+
+  it('does not expand child tools when applying runtime config from cache or disk', async () => {
+    const persistedRead = { name: 'read_file', description: 'persisted read', inputSchema: { type: 'object' }, requiresApproval: false }
+    const runtimeRead = { name: 'read_file', description: 'runtime read', inputSchema: { type: 'object' }, requiresApproval: false }
+    const runtimeShell = { name: 'shell', description: 'runtime shell', inputSchema: { type: 'object' }, requiresApproval: false }
+    const runtimeAgent = { name: 'agent', description: 'runtime agent', inputSchema: { type: 'object' }, requiresApproval: false }
+    const childConfig = createConfig({ tools: [persistedRead], systemPrompt: 'child' })
+    const emptyChildConfig = createConfig({ tools: [], systemPrompt: 'empty child' })
+    const runtimeConfig = createConfig({ tools: [runtimeRead, runtimeShell, runtimeAgent], systemPrompt: 'runtime' })
+    const writer = new SessionStore(dir)
+    await writer.create({ sessionId: 'child-runtime-tools', config: childConfig, parentSessionId: 'parent' })
+    await writer.create({ sessionId: 'empty-child-runtime-tools', config: emptyChildConfig, parentSessionId: 'parent' })
+
+    const cachedChild = await writer.load('child-runtime-tools', { runtimeConfig })
+    const cachedEmptyChild = await writer.load('empty-child-runtime-tools', { runtimeConfig })
+    expect(cachedChild.config.tools.map((tool) => [tool.name, tool.description])).toEqual([['read_file', 'runtime read']])
+    expect(cachedEmptyChild.config.tools).toEqual([])
+
+    const reader = new SessionStore(dir, { runtimeConfig })
+    const restoredChild = await reader.load('child-runtime-tools')
+    const restoredEmptyChild = await reader.load('empty-child-runtime-tools')
+    expect(restoredChild.config.tools.map((tool) => [tool.name, tool.description])).toEqual([['read_file', 'runtime read']])
+    expect(restoredEmptyChild.config.tools).toEqual([])
+  })
+
+  it('persists delegation depth across repeated forks and preserves root versus child runtime tool authority', async () => {
+    const persistedRead = { name: 'read_file', description: 'persisted read', inputSchema: { type: 'object' }, requiresApproval: false }
+    const runtimeRead = { name: 'read_file', description: 'runtime read', inputSchema: { type: 'object' }, requiresApproval: false }
+    const runtimeShell = { name: 'shell', description: 'runtime shell', inputSchema: { type: 'object' }, requiresApproval: false }
+    const runtimeConfig = createConfig({ tools: [runtimeRead, runtimeShell], systemPrompt: 'runtime' })
+    const writer = new SessionStore(dir)
+    const root = await writer.create({ sessionId: 'depth-root', config: createConfig({ tools: [persistedRead], systemPrompt: 'root' }) })
+    const rootFork = await writer.fork({ sourceSessionId: root.sessionId, cursor: 0, sessionId: 'depth-root-fork' })
+    const child = await writer.create({
+      sessionId: 'depth-child',
+      config: createConfig({ tools: [persistedRead], systemPrompt: 'child' }),
+      parentSessionId: root.sessionId,
+      parentCallId: 'agent-call',
+      subAgentStartedAt: new Date(0).toISOString(),
+      delegationDepth: 1,
+    })
+    const childFork = await writer.fork({ sourceSessionId: child.sessionId, cursor: 0, sessionId: 'depth-child-fork' })
+    const repeatedFork = await writer.fork({ sourceSessionId: childFork.sessionId, cursor: 0, sessionId: 'depth-child-fork-again' })
+    const emptyChild = await writer.create({
+      sessionId: 'depth-empty-child',
+      config: createConfig({ tools: [], systemPrompt: 'empty child' }),
+      parentSessionId: root.sessionId,
+      delegationDepth: 1,
+    })
+    const emptyFork = await writer.fork({ sourceSessionId: emptyChild.sessionId, cursor: 0, sessionId: 'depth-empty-child-fork' })
+
+    expect(root.delegationDepth).toBe(0)
+    expect(rootFork.delegationDepth).toBe(0)
+    expect(childFork.delegationDepth).toBe(1)
+    expect(repeatedFork.delegationDepth).toBe(1)
+    expect(emptyFork.delegationDepth).toBe(1)
+
+    const reader = new SessionStore(dir, { runtimeConfig })
+    const restoredRootFork = await reader.load(rootFork.sessionId)
+    const restoredRepeatedFork = await reader.load(repeatedFork.sessionId)
+    const restoredEmptyFork = await reader.load(emptyFork.sessionId)
+    expect(reader.get(child.sessionId)).toBeUndefined()
+    expect(reader.get(childFork.sessionId)).toBeUndefined()
+    expect(restoredRootFork.config.tools.map((tool) => tool.name)).toEqual(['read_file', 'shell'])
+    expect(restoredRepeatedFork.delegationDepth).toBe(1)
+    expect(restoredRepeatedFork.config.tools.map((tool) => tool.name)).toEqual(['read_file'])
+    expect(restoredEmptyFork.config.tools).toEqual([])
+  })
+
+  it('keeps legacy provenance without delegation depth conservatively restricted', async () => {
+    const runtimeRead = { name: 'read_file', description: 'runtime read', inputSchema: { type: 'object' }, requiresApproval: false }
+    const runtimeShell = { name: 'shell', description: 'runtime shell', inputSchema: { type: 'object' }, requiresApproval: false }
+    const runtimeConfig = createConfig({ tools: [runtimeRead, runtimeShell], systemPrompt: 'runtime' })
+    const writer = new SessionStore(dir)
+    for (const [sessionId, provenance] of [
+      ['legacy-parent-only', { parentSessionId: 'legacy-parent' }],
+      ['legacy-agent-type', { agentType: 'implementation' }],
+    ] as const) {
+      const created = await writer.create({
+        sessionId,
+        config: createConfig({ tools: [runtimeRead], systemPrompt: 'legacy' }),
+        ...provenance,
+      })
+      const lines = readFileSync(created.logPath, 'utf8').trimEnd().split('\n')
+      const header = JSON.parse(lines[0]!) as Record<string, unknown>
+      delete header.delegationDepth
+      lines[0] = JSON.stringify(header)
+      writeFileSync(created.logPath, `${lines.join('\n')}\n`)
+    }
+
+    const reader = new SessionStore(dir, { runtimeConfig })
+    const parentOnly = await reader.load('legacy-parent-only')
+    const agentTyped = await reader.load('legacy-agent-type')
+    expect(parentOnly.delegationDepth).toBeUndefined()
+    expect(agentTyped.delegationDepth).toBeUndefined()
+    expect(parentOnly.config.tools.map((tool) => tool.name)).toEqual(['read_file'])
+    expect(agentTyped.config.tools.map((tool) => tool.name)).toEqual(['read_file'])
   })
 })
 

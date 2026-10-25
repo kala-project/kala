@@ -68,6 +68,8 @@ export type SessionRecord = {
   readonly createdAt: string
   readonly config: AgentConfig
   readonly toolLock: Readonly<Record<string, { version: string; schemaHash: string | null }>>
+  /** Durable authority depth; absent only for legacy records. */
+  readonly delegationDepth?: number
   readonly parentSessionId?: string
   readonly parentCursor?: number
   readonly parentCallId?: string
@@ -368,6 +370,7 @@ export type CreateSessionParams = {
   externalSessionId?: string
   parentSessionId?: string
   parentCursor?: number
+  delegationDepth?: number
   parentCallId?: string
   agentType?: string
   subAgentStartedAt?: string
@@ -735,6 +738,7 @@ export class SessionStore {
         executionMode: source.executionMode,
         parentSessionId: source.sessionId,
         parentCursor: params.cursor,
+        delegationDepth: effectiveDelegationDepth(source),
         initialState: forkedState,
         ...(source.workspaceId !== undefined ? { workspaceId: source.workspaceId } : {}),
         ...(source.workspaceName !== undefined ? { workspaceName: source.workspaceName } : {}),
@@ -770,6 +774,7 @@ export class SessionStore {
       ? { ...stateWithCwd, approvalMode: params.initialApprovalMode }
       : stateWithCwd
     const logPath = this.pathFor(sessionId)
+    const delegationDepth = effectiveDelegationDepth(params)
     if (this.options.authority) {
       await this.authorityReady
       const createdAt = new Date().toISOString()
@@ -799,6 +804,7 @@ export class SessionStore {
       ...(params.parentCursor !== undefined
         ? { parentCursor: params.parentCursor }
         : {}),
+      delegationDepth,
       ...(params.parentCallId !== undefined
         ? { parentCallId: params.parentCallId }
         : {}),
@@ -845,6 +851,7 @@ export class SessionStore {
       ...(params.parentCursor !== undefined
         ? { parentCursor: params.parentCursor }
         : {}),
+      delegationDepth,
       ...(params.parentCallId !== undefined
         ? { parentCallId: params.parentCallId }
         : {}),
@@ -1210,7 +1217,8 @@ export class SessionStore {
 
   private applyRuntimeConfig(record: SessionRecord, runtimeConfig: AgentConfig | undefined): void {
     if (!runtimeConfig) return
-    ;(record as { config: AgentConfig }).config = configWithPersistedSystemPrompt(runtimeConfig, record.state)
+    const applicableConfig = runtimeConfigForSession(runtimeConfig, record, record.toolLock)
+    ;(record as { config: AgentConfig }).config = configWithPersistedSystemPrompt(applicableConfig, record.state)
   }
 
   private resolveRuntimeConfig(
@@ -2340,9 +2348,13 @@ export class SessionStore {
       logPath: path,
       createdAt: parsed.header.ts,
       config: configWithPersistedSystemPrompt(
-        options.runtimeConfig
-          ?? this.resolveRuntimeConfig(undefined, parsed.header.executionMode ?? 'chat')
-          ?? parsed.header.config,
+        runtimeConfigForSession(
+          options.runtimeConfig
+            ?? this.resolveRuntimeConfig(undefined, parsed.header.executionMode ?? 'chat')
+            ?? parsed.header.config,
+          parsed.header,
+          toolLockFor(parsed.header.config),
+        ),
         finalState,
       ),
       toolLock: toolLockFor(parsed.header.config),
@@ -2359,6 +2371,9 @@ export class SessionStore {
         : {}),
       ...(parsed.header.parentCursor !== undefined
         ? { parentCursor: parsed.header.parentCursor }
+        : {}),
+      ...(parsed.header.delegationDepth !== undefined
+        ? { delegationDepth: parsed.header.delegationDepth }
         : {}),
       ...(parsed.header.parentCallId !== undefined
         ? { parentCallId: parsed.header.parentCallId }
@@ -2547,6 +2562,7 @@ function recordForCreate(
     preferences: normalizedPreferences(params.preferences),
     ...(params.parentSessionId ? { parentSessionId: params.parentSessionId } : {}),
     ...(params.parentCursor !== undefined ? { parentCursor: params.parentCursor } : {}),
+    delegationDepth: effectiveDelegationDepth(params),
     ...(params.parentCallId !== undefined ? { parentCallId: params.parentCallId } : {}),
     ...(params.agentType !== undefined ? { agentType: params.agentType } : {}),
     ...(params.subAgentStartedAt !== undefined ? { subAgentStartedAt: params.subAgentStartedAt } : {}),
@@ -2593,6 +2609,41 @@ function restoreSessionRecord(
     logPath,
     ...(memoryPolicy !== undefined ? { memoryPolicy } : {}),
   } as SessionRecord
+}
+
+type DelegationAuthority = Pick<
+  SessionRecord,
+  'delegationDepth' | 'parentSessionId' | 'parentCallId' | 'agentType' | 'subAgentStartedAt'
+>
+
+/** Resolve durable delegation authority without consulting process-local ancestor caches. */
+export function effectiveDelegationDepth(authority: DelegationAuthority): number {
+  if (
+    typeof authority.delegationDepth === 'number'
+    && Number.isSafeInteger(authority.delegationDepth)
+    && authority.delegationDepth >= 0
+  ) {
+    return authority.delegationDepth
+  }
+  return authority.parentSessionId
+    || authority.parentCallId
+    || authority.agentType
+    || authority.subAgentStartedAt
+    ? 1
+    : 0
+}
+
+function runtimeConfigForSession(
+  runtimeConfig: AgentConfig,
+  authority: DelegationAuthority,
+  toolLock: SessionRecord['toolLock'],
+): AgentConfig {
+  if (effectiveDelegationDepth(authority) === 0) return runtimeConfig
+  const allowedToolNames = new Set(Object.keys(toolLock))
+  return {
+    ...runtimeConfig,
+    tools: runtimeConfig.tools.filter((tool) => allowedToolNames.has(tool.name)),
+  }
 }
 
 function randomMutationId(): string {

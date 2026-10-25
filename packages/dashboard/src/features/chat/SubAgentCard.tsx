@@ -369,6 +369,11 @@ const SubAgentRow = memo(function SubAgentRow({
               <strong className="font-semibold">{status === 'cancelled' ? t('chat.subAgent.cancelled') : t('chat.subAgent.failed')}</strong> {failureText}
             </div>
           ) : null}
+          {view.transcriptError ? (
+            <div role="alert" className="my-1 rounded-lg bg-muted/60 px-3 py-2 text-sm text-foreground" data-testid={`sub-agent-history-error-${call.callId}`}>
+              {view.transcriptError}
+            </div>
+          ) : null}
           {displayedMessages.length > 0 ? (
             <div
               className={cn(

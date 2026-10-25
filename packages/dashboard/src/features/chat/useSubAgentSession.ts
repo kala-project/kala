@@ -17,7 +17,7 @@
  * envelope parser that seeds `initialChildSessionId`.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useContext, useEffect, useRef, useState } from 'react'
 
 import type { Message } from '@agent-kernel/kernel'
 import type {
@@ -29,7 +29,7 @@ import type {
   SubAgentListResult,
 } from '@agent-kernel/shared'
 
-import { dashboardConnectionManager, type DashboardSocket } from '../../session.js'
+import { dashboardConnectionManager, SessionInspectionContext, useSession, type DashboardSocket } from '../../session.js'
 
 export type SubAgentLifecycle =
   | { status: 'idle' }
@@ -64,6 +64,7 @@ export type SubAgentLifecycle =
 export type SubAgentView = {
   lifecycle: SubAgentLifecycle
   messages: readonly Message[]
+  transcriptError?: string
   agentType?: string
   intention?: string
   prompt?: string
@@ -236,8 +237,21 @@ export function useSubAgentSession({
   const childSessionId =
     lifecycle.status !== 'idle' ? lifecycle.childSessionId : initialChildSessionId
 
+  const transport = useContext(SessionInspectionContext)
+  const independentlyRouted = Boolean(transport?.sessionScoped || transport?.sessionRouteTickets)
+  // Reuse the same owner/ticket/reconnect lifecycle as the main Session. Only
+  // expanded scoped views connect; no cache or model action is attached here.
+  const child = useSession({
+    host: transport?.host ?? '',
+    socket: transport?.socket,
+    sessionScoped: transport?.sessionScoped,
+    sessionRouteTickets: transport?.sessionRouteTickets,
+    token: transport?.token,
+    sessionId: independentlyRouted && mirrorMessages ? childSessionId ?? null : null,
+  })
+
   useEffect(() => {
-    if (!socket || !childSessionId || !mirrorMessages) return
+    if (!socket || !childSessionId || !mirrorMessages || independentlyRouted) return
     let cancelled = false
 
     const onReady = (payload: SessionReadyEvent): void => {
@@ -263,11 +277,12 @@ export function useSubAgentSession({
       socket.off('state:changed', onStateChanged)
       releaseChannel()
     }
-  }, [socket, childSessionId, mirrorMessages])
+  }, [socket, childSessionId, mirrorMessages, independentlyRouted])
 
   return {
     lifecycle,
-    messages,
+    messages: independentlyRouted ? child.state?.messages ?? [] : messages,
+    ...(independentlyRouted && child.lastError ? { transcriptError: child.lastError.message } : {}),
     ...(agentType !== undefined ? { agentType } : {}),
     ...(intention !== undefined ? { intention } : {}),
     ...(prompt !== undefined ? { prompt } : {}),

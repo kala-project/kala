@@ -88,14 +88,15 @@ describe('resolveSubAgentPolicy', () => {
     expect(policy.reasons).not.toContain('role_template_applied')
   })
 
-  it('raises dangerously small explicit values to the role minimum', () => {
+  it('preserves small explicit caller ceilings without adding a default cancellation grace', () => {
     const policy = resolveSubAgentPolicy({
       input: { role: 'test', maxTurns: 5, timeoutMs: 30_000 },
     })
-    expect(policy.maxTurns).toBe(SUB_AGENT_ROLE_TEMPLATES.test.minimumMaxTurns)
-    expect(policy.timeoutMs).toBe(SUB_AGENT_ROLE_TEMPLATES.test.minimumTimeoutMs)
-    expect(policy.reasons).toContain('policy_max_turns_raised')
-    expect(policy.reasons).toContain('policy_timeout_raised')
+    expect(policy.maxTurns).toBe(5)
+    expect(policy.timeoutMs).toBe(30_000)
+    expect(policy.gracePeriodMs).toBe(0)
+    expect(policy.reasons).not.toContain('policy_max_turns_raised')
+    expect(policy.reasons).not.toContain('policy_timeout_raised')
   })
 
   it('records depth cap when parent depth reaches max depth', () => {

@@ -376,6 +376,7 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     expect(child).toMatchObject({
       parentSessionId: parent.sessionId,
       parentCursor: 1,
+      delegationDepth: 0,
       organizationId: 'org-a',
       principal: 'principal-a',
       organizationRole: 'member',
@@ -383,6 +384,19 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
       preferences: { selectedModel: 'fork-model' },
     })
     expect((await writer.store.load(parent.sessionId)).state).toEqual(second.next)
+
+    const delegated = await writer.store.create({
+      sessionId: 'fork-delegated-source', config, parentSessionId: parent.sessionId,
+      parentCallId: 'fork-delegation-call', delegationDepth: 1,
+    })
+    const delegatedFork = await writer.store.fork({
+      sourceSessionId: delegated.sessionId, cursor: 0, sessionId: 'fork-delegated-child',
+    })
+    const coldReader = makeStore('fork-depth-reader')
+    expect(coldReader.store.get(parent.sessionId)).toBeUndefined()
+    expect((await coldReader.store.load(child.sessionId, { recoverDangling: false })).delegationDepth).toBe(0)
+    expect((await coldReader.store.load(delegatedFork.sessionId, { recoverDangling: false })).delegationDepth).toBe(1)
+    expect(coldReader.store.get(delegated.sessionId)).toBeUndefined()
 
     await expect(writer.store.fork({
       sourceSessionId: parent.sessionId,

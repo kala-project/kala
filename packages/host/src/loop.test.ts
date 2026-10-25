@@ -2730,7 +2730,39 @@ describe('host loop', () => {
     expect(descendants[0]!.config.tools.some((tool) => tool.name === 'agent')).toBe(false)
   })
 
-  it('hard-caps recursive sub-agents even if an old child config still exposes agent', async () => {
+  it('allows a root fork to create its first sub-agent through the real loop', async () => {
+    const root = await store.create({
+      config: createConfig({ tools: [AGENT], systemPrompt: 'sys' }),
+      sessionId: 'sess-root-before-fork',
+      workspaceId: 'ws-root-fork',
+    })
+    const fork = await store.fork({
+      sourceSessionId: root.sessionId,
+      cursor: root.state.cursor,
+      sessionId: 'sess-root-after-fork',
+    })
+    const llm = scriptedLlm([
+      { message: { role: 'assistant', content: [{ type: 'tool_call', callId: 'agent-from-root-fork', name: 'agent', input: { prompt: 'delegate once' } }] } },
+      { message: { role: 'assistant', content: [{ type: 'text', text: 'child done' }] } },
+      { message: { role: 'assistant', content: [{ type: 'text', text: 'parent done' }] } },
+    ])
+    const loop = runHostLoop({
+      store,
+      llm,
+      tools: nullTools(),
+      broadcast: silentBroadcast(),
+    })
+
+    await loop.dispatch(fork.sessionId, { kind: 'user_message', text: 'go' })
+
+    const children = store.list().filter((record) => record.parentSessionId === fork.sessionId)
+    expect(children).toHaveLength(1)
+    expect(fork.delegationDepth).toBe(0)
+    expect(children[0]!.delegationDepth).toBe(1)
+    expect(children[0]!.state.status).toBe('done')
+  })
+
+  it('hard-caps a repeatedly forked child after cold restore without loading ancestors', async () => {
     const parent = await store.create({
       config: createConfig({ tools: [AGENT], systemPrompt: 'sys' }),
       sessionId: 'sess-depth-hardcap-parent',
@@ -2743,22 +2775,29 @@ describe('host loop', () => {
       parentCursor: 0,
       workspaceId: 'ws-depth-hardcap',
     })
+    const childFork = await store.fork({ sourceSessionId: child.sessionId, cursor: 0, sessionId: 'sess-depth-hardcap-child-fork' })
+    const repeatedFork = await store.fork({ sourceSessionId: childFork.sessionId, cursor: 0, sessionId: 'sess-depth-hardcap-child-fork-again' })
+    const coldStore = new SessionStore(dir)
+    const restoredFork = await coldStore.load(repeatedFork.sessionId)
+    expect(coldStore.get(parent.sessionId)).toBeUndefined()
+    expect(coldStore.get(child.sessionId)).toBeUndefined()
+    expect(restoredFork.delegationDepth).toBe(1)
     const llm = scriptedLlm([
       { message: { role: 'assistant', content: [{ type: 'tool_call', callId: 'agent-child-hardcap', name: 'agent', input: { prompt: 'try nested delegate' } }] } },
       { message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } },
     ])
     const loop = runHostLoop({
-      store,
+      store: coldStore,
       llm,
       tools: nullTools(),
       broadcast: silentBroadcast(),
     })
 
-    await loop.dispatch(child.sessionId, { kind: 'user_message', text: 'go' })
+    await loop.dispatch(restoredFork.sessionId, { kind: 'user_message', text: 'go' })
 
-    const grandChildren = store.list().filter((r) => r.parentSessionId === child.sessionId)
+    const grandChildren = coldStore.list().filter((r) => r.parentSessionId === restoredFork.sessionId)
     expect(grandChildren).toHaveLength(0)
-    const childLog = await readSessionLog(child.logPath)
+    const childLog = await readSessionLog(restoredFork.logPath)
     const refused = childLog.events.find(
       (e) => e.event.kind === 'tool_result' && e.event.callId === 'agent-child-hardcap',
     )

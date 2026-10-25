@@ -152,6 +152,7 @@ import {
   useControlPlane,
   useDashboardControlSocket,
   useSession,
+  SessionInspectionContext,
 } from './session.js'
 import { backgroundTerminalTasks } from './background-terminal.js'
 import { resolveHostEndpoint, type ResolvedHostEndpoint } from './host-endpoint.js'
@@ -487,6 +488,13 @@ export function App(): JSX.Element {
 
   const controlSocket = useDashboardControlSocket(hostEndpoint.url, config.token, productAccessReady)
   const sessionRouteTickets = privateCloudMode && authSession.session?.authenticated === true
+  const sessionInspectionTransport = useMemo(() => ({
+    host: hostEndpoint.url,
+    socket: controlSocket,
+    sessionScoped: false,
+    sessionRouteTickets,
+    ...(config.token !== undefined ? { token: config.token } : {}),
+  }), [hostEndpoint.url, controlSocket, sessionRouteTickets, config.token])
   const session = useSession({
     host: hostEndpoint.url,
     socket: controlSocket,
@@ -2299,6 +2307,7 @@ export function App(): JSX.Element {
                           onOpenSession={selectSession}
                         />
                       ) : (
+                        <SessionInspectionContext.Provider value={sessionInspectionTransport}>
                         <ChatPanel
                         sessionId={activeSessionId}
                         chapterReadingModeOverride={chapterModeOverride}
@@ -2410,6 +2419,7 @@ export function App(): JSX.Element {
                           </>
                         }
                         />
+                        </SessionInspectionContext.Provider>
                       )}
                     </div>
                     <div className="min-h-0">

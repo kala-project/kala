@@ -7,7 +7,7 @@
  * local mutation.
  */
 
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { createContext, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 
 import type {
   AgentConfig,
@@ -119,11 +119,15 @@ export type UseSessionOptions = {
   host: string
   sessionId: string | null
   socket?: DashboardSocket | null
+  sessionScoped?: boolean
   sessionRouteTickets?: boolean
   token?: string
   cache?: SessionViewCache & { hydrate?(sessionId: string): Promise<CachedSessionView | null> }
   onForked?: (payload: SessionReadyEvent) => void
 }
+
+/** Read-only nested views reuse useSession's owner routing, never a parent's capability. */
+export const SessionInspectionContext = createContext<Pick<UseSessionOptions, 'host' | 'socket' | 'token' | 'sessionScoped' | 'sessionRouteTickets'> | null>(null)
 
 const CONTROL_SOCKET_SESSION_ID = '__agent-kernel-control__'
 const connectionManagers = new WeakMap<DashboardSocket, DashboardConnectionManager>()
@@ -254,6 +258,7 @@ export function useSession({
   host,
   sessionId,
   socket: sharedSocket,
+  sessionScoped = false,
   sessionRouteTickets = false,
   token,
   cache,
@@ -597,7 +602,8 @@ export function useSession({
         reconnectionDelayMax: 30_000,
         reconnectionAttempts: Infinity,
         randomizationFactor: 0.5,
-        transports: ['websocket', 'polling'],
+        ...(sessionScoped ? { forceNew: true, withCredentials: true } : {}),
+        transports: sessionScoped ? ['websocket'] : ['websocket', 'polling'],
         tryAllTransports: true,
       })
       socketRef.current = socket
@@ -682,7 +688,7 @@ export function useSession({
         void connectRoutedSocket()
         return
       }
-      if (sharedSocket !== undefined) connectSharedSocket()
+      if (sharedSocket !== undefined && !sessionScoped) connectSharedSocket()
       else connectLegacySocket()
     }
 
@@ -987,7 +993,7 @@ export function useSession({
       if (socketRef.current === socket) socketRef.current = null
       setBoundSocket((current) => current?.socket === socket ? null : current)
     }
-  }, [host, sessionId, token, cache, sharedSocket, sessionRouteTickets, reconnectGeneration])
+  }, [host, sessionId, token, cache, sharedSocket, sessionScoped, sessionRouteTickets, reconnectGeneration])
 
   const selectionCurrent = projection.sessionId === sessionId
   const selectedProjection = selectionCurrent
@@ -1079,7 +1085,7 @@ export function useSession({
       hydratedSessionId,
       historyLoadedSessionId,
       historyAuthoritativeSessionId,
-      socket: !sessionRouteTickets && sessionId && sharedSocket ? sharedSocket : boundSocket?.sessionId === sessionId ? boundSocket.socket : null,
+      socket: !sessionRouteTickets && !sessionScoped && sessionId && sharedSocket ? sharedSocket : boundSocket?.sessionId === sessionId ? boundSocket.socket : null,
       reconnect,
     }),
     [
@@ -1113,6 +1119,7 @@ export function useSession({
       boundSocket,
       sharedSocket,
       sessionId,
+      sessionScoped,
       sessionRouteTickets,
       reconnect,
     ],
