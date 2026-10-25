@@ -1,6 +1,6 @@
 import { issueRuntimeRoutingTicket, verifyRuntimeRoutingTicket } from '@agent-kernel/shared'
 
-import type { RuntimeResourceOwnerBindingResolver } from './postgres-runtime-resource-owner-resolver.js'
+import type { RuntimeResourceOwnerBindingResolver, RuntimeSessionRouteState } from './postgres-runtime-resource-owner-resolver.js'
 
 export type RuntimeRoutingTicketResolverOptions = {
   key: Uint8Array
@@ -54,20 +54,7 @@ export class RuntimeRoutingTicketResolver {
     sessionId: string,
     organization: RuntimeRoutingTicketOrganization,
   ): Promise<SessionRoutingTicketResult> {
-    if (!/^[0-9A-Za-z][0-9A-Za-z_.:-]{0,255}$/u.test(sessionId)) return { status: 'missing' }
-    const input = {
-      organizationId: organization.organizationId,
-      unitId: organization.unitId,
-      resourceType: 'session' as const,
-      resourceId: sessionId,
-    }
-    const state = this.#ownerResolver.resolveSessionRouteState
-      ? await this.#ownerResolver.resolveSessionRouteState({
-        organizationId: organization.organizationId, unitId: organization.unitId, sessionId,
-      })
-      : await this.#ownerResolver.resolveResourceOwnerBinding(input).then((binding) => binding
-        ? { status: 'live' as const, binding }
-        : { status: 'missing' as const })
+    const state = await this.resolveSessionOwnerForOrganization(sessionId, organization)
     if (state.status !== 'live') return state
     return {
       status: 'live',
@@ -81,6 +68,21 @@ export class RuntimeRoutingTicketResolver {
         ttlMs: Math.min(15_000, this.#maxTtlMs),
       }, { key: this.#key, maxTtlMs: this.#maxTtlMs, nowMs: this.#now() }),
     }
+  }
+
+  /** HTTP resolves from current authenticated scope, without a client-supplied transport ticket. */
+  async resolveSessionOwnerForOrganization(sessionId: string, organization: RuntimeRoutingTicketOrganization): Promise<RuntimeSessionRouteState> {
+    if (!/^[0-9A-Za-z][0-9A-Za-z_.:-]{0,255}$/u.test(sessionId)) return { status: 'missing' }
+    if (this.#ownerResolver.resolveSessionRouteState) {
+      return this.#ownerResolver.resolveSessionRouteState({
+        organizationId: organization.organizationId, unitId: organization.unitId, sessionId,
+      })
+    }
+    const binding = await this.#ownerResolver.resolveResourceOwnerBinding({
+      organizationId: organization.organizationId, unitId: organization.unitId,
+      resourceType: 'session', resourceId: sessionId,
+    })
+    return binding ? { status: 'live', binding } : { status: 'missing' }
   }
 
   async resolveTicketForOrganization(ticket: unknown, organization: RuntimeRoutingTicketOrganization): Promise<string | undefined> {

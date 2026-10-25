@@ -1,7 +1,7 @@
 import { createHmac, randomBytes } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http'
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https'
-import type { Duplex } from 'node:stream'
+import { Readable, type Duplex } from 'node:stream'
 
 import httpProxy from 'http-proxy'
 import { parsePublicUrls, validatePublicRequest, type PublicUrlPattern } from '@agent-kernel/shared'
@@ -94,6 +94,39 @@ async function readRequestBody(request: IncomingMessage, maxBytes = Number.POSIT
     chunks.push(data)
   }
   return Buffer.concat(chunks)
+}
+
+class SessionHttpInputError extends Error {
+  constructor(readonly status: number, message: string) { super(message) }
+}
+
+/** Owner-sensitive public APIs only; generic Unit APIs and internal handoffs stay separate. */
+async function sessionHttpScope(request: IncomingMessage, url: URL): Promise<{ sessionId: string; body?: Buffer } | undefined> {
+  const read = request.method === 'GET' || request.method === 'HEAD'
+  const json = request.method === 'POST' && ['/runtime/admission/messages', '/runtime/attachments/release', '/session-artifacts/register'].includes(url.pathname)
+  const query = (request.method === 'POST' && url.pathname === '/runtime/attachments')
+    || (read && (/^\/runtime\/attachments\/[^/]+$/u.test(url.pathname) || /^\/session-artifacts\/[^/]+$/u.test(url.pathname)))
+  const path = (read && /^\/runtime\/sessions\/([^/]+)\/tool-result\/[^/]+$/u.exec(url.pathname))
+    || (request.method === 'GET' && /^\/runtime\/sessions\/([^/]+)\/tool-lock$/u.exec(url.pathname))
+  if (!json && !query && !path) return undefined
+  let sessionId: unknown
+  let body: Buffer | undefined
+  if (json) {
+    if (request.headers['content-type']?.split(';', 1)[0]?.trim() !== 'application/json') throw new SessionHttpInputError(400, 'invalid_request')
+    const maxBytes = (url.pathname === '/session-artifacts/register' ? 64 : 8) * 1024 * 1024
+    if (Number(request.headers['content-length'] ?? 0) > maxBytes) throw new SessionHttpInputError(413, 'request_body_too_large')
+    try { body = await readRequestBody(request, maxBytes) } catch { throw new SessionHttpInputError(413, 'request_body_too_large') }
+    try { sessionId = (JSON.parse(body.toString('utf8')) as { sessionId?: unknown } | null)?.sessionId }
+    catch { throw new SessionHttpInputError(400, 'invalid_request') }
+  } else if (query) {
+    const ids = url.searchParams.getAll('sessionId')
+    if (ids.length !== 1) throw new SessionHttpInputError(400, 'invalid_session_id')
+    sessionId = ids[0]
+  } else if (path) {
+    try { sessionId = decodeURIComponent(path[1]!) } catch { throw new SessionHttpInputError(400, 'invalid_session_id') }
+  }
+  if (typeof sessionId !== 'string' || !/^[0-9A-Za-z][0-9A-Za-z_.:-]{0,255}$/u.test(sessionId)) throw new SessionHttpInputError(400, 'invalid_session_id')
+  return { sessionId, ...(body ? { body } : {}) }
 }
 
 function cookies(request: IncomingMessage): Record<string, string> {
@@ -868,6 +901,7 @@ export async function startRuntimeIngressGateway(options: {
     delete request.headers['x-agent-runlab-organization-id']
     delete request.headers['x-agent-runlab-organization-role']
     delete request.headers['x-agent-runlab-principal']
+    delete request.headers['x-agent-runlab-route-session-id']
     request.headers['x-agent-runlab-runtime-unit'] = assignment.unitId
     request.headers['x-agent-runlab-ingress-secret'] = options.ingressSecret
     if (organizationAccess) {
@@ -875,7 +909,33 @@ export async function startRuntimeIngressGateway(options: {
       request.headers['x-agent-runlab-organization-role'] = organizationAccess.membership.role
       request.headers['x-agent-runlab-principal'] = Buffer.from(`${identity.issuer}\0${identity.subject}`, 'utf8').toString('base64url')
     }
-    const runtimeOrigin = await resolveRuntimeOrigin(assignment.unitId)
+    let runtimeOrigin: string
+    let replayBody: Buffer | undefined
+    if (options.runtimeRoutingTicketResolver && organizationAccess) {
+      try {
+        const scoped = await sessionHttpScope(request, url)
+        if (scoped) {
+          const state = await options.runtimeRoutingTicketResolver.resolveSessionOwnerForOrganization(scoped.sessionId, {
+            principalId: Buffer.from(`${identity.issuer}\0${identity.subject}`, 'utf8').toString('base64url'),
+            organizationId: organizationAccess.organization.id, unitId: assignment.unitId,
+          })
+          if (state.status !== 'live') {
+            response.writeHead(state.status === 'missing' ? 404 : state.status === 'deleting' ? 410 : 503, {
+              'content-type': 'application/json', 'cache-control': 'no-store',
+              ...(state.status === 'relocating' ? { 'retry-after': '1' } : {}),
+            })
+            response.end(JSON.stringify({ error: `session_${state.status}` })); return
+          }
+          const origin = new URL(state.binding.origin)
+          if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) throw new Error('invalid session owner origin')
+          runtimeOrigin = origin.origin
+          replayBody = scoped.body
+        } else runtimeOrigin = await resolveRuntimeOrigin(assignment.unitId)
+      } catch (error) {
+        response.writeHead(error instanceof SessionHttpInputError ? error.status : 503, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        response.end(JSON.stringify({ error: error instanceof SessionHttpInputError ? error.message : 'session_route_unavailable' })); return
+      }
+    } else runtimeOrigin = await resolveRuntimeOrigin(assignment.unitId)
     if (url.pathname.startsWith('/auth/executor-pairings')) {
       const decision = /^\/auth\/executor-pairings\/[^/]+\/(approve|reject)$/u.test(url.pathname)
       if (decision && (!organizationAccess || !permits(organizationAccess.membership.role, 'workspace:manage'))) { response.writeHead(403, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: 'forbidden', requiredPermission: 'workspace:manage' })); return }
@@ -907,7 +967,7 @@ export async function startRuntimeIngressGateway(options: {
       return
     }
 
-    proxy.web(request, response, { target: runtimeOrigin }, () => { if (!response.headersSent) response.writeHead(502); response.end() })
+    proxy.web(request, response, { target: runtimeOrigin, ...(replayBody ? { buffer: Readable.from(replayBody) } : {}) }, () => { if (!response.headersSent) response.writeHead(502); response.end() })
   }
   const http = createServer((request, response) => {
     const access = validatePublicRequest(publicUrls!, request.headers.host, typeof request.headers.origin === 'string' ? request.headers.origin : undefined)

@@ -710,10 +710,19 @@ describe('Private Cloud edge request path', () => {
     expect(httpRequests).toHaveLength(2)
   })
 
-  it('routes only authorized single WS tickets to live Session owners and never falls back to the Unit origin', async () => {
+  it('routes authorized Session HTTP and WS to live owners without Unit fallback', async () => {
+    const httpCalls: Array<{ target: string; body: string; unit: string | undefined; cookie: string | undefined }> = []
     const upgrades: Array<{ target: string; path: string; unit?: string; cookie?: string; routedSession?: string }> = []
     const startRuntime = async (target: string) => {
-      const runtime = createServer()
+      const runtime = createServer((request, response) => {
+        void (async () => {
+          const chunks: Buffer[] = []
+          for await (const chunk of request) chunks.push(Buffer.from(chunk))
+          httpCalls.push({ target, body: Buffer.concat(chunks).toString('utf8'), unit: request.headers['x-agent-runlab-runtime-unit'] as string | undefined, cookie: request.headers.cookie })
+          response.writeHead(200, { 'content-type': 'application/json', 'x-test-runtime': target })
+          response.end('{}')
+        })()
+      })
       runtime.on('upgrade', (request, socket) => {
         upgrades.push({
           target,
@@ -788,6 +797,47 @@ describe('Private Cloud edge request path', () => {
     }, { key, maxTtlMs: 10_000, nowMs: overrides.issuedAt ?? nowMs })
     const ticketPath = (ticket: string) => `/socket.io/?EIO=4&transport=websocket&runtimeRouteTicket=${encodeURIComponent(ticket)}`
     const endpoint = `http://127.0.0.1:${gateway.port}`
+    const raw = '{\n  "sessionId": "session_a", "text": "字节原样", "operationId": "operation-http"\n}'
+    const httpCall = (method: string, path: string, body?: string) => fetch(`${endpoint}${path}`, {
+      method, headers: { cookie: `ak_session=${sessionCookie}`, origin: endpoint, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
+      ...(body !== undefined ? { body } : {}),
+    })
+    const sessionRequests: Array<[string, string, string?]> = [
+      ['POST', '/runtime/admission/messages', raw],
+      ['POST', '/runtime/attachments/release', raw],
+      ['POST', '/session-artifacts/register', raw],
+      ['POST', '/runtime/attachments?sessionId=session_a', 'raw-upload\u0000bytes'],
+      ['GET', '/runtime/attachments/attachment_a?sessionId=session_a'],
+      ['HEAD', '/runtime/attachments/attachment_a?sessionId=session_a'],
+      ['GET', '/session-artifacts/artifact_a?sessionId=session_a'],
+      ['HEAD', '/session-artifacts/artifact_a?sessionId=session_a'],
+      ['GET', '/runtime/sessions/session_a/tool-result/call_a'],
+      ['HEAD', '/runtime/sessions/session_a/tool-result/call_a'],
+      ['GET', '/runtime/sessions/session%5Fa/tool-lock'],
+    ]
+    for (const [method, path, body] of sessionRequests) {
+      const result = await httpCall(method, path, body)
+      expect(result.status).toBe(200)
+      expect(result.headers.get('x-test-runtime')).toBe('session-a')
+      await result.arrayBuffer()
+      expect(httpCalls.at(-1)).toEqual({ target: 'session-a', body: body ?? '', unit: owner.organization.unitId, cookie: undefined })
+    }
+    const originalOwner = owners.get('session_a')!
+    owners.set('session_a', owners.get('session_b')!)
+    const moved = await httpCall('POST', '/runtime/admission/messages', raw)
+    expect(moved.headers.get('x-test-runtime')).toBe('session-b')
+    await moved.arrayBuffer()
+    owners.set('session_a', originalOwner)
+    const callsBeforeDenied = httpCalls.length
+    for (const [sessionId, status] of [['missing', 404], ['deleting', 410], ['relocating', 503]] as const) {
+      expect((await httpCall('POST', '/runtime/admission/messages', JSON.stringify({ sessionId }))).status).toBe(status)
+    }
+    expect((await httpCall('POST', '/runtime/admission/messages', '{')).status).toBe(400)
+    expect((await httpCall('GET', '/runtime/attachments/a?sessionId=session_a&sessionId=session_b')).status).toBe(400)
+    expect((await httpCall('GET', '/runtime/sessions/session%2Fa/tool-lock')).status).toBe(400)
+    resolveSessionRouteState.mockRejectedValueOnce(new Error('postgres unavailable'))
+    expect((await httpCall('POST', '/runtime/admission/messages', raw)).status).toBe(503)
+    expect(httpCalls).toHaveLength(callsBeforeDenied)
     const postTicket = (sessionId: string, headers: Record<string, string> = {}) => fetch(`${endpoint}/runtime/route-ticket`, {
       method: 'POST',
       headers: { cookie: `ak_session=${sessionCookie}`, origin: endpoint, 'content-type': 'application/json', ...headers },

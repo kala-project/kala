@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { createSessionWithAck, useSession } from './session.js'
+import { createSessionWithAck, useDashboardControlSocket, useSession } from './session.js'
 
 const sockets: FakeSocket[] = []
 const socketOptions: unknown[] = []
@@ -50,6 +50,17 @@ afterEach(() => {
 })
 
 describe('routed Session hook', () => {
+  it('opens the global control channel without polling so a Unit-routed Gateway can connect', () => {
+    const view = renderHook(() => useDashboardControlSocket(window.location.origin))
+    expect(sockets).toHaveLength(1)
+    expect(socketOptions[0]).toMatchObject({
+      transports: ['websocket'],
+      auth: { role: 'dashboard', clientId: expect.any(String) },
+    })
+    view.unmount()
+    expect(sockets[0]!.closed).toBe(true)
+  })
+
   it('creates a private-cloud Session on a fresh Gateway-selected control connection', async () => {
     const shared = new FakeSocket()
     const creating = createSessionWithAck(shared as never, { sessionId: 'placed-session' }, 1_000, {

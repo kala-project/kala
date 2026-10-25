@@ -1114,6 +1114,9 @@ export function useDashboardControlSocket(host: string, token?: string, enabled 
   useEffect(() => {
     if (!enabled) { setSocket(null); return }
     const next = openDashboardSocket(`${host}/dashboard`, {
+      // Unit-routed Gateways cannot pin Engine.IO polling requests to a Runtime.
+      // Match routed Session sockets instead of Socket.IO's polling-first default.
+      transports: ['websocket'],
       auth: {
         clientId: `dashboard-${CONTROL_SOCKET_SESSION_ID}`,
         role: 'dashboard',
