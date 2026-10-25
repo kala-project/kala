@@ -354,6 +354,23 @@ export function configureDashboardNamespace(
 ): void {
   const operations = new OperationDeduper()
   const cleanupPlans = new Map<string, { principal: string; sessionIds: readonly string[] }>()
+  const terminalInputTails = new Map<string, Promise<void>>()
+  const withTerminalInput = async (input: ClientTerminalInput, operation: () => Promise<void>): Promise<void> => {
+    const key = JSON.stringify([input.workspaceId, input.sessionId, input.terminalId])
+    const previous = terminalInputTails.get(key) ?? Promise.resolve()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const tail = previous.then(() => gate, () => gate)
+    // Install the tail before the first await, not after authorization finishes.
+    terminalInputTails.set(key, tail)
+    try {
+      await previous.catch(() => {})
+      await operation()
+    } finally {
+      release()
+      if (terminalInputTails.get(key) === tail) terminalInputTails.delete(key)
+    }
+  }
   const getDefaultConfig = (actor?: DashboardActor): AgentConfig => typeof deps.defaultConfig === 'function'
     ? deps.defaultConfig(actor)
     : deps.defaultConfig
@@ -1657,13 +1674,18 @@ export function configureDashboardNamespace(
     socket.on('terminal:input', async (raw: ClientTerminalInput) => {
       const p = vparse(schema.ClientTerminalInputSchema, raw, 'terminal:input', (raw as ClientTerminalInput | undefined)?.sessionId)
       if (!p) return
-      const error = await validateTerminalSessionAccess(p.sessionId, p.workspaceId)
-        ?? await validateEffectOwner(terminalOwnerSessionId(p.sessionId)!)
-      if (error) {
-        auditScopedAccessDenied('terminal.input', p.sessionId, p.workspaceId, error)
-        return
-      }
-      deps.executors.inputTerminal(p)
+      await withTerminalInput(p, async () => {
+        const error = await validateTerminalSessionAccess(p.sessionId, p.workspaceId)
+          ?? await validateEffectOwner(terminalOwnerSessionId(p.sessionId)!)
+        if (error) {
+          auditScopedAccessDenied('terminal.input', p.sessionId, p.workspaceId, error)
+          return
+        }
+        // Registry preserves invocation order through its own device checks.
+        deps.executors.inputTerminal(p)
+      }).catch((error: unknown) => {
+        auditScopedAccessDenied('terminal.input', p.sessionId, p.workspaceId, error instanceof Error ? error.message : String(error))
+      })
     })
     socket.on('terminal:resize', async (raw: ClientTerminalResize) => {
       const p = vparse(schema.ClientTerminalResizeSchema, raw, 'terminal:resize', (raw as ClientTerminalResize | undefined)?.sessionId)

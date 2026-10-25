@@ -4477,6 +4477,62 @@ describe('wire protocol', () => {
     executor.close()
   })
 
+  it('preserves terminal input order before asynchronous owner checks without blocking another terminal', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kala-terminal-input-order-'))
+    let checking = false
+    let checks = 0
+    let denyNext = false
+    let release!: () => void
+    const firstOwnerCheck = new Promise<void>((resolve) => { release = resolve })
+    const isolated = await startHostServer({
+      port: 0, sessionsDir: root, defaultConfig: config, llm: scriptedLlm(),
+      assertSessionEffectOwner: async () => {
+        if (!checking) return
+        checks++
+        if (checks === 1) await firstOwnerCheck
+        if (denyNext) { denyNext = false; throw new Error('owner moved') }
+      },
+    })
+    const workspaceId = 'workspace-terminal-order'
+    const sessionId = 'session-terminal-order'
+    const executor: ClientSocket<ExecutorServerToClientEvents, ExecutorClientToServerEvents> = clientIO(`http://localhost:${isolated.port}/executor`, {
+      transports: ['websocket'], auth: { role: 'executor', clientVersion: PROTOCOL_VERSION }, reconnection: false,
+    })
+    const dashboard: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(`http://localhost:${isolated.port}/dashboard`, {
+      transports: ['websocket'], auth: { sessionId, role: 'dashboard', clientVersion: PROTOCOL_VERSION }, autoConnect: false, reconnection: false,
+    })
+    try {
+      await isolated.store.create({ sessionId, workspaceId, config })
+      await new Promise<void>((resolve) => executor.on('connect', resolve))
+      executor.emit('executor:announce', { executorId: 'executor-terminal-order', workspaceId, workspaceName: 'terminal order', tools: [], runtime: 'node', runtimeVersion: 'test' })
+      const ready = new Promise<SessionReadyEvent>((resolve) => dashboard.on('session:ready', resolve))
+      dashboard.connect()
+      await ready
+      await waitForWorkspace(dashboard, workspaceId)
+      const delivered: Array<{ terminalId: string; data: string }> = []
+      executor.on('terminal:input', (payload) => delivered.push(payload))
+      checking = true
+      dashboard.emit('terminal:input', { workspaceId, sessionId, terminalId: 'terminal-a', data: 'p' })
+      dashboard.emit('terminal:input', { workspaceId, sessionId, terminalId: 'terminal-a', data: 'r' })
+      dashboard.emit('terminal:input', { workspaceId, sessionId, terminalId: 'terminal-b', data: 'x' })
+      await vi.waitFor(() => expect(delivered.some((p) => p.terminalId === 'terminal-b')).toBe(true))
+      expect(delivered.filter((p) => p.terminalId === 'terminal-a')).toEqual([])
+      release()
+      await vi.waitFor(() => expect(delivered.filter((p) => p.terminalId === 'terminal-a').map((p) => p.data).join('')).toBe('pr'))
+      denyNext = true
+      dashboard.emit('terminal:input', { workspaceId, sessionId, terminalId: 'terminal-a', data: 'denied' })
+      dashboard.emit('terminal:input', { workspaceId, sessionId, terminalId: 'terminal-a', data: 'z' })
+      await vi.waitFor(() => expect(delivered.filter((p) => p.terminalId === 'terminal-a').map((p) => p.data).join('')).toBe('prz'))
+      expect(checks).toBe(5)
+    } finally {
+      release()
+      dashboard.close()
+      executor.close()
+      await isolated.close()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('does not create or report a fork after the source Session owner moves', async () => {
     const isolatedDir = mkdtempSync(join(tmpdir(), 'kala-fork-owner-'))
     let denyFork = false
