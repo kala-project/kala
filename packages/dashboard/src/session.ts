@@ -23,6 +23,7 @@ import type {
   CompactStatusEvent,
   ContextUsageSnapshot,
   ControlUpdate,
+  DashboardChannel,
   DashboardClientToServerEvents,
   DashboardServerToClientEvents,
   EventAppendedEvent,
@@ -139,6 +140,16 @@ export function dashboardConnectionManager(socket: DashboardSocket): DashboardCo
     connectionManagers.set(socket, manager)
   }
   return manager
+}
+
+/** Channels available to Workspace clients without widening a Session-bound transport. */
+export function workspaceSubscriptionChannels(socket: Pick<DashboardSocket, 'auth'>, workspaceId: string, sessionId?: string): readonly DashboardChannel[] {
+  const auth = typeof socket.auth === 'object' ? socket.auth : undefined
+  if (typeof auth?.sessionId === 'string' && !auth.clientId) {
+    if (sessionId !== undefined && sessionId !== auth.sessionId) throw new Error('Workspace Session does not match its bound socket')
+    return [`session:${auth.sessionId}`]
+  }
+  return [...(sessionId ? [`session:${sessionId}` as const] : []), `workspace:${workspaceId}`]
 }
 
 /**

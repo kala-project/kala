@@ -2,6 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createSessionWithAck, useDashboardControlSocket, useSession } from './session.js'
+import { workspaceExec } from './lib/workspace-exec.js'
 
 const sockets: FakeSocket[] = []
 const socketOptions: unknown[] = []
@@ -50,6 +51,22 @@ afterEach(() => {
 })
 
 describe('routed Session hook', () => {
+  it.each([
+    { auth: { sessionId: 'session-1' }, channel: 'session:session-1' },
+    { auth: { clientId: 'dashboard-1' }, channel: 'workspace:workspace-1' },
+  ])('binds Workspace RPC readiness to $channel without exceeding socket scope', async ({ auth, channel }) => {
+    const socket = new FakeSocket()
+    Object.assign(socket, { auth, connected: true })
+    socket.emit.mockImplementation((...args: unknown[]) => {
+      const [event, payload, ack] = args as [string, { requestId: string; generation: number; channels: string[] }, (result: unknown) => void]
+      if (event === 'client:subscribe_channels') ack({ requestId: payload.requestId, generation: payload.generation, accepted: payload.channels, rejected: [], cursors: {} })
+      if (event === 'workspace:exec') ack({ requestId: payload.requestId, stdout: 'calculator.cjs', stderr: '', exitCode: 0, durationMs: 1 })
+      return socket
+    })
+    await expect(workspaceExec(socket as never, 'workspace-1', ['ls'])).resolves.toMatchObject({ exitCode: 0, stdout: 'calculator.cjs' })
+    expect(socket.emit).toHaveBeenCalledWith('client:subscribe_channels', expect.objectContaining({ channels: [channel] }), expect.any(Function))
+  })
+
   it('opens the global control channel without polling so a Unit-routed Gateway can connect', () => {
     const view = renderHook(() => useDashboardControlSocket(window.location.origin))
     expect(sockets).toHaveLength(1)

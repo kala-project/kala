@@ -10,7 +10,7 @@
  */
 
 import { randomId } from './random-id.js'
-import { dashboardConnectionManager } from '../session.js'
+import { dashboardConnectionManager, workspaceSubscriptionChannels } from '../session.js'
 import type { Socket } from 'socket.io-client'
 
 import type {
@@ -38,15 +38,19 @@ export type WorkspaceExecOptions = {
 
 const DEFAULT_ACK_BUFFER_MS = 2_000
 
-async function ensureWorkspaceSubscription(socket: WorkspaceSocket, workspaceId: string): Promise<() => void> {
+export async function ensureWorkspaceSubscription(socket: WorkspaceSocket, workspaceId: string, sessionId?: string): Promise<() => void> {
   // Lightweight feature-test sockets used by isolated panels predate channel
   // subscriptions; production Socket.IO sockets always provide on/off.
   if (typeof socket.on !== 'function' || typeof socket.off !== 'function' || !('io' in socket)) return () => {}
   const manager = dashboardConnectionManager(socket)
-  const channel = `workspace:${workspaceId}` as const
-  const release = manager.acquire(channel)
-  await manager.waitUntilActive(channel, 1_500)
-  return release
+  const channels = workspaceSubscriptionChannels(socket, workspaceId, sessionId)
+  const releases = channels.map((channel) => manager.acquire(channel))
+  const release = (): void => releases.forEach((dispose) => dispose())
+  try {
+    const active = await Promise.all(channels.map((channel) => manager.waitUntilActive(channel)))
+    if (!active.every(Boolean)) throw new Error('Unable to subscribe to this workspace Session.')
+    return release
+  } catch (error) { release(); throw error }
 }
 
 function workspaceReadFailure(requestId: string, code: 'EACCES' | 'ENOENT' | 'EINVAL' | 'EIO', message: string): WorkspaceReadBinaryResponse {

@@ -639,13 +639,13 @@ export function App(): JSX.Element {
     ? chapterModeOverrides[activeSessionId] ?? undefined
     : currentSession?.preferences?.chapterReadingMode
   const setChapterReadingModeForSession = useCallback((mode: ChapterReadingMode | null): void => {
-    if (!activeSessionId || !controlSocket) {
+    if (!activeSessionId || !transportSocket) {
       notify.error(t('chat.transcript.chapterSaveFailed'))
       return
     }
     const sessionId = activeSessionId
     setChapterModeOverrides((current) => ({ ...current, [sessionId]: mode }))
-    void updateSessionPreferences(controlSocket, sessionId, { chapterReadingMode: mode }).catch((error) => {
+    void updateSessionPreferences(transportSocket, sessionId, { chapterReadingMode: mode }).catch((error) => {
       setChapterModeOverrides((current) => {
         if (current[sessionId] !== mode) return current
         const copy = { ...current }
@@ -654,7 +654,7 @@ export function App(): JSX.Element {
       })
       notify.error(t('chat.transcript.chapterSaveFailed'), { description: error instanceof Error ? error.message : String(error) })
     })
-  }, [activeSessionId, controlSocket, t])
+  }, [activeSessionId, transportSocket, t])
   useEffect(() => {
     if (!activeSessionId || !Object.prototype.hasOwnProperty.call(chapterModeOverrides, activeSessionId)) return
     const optimistic = chapterModeOverrides[activeSessionId]
@@ -668,13 +668,13 @@ export function App(): JSX.Element {
     })
   }, [activeSessionId, chapterModeOverrides, currentSession?.preferences?.chapterReadingMode])
   const setRightPanelTab = useCallback((next: RightPanelTab): void => {
-    if (!activeSessionId || !controlSocket) {
+    if (!activeSessionId || !transportSocket) {
       notify.error('Unable to save the right panel', { description: 'No active Session connection.' })
       return
     }
     const sessionId = activeSessionId
     setRightPanelTabOverrides((current) => ({ ...current, [sessionId]: next }))
-    void updateSessionPreferences(controlSocket, sessionId, { rightPanelTab: next }).catch((error) => {
+    void updateSessionPreferences(transportSocket, sessionId, { rightPanelTab: next }).catch((error) => {
       setRightPanelTabOverrides((current) => {
         if (current[sessionId] !== next) return current
         const copy = { ...current }
@@ -683,7 +683,7 @@ export function App(): JSX.Element {
       })
       notify.error('Unable to save the right panel', { description: error instanceof Error ? error.message : String(error) })
     })
-  }, [activeSessionId, controlSocket])
+  }, [activeSessionId, transportSocket])
   useEffect(() => {
     if (!activeSessionId) return
     const persisted = currentSession?.preferences?.rightPanelTab
@@ -1492,24 +1492,24 @@ export function App(): JSX.Element {
   const staleTranscriptViewStart = historyAuthoritative && transcriptViewStart > 0
     && chatItems.length > 0 && transcriptViewStart >= chatItems.length
   useEffect(() => {
-    if (!staleTranscriptViewStart || !activeSessionId || !controlSocket) return
+    if (!staleTranscriptViewStart || !activeSessionId || !transportSocket) return
     const sessionId = activeSessionId
     // A prior /clear index can outlive the transcript it indexed. Restore the
     // full current history and persist the repair so later messages stay visible.
     setTranscriptViewStartOverrides((current) => ({ ...current, [sessionId]: 0 }))
-    void updateSessionPreferences(controlSocket, sessionId, { transcriptViewStart: 0 }).catch((error) => {
+    void updateSessionPreferences(transportSocket, sessionId, { transcriptViewStart: 0 }).catch((error) => {
       notify.error('Unable to restore the conversation view', { description: error instanceof Error ? error.message : String(error) })
     })
-  }, [activeSessionId, controlSocket, notify, staleTranscriptViewStart])
+  }, [activeSessionId, transportSocket, notify, staleTranscriptViewStart])
   const clearTranscriptView = useCallback((): void => {
-    if (!activeSessionId || !controlSocket) {
+    if (!activeSessionId || !transportSocket) {
       notify.error('Unable to clear the conversation view', { description: 'No active Session connection.' })
       return
     }
     const sessionId = activeSessionId
     const start = lastUserTranscriptIndex(chatItems)
     setTranscriptViewStartOverrides((current) => ({ ...current, [sessionId]: start }))
-    void updateSessionPreferences(controlSocket, sessionId, { transcriptViewStart: start }).catch((error) => {
+    void updateSessionPreferences(transportSocket, sessionId, { transcriptViewStart: start }).catch((error) => {
       setTranscriptViewStartOverrides((current) => {
         if (current[sessionId] !== start) return current
         const copy = { ...current }
@@ -1518,7 +1518,7 @@ export function App(): JSX.Element {
       })
       notify.error('Unable to clear the conversation view', { description: error instanceof Error ? error.message : String(error) })
     })
-  }, [activeSessionId, chatItems, controlSocket])
+  }, [activeSessionId, chatItems, transportSocket])
   const createNewSessionFromCurrent = useCallback(async (): Promise<void> => {
     if (!controlSocket || !currentSession) {
       notify.error(t('app.socketNotConnected'))

@@ -1,13 +1,13 @@
 import { ComputerResponseSchema, type ComputerRequest, type ComputerResponse } from '@agent-kernel/shared'
 import type { WorkspaceSocket } from '../../lib/workspace-exec.js'
-import { dashboardConnectionManager } from '../../session.js'
+import { dashboardConnectionManager, workspaceSubscriptionChannels } from '../../session.js'
 
 export async function requestComputer(socket: WorkspaceSocket, request: ComputerRequest): Promise<ComputerResponse> {
   const release: Array<() => void> = []
   try {
     if (typeof socket.on === 'function' && typeof socket.off === 'function' && 'io' in socket) {
       const manager = dashboardConnectionManager(socket)
-      const channels = [`session:${request.sessionId}`, `workspace:${request.workspaceId}`] as const
+      const channels = workspaceSubscriptionChannels(socket, request.workspaceId, request.sessionId)
       for (const channel of channels) release.push(manager.acquire(channel))
       await Promise.all(channels.map((channel) => manager.waitUntilActive(channel, 2_000)))
     }

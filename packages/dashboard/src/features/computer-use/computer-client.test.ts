@@ -6,7 +6,10 @@ import { requestComputer } from './computer-client.js'
 
 const release = vi.fn()
 const manager = { acquire: vi.fn(() => release), waitUntilActive: vi.fn(async () => {}) }
-vi.mock('../../session.js', () => ({ dashboardConnectionManager: () => manager }))
+vi.mock('../../session.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../session.js')>(),
+  dashboardConnectionManager: () => manager,
+}))
 
 describe('desktop request client', () => {
   let socket: WorkspaceSocket
@@ -28,6 +31,13 @@ describe('desktop request client', () => {
     callback(value)
     return pending
   }
+
+  it('keeps a Session-bound desktop request inside its Session channel', async () => {
+    socket.auth = { sessionId: 'session' }
+    expect(await reply(response)).toEqual(response)
+    expect(manager.acquire.mock.calls).toEqual([['session:session']])
+    expect(release).toHaveBeenCalledTimes(1)
+  })
 
   it('waits for both channels and releases them after a correlated response', async () => {
     expect(await reply(response)).toEqual(response)

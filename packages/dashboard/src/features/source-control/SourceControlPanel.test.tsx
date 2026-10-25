@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { WorkspaceExecResponse } from '@agent-kernel/shared/workspace-exec'
@@ -73,6 +73,23 @@ describe('SourceControlPanel', () => {
     expect(execCalls.length).toBeGreaterThanOrEqual(3)
     expect(execCalls.some(([, payload]) => JSON.stringify((payload as { argv: string[] }).argv).includes('status'))).toBe(true)
     expect(execCalls.some(([, payload]) => JSON.stringify((payload as { argv: string[] }).argv).includes('show'))).toBe(true)
+  })
+
+  it('loads after its socket connects and refreshes after reconnect without changing memoized props', async () => {
+    const socket = makeWorkspaceExecSocket({ onExec: (argv) => ({ stdout: argv.includes('status') ? PORCELAIN : REPO_ROOT }) })
+    socket.setConnected(false)
+    const view = render(<SourceControlPanel socket={socket.asDashboardSocket()} workspaceId="ws-1" sessionId="s-1" cwd="/repo" />)
+    expect(socket.emitMock).not.toHaveBeenCalled()
+    act(() => socket.setConnected(true))
+    expect(await screen.findByText('main')).toBeTruthy()
+    expect(screen.getAllByTestId('source-control-file')).toHaveLength(3)
+    act(() => socket.setConnected(false))
+    expect(screen.queryByTestId('source-control-file')).toBeNull()
+    act(() => socket.setConnected(true))
+    await waitFor(() => expect(socket.emitMock.mock.calls.filter(([event, payload]) => event === 'workspace:exec' && (payload.argv as string[]).includes('status'))).toHaveLength(2))
+    expect(await screen.findByText('main')).toBeTruthy()
+    view.unmount()
+    expect(socket.listenerCount()).toBe(0)
   })
 
   it('persists list or tree view per session', async () => {
@@ -150,10 +167,17 @@ function makeWorkspaceExecSocket(input: {
     }
     return undefined
   })
+  const listeners = new Map<string, Set<() => void>>()
+  const socket = {
+    emit: emitMock,
+    connected: true,
+    on(event: string, listener: () => void) { const set = listeners.get(event) ?? new Set<() => void>(); set.add(listener); listeners.set(event, set); return socket },
+    off(event: string, listener: () => void) { listeners.get(event)?.delete(listener); return socket },
+  }
   return {
     emitMock,
-    asDashboardSocket() {
-      return { emit: emitMock } as never
-    },
+    setConnected(connected: boolean) { socket.connected = connected; for (const listener of listeners.get(connected ? 'connect' : 'disconnect') ?? []) listener() },
+    listenerCount() { return [...listeners.values()].reduce((n, set) => n + set.size, 0) },
+    asDashboardSocket() { return socket as never },
   }
 }

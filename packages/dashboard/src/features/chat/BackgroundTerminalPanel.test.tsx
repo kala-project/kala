@@ -159,13 +159,17 @@ describe('BackgroundShellsButton', () => {
     expect(screen.getByTestId('bg-task-empty').textContent ?? '').toContain('No background shells')
   })
 
-  it('waits for Session and Workspace subscriptions before listing shells', async () => {
+  it.each([
+    { mode: 'control', auth: { clientId: 'dashboard' }, subscriptions: 2 },
+    { mode: 'Session-bound', auth: { sessionId: 'sess-1' }, subscriptions: 1 },
+  ])('waits only for authorized $mode subscriptions before listing shells', async ({ auth, subscriptions }) => {
     const socket = makeManagedBgListSocket({
       requestId: 'ignored',
       workspaceId: 'ws-1',
       sessionId: 'sess-1',
       tasks: [],
     })
+    socket.auth = auth
     render(
       <BackgroundShellsButton
         socket={socket}
@@ -175,7 +179,7 @@ describe('BackgroundShellsButton', () => {
       />,
     )
 
-    await waitFor(() => expect(socket.events.filter((event) => event === 'client:subscribe_channels')).toHaveLength(2))
+    await waitFor(() => expect(socket.events.filter((event) => event === 'client:subscribe_channels')).toHaveLength(subscriptions))
     expect(socket.events).not.toContain('bg:list')
     socket.acknowledgeSubscriptions()
 

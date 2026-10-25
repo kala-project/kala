@@ -37,7 +37,7 @@ import { ScrollArea } from '../../components/ui/scroll-area.js'
 import { DEFAULT_FILE_VIEW_FONT_SIZE, PREF_FILE_VIEW_FONT_SIZE, useNumberPref } from '../../lib/prefs.js'
 import { FILE_VIEW_FONT_SIZE_PX, FONT_SIZE_MIN, FONT_SIZE_MAX } from '../../lib/display-sizes.js'
 import { useInterfaceScale } from '../../lib/interface-scale.js'
-import { workspaceReadBinary } from '../../lib/workspace-exec.js'
+import { ensureWorkspaceSubscription, workspaceReadBinary } from '../../lib/workspace-exec.js'
 import { notify } from '../../notify.js'
 import { writeTextToClipboard } from '../../lib/clipboard.js'
 import type { WorkspaceFileTarget } from '../chat/ChatPanel.js'
@@ -319,6 +319,8 @@ function SessionFilesPanelImpl({
             <WorkspaceToolState tone="offline" message={t('sessionFiles.offline')} />
           ) : nodes.length === 0 && loadingPath ? (
             <div className="flex items-center gap-2 p-3 text-xs text-sidebar-foreground/60"><Loader2 className="h-3.5 w-3.5 animate-spin" /> {t('sessionFiles.loadingFiles')}</div>
+          ) : nodes.length === 0 && viewer.kind === 'error' ? (
+            <div role="alert" className="p-3 text-xs text-destructive" data-testid="session-files-error">{viewer.message}</div>
           ) : nodes.length === 0 ? (
             <WorkspaceToolState tone="empty" message={t('sessionFiles.noFiles')} />
           ) : (
@@ -981,21 +983,29 @@ function SessionTerminal({ socket, workspaceId, sessionId, cwd }: { socket: Dash
 }
 
 async function requestDir(socket: DashboardSocket, workspaceId: string, sessionId: string | undefined, path: string | undefined): Promise<DirListResult> {
-  return await new Promise((resolve) => {
-    const requestId = randomId()
-    const timer = window.setTimeout(() => {
-      socket.off('server:dir_list', handler)
-      resolve({ requestId, workspaceId, path: path ?? '', roots: [], entries: [], error: 'timed out' })
-    }, 5000)
-    const handler = (result: DirListResult): void => {
-      if (result.requestId !== requestId) return
-      window.clearTimeout(timer)
-      socket.off('server:dir_list', handler)
-      resolve(result)
-    }
-    socket.on('server:dir_list', handler)
-    socket.emit('client:list_dirs', { requestId, workspaceId, ...(sessionId ? { sessionId } : {}), ...(path ? { path } : {}) })
-  })
+  const requestId = randomId()
+  let release = (): void => {}
+  try {
+    // A connected Engine.IO transport is not a hydrated Session. Socket.IO
+    // flushes buffered packets before Host's async namespace setup finishes.
+    release = await ensureWorkspaceSubscription(socket, workspaceId, sessionId)
+    return await new Promise((resolve) => {
+      const timer = window.setTimeout(() => {
+        socket.off('server:dir_list', handler)
+        resolve({ requestId, workspaceId, path: path ?? '', roots: [], entries: [], error: 'timed out' })
+      }, 5000)
+      const handler = (result: DirListResult): void => {
+        if (result.requestId !== requestId) return
+        window.clearTimeout(timer)
+        socket.off('server:dir_list', handler)
+        resolve(result)
+      }
+      socket.on('server:dir_list', handler)
+      socket.emit('client:list_dirs', { requestId, workspaceId, ...(sessionId ? { sessionId } : {}), ...(path ? { path } : {}) })
+    })
+  } catch (error) {
+    return { requestId, workspaceId, path: path ?? '', roots: [], entries: [], error: error instanceof Error ? error.message : String(error) }
+  } finally { release() }
 }
 
 async function requestFile(socket: DashboardSocket, workspaceId: string, sessionId: string | undefined, path: string, options: { cwd?: string; maxBytes?: number; download?: boolean; timeoutMs?: number } = {}): Promise<FileContentsResult> {

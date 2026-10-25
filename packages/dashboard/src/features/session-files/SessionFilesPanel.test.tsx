@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { DirListEntry, DirListResult, FileContentsResult, TerminalCreateResult, TerminalKillResult } from '@agent-kernel/shared'
@@ -105,6 +105,30 @@ describe('SessionFilesPanel', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+  })
+
+  it('waits for the bound Session acknowledgement before sending the first directory request', async () => {
+    const fixture = makeSessionFilesSocket({
+      file: { kind: 'text', content: 'hello', size: 5 },
+      entries: [{ name: 'notes.txt', path: '/repo/notes.txt', type: 'file', size: 5 }],
+    })
+    const socket = fixture.asDashboardSocket()
+    Object.assign(socket, { io: {}, connected: true, auth: { sessionId: 'sess-1' } })
+    const originalEmit = fixture.emitMock.getMockImplementation()!
+    let acknowledge: (() => void) | undefined
+    fixture.emitMock.mockImplementation((event, payload, ack) => {
+      if (event === 'client:subscribe_channels') {
+        expect(payload.channels).toEqual(['session:sess-1'])
+        acknowledge = () => ack?.({ requestId: payload.requestId, generation: payload.generation, accepted: payload.channels, rejected: [], cursors: {} })
+        return
+      }
+      return originalEmit(event, payload, ack)
+    })
+    render(<SessionFilesPanel socket={socket} workspaceId="ws-1" sessionId="sess-1" cwd="/repo" mode="sidebar" />)
+    await waitFor(() => expect(acknowledge).toBeDefined())
+    expect(fixture.emitMock.mock.calls.some(([event]) => event === 'client:list_dirs')).toBe(false)
+    await act(async () => { acknowledge!() })
+    expect(await screen.findByText('notes.txt')).toBeTruthy()
   })
 
   it('loads the session file tree and views text files read-only', async () => {

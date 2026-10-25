@@ -26,7 +26,7 @@ import type {
 } from '@agent-kernel/shared'
 
 import type { DashboardSocket } from '../../session.js'
-import { dashboardConnectionManager } from '../../session.js'
+import { dashboardConnectionManager, workspaceSubscriptionChannels } from '../../session.js'
 
 export type LiveBackgroundTask = BackgroundTaskSummary & {
   /** Tail of stdout+stderr held on the client (may be less than bytesLogged when the ring buffer wrapped). */
@@ -98,19 +98,16 @@ export function useBackgroundTasks({
       && typeof socket.off === 'function'
       && 'io' in socket
     const manager = isManagedSocket ? dashboardConnectionManager(socket) : null
-    const sessionChannel = `session:${sessionId}` as const
-    const workspaceChannel = `workspace:${workspaceId}` as const
-    const releaseSession = manager?.acquire(sessionChannel)
-    const releaseWorkspace = manager?.acquire(workspaceChannel)
+    let channels: ReturnType<typeof workspaceSubscriptionChannels>
+    try { channels = workspaceSubscriptionChannels(socket, workspaceId, sessionId) }
+    catch (error) { setError(error instanceof Error ? error.message : 'Workspace connection is not ready.'); return }
+    const releases = channels.map((channel) => manager?.acquire(channel))
 
     const loadTasks = async (): Promise<void> => {
       if (manager) {
-        const [sessionActive, workspaceActive] = await Promise.all([
-          manager.waitUntilActive(sessionChannel),
-          manager.waitUntilActive(workspaceChannel),
-        ])
+        const active = await Promise.all(channels.map((channel) => manager.waitUntilActive(channel)))
         if (cancelled) return
-        if (!sessionActive || !workspaceActive) {
+        if (!active.every(Boolean)) {
           setError('Unable to subscribe to this workspace session.')
           return
         }
@@ -197,8 +194,7 @@ export function useBackgroundTasks({
 
     return () => {
       cancelled = true
-      releaseSession?.()
-      releaseWorkspace?.()
+      releases.forEach((release) => release?.())
       socket.off('connect', onConnect)
       socket.off('server:control_update', onControlUpdate)
     }

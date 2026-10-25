@@ -76,6 +76,20 @@ function SourceControlPanelImpl({ socket, workspaceId, sessionId, cwd, fontSizeP
   const statusGeneration = useRef(0)
   const sessionIdRef = useRef(sessionId)
   sessionIdRef.current = sessionId
+  // Socket.IO mutates connected in place; memoized props do not change when
+  // an independently bound Session finishes connecting or reconnects.
+  const [, refreshConnection] = useState(0)
+  useEffect(() => {
+    if (!socket) return
+    const onConnectionChange = (): void => refreshConnection((revision) => revision + 1)
+    socket.on('connect', onConnectionChange)
+    socket.on('disconnect', onConnectionChange)
+    onConnectionChange()
+    return () => {
+      socket.off('connect', onConnectionChange)
+      socket.off('disconnect', onConnectionChange)
+    }
+  }, [socket])
   const online = Boolean(socket && workspaceId && socket.connected !== false)
   const viewModeKey = sourceControlViewModeKey(sessionId, workspaceId)
 
