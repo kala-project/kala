@@ -62,7 +62,7 @@ describe('ScheduledTaskInbox', () => {
     expect(screen.queryByRole('dialog', { name: 'Scheduled runs' })).toBeNull()
   })
 
-  it('shows immutable task context, dispatch times and errors without claiming agent completion, and opens the known session', async () => {
+  it('shows conversation names and only the updated time without claiming agent completion', async () => {
     const item = {
       ...makeItem(1), taskLabel: 'Morning repository review',
       target: { kind: 'workspace', workspaceId: 'ws-1', workspaceName: 'Payments', cwd: '/repo' },
@@ -70,15 +70,20 @@ describe('ScheduledTaskInbox', () => {
     }
     vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockImplementation(async (_url, init) => new Response(JSON.stringify(init?.method === 'POST'
       ? { acknowledged: ['occ-1'], unreadCount: 0 }
-      : { items: [item, { ...makeItem(3), error: 'Workspace Executor is offline.' }], unreadCount: 2 }), { status: 200 })))
+      : { items: [item, { ...makeItem(3), target: { kind: 'session', sessionId: 'session-2' }, error: 'Workspace Executor is offline.' }], unreadCount: 2 }), { status: 200 })))
     const onOpenSession = vi.fn()
-    render(<ScheduledTaskInbox host="https://runlab.example" onOpenTask={() => {}} onOpenSession={onOpenSession} />)
+    render(<ScheduledTaskInbox host="https://runlab.example" onOpenTask={() => {}} onOpenSession={onOpenSession} sessionNames={new Map([['session-1', 'Payments review'], ['session-2', 'Release checklist']])} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Scheduled run inbox, 2 unread' }))
     expect(screen.getByText('Morning repository review')).toBeTruthy()
     expect(screen.getByText('Workspace: Payments')).toBeTruthy()
     expect(screen.getByText('/repo')).toBeTruthy()
-    expect(screen.getByText(/Claimed for dispatch:/)).toBeTruthy()
-    expect(screen.getAllByText(/Status updated:/)).toHaveLength(2)
+    expect(screen.getByText('Session: Payments review')).toBeTruthy()
+    expect(screen.getByText('Session: Release checklist')).toBeTruthy()
+    expect(screen.queryByText(/session-[12]/)).toBeNull()
+    expect(screen.queryByText(/Claimed for dispatch:/)).toBeNull()
+    expect(screen.queryByText(/Scheduled:/)).toBeNull()
+    expect(screen.getAllByText(/Updated:/)).toHaveLength(2)
+    expect(screen.getAllByText(/Updated:/)[0]?.getAttribute('datetime')).toBe(item.updatedAt)
     expect(screen.getByText('Message queued for the session. Completion and results are not tracked here.')).toBeTruthy()
     expect(screen.getByText('Workspace Executor is offline.')).toBeTruthy()
     expect(screen.queryByText('Run started')).toBeNull()

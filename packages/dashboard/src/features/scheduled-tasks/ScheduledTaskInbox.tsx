@@ -19,6 +19,7 @@ export type ScheduledTaskInboxProps = {
   token?: string
   onOpenTask: (taskId: string) => void
   onOpenSession?: (sessionId: string) => void
+  sessionNames?: ReadonlyMap<string, string>
 }
 
 type InboxState = ScheduledTaskInboxSnapshot & {
@@ -51,7 +52,7 @@ function formatScheduledTime(value: string) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
 }
 
-export function ScheduledTaskInbox({ host, token, onOpenTask, onOpenSession }: ScheduledTaskInboxProps) {
+export function ScheduledTaskInbox({ host, token, onOpenTask, onOpenSession, sessionNames }: ScheduledTaskInboxProps) {
   const { t } = useTranslation()
   const identity = `${host}\u0000${token ?? ''}`
   const client = useMemo(() => createScheduledTasksClient({ host, token }), [host, token])
@@ -220,6 +221,8 @@ export function ScheduledTaskInbox({ host, token, onOpenTask, onOpenSession }: S
             {visibleItems.map((item) => {
               const details = statusDetails[item.status]
               const target = item.target
+              const sessionId = item.sessionId ?? (target?.kind === 'session' ? target.sessionId : undefined)
+              const sessionName = sessionId ? sessionNames?.get(sessionId) || t('scheduledTaskInbox.unnamedSession') : undefined
               return (
                 <div key={item.occurrenceId} className="rounded-lg border-b border-border/50 last:border-0">
                 <button
@@ -236,15 +239,14 @@ export function ScheduledTaskInbox({ host, token, onOpenTask, onOpenSession }: S
                     <span className="mt-1 block break-all text-[11px] text-muted-foreground">
                       {target?.kind === 'workspace'
                         ? t('scheduledTaskInbox.workspace', { name: target.workspaceName || target.workspaceId })
-                        : target?.kind === 'session' ? t('scheduledTaskInbox.session', { id: target.sessionId }) : t('scheduledTaskInbox.contextUnavailable')}
+                        : sessionName ? t('scheduledTaskInbox.session', { name: sessionName }) : t('scheduledTaskInbox.contextUnavailable')}
                     </span>
+                    {target?.kind === 'workspace' && sessionName ? <span className="mt-1 block truncate text-[11px] text-muted-foreground" title={sessionName}>{t('scheduledTaskInbox.session', { name: sessionName })}</span> : null}
                     {target?.kind === 'workspace' && target.cwd ? <span className="block truncate text-[11px] text-muted-foreground" title={target.cwd}>{target.cwd}</span> : null}
                     <span className="flex items-center gap-2">
                       <span className={`mt-1 rounded px-1.5 py-0.5 text-[11px] font-medium ${details.className}`}>{t(`scheduledTaskInbox.status.${item.status}`)}</span>
                     </span>
-                    <span className="mt-1 block text-[11px] text-muted-foreground">{t('scheduledTaskInbox.scheduledFor', { time: formatScheduledTime(item.scheduledFor) })}</span>
-                    {item.claimedAt ? <span className="block text-[11px] text-muted-foreground">{t('scheduledTaskInbox.claimedAt', { time: formatScheduledTime(item.claimedAt) })}</span> : null}
-                    <span className="block text-[11px] text-muted-foreground">{t('scheduledTaskInbox.updatedAt', { time: formatScheduledTime(item.updatedAt) })}</span>
+                    <time className="mt-1 block text-[11px] text-muted-foreground" dateTime={item.updatedAt}>{t('scheduledTaskInbox.updatedAt', { time: formatScheduledTime(item.updatedAt) })}</time>
                     <span className="mt-1 block text-[11px] text-muted-foreground">{t(`scheduledTaskInbox.outcome.${item.status}`)}</span>
                     {item.error ? <span className="mt-1 block whitespace-pre-wrap break-words text-xs text-destructive">{item.error}</span> : null}
                   </span>

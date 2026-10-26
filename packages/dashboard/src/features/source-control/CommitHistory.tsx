@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { ChevronRight, GitCommitHorizontal, Loader2, RefreshCw } from 'lucide-react'
 import type { WorkspaceSocket } from '../../lib/workspace-exec.js'
 import {
   gitHistory, gitCommitDetails, gitCommitDiff,
@@ -52,24 +53,39 @@ export function CommitHistory({ socket, workspaceId, cwd }: Props): JSX.Element 
   }, [socket, workspaceId, cwd, online])
 
   return (
-    <section className="space-y-2" aria-label={t('sourceControl.history')}>
-      <div className="flex items-center justify-between px-1.5">
-        <h2 className="text-xs font-semibold">{t('sourceControl.history')}</h2>
-        <button type="button" className="text-xs text-primary disabled:opacity-50" disabled={!online || loading} onClick={() => void load(true)}>{t('sourceControl.refreshHistory')}</button>
+    <section className="space-y-3" aria-label={t('sourceControl.history')}>
+      <div className="flex items-center justify-between gap-2 px-1 py-1">
+        <h2 className="text-[11px] font-medium text-muted-foreground">{t('sourceControl.history')}</h2>
+        <button type="button" className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50" disabled={!online || loading} onClick={() => void load(true)}>{loading ? <Loader2 className="size-3 animate-spin" aria-hidden="true" /> : <RefreshCw className="size-3" aria-hidden="true" />}{t('sourceControl.refreshHistory')}</button>
       </div>
       {!online ? <p className="p-3 text-xs text-muted-foreground">{t('sourceControl.offline')}</p> : null}
       {error ? <p role="alert" className="break-words p-2 text-xs text-destructive">{error}</p> : null}
       {online && !loading && !error && page.commits.length === 0 ? <p className="p-3 text-xs text-muted-foreground">{t('sourceControl.noCommits')}</p> : null}
-      {page.commits.map((commit) => (
-        <button key={commit.hash} type="button" className="block w-full rounded px-2 py-2 text-left hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring" onClick={() => setSelected(commit)}>
-          <span className="block truncate text-xs font-medium">{commit.message.split('\n')[0] || t('sourceControl.emptyMessage')}</span>
-          <span className="block truncate text-[11px] text-muted-foreground">{commit.hash.slice(0, 8)} · {commit.authorName} · {formatTime(commit.committedAt)}</span>
-        </button>
-      ))}
+      <ol className="space-y-2">
+        {page.commits.map((commit, index) => (
+          <li key={commit.hash} className="relative flex gap-2">
+            <div className="flex flex-none flex-col items-center pt-3">
+              <span className="z-10 flex size-6 items-center justify-center rounded-full border border-sidebar-border/60 bg-sidebar text-primary/80"><GitCommitHorizontal className="size-3.5" aria-hidden="true" /></span>
+              {index < page.commits.length - 1 ? <span className="-mb-5 mt-1 w-px flex-1 bg-sidebar-border/70" aria-hidden="true" /> : null}
+            </div>
+            <button type="button" className="group min-w-0 flex-1 rounded-xl border border-sidebar-border/50 bg-background/30 px-3 py-2.5 text-left transition-colors hover:border-sidebar-border hover:bg-sidebar-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => setSelected(commit)}>
+              <span className="flex min-w-0 items-center gap-2">
+                <span className="min-w-0 flex-1 truncate text-xs font-medium leading-relaxed" title={commit.message.split('\n')[0]}>{commit.message.split('\n')[0] || t('sourceControl.emptyMessage')}</span>
+                <ChevronRight className="size-3.5 flex-none text-muted-foreground/40 transition-colors group-hover:text-foreground" aria-hidden="true" />
+              </span>
+              <span className="mt-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted-foreground">
+                <code className="flex-none rounded bg-muted/70 px-1.5 py-0.5 font-mono text-primary/80">{commit.hash.slice(0, 8)}</code>
+                <span className="min-w-0 flex-1 truncate">{commit.authorName}</span>
+                <time className="max-w-full flex-none break-words tabular-nums" dateTime={commit.committedAt}>{formatTime(commit.committedAt)}</time>
+              </span>
+            </button>
+          </li>
+        ))}
+      </ol>
       {loading ? <p role="status" className="p-2 text-xs text-muted-foreground">{t('sourceControl.loadingHistory')}</p> : null}
       <div className="flex items-center justify-between text-xs text-primary">
-        {offset > 0 ? <button type="button" className="p-2 disabled:opacity-50" disabled={loading} onClick={() => void load(false, previousOffsets.current.at(-1) ?? 0)}>{t('sourceControl.newerCommits')}</button> : <span />}
-        {page.nextOffset !== undefined ? <button type="button" className="p-2 disabled:opacity-50" disabled={loading} onClick={() => void load(false, page.nextOffset)}>{t('sourceControl.loadMore')}</button> : null}
+        {offset > 0 ? <button type="button" className="rounded-lg border border-sidebar-border/50 px-2.5 py-1.5 transition-colors hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50" disabled={loading} onClick={() => void load(false, previousOffsets.current.at(-1) ?? 0)}>{t('sourceControl.newerCommits')}</button> : <span />}
+        {page.nextOffset !== undefined ? <button type="button" className="rounded-lg border border-sidebar-border/50 px-2.5 py-1.5 transition-colors hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50" disabled={loading} onClick={() => void load(false, page.nextOffset)}>{t('sourceControl.loadMore')}</button> : null}
       </div>
       <CommitDetailsDialog socket={socket} workspaceId={workspaceId} cwd={cwd} commit={selected} onClose={() => setSelected(null)} />
     </section>

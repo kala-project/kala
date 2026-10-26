@@ -568,14 +568,16 @@ describe('SessionFilesPanel', () => {
     expect((await screen.findByTestId('monaco-editor')).textContent).toContain('name,note,value')
   })
 
-  it('previews JSONL records while retaining malformed-line diagnostics', async () => {
+  it('previews JSONL as one continuous document while retaining malformed-line diagnostics', async () => {
     const socket = makeSessionFilesSocket({ file: { kind: 'text', content: '{"ok":true}\ninvalid\n{"ok":false}', size: 34 }, entries: [{ name: 'events.jsonl', path: '/repo/events.jsonl', type: 'file' }] })
     render(<SessionFilesPanel mode="sidebar" socket={socket.asDashboardSocket()} workspaceId="ws-1" sessionId="sess-1" cwd="/repo" />)
     fireEvent.click(await screen.findByText('events.jsonl'))
-    expect(await screen.findByTestId('session-file-record-preview')).toBeTruthy()
+    const editor = await screen.findByTestId('monaco-editor')
+    expect(editor.getAttribute('data-language')).toBe('json')
+    expect(editor.getAttribute('data-readonly')).toBe('true')
+    expect(editor.textContent).toBe('{"ok":true}\ninvalid\n{"ok":false}')
+    expect(screen.queryByTestId('session-file-record-preview')).toBeNull()
     expect(screen.getByText(/Invalid JSON on Line 2/u)).toBeTruthy()
-    expect(screen.getByText('true')).toBeTruthy()
-    expect(screen.getByText('false')).toBeTruthy()
   })
 
   it('previews JSON as a formatted document instead of a flattened path table', async () => {

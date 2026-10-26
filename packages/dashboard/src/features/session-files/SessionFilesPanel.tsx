@@ -501,15 +501,15 @@ function FileView({ viewer, selected, path, target, chrome = true, wordWrap = tr
       {viewer.truncated ? <div className="border-b border-amber-200 bg-amber-50 px-3 py-1 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">{t('sessionFiles.capped')}</div> : null}
       {markdownMode === 'preview' && previewModel?.kind === 'source' && previewModel.format === 'Markdown' ? (
         <MarkdownFileView content={viewer.content} fontSize={fontSize} />
-      ) : markdownMode === 'preview' && previewModel?.kind === 'json' ? (
+      ) : markdownMode === 'preview' && (previewModel?.kind === 'json' || previewModel?.kind === 'records') ? (
         <div className="flex h-full min-h-0 flex-col" data-testid="session-file-json-preview">
           {previewModel.error ? <div className="border-b border-amber-300/50 bg-amber-50 px-3 py-1.5 text-xs text-amber-900 dark:bg-amber-950/40 dark:text-amber-100">{previewModel.error}</div> : null}
           <div className="min-h-0 flex-1">
             <Editor
-              value={previewModel.content}
+              value={previewModel.kind === 'json' ? previewModel.content : viewer.content}
               language="json"
               theme="vs-dark"
-              options={{ readOnly: true, minimap: { enabled: false }, wordWrap: wordWrap ? 'on' : 'off', fontSize, scrollBeyondLastLine: false, automaticLayout: true, folding: true, lineNumbers: 'on', renderValidationDecorations: 'on' }}
+              options={{ readOnly: true, minimap: { enabled: false }, wordWrap: wordWrap ? 'on' : 'off', fontSize, scrollBeyondLastLine: false, automaticLayout: true, folding: true, lineNumbers: 'on', renderValidationDecorations: previewModel.kind === 'json' ? 'on' : 'off' }}
             />
           </div>
         </div>

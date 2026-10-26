@@ -1,7 +1,7 @@
 import { randomId } from '../../lib/random-id.js'
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { DiffEditor } from '../../lib/monaco.js'
-import { AlertCircle, ChevronDown, ChevronRight, Columns2, FileCode2, Folder, GitBranch, List, ListTree, Loader2, RefreshCw, Rows3 } from 'lucide-react'
+import { AlertCircle, ChevronDown, ChevronRight, Columns2, FileCode2, Folder, GitBranch, History, List, ListTree, Loader2, RefreshCw, Rows3 } from 'lucide-react'
 import type { Socket } from 'socket.io-client'
 
 import type {
@@ -66,6 +66,7 @@ const GIT_STATUS_LABEL: Record<GitFileChange['status'], string> = {
 
 function SourceControlPanelImpl({ socket, workspaceId, sessionId, cwd, fontSizePx = 12 }: SourceControlPanelProps): JSX.Element {
   const { t } = useTranslation()
+  const tabsId = useId()
   const resourceKey = `${workspaceId ?? 'offline'}\0${cwd ?? ''}`
   const [status, setStatus] = useState<GitStatusResult | null>(null)
   const [loading, setLoading] = useState(false)
@@ -133,35 +134,46 @@ function SourceControlPanelImpl({ socket, workspaceId, sessionId, cwd, fontSizeP
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-sidebar text-sidebar-foreground" data-testid="source-control-panel">
-      <div className="flex h-10 flex-none items-center gap-2 border-b border-sidebar-border/40 bg-muted/15 px-3" data-testid="source-control-toolbar">
-        <GitBranch className="h-3.5 w-3.5 flex-none text-sidebar-foreground/70" />
-        <div className="min-w-0 flex-1 truncate text-xs text-sidebar-foreground/75">
-          {status?.repo?.branch ?? status?.repo?.head ?? t('sourceControl.repository')}
+      <div className="flex-none space-y-3 border-b border-sidebar-border/50 bg-gradient-to-b from-muted/20 to-transparent p-3">
+        <div className="flex min-w-0 items-center gap-2.5 rounded-xl border border-sidebar-border/60 bg-background/40 p-2.5 shadow-sm" data-testid="source-control-toolbar">
+          <span className="flex size-9 flex-none items-center justify-center rounded-lg bg-primary/10 text-primary"><GitBranch className="size-4" aria-hidden="true" /></span>
+          <div className="min-w-0 flex-1">
+            <div className="mb-0.5 text-[10px] font-medium tracking-wide text-sidebar-foreground/50">{t('sourceControl.repository')}</div>
+            <div className="truncate font-mono text-xs font-semibold text-sidebar-foreground" title={status?.repo?.branch ?? status?.repo?.head}>
+              {status?.repo?.branch ?? status?.repo?.head ?? '—'}
+            </div>
+          </div>
+          <div className="flex flex-none items-center gap-0.5 rounded-lg border border-sidebar-border/50 bg-sidebar/60 p-0.5">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7 flex-none rounded-md text-sidebar-foreground/60 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+              disabled={fileCount === 0}
+              onClick={toggleViewMode}
+              title={viewMode === 'tree' ? t('sourceControl.showList') : t('sourceControl.showTree')}
+              aria-label={viewMode === 'tree' ? t('sourceControl.showList') : t('sourceControl.showTree')}
+              aria-pressed={viewMode === 'tree'}
+              data-testid="source-control-view-mode-toggle"
+              data-view-mode={viewMode}
+            >
+              {viewMode === 'tree' ? <List className="size-3.5" /> : <ListTree className="size-3.5" />}
+            </Button>
+            <Button variant="ghost" size="icon" className="size-7 flex-none rounded-md text-sidebar-foreground/60 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground" disabled={!online || loading} onClick={() => void refresh()} title={t('sourceControl.refresh')} aria-label={t('sourceControl.refresh')}>
+              {loading ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+            </Button>
+          </div>
         </div>
-        {fileCount > 0 ? <span className="font-mono text-caption tabular-nums text-sidebar-foreground/55">{fileCount}</span> : null}
-        <Button
-          variant="ghost"
-          size="icon"
-          className={cn('h-8 w-8 flex-none rounded-lg text-sidebar-foreground/65 hover:bg-sidebar-accent/70 hover:text-sidebar-foreground', fileCount > 0 && 'text-sidebar-foreground')}
-          disabled={fileCount === 0}
-          onClick={toggleViewMode}
-          title={viewMode === 'tree' ? t('sourceControl.showList') : t('sourceControl.showTree')}
-          aria-label={viewMode === 'tree' ? t('sourceControl.showList') : t('sourceControl.showTree')}
-          aria-pressed={viewMode === 'tree'}
-          data-testid="source-control-view-mode-toggle"
-          data-view-mode={viewMode}
-        >
-          {viewMode === 'tree' ? <List className="h-3.5 w-3.5" /> : <ListTree className="h-3.5 w-3.5" />}
-        </Button>
-        <Button variant="ghost" size="icon" className="h-8 w-8 flex-none rounded-lg text-sidebar-foreground/65 hover:bg-sidebar-accent/70 hover:text-sidebar-foreground" disabled={!online || loading} onClick={() => void refresh()} title={t('sourceControl.refresh')} aria-label={t('sourceControl.refresh')}>
-          {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-        </Button>
+        <div className="grid grid-cols-2 gap-1 rounded-xl bg-muted/60 p-1" role="tablist" aria-label={t('sourceControl.repository')}>
+          <button type="button" id={`${tabsId}-changes`} role="tab" aria-selected={tab === 'changes'} aria-controls={`${tabsId}-panel`} onClick={() => setTab('changes')} className={cn('flex min-w-0 items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring', tab === 'changes' ? 'bg-background text-sidebar-foreground shadow-sm ring-1 ring-sidebar-border/50 dark:bg-sidebar-accent' : 'text-sidebar-foreground/55 hover:bg-sidebar-accent/40 hover:text-sidebar-foreground')}>
+            <FileCode2 className="size-3.5 flex-none" aria-hidden="true" /><span className="truncate">{t('sourceControl.workingChanges')}</span>
+            {fileCount > 0 ? <span className={cn('flex h-4 min-w-4 flex-none items-center justify-center rounded px-1 text-[10px] font-semibold tabular-nums', tab === 'changes' ? 'bg-primary/10 text-primary' : 'bg-sidebar-accent text-sidebar-foreground/60')}>{fileCount}</span> : null}
+          </button>
+          <button type="button" id={`${tabsId}-history`} role="tab" aria-selected={tab === 'history'} aria-controls={`${tabsId}-panel`} onClick={() => setTab('history')} className={cn('flex min-w-0 items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring', tab === 'history' ? 'bg-background text-sidebar-foreground shadow-sm ring-1 ring-sidebar-border/50 dark:bg-sidebar-accent' : 'text-sidebar-foreground/55 hover:bg-sidebar-accent/40 hover:text-sidebar-foreground')}>
+            <History className="size-3.5 flex-none" aria-hidden="true" /><span className="truncate">{t('sourceControl.history')}</span>
+          </button>
+        </div>
       </div>
-      <div className="flex gap-3 border-b border-sidebar-border/40 px-3 py-2 text-xs" role="tablist" aria-label={t('sourceControl.repository')}>
-        <button type="button" role="tab" aria-selected={tab === 'changes'} onClick={() => setTab('changes')} className={cn(tab === 'changes' && 'font-semibold text-primary')}>{t('sourceControl.workingChanges')}</button>
-        <button type="button" role="tab" aria-selected={tab === 'history'} onClick={() => setTab('history')} className={cn(tab === 'history' && 'font-semibold text-primary')}>{t('sourceControl.history')}</button>
-      </div>
-      <div className="min-h-0 flex-1 overflow-auto p-1.5" style={{ fontSize: `${fontSizePx / 16}rem` }}>
+      <div id={`${tabsId}-panel`} role="tabpanel" aria-labelledby={`${tabsId}-${tab}`} className="min-h-0 flex-1 overflow-auto p-2.5" style={{ fontSize: `${fontSizePx / 16}rem` }}>
         {tab === 'history' ? <CommitHistory socket={socket} workspaceId={workspaceId} cwd={cwd} /> : !online ? (
           <EmptyState message={t('sourceControl.offline')} />
         ) : loading && !status ? (
@@ -175,7 +187,7 @@ function SourceControlPanelImpl({ socket, workspaceId, sessionId, cwd, fontSizeP
             {status?.truncated ? <div className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-caption text-amber-700 dark:text-amber-200">{t('sourceControl.truncatedFiles', { count: status.truncated.limit })}</div> : null}
             {groups.map((group) => (
               <div key={group.id}>
-                <div className="px-1.5 py-1 text-caption font-medium uppercase tracking-normal text-sidebar-foreground/55">{group.label}</div>
+                <div className="mb-1 flex items-center justify-between gap-2 px-2 py-1.5 text-caption font-medium text-sidebar-foreground/60"><span>{group.label}</span><span className="rounded-md bg-muted/60 px-1.5 py-0.5 text-[10px] tabular-nums text-sidebar-foreground/50">{group.files.length}</span></div>
                 <div className="space-y-0.5">
                   {viewMode === 'tree' ? (
                     <GitFileTree
@@ -264,7 +276,7 @@ function GitDirRow({ node, depth, collapsed, onToggle }: { node: Extract<GitTree
   return (
     <button
       type="button"
-      className="flex h-7 w-full min-w-0 items-center gap-1.5 rounded px-1.5 text-left text-sidebar-foreground/80 hover:bg-sidebar-accent"
+      className="flex h-8 w-full min-w-0 items-center gap-1.5 rounded-lg px-1.5 text-left text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       style={{ paddingLeft: `${0.375 + depth * 0.875}rem` }}
       onClick={onToggle}
       title={node.path}
@@ -282,7 +294,7 @@ function GitFileRow({ file, depth, label, onOpen }: { file: GitFileChange; depth
   return (
     <button
       type="button"
-      className="flex h-7 w-full min-w-0 items-center gap-1.5 rounded px-1.5 text-left hover:bg-sidebar-accent"
+      className="flex h-8 w-full min-w-0 items-center gap-1.5 rounded-lg px-1.5 text-left transition-colors hover:bg-sidebar-accent/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       style={{ paddingLeft: `${0.375 + depth * 0.875}rem` }}
       onClick={onOpen}
       title={file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path}
@@ -464,7 +476,7 @@ function statusBadgeClass(status: GitFileChange['status']): string {
 }
 
 function EmptyState({ message }: { message: string }): JSX.Element {
-  return <div className="flex min-h-28 flex-col items-center justify-center gap-2 px-4 text-center text-xs text-sidebar-foreground/60"><GitBranch className="h-5 w-5 opacity-60" aria-hidden="true" />{message}</div>
+  return <div className="m-1 flex min-h-40 flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-sidebar-border/70 bg-muted/15 px-6 text-center text-xs leading-relaxed text-sidebar-foreground/55"><span className="flex size-11 items-center justify-center rounded-2xl bg-sidebar-accent/60"><GitBranch className="size-5 text-sidebar-foreground/45" aria-hidden="true" /></span><span>{message}</span></div>
 }
 
 function ErrorState({ message }: { message: string }): JSX.Element {

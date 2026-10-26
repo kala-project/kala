@@ -516,6 +516,7 @@ export function App(): JSX.Element {
   const transportStatus = connectionStatusForTransport(transportSocket, session.status, connectedSocketRef.current === transportSocket)
   useEffect(() => previewStore.connect(controlSocket, sessionViewCache), [controlSocket, previewStore, sessionViewCache])
   const control = useControlPlane(controlSocket)
+  const sessionNames = useMemo(() => new Map(control.sessions.map((item) => [item.sessionId, sessionDisplayLabel(item, t('scheduledTaskInbox.unnamedSession'))])), [control.sessions, t])
   const controlSessionsRef = useRef<readonly SessionSummary[]>([])
   controlSessionsRef.current = control.sessions
   const currentSession = control.sessions.find(
@@ -2696,7 +2697,7 @@ export function App(): JSX.Element {
                         activeTab={rightPanelTab}
                         onTabChange={setRightPanelTab}
                         onCollapse={() => setInspectorOpen(false)}
-                        headerHelp={<ScheduledTaskInbox host={hostEndpoint.url} {...(config.token ? { token: config.token } : {})} onOpenTask={(taskId) => { void openScheduledTaskFromInbox(taskId) }} onOpenSession={selectSession} />}
+                        headerHelp={<ScheduledTaskInbox sessionNames={sessionNames} host={hostEndpoint.url} {...(config.token ? { token: config.token } : {})} onOpenTask={(taskId) => { void openScheduledTaskFromInbox(taskId) }} onOpenSession={selectSession} />}
                         inspector={<InspectorPanel
                         state={session.state}
                         config={session.config}
@@ -2793,7 +2794,7 @@ export function App(): JSX.Element {
           </DialogHeader>
           <div className="h-full min-h-0 pb-[env(safe-area-inset-bottom)]">
             <RightPanel
-              headerHelp={<ScheduledTaskInbox host={hostEndpoint.url} {...(config.token ? { token: config.token } : {})} onOpenTask={(taskId) => { void openScheduledTaskFromInbox(taskId) }} onOpenSession={(id) => { selectSession(id); setInspectorDrawerOpen(false) }} />}
+              headerHelp={<ScheduledTaskInbox sessionNames={sessionNames} host={hostEndpoint.url} {...(config.token ? { token: config.token } : {})} onOpenTask={(taskId) => { void openScheduledTaskFromInbox(taskId) }} onOpenSession={(id) => { selectSession(id); setInspectorDrawerOpen(false) }} />}
               activeTab={rightPanelTab}
               onTabChange={setRightPanelTab}
               onCollapse={() => setInspectorDrawerOpen(false)}
@@ -3015,6 +3016,7 @@ export function App(): JSX.Element {
         host={hostEndpoint.url}
         {...(config.token ? { token: config.token } : {})}
         target={scheduledTasksTarget}
+        sessionNames={sessionNames}
         taskId={scheduledTaskId}
         onTasksChange={() => setScheduledTasksRevision((revision) => revision + 1)}
         onOpenSession={(sessionId) => {

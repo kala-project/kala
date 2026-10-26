@@ -35,6 +35,8 @@ export type ScheduledRun = {
   taskId: string
   operationId: string
   scheduledFor: string
+  claimedAt?: string
+  updatedAt?: string
   status: 'claimed' | 'enqueued' | 'failed' | 'needs_review' | 'skipped'
   task: ScheduledTaskSnapshot
   sessionId?: string

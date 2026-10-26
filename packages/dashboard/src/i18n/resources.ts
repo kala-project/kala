@@ -1832,8 +1832,8 @@ export const resources = {
         title: 'Scheduled runs', close: 'Close scheduled runs', loading: 'Loading scheduled runs', empty: 'No recent scheduled runs',
         unread: '{{count}} unread', trigger: 'Scheduled run inbox, {{unread}}', newer: 'Newer', older: 'Older',
         loadError: 'Could not load scheduled runs', seenError: 'Could not mark scheduled runs as seen',
-        taskFallback: 'Task {{id}}', workspace: 'Workspace: {{name}}', session: 'Session: {{id}}', contextUnavailable: 'Workspace context unavailable',
-        scheduledFor: 'Scheduled: {{time}}', claimedAt: 'Claimed for dispatch: {{time}}', updatedAt: 'Status updated: {{time}}', openSession: 'Open conversation',
+        taskFallback: 'Task {{id}}', workspace: 'Workspace: {{name}}', session: 'Session: {{name}}', unnamedSession: 'Untitled conversation', contextUnavailable: 'Workspace context unavailable',
+        scheduledFor: 'Scheduled: {{time}}', claimedAt: 'Claimed for dispatch: {{time}}', updatedAt: 'Updated: {{time}}', openSession: 'Open conversation',
         status: { enqueued: 'Queued', failed: 'Dispatch failed', needs_review: 'Needs review' },
         outcome: {
           enqueued: 'Message queued for the session. Completion and results are not tracked here.',
@@ -3867,8 +3867,8 @@ export const resources = {
         title: '定时运行记录', close: '关闭定时运行记录', loading: '正在加载定时运行记录', empty: '暂无近期定时运行记录',
         unread: '{{count}} 条未读', trigger: '定时运行收件箱，{{unread}}', newer: '较新', older: '较早',
         loadError: '无法加载定时运行记录', seenError: '无法将定时运行记录标记为已读',
-        taskFallback: '任务 {{id}}', workspace: '工作区：{{name}}', session: '会话：{{id}}', contextUnavailable: '工作区信息不可用',
-        scheduledFor: '计划时间：{{time}}', claimedAt: '领取派发：{{time}}', updatedAt: '状态更新：{{time}}', openSession: '打开对话',
+        taskFallback: '任务 {{id}}', workspace: '工作区：{{name}}', session: '会话：{{name}}', unnamedSession: '未命名对话', contextUnavailable: '工作区信息不可用',
+        scheduledFor: '计划时间：{{time}}', claimedAt: '领取派发：{{time}}', updatedAt: '更新于：{{time}}', openSession: '打开对话',
         status: { enqueued: '已入队', failed: '派发失败', needs_review: '需要核查' },
         outcome: {
           enqueued: '消息已加入会话队列。此处不跟踪任务完成状态或执行结果。',

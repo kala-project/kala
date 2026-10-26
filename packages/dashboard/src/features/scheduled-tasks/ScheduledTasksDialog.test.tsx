@@ -27,6 +27,8 @@ const run: ScheduledRun = {
   taskId: 'task-1',
   operationId: 'operation-1',
   scheduledFor: '2026-10-02T09:00:00.000Z',
+  claimedAt: '2026-10-02T09:00:01.000Z',
+  updatedAt: '2026-10-02T09:00:03.000Z',
   status: 'enqueued',
   task: {
     id: 'task-1',
@@ -80,7 +82,7 @@ function mockClient(initial: readonly ScheduledTask[] = []): ScheduledTasksClien
 }
 
 function renderDialog(client: ScheduledTasksClient, options: { target?: ScheduledTask['target']; taskId?: string | null; onOpenSession?: (sessionId: string) => void; onOpenChange?: (open: boolean) => void; onTasksChange?: () => void } = {}) {
-  return render(<ScheduledTasksDialog open onOpenChange={options.onOpenChange ?? (() => {})} host="https://runlab.example" target={options.target ?? sessionTarget} taskId={options.taskId} client={client} onOpenSession={options.onOpenSession} onTasksChange={options.onTasksChange} />)
+  return render(<ScheduledTasksDialog open onOpenChange={options.onOpenChange ?? (() => {})} host="https://runlab.example" target={options.target ?? sessionTarget} taskId={options.taskId} sessionNames={new Map([['session-run-1', 'Progress review']])} client={client} onOpenSession={options.onOpenSession} onTasksChange={options.onTasksChange} />)
 }
 
 afterEach(() => {
@@ -199,7 +201,13 @@ describe('ScheduledTasksDialog', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '查看过去的运行' }))
     expect(client.history).toHaveBeenCalledWith('task-1')
-    const sessionLink = await screen.findByRole('button', { name: /打开对话 session-run-1/i })
+    const sessionLink = await screen.findByRole('button', { name: /打开对话 Progress review/i })
+    expect(screen.queryByText(/打开对话 session-run-1/i)).toBeNull()
+    const timingDetails = screen.getByText('时间详情').closest('details')!
+    expect(timingDetails.open).toBe(false)
+    expect(timingDetails.textContent).toContain('计划时间：')
+    expect(timingDetails.textContent).toContain('领取派发：')
+    expect(timingDetails.textContent).toContain('更新时间：')
     fireEvent.click(sessionLink)
     expect(onOpenSession).toHaveBeenCalledWith('session-run-1')
 
