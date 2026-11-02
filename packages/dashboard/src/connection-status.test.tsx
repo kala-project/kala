@@ -238,6 +238,7 @@ describe('ConnectionStatus', () => {
     fireEvent.click(desktop)
     let popover = screen.getByTestId('connection-status-popover')
     expect(within(popover).getByText('Connection health')).toBeTruthy()
+    expect(getComputedStyle(popover).position).toBe('fixed')
     expect(popover.parentElement).toBe(document.body)
     expect(screen.getByTestId('desktop-sidebar').contains(popover)).toBe(false)
     expect(popover.className).toContain('safe-area-inset-left')
