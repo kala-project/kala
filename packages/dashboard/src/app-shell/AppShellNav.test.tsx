@@ -113,7 +113,7 @@ describe('sidebar shell controls', () => {
     const management = screen.getByTestId('product-switcher-management')
     expect(management.getAttribute('role')).toBe('menuitem')
     expect(management.textContent).toBe('Management')
-    expect(management.title).toBe('Management & observability')
+    expect(management.title).toBe('Management tools')
     fireEvent.click(management)
     expect(openManagement).toHaveBeenCalledOnce()
     await i18n.changeLanguage('zh')

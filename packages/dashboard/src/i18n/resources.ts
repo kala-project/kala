@@ -2682,6 +2682,8 @@ export const resources = {
           attachments: '消息附件',
           reserved: '上传预留',
           filesSize: '{{count}} 个文件 · {{size}}',
+          filesSize_one: '{{count}} 个文件 · {{size}}',
+          filesSize_other: '{{count}} 个文件 · {{size}}',
           measuredAt: '统计时间：{{time}} · 手动刷新',
           refresh: '刷新用量',
           technicalDetails: '存储详情',
