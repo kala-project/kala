@@ -1,7 +1,7 @@
 # Control-plane PostgreSQL Schema
 
 Status: normative schema refinement of the [deployment-mode SoT](./deployment-mode-contract.md), not a claim that every target invariant is implemented.
-Migrations: ordered files in `packages/runtime-ingress-gateway/migrations/`; the durable delivery expansion is `0008_webhook_deliveries.sql`.
+Migrations: ordered files in `packages/runtime-ingress-gateway/migrations/`; durable delivery is `0008_webhook_deliveries.sql` and governance/retention is `0009_governance_ledger_retention.sql`.
 
 ## Aggregate boundaries
 
@@ -23,7 +23,7 @@ PostgreSQL constraints cover shape and referential isolation. The repository tra
 4. Executor enrollment consumes `used_count` with `SELECT ... FOR UPDATE`, verifies expiry/revocation, inserts machine identity and appends Audit atomically.
 5. Placement mutation compares generation and `last_operation_id`; stale generations fail and repeated operation IDs return the original result.
 6. Usage insertion is idempotent on `(organization_id, source_operation_id)`.
-7. Audit and Usage rows are never updated or deleted by the application role. Retention runs through a separate narrowly scoped maintenance role.
+7. Audit and Usage rows are never updated or deleted by ordinary application/retention roles, including through FK cascades or SET NULL. Intent/outcome rows append separately; per-Organization/day retention admission and its captured cutoff live in a mutable operational table. Retention uses a separate narrowly scoped identity and never silently replays unresolved Runtime effects; the deployment-mode SoT defines admission and settlement.
 8. Outbox recipient fan-out and delivery claims use short `FOR UPDATE SKIP LOCKED` transactions. Each endpoint has independent attempt/terminal state and a lease token/generation; completion requires the current unexpired claim. HTTP and SecretResolver calls occur outside transactions. Legacy unresolved events require review, never automatic replay. The deployment-mode SoT defines the protocol and rollout boundary.
 
 ## Deliberate choices
@@ -59,4 +59,4 @@ Production connections require TLS and server identity verification. Credentials
 
 Migration 0008 separates immutable event envelopes from per-endpoint snapshots/attempts/leases. Endpoint invalidation generation prevents disable/re-enable or URL/reference reversion from reviving old work. The producer's six envelope INSERT columns exclude operational state. Physical event/endpoint deletion is restricted while delivery history references it; logical endpoint deletion disables delivery. Event-level legacy completion/retry columns remain historical, not the new delivery completion view.
 
-The [design/status ledger](./private-cloud-design-status.md#durable-external-delivery-bounded-local-source-acceptance) records the source acceptance and gaps. In particular, Audit/Usage broad application DML, retention's mutable audit outcomes, subscriber management and maintenance/archive tooling remain implementation gaps against the target above; this Outbox expansion does not silently declare them solved.
+The [design/status ledger](./private-cloud-design-status.md#durable-external-delivery-bounded-local-source-acceptance) records the source acceptance and gaps. Migration 0009 closes ordinary Audit/Usage mutation and attribution-loss paths, makes principal identity keys immutable, separates maintenance grants from the app writer, and stores daily retention admission/settlement separately from immutable audit records. The shared effective-role audit rejects excess inherited/column/function authority and high-privilege logins disguised with SET ROLE. Old identity data already nulled or audit intentions already overwritten cannot be reconstructed by this migration. Existing cross-Organization usage/Workspace references must be reviewed before migration; the FK is validated, never silently rewritten. Privileged archive/anonymization and unresolved-operation reconciliation tooling remain separate implementation gates, as do Workspace authorization and subscriber administration.

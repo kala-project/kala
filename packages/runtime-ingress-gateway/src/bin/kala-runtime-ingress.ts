@@ -23,6 +23,7 @@ import { loadEnterpriseSsoResolver } from '../auth/enterprise-sso-config.js'
 import { SlidingWindowRateLimiter } from '../governance/rate-limit.js'
 import { resolveRuntimeIngressControlPlaneMode } from '../config/control-plane.js'
 import { ServiceAccountService } from '../api/service-accounts.js'
+import { openRetentionDatabase } from '../governance/retention-authority.js'
 import { createRuntimeHostRetentionClient, RetentionService, startRetentionScheduler } from '../governance/retention.js'
 import { OwnerBootstrapService } from '../organizations/owner-bootstrap.js'
 import { createRuntimeHostProvisioningClient, RuntimeUnitProvisioner } from '../organizations/runtime-unit-provisioner.js'
@@ -231,6 +232,12 @@ async function main(): Promise<void> {
     ...(runtimeTls ? { tls: runtimeTls } : {}),
   })
   const postgresProvisioner = database ? new RuntimeUnitProvisioner(database, requestHostProvisioning) : undefined
+  const retentionFlag = process.env.KALA_INGRESS_RETENTION_ENABLED ?? '0'
+  if (!['0','1'].includes(retentionFlag)) throw new Error('KALA_INGRESS_RETENTION_ENABLED must be 0 or 1')
+  const maintenance = await openRetentionDatabase({ enabled: retentionFlag === '1', readSecret: readRequiredSecretEnv,
+    migrationsDirectory: resolve(process.env.KALA_INGRESS_MIGRATIONS_DIR ?? 'migrations'), telemetry,
+    installationId: retentionFlag === '1' ? (await readFile(process.env.KALA_INSTALLATION_ID_FILE ?? '', 'utf8')).trim() : '',
+  })
   const gateway = await startRuntimeIngressGateway({
     port,
     telemetry,
@@ -269,8 +276,8 @@ async function main(): Promise<void> {
       }
     },
   })
-  const retentionScheduler = database && process.env.KALA_INGRESS_RETENTION_ENABLED !== '0' ? startRetentionScheduler({
-    service: new RetentionService(database, createRuntimeHostRetentionClient({
+  const retentionScheduler = maintenance ? startRetentionScheduler({
+    service: new RetentionService(maintenance, createRuntimeHostRetentionClient({
       origin: hostOrigin,
       ...(runtimeOriginResolver ? { runtimeOriginResolver } : {}),
       ingressSecret,
@@ -278,15 +285,15 @@ async function main(): Promise<void> {
     })),
     intervalMs: numberEnv('KALA_INGRESS_RETENTION_INTERVAL_MS', 24 * 60 * 60 * 1000),
     onResult: (result) => {
-      process.stdout.write(`${JSON.stringify({ event: 'retention_purge_completed', purged: result.purged, failures: result.failures })}\n`)
+      process.stdout.write(`${JSON.stringify({ event: 'retention_purge_completed', completed: result.purged.filter((run) => !run.reused).length, reused: result.purged.filter((run) => run.reused).length, unresolved: result.failures.length })}\n`)
     },
-    onError: (error) => {
-      process.stderr.write(`${JSON.stringify({ event: 'retention_purge_failed', error: error.message })}\n`)
+    onError: () => {
+      process.stderr.write(`${JSON.stringify({ event: 'retention_purge_failed' })}\n`)
     },
   }) : undefined
   if (database && !retentionScheduler) process.stdout.write(`${JSON.stringify({ event: 'retention_scheduler_disabled' })}\n`)
   process.stdout.write(`${JSON.stringify({ event: `${deployment.variant}_gateway_ready`, port: gateway.port })}\n`)
-  const close = async (): Promise<void> => { retentionScheduler?.stop(); await gateway.close(); await runtimeResourceOwnerResolver?.close(); await runtimeOriginResolver?.close(); await database?.close(); await telemetry?.close(); process.exit(0) }
+  const close = async (): Promise<void> => { await retentionScheduler?.stop(); await gateway.close(); await runtimeResourceOwnerResolver?.close(); await runtimeOriginResolver?.close(); await maintenance?.close(); await database?.close(); await telemetry?.close(); process.exit(0) }
   process.on('SIGTERM', () => { void close() }); process.on('SIGINT', () => { void close() })
 }
 

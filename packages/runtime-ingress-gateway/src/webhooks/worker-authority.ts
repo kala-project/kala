@@ -1,4 +1,5 @@
 import type { SqlExecutor } from '../persistence/postgres.js'
+import { assertRestrictedControlRole } from '../persistence/restricted-role.js'
 
 const fanoutColumns = ['webhook_fanout_state', 'webhook_fanout_error', 'webhook_materialized_at']
 const deliveryColumns = ['state', 'attempt_count', 'available_at', 'lease_token', 'lease_generation', 'lease_expires_at', 'last_error', 'last_status', 'completed_at', 'updated_at']
@@ -19,52 +20,12 @@ export async function grantWebhookWorker(database: SqlExecutor, role: string): P
 
 /** Audit effective privileges, including inherited/table/column privileges and ownership. */
 export async function assertWebhookWorkerPrivileges(database: SqlExecutor, role?: string): Promise<void> {
-  const result = await database.query<{ safe: boolean }>(`WITH identity AS (
-    SELECT oid,rolname,rolsuper,rolcreaterole,rolcreatedb,rolreplication,rolbypassrls
-    FROM pg_roles WHERE rolname=COALESCE($1,current_user)
-  ), relations AS MATERIALIZED (
-    SELECT cls.oid,cls.relname,cls.relowner,ns.nspname FROM pg_class cls JOIN pg_namespace ns ON ns.oid=cls.relnamespace
-    WHERE cls.relkind IN ('r','p','v','m','f') AND ns.nspname NOT IN ('pg_catalog','information_schema')
-      AND ns.nspname NOT LIKE 'pg_toast%'
-  ), audited_columns AS MATERIALIZED (
-    SELECT r.*,a.attname FROM relations r JOIN pg_attribute a ON a.attrelid=r.oid
-    WHERE a.attnum>0 AND NOT a.attisdropped
-  ) SELECT NOT (
-    identity.rolsuper OR identity.rolcreaterole OR identity.rolcreatedb OR identity.rolreplication OR identity.rolbypassrls
-    OR has_database_privilege(identity.rolname,current_database(),'CREATE')
-    OR EXISTS (SELECT 1 FROM pg_auth_members WHERE member=identity.oid)
-    OR EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace ns ON ns.oid=p.pronamespace
-      WHERE p.prosecdef AND ns.nspname NOT IN ('pg_catalog','information_schema')
-        AND has_function_privilege(identity.rolname,p.oid,'EXECUTE'))
-    OR EXISTS (SELECT 1 FROM pg_class WHERE CASE WHEN relkind='S'
-      THEN has_sequence_privilege(identity.rolname,oid,'USAGE,SELECT,UPDATE') ELSE false END)
-    OR EXISTS (SELECT 1 FROM pg_namespace ns WHERE ns.nspname NOT LIKE 'pg_%' AND ns.nspname<>'information_schema'
-      AND (has_schema_privilege(identity.rolname,ns.oid,'CREATE') OR pg_has_role(identity.oid,ns.nspowner,'MEMBER')))
-    OR EXISTS (SELECT 1 FROM relations r WHERE pg_has_role(identity.oid,r.relowner,'MEMBER')
-      OR has_table_privilege(identity.rolname,r.oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
-      OR (has_table_privilege(identity.rolname,r.oid,'INSERT') AND NOT (r.nspname='public' AND r.relname='webhook_deliveries'))
-      OR has_table_privilege(identity.rolname,r.oid,'UPDATE'))
-    OR EXISTS (SELECT 1 FROM audited_columns r
-      WHERE (has_column_privilege(identity.rolname,r.oid,r.attname,'UPDATE') AND NOT
-        (r.nspname='public' AND ((r.relname='outbox_events' AND r.attname=ANY($2::text[]))
-          OR (r.relname='webhook_deliveries' AND r.attname=ANY($3::text[])))))
-      OR (has_column_privilege(identity.rolname,r.oid,r.attname,'INSERT') AND NOT (r.nspname='public' AND r.relname='webhook_deliveries'))
-      OR (has_column_privilege(identity.rolname,r.oid,r.attname,'SELECT') AND NOT
-        ((r.nspname='public' AND r.relname IN ('control_plane_schema_migrations','outbox_events','webhook_endpoints','webhook_deliveries'))
-          OR (r.nspname='kala_installation_claim' AND r.relname IN ('marker','recovery_checkpoint')))))
-    OR EXISTS (SELECT 1 FROM relations r WHERE has_table_privilege(identity.rolname,r.oid,'SELECT') AND NOT
-      ((r.nspname='public' AND r.relname IN ('control_plane_schema_migrations','outbox_events','webhook_endpoints','webhook_deliveries'))
-        OR (r.nspname='kala_installation_claim' AND r.relname IN ('marker','recovery_checkpoint'))))
-  ) AND has_table_privilege(identity.rolname,'outbox_events','SELECT')
-    AND has_table_privilege(identity.rolname,'webhook_endpoints','SELECT')
-    AND has_table_privilege(identity.rolname,'webhook_deliveries','SELECT')
-    AND has_table_privilege(identity.rolname,'webhook_deliveries','INSERT')
-    AND has_table_privilege(identity.rolname,'control_plane_schema_migrations','SELECT')
-    AND has_table_privilege(identity.rolname,'kala_installation_claim.marker','SELECT')
-    AND has_table_privilege(identity.rolname,'kala_installation_claim.recovery_checkpoint','SELECT')
-    AND NOT EXISTS (SELECT 1 FROM unnest($2::text[]) AS col(name) WHERE NOT has_column_privilege(identity.rolname,'outbox_events',col.name,'UPDATE'))
-    AND NOT EXISTS (SELECT 1 FROM unnest($3::text[]) AS col(name) WHERE NOT has_column_privilege(identity.rolname,'webhook_deliveries',col.name,'UPDATE')) AS safe FROM identity`, [role ?? null, fanoutColumns, deliveryColumns])
-  if (result.rowCount !== 1 || !result.rows[0]?.safe) throw new Error('Webhook worker identity has excessive database authority')
+  await assertRestrictedControlRole(database, {
+    select: ['public.control_plane_schema_migrations','public.outbox_events','public.webhook_endpoints','public.webhook_deliveries',
+      'kala_installation_claim.marker','kala_installation_claim.recovery_checkpoint'],
+    insert: ['public.webhook_deliveries'],
+    update: { 'public.outbox_events': fanoutColumns, 'public.webhook_deliveries': deliveryColumns },
+  }, role)
 }
 
 export async function assertWebhookInstallation(database: SqlExecutor, installationId: string): Promise<void> {

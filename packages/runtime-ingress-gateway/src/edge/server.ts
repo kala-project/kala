@@ -1196,17 +1196,36 @@ export async function requestRuntime(
   headers: Record<string, string>,
   body: Buffer | undefined,
   tls: { ca: string | Buffer; cert: string | Buffer; key: string | Buffer; servername?: string } | undefined,
+  limits?: { signal: AbortSignal; maxResponseBytes: number },
 ): Promise<{ status: number; contentType: string; body: Buffer }> {
   if (!tls) {
     const response = await fetch(`${origin}${path}`, {
       method,
       headers,
+      ...(limits ? { signal: limits.signal, redirect: 'error' as const } : {}),
       ...(body ? { body: new Uint8Array(body) } : {}),
     })
+    let bytes: Buffer
+    if (limits) {
+      const chunks: Buffer[] = []; let size = 0
+      try {
+        const reader = response.body?.getReader()
+        if (reader) try {
+          for (;;) {
+            const item = await reader.read()
+            if (item.done) break
+            size += item.value.length
+            if (size > limits.maxResponseBytes) { await reader.cancel(); throw new Error('Runtime response limit exceeded') }
+            chunks.push(Buffer.from(item.value))
+          }
+        } finally { reader.releaseLock() }
+        bytes = Buffer.concat(chunks)
+      } catch (error) { await response.body?.cancel().catch(() => undefined); throw error }
+    } else bytes = Buffer.from(await response.arrayBuffer())
     return {
       status: response.status,
       contentType: response.headers.get('content-type') ?? 'application/json',
-      body: Buffer.from(await response.arrayBuffer()),
+      body: bytes,
     }
   }
   const url = new URL(path, origin)
@@ -1220,9 +1239,15 @@ export async function requestRuntime(
       servername: tls.servername ?? url.hostname,
       minVersion: 'TLSv1.3',
       rejectUnauthorized: true,
+      ...(limits ? { signal: limits.signal } : {}),
     }, (response) => {
       const chunks: Buffer[] = []
-      response.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
+      let size = 0
+      response.on('data', (chunk) => {
+        size += chunk.length
+        if (limits && size > limits.maxResponseBytes) { request.destroy(new Error('Runtime response limit exceeded')); return }
+        chunks.push(Buffer.from(chunk))
+      })
       response.once('error', reject)
       response.once('end', () => resolve({
         status: response.statusCode ?? 502,

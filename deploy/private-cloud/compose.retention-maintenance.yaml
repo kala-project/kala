@@ -1,0 +1,16 @@
+# Source-only opt-in for the PG/S3 profile; not a new default or standalone Runtime authority.
+# Stop/drain legacy retention before migration 0009. Role/URL must not be the Gateway writer.
+services:
+  control-plane-init:
+    environment:
+      KALA_RETENTION_MAINTENANCE_ROLE: ${KALA_RETENTION_MAINTENANCE_ROLE:?set a separately pre-created standalone maintenance login role}
+
+  runtime-ingress:
+    environment:
+      KALA_INGRESS_RETENTION_ENABLED: "1"
+      KALA_RETENTION_DATABASE_URL_FILE: /run/kala-retention/database_url
+    volumes:
+      # Only the maintenance URL; operator grants uid/gid 65532 read/traverse permission.
+      - ${KALA_RETENTION_SECRETS_DIR:?set the dedicated maintenance credential directory}:/run/kala-retention:ro
+    # Drain the bounded Runtime call and durable settlement before closing pools.
+    stop_grace_period: 30s

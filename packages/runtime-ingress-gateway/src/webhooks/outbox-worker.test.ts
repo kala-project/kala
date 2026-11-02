@@ -12,11 +12,14 @@ import { assertWebhookInstallation, assertWebhookWorkerPrivileges, grantWebhookW
 import { scopedWebhookSecrets } from '../bin/webhook-worker.js'
 import { OrganizationProvisioningService } from '../organizations/provisioning.js'
 import { grantControlWriter } from '../bin/init-control-plane.js'
+import { RetentionService } from '../governance/retention.js'
+import { assertRetentionPrivileges, grantRetentionRole, openRetentionDatabase } from '../governance/retention-authority.js'
+import { PostgresUsageLedger } from '../governance/usage-ledger.js'
 import { assertControlPlaneSchema, createPostgresControlPlaneDatabase, migrateControlPlane, readControlPlaneMigrations, type ControlPlaneDatabase } from '../persistence/postgres.js'
 
 // Explicit integration gate: creates/removes ONLY its own bounded temporary PG.
 // KALA_TEST_WEBHOOK_DELIVERY=1 KALA_TEST_DOCKER_SUDO=1 vitest run <this file>
-describe.runIf(process.env.KALA_TEST_WEBHOOK_DELIVERY === '1')('durable webhook framework / real PostgreSQL and HTTP', () => {
+describe.runIf(process.env.KALA_TEST_WEBHOOK_DELIVERY === '1')('durable control governance / real PostgreSQL and HTTP', () => {
   let container: string | undefined
   let admin: ControlPlaneDatabase
   let a: ControlPlaneDatabase
@@ -25,6 +28,8 @@ describe.runIf(process.env.KALA_TEST_WEBHOOK_DELIVERY === '1')('durable webhook 
   let origin: string
   let root: string
   let workerUrl: string
+  let maintenanceA: ControlPlaneDatabase
+  let maintenanceB: ControlPlaneDatabase
   const installation = randomUUID()
   const migrationsDir = resolve(import.meta.dirname, '../../migrations')
   const requests: { path: string; body: string; deliveryId: string; signature: string }[] = []
@@ -65,12 +70,15 @@ describe.runIf(process.env.KALA_TEST_WEBHOOK_DELIVERY === '1')('durable webhook 
       CREATE TABLE kala_installation_claim.recovery_checkpoint(singleton boolean PRIMARY KEY,installation_id uuid NOT NULL,checkpoint_id uuid NOT NULL,key_sha256 text NOT NULL)`)
     await admin.query('INSERT INTO kala_installation_claim.marker VALUES(true,$1)', [installation])
     await admin.query('INSERT INTO kala_installation_claim.recovery_checkpoint VALUES(true,$1,$2,$3)', [installation, randomUUID(), 'a'.repeat(64)])
-    await admin.query(`CREATE ROLE webhook_worker LOGIN PASSWORD '${password}'; CREATE ROLE gateway_writer LOGIN PASSWORD '${password}'`)
+    await admin.query(`CREATE ROLE webhook_worker LOGIN PASSWORD '${password}'; CREATE ROLE gateway_writer LOGIN PASSWORD '${password}'; CREATE ROLE retention_maintenance LOGIN PASSWORD '${password}'`)
     await admin.transaction((tx) => grantWebhookWorker(tx, 'webhook_worker'))
     await grantControlWriter(admin, 'gateway_writer')
+    await admin.transaction((tx) => grantRetentionRole(tx, 'retention_maintenance'))
     workerUrl = `postgresql://webhook_worker:${password}@127.0.0.1:${port}/runlab_control`
     a = createPostgresControlPlaneDatabase({ connectionString: workerUrl, applicationName: 'webhook-test-a' })
     b = createPostgresControlPlaneDatabase({ connectionString: workerUrl, applicationName: 'webhook-test-b' })
+    maintenanceA = createPostgresControlPlaneDatabase({ connectionString: workerUrl.replace('webhook_worker:', 'retention_maintenance:'), applicationName: 'retention-test-a' })
+    maintenanceB = createPostgresControlPlaneDatabase({ connectionString: workerUrl.replace('webhook_worker:', 'retention_maintenance:'), applicationName: 'retention-test-b' })
     server = createServer(async (req, res) => {
       let body = ''; for await (const chunk of req) body += String(chunk)
       if (req.url?.startsWith('/v1/')) {
@@ -95,14 +103,18 @@ describe.runIf(process.env.KALA_TEST_WEBHOOK_DELIVERY === '1')('durable webhook 
     for (const child of children) child.kill('SIGKILL')
     server?.closeAllConnections()
     if (server) await new Promise<void>((done) => server.close(() => done()))
-    await Promise.all([a?.close(), b?.close(), admin?.close()])
+    await Promise.all([a?.close(), b?.close(), maintenanceA?.close(), maintenanceB?.close(), admin?.close()])
     if (container) docker('rm', '-f', container)
     if (root) await rm(root, { recursive: true, force: true })
   }, 30_000)
 
   beforeEach(async () => {
     requests.length = 0; failures.clear(); slow = undefined
-    await admin.query(`TRUNCATE webhook_deliveries,outbox_events,webhook_endpoints,organizations CASCADE`)
+    // Test owner only, within a disposable database; never a production cleanup path.
+    await admin.transaction(async (tx) => {
+      await tx.query(`SET LOCAL session_replication_role=replica`)
+      await tx.query(`TRUNCATE webhook_deliveries,outbox_events,webhook_endpoints,organizations CASCADE`)
+    })
     await admin.query(`INSERT INTO organizations(id,name,status,runtime_unit_id) VALUES('org_acme','A','active','unit_a'),('org_other','B','active','unit_b')`)
   })
 
@@ -266,6 +278,129 @@ describe.runIf(process.env.KALA_TEST_WEBHOOK_DELIVERY === '1')('durable webhook 
       AS $$ UPDATE organizations SET name='forbidden'; $$`)
     try { await expect(assertWebhookWorkerPrivileges(a)).rejects.toThrow('excessive') }
     finally { await admin.query(`DROP FUNCTION public.webhook_test_escape()`) }
+  })
+
+  const prepareRetention = async () => {
+    await admin.query(`INSERT INTO principals(id,kind,issuer,subject) VALUES('prn_a','human','https://fixture.invalid','a'),('prn_b','human','https://fixture.invalid','b') ON CONFLICT DO NOTHING`)
+    await admin.query(`INSERT INTO organization_memberships(organization_id,principal_id,role) VALUES('org_acme','prn_a','owner'),('org_other','prn_b','owner')`)
+    await admin.query(`INSERT INTO retention_policies(organization_id,session_days,artifact_days,audit_days,deleted_resource_grace_days)
+      VALUES('org_acme',30,30,365,30),('org_other',30,30,365,30)`)
+    await admin.query(`INSERT INTO browser_sessions(id,principal_id,organization_id,token_hash,cache_namespace,device,idle_expires_at,absolute_expires_at)
+      VALUES('bs_old','prn_a','org_acme','old','fixture','{}','2020-01-01','2020-01-02'),
+      ('bs_live','prn_a','org_acme','live','fixture','{}','2030-01-01','2030-01-02'),
+      ('bs_other','prn_b','org_other','other','fixture','{}','2020-01-01','2020-01-02')`)
+    await admin.query(`INSERT INTO notification_devices(id,organization_id,principal_id,endpoint_hash,subscription_encrypted,label,updated_at)
+      VALUES('old','org_acme','prn_a','old','{}','fixture','2020-01-01'),('other','org_other','prn_b','other','{}','fixture','2020-01-01')`)
+  }
+
+  it('preserves immutable audit/usage attribution, tenant FK boundaries and independent maintenance authority', async () => {
+    await prepareRetention()
+    await assertRetentionPrivileges(maintenanceA)
+    const gateway = createPostgresControlPlaneDatabase({ connectionString: workerUrl.replace('webhook_worker:', 'gateway_writer:') })
+    const entry = { id: 'usage_a', organizationId: 'org_acme', principalId: 'prn_a', workspaceId: 'ws_a', inputTokens: 2, outputTokens: 3,
+      occurredAt: new Date(), operationId: 'usage-operation' }
+    try {
+      await admin.query(`INSERT INTO workspaces(id,organization_id,name) VALUES('ws_a','org_acme','A'),('ws_b','org_other','B')`)
+      const ledger = new PostgresUsageLedger(gateway)
+      expect(await ledger.append(entry)).toBe(true)
+      expect(await ledger.append({ ...entry, id: 'usage_duplicate' })).toBe(false)
+      await expect(ledger.append({ ...entry, id: 'usage_cross', workspaceId: 'ws_b', operationId: 'cross' })).rejects.toMatchObject({ code: '23503' })
+      await gateway.query(`INSERT INTO audit_events(id,organization_id,actor_principal_id,actor_kind,action,target_type,result)
+        VALUES('audit_a','org_acme','prn_a','human','fixture','organization','allowed')`)
+      for (const sql of [`UPDATE audit_events SET result='succeeded'`, `DELETE FROM audit_events`, `UPDATE usage_ledger SET input_tokens=0`, `DELETE FROM usage_ledger`, `TRUNCATE usage_ledger`, `DELETE FROM retention_runs`]) {
+        await expect(gateway.query(sql)).rejects.toMatchObject({ code: '42501' })
+      }
+      await expect(admin.query(`UPDATE audit_events SET result='succeeded' WHERE id='audit_a'`)).rejects.toMatchObject({ code: '42501' })
+      await expect(admin.query(`TRUNCATE usage_ledger`)).rejects.toMatchObject({ code: '42501' })
+      await expect(admin.query(`DELETE FROM workspaces WHERE id='ws_a'`)).rejects.toMatchObject({ code: '23503' })
+      await expect(admin.query(`DELETE FROM principals WHERE id='prn_a'`)).rejects.toMatchObject({ code: '23503' })
+      await expect(gateway.query(`UPDATE principals SET subject='rewritten-history' WHERE id='prn_a'`)).rejects.toMatchObject({ code: '42501' })
+      await gateway.query(`UPDATE principals SET display_name='Updated profile' WHERE id='prn_a'`)
+      expect((await admin.query(`SELECT actor_principal_id FROM audit_events WHERE id='audit_a'`)).rows[0]?.actor_principal_id).toBe('prn_a')
+      for (const sql of [`UPDATE organizations SET name='bad'`, `SELECT * FROM usage_ledger`, `UPDATE audit_events SET result='failed'`, `DELETE FROM outbox_events`, `UPDATE retention_runs SET cutoff=now()`]) {
+        await expect(maintenanceA.query(sql)).rejects.toMatchObject({ code: '42501' })
+      }
+      const options = { enabled: true, migrationsDirectory: migrationsDir, installationId: installation,
+        readSecret: async () => workerUrl.replace('webhook_worker:', 'retention_maintenance:') }
+      const opened = await openRetentionDatabase(options); await opened?.close()
+      await expect(openRetentionDatabase({ ...options, installationId: randomUUID() })).rejects.toThrow('authority unavailable')
+      await expect(openRetentionDatabase({ ...options, readSecret: async () => workerUrl.replace('webhook_worker:', 'gateway_writer:') })).rejects.toThrow('authority unavailable')
+      await expect(openRetentionDatabase({ ...options, enabled: false, readSecret: async () => { throw new Error('must not read') } })).resolves.toBeUndefined()
+      await admin.query(`GRANT retention_maintenance TO gateway_writer`)
+      try {
+        await gateway.transaction(async (tx) => {
+          await tx.query(`SET LOCAL ROLE retention_maintenance`)
+          await expect(assertRetentionPrivileges(tx)).rejects.toThrow('excessive')
+        })
+      } finally { await admin.query(`REVOKE retention_maintenance FROM gateway_writer`) }
+      const exported = await new RetentionService(gateway).exportOrganization('org_acme')
+      expect(exported.usage).toHaveLength(1); expect(exported.audit).toHaveLength(1)
+    } finally { await gateway.close() }
+  })
+
+  it('admits one retention sweep across replicas, records immutable intent/outcome, and reuses the captured daily receipt', async () => {
+    await prepareRetention()
+    let release!: () => void; let started!: () => void; let calls = 0
+    const observed = new Promise<void>((ready) => { started = ready })
+    const wait = new Promise<void>((ready) => { release = ready })
+    const adapter = { async purgeOrganizationSessions(input: { organizationId: string; runtimeUnitId: string; before: Date }) {
+      calls++; expect(input).toEqual({ organizationId: 'org_acme', runtimeUnitId: 'unit_a', before: new Date('2026-09-30T12:00:00Z') })
+      started(); await wait; return { sessions: 3 }
+    } }
+    const time = new Date('2026-10-30T12:00:00Z')
+    const first = new RetentionService(maintenanceA, adapter).purgeOrganization('org_acme', time)
+    try {
+      await observed
+      expect((await admin.query(`SELECT count(*)::integer AS count FROM pg_stat_activity WHERE application_name LIKE 'retention-test-%' AND state='idle in transaction'`)).rows[0]?.count).toBe(0)
+      await expect(new RetentionService(maintenanceB, adapter).purgeOrganization('org_acme', time)).rejects.toThrow('requires_review')
+      expect(calls).toBe(1)
+      expect((await admin.query(`SELECT id FROM browser_sessions ORDER BY id`)).rows.map((row) => row.id)).toEqual(['bs_live','bs_other'])
+      expect((await admin.query(`SELECT id FROM notification_devices`)).rows.map((row) => row.id)).toEqual(['other'])
+    } finally { release() }
+    const receipt = await first
+    expect(receipt).toMatchObject({ sessions: 1, devices: 1, hostSessions: 3, state: 'succeeded', reused: false })
+    await admin.query(`UPDATE retention_policies SET session_days=1 WHERE organization_id='org_acme'`)
+    expect(await new RetentionService(maintenanceB, adapter).purgeOrganization('org_acme', new Date('2026-10-30T23:59:00Z')))
+      .toEqual({ ...receipt, reused: true })
+    expect(calls).toBe(1)
+    const audit = (await admin.query(`SELECT result,metadata,request_id FROM audit_events WHERE action='retention.purge' ORDER BY occurred_at,id`)).rows
+    expect(audit).toHaveLength(2); expect(audit.map((row) => row.result)).toEqual(['allowed','succeeded'])
+    expect(audit.every((row) => row.request_id === receipt.runId)).toBe(true)
+    expect(audit[0]?.metadata).toMatchObject({ phase: 'started' })
+    const controlOnly = await new RetentionService(maintenanceB).purgeOrganization('org_other', time)
+    expect(controlOnly).toMatchObject({ state: 'control_only', hostSessions: 0 })
+  })
+
+  it('quarantines ambiguous/crashed retention, never redispatches next day, and rolls deletion back without an audit intention', async () => {
+    await prepareRetention()
+    let calls = 0
+    const adapter = { async purgeOrganizationSessions() { calls++; throw new Error('fixture-private-runtime-failure') } }
+    const time = new Date('2026-10-30T12:00:00Z')
+    await expect(new RetentionService(maintenanceA, adapter).purgeOrganization('org_acme', time)).rejects.toThrow('requires_review')
+    await expect(new RetentionService(maintenanceB, adapter).purgeOrganization('org_acme', new Date('2026-10-31T12:00:00Z'))).rejects.toThrow('requires_review')
+    expect(calls).toBe(1)
+    expect((await admin.query(`SELECT state FROM retention_runs WHERE organization_id='org_acme'`)).rows[0]?.state).toBe('unknown')
+    expect(JSON.stringify((await admin.query(`SELECT * FROM audit_events`)).rows)).not.toContain('fixture-private-runtime-failure')
+    // Simulate process loss after durable admission and before settlement by
+    // failing the outcome INSERT at the real database privilege boundary.
+    let dispatches = 0
+    await admin.query(`REVOKE INSERT ON audit_events FROM retention_maintenance`)
+    try {
+      await expect(new RetentionService(maintenanceA, { async purgeOrganizationSessions() { dispatches++; return { sessions: 0 } } })
+        .purgeOrganization('org_other', time)).rejects.toMatchObject({ code: '42501' })
+      expect(dispatches).toBe(0)
+      expect((await admin.query(`SELECT id FROM browser_sessions WHERE id='bs_other'`)).rowCount).toBe(1)
+      expect((await admin.query(`SELECT id FROM retention_runs WHERE organization_id='org_other'`)).rowCount).toBe(0)
+    } finally { await admin.query(`GRANT INSERT ON audit_events TO retention_maintenance`) }
+    const lostReceipt = new RetentionService(maintenanceA, { async purgeOrganizationSessions() {
+      dispatches++; await admin.query(`REVOKE INSERT ON audit_events FROM retention_maintenance`); return { sessions: 2 }
+    } })
+    try { await expect(lostReceipt.purgeOrganization('org_other', time)).rejects.toMatchObject({ code: '42501' }) }
+    finally { await admin.query(`GRANT INSERT ON audit_events TO retention_maintenance`) }
+    expect((await admin.query(`SELECT state FROM retention_runs WHERE organization_id='org_other'`)).rows[0]?.state).toBe('dispatching')
+    await expect(new RetentionService(maintenanceB, { async purgeOrganizationSessions() { dispatches++; return { sessions: 0 } } })
+      .purgeOrganization('org_other', new Date('2026-11-01'))).rejects.toThrow('requires_review')
+    expect(dispatches).toBe(1)
   })
 
   it('runs the independent process with external secret protocol, exits once, and drains idle SIGTERM', async () => {

@@ -137,6 +137,7 @@ Production TLS terminates at managed ingress. Internal HTTP is permitted only on
 
 - Authorization defaults deny when identity, policy, contract, placement, or repository dependencies are unavailable.
 - Agent Event Log and Queue durability remain first-persist-then-publish/delete.
+- Retention intentions/outcomes append without rewriting the audit ledger. A separately credentialed maintenance lane uses durable per-Organization/day admission, preserves ledger attribution and stops automatic dispatch after an unresolved external result; session cleanup does not imply ledger/archive/backup destruction authority.
 - Control-plane mutations are transactional; external effects use immutable Outbox envelopes and independent per-endpoint leased delivery state. Workers perform network/secret I/O outside transactions and receivers deduplicate stable delivery IDs; delivery is at-least-once, not exactly-once. The deployment SoT defines legacy review, lease fencing and destination policy.
 - Cached authorization carries a short bounded lifetime and a version; revocation signals close live channels.
 - Runtime restart recovery deduplicates committed operations using operation IDs and Executor receipts. An already-dispatched external effect with no confirmed receipt remains **unknown** until reconciled; leases and database fencing alone cannot make an uncooperative LLM, tool or customer system exactly-once. Retry must follow the effect's idempotency contract and surface an explicit incomplete/unknown state rather than silently repeating it.

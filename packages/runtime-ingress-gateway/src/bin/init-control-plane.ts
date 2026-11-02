@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url'
 import pg from 'pg'
 import { createPostgresControlPlaneDatabase, migrateControlPlane, readControlPlaneMigrations } from '../persistence/postgres.js'
 
+import { grantRetentionRole } from '../governance/retention-authority.js'
 import { grantWebhookWorker } from '../webhooks/worker-authority.js'
 
 const { Client } = pg
@@ -34,6 +35,8 @@ async function main(): Promise<void> {
   const { adminUrl, databaseUrl, requireExistingDatabase } = await resolveControlPlaneInitConfig()
   const writerRole = process.env.KALA_INGRESS_CONTROL_WRITER_ROLE
   const workerRole = process.env.KALA_WEBHOOK_WORKER_ROLE
+  const retentionRole = process.env.KALA_RETENTION_MAINTENANCE_ROLE
+  if (retentionRole && (!writerRole || retentionRole === writerRole || retentionRole === workerRole)) throw new Error('Retention requires a separate maintenance identity')
   if (workerRole && (!writerRole || workerRole === writerRole)) throw new Error('Webhook worker requires a separate control database identity')
   if (requireExistingDatabase) {
     if (new URL(databaseUrl).pathname !== '/runlab_control') throw new Error('external control database must be runlab_control')
@@ -62,6 +65,7 @@ async function main(): Promise<void> {
     const migrations = await readControlPlaneMigrations(resolve(process.env.KALA_INGRESS_MIGRATIONS_DIR ?? 'migrations'))
     const version = await migrateControlPlane(database, migrations)
     if (writerRole) await database.transaction((tx) => grantControlWriter(tx, writerRole))
+    if (retentionRole) await database.transaction((tx) => grantRetentionRole(tx, retentionRole))
     if (workerRole) await database.transaction((tx) => grantWebhookWorker(tx, workerRole))
     process.stdout.write(`${JSON.stringify({ event: 'control_plane_initialized', version })}\n`)
   } finally { await database.close() }
@@ -78,6 +82,8 @@ export async function grantControlWriter(database: { query: (sql: string) => Pro
   await database.query(`REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON outbox_events FROM "${role}"`)
   await database.query(`REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON webhook_deliveries FROM "${role}"`)
   await database.query(`GRANT INSERT (id,organization_id,topic,aggregate_type,aggregate_id,payload) ON outbox_events TO "${role}"`)
+  await database.query(`REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON audit_events,usage_ledger FROM "${role}"`)
+  await database.query(`REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON retention_runs FROM "${role}"`)
   // The running Gateway reads the verifier and records successful logins, but cannot
   // replace/bootstrap a credential or modify its identity and password columns.
   await database.query(`REVOKE INSERT, UPDATE, DELETE ON TABLE public.dedicated_owner_credentials FROM "${role}"`)
@@ -85,6 +91,12 @@ export async function grantControlWriter(database: { query: (sql: string) => Pro
   await database.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "${role}"`)
   // The fresh PG/S3 claim lives outside public; only its immutable marker is readable.
   await database.query(`DO $kala$ BEGIN
+    IF EXISTS (SELECT 1 FROM unnest(ARRAY['public.audit_events','public.usage_ledger']) AS ledger(name)
+      WHERE has_any_column_privilege('${role}',ledger.name,'UPDATE') OR has_table_privilege('${role}',ledger.name,'DELETE,TRUNCATE,REFERENCES,TRIGGER'))
+      OR has_any_column_privilege('${role}','public.retention_runs','INSERT,UPDATE')
+      OR has_table_privilege('${role}','public.retention_runs','DELETE,TRUNCATE,REFERENCES,TRIGGER') THEN
+      RAISE EXCEPTION 'Gateway writer must not mutate governance ledgers or maintenance progress';
+    END IF;
     IF has_any_column_privilege('${role}','public.outbox_events','UPDATE')
       OR has_table_privilege('${role}','public.outbox_events','DELETE,TRUNCATE,REFERENCES,TRIGGER')
       OR has_any_column_privilege('${role}','public.webhook_deliveries','INSERT,UPDATE')
