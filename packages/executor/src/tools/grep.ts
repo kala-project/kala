@@ -4,11 +4,12 @@ import picomatch from 'picomatch'
 
 import { SandboxError } from '../sandbox.js'
 import type { Tool } from './registry.js'
-import { ToolError } from './registry.js'
+import { parseSearchPage, searchPageFooter } from './search-page.js'
+import { ToolError, throwIfAborted } from './registry.js'
 import { optionalBoolean, optionalString, requireString } from './schema.js'
 
-const MAX_LINES = 1000
 const MAX_FILES = 10_000
+const MAX_WALK = 100_000
 
 type OutputMode = 'files_with_matches' | 'count' | 'content'
 
@@ -23,34 +24,43 @@ function parseMode(input: Record<string, unknown>): OutputMode {
 async function collectFiles(
   root: string,
   filter: ((rel: string) => boolean) | null,
-): Promise<string[]> {
+  check: () => void,
+): Promise<{ files: string[]; incomplete: boolean }> {
   const out: string[] = []
+  let incomplete = false
+  let visited = 0
   const stack = [root]
   while (stack.length > 0) {
+    check()
     const dir = stack.pop()!
     let entries
     try {
       entries = await readdir(dir, { withFileTypes: true })
     } catch {
+      incomplete = true
       continue
     }
+    entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
     for (const e of entries) {
+      if (++visited > MAX_WALK) return { files: out.sort(), incomplete: true }
       if (e.name === 'node_modules' || e.name === '.git') continue
       const full = join(dir, e.name)
       if (e.isDirectory()) stack.push(full)
       else if (e.isFile()) {
         const rel = relative(root, full)
         if (!filter || filter(rel)) out.push(full)
-        if (out.length > MAX_FILES) return out
+        if (out.length > MAX_FILES) return { files: out.slice(0, MAX_FILES).sort(), incomplete: true }
       }
     }
   }
-  return out
+  return { files: out.sort(), incomplete }
 }
 
 export const grepTool: Tool = {
   name: 'grep',
   async run(input, ctx) {
+    const page = parseSearchPage(input)
+    throwIfAborted(ctx)
     const pattern = requireString(input, 'pattern')
     const pathInput = optionalString(input, 'path')
     const globPattern = optionalString(input, 'glob')
@@ -87,58 +97,30 @@ export const grepTool: Tool = {
       ? picomatch(globPattern, { dot: true })
       : null
 
-    const files: string[] = s.isFile()
-      ? [resolvedRoot]
-      : await collectFiles(resolvedRoot, globFilter)
-
+    const collected = s.isFile() ? { files: [resolvedRoot], incomplete: false } : await collectFiles(resolvedRoot, globFilter, () => throwIfAborted(ctx))
     const results: string[] = []
-    let totalLines = 0
-    let truncated = false
-
-    for (const file of files) {
+    let visited = 0
+    let incomplete = collected.incomplete
+    const add = (row: string) => {
+      if (visited++ >= page.offset) results.push(row)
+      return results.length > page.limit
+    }
+    search: for (const file of collected.files) {
+      throwIfAborted(ctx)
       let text: string
-      try {
-        text = await readFile(file, 'utf8')
-      } catch {
-        continue
-      }
+      try { text = await readFile(file, 'utf8') } catch { incomplete = true; continue }
       const lines = text.split('\n')
       let fileCount = 0
-      const contentHits: Array<{ line: number; text: string }> = []
       for (let i = 0; i < lines.length; i++) {
-        if (regex.test(lines[i]!)) {
-          fileCount++
-          if (mode === 'content') contentHits.push({ line: i + 1, text: lines[i]! })
-        }
+        if (!regex.test(lines[i]!)) continue
+        fileCount++
+        if (mode === 'content' && add(`${file}:${i + 1}:${lines[i]}`)) break search
+        if (mode === 'files_with_matches') break
       }
-      if (fileCount === 0) continue
-      if (mode === 'files_with_matches') {
-        results.push(file)
-        totalLines++
-      } else if (mode === 'count') {
-        results.push(`${file}:${fileCount}`)
-        totalLines++
-      } else {
-        for (const hit of contentHits) {
-          if (totalLines >= MAX_LINES) {
-            truncated = true
-            break
-          }
-          results.push(`${file}:${hit.line}:${hit.text}`)
-          totalLines++
-        }
-      }
-      if (totalLines >= MAX_LINES) {
-        truncated = true
-        break
-      }
+      if (fileCount && mode !== 'content' && add(mode === 'count' ? `${file}:${fileCount}` : file)) break
     }
-
-    if (truncated) {
-      results.push(
-        `... and more matches (refine pattern or use output_mode=count)`,
-      )
-    }
-    return results.join('\n')
+    const more = results.length > page.limit
+    if (more) results.pop()
+    return [...results, ...searchPageFooter(page, results.length, more, incomplete)].join('\n')
   },
 }

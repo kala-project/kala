@@ -21,9 +21,10 @@ const MAX_OUTPUT = 1_000_000
  * (`sleep`, a compiler, …) as a grandchild that keeps the stdout pipe open, so
  * a bare kill leaves it running and `close` never fires until the command
  * exits on its own — timeoutMs and abort would hang for the full duration.
- * On win32 we hand the whole tree to `taskkill /T /F`; elsewhere a process
- * group signal (negative pid) isn't used because we don't detach, so SIGKILL
- * to the child is enough for the POSIX `sh -c` case.
+ * On win32 we hand the whole tree to `taskkill /T /F`. On POSIX, the
+ * foreground shell owns a separate process group (without unref); kill that
+ * group so waiting shells and their ordinary descendants close their pipes.
+ * Descendants that explicitly create another session can escape this group.
  */
 function killTree(child: ReturnType<typeof spawn>): void {
   if (process.platform === 'win32') {
@@ -42,6 +43,14 @@ function killTree(child: ReturnType<typeof spawn>): void {
       child.kill('SIGKILL')
     }
     return
+  }
+  if (child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, 'SIGKILL')
+      return
+    } catch {
+      // The group may already have exited; still try the direct child.
+    }
   }
   child.kill('SIGKILL')
 }
@@ -106,6 +115,7 @@ async function runShell(input: Record<string, unknown>, ctx: Parameters<Tool['ru
           cwd: resolvedCwd,
           env,
           stdio: ['ignore', 'pipe', 'pipe'],
+          detached: process.platform !== 'win32',
         })
       } catch (err) {
         // Synchronous spawn failure (e.g. cwd disappeared between resolve and

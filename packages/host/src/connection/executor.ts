@@ -321,7 +321,7 @@ export function createExecutorRegistry(
         if (newBind.pending.delete(key)) {
           p.resolve({
             ok: false,
-            content: `tool call ack timed out after ${ackTimeoutMs}ms (post-reconnect)`,
+            content: `tool call ack timed out after ${ackTimeoutMs}ms (post-reconnect); execution outcome is unknown. Inspect current state before retrying; do not blindly repeat side effects.`,
             failure: { code: 'tool_ack_timeout', category: 'infrastructure', outcome: 'indeterminate', retryable: false, responsibility: 'system', timeoutStage: 'acknowledgement' },
           })
         }
@@ -756,7 +756,7 @@ export function createExecutorRegistry(
             audit?.log({ action: 'tool.result', actor: { kind: 'executor', executorId: bind.announcement.executorId, workspaceId: bind.announcement.workspaceId }, target: { sessionId, callId: eff.callId, toolName: eff.name }, outcome: 'error', error: 'timeout' })
             resolve({
               ok: false,
-              content: `tool call ack timed out after ${ackTimeoutMs}ms`,
+              content: `tool call ack timed out after ${ackTimeoutMs}ms; execution outcome is unknown. Inspect current state before retrying; do not blindly repeat side effects.`,
               failure: { code: 'tool_ack_timeout', category: 'infrastructure', outcome: 'indeterminate', retryable: false, responsibility: 'system', timeoutStage: 'acknowledgement' },
             })
           }
@@ -1231,9 +1231,15 @@ function ackTimeoutMsFor(
   input: Record<string, unknown>,
   defaultAckTimeoutMs: number,
 ): number {
-  if (toolName !== 'bash') return defaultAckTimeoutMs
-  if (input['run_in_background'] === true) return defaultAckTimeoutMs
-  const toolTimeoutMs = bashToolTimeoutMs(input)
+  let toolTimeoutMs: number | undefined
+  if (toolName === 'bash_output' && input['block'] === true) {
+    toolTimeoutMs = positiveInt(input['timeout_ms']) ?? 30_000
+  } else if (toolName === 'bash' || toolName === 'shell') {
+    if (input['run_in_background'] === true || input['background'] === true) return defaultAckTimeoutMs
+    toolTimeoutMs = bashToolTimeoutMs(input)
+  } else {
+    return defaultAckTimeoutMs
+  }
   if (toolTimeoutMs === undefined) return defaultAckTimeoutMs
   return Math.max(defaultAckTimeoutMs, toolTimeoutMs + Math.min(Math.max(Math.round(toolTimeoutMs * 0.1), 5_000), 60_000))
 }

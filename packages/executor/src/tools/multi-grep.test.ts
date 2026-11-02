@@ -68,4 +68,31 @@ describe('multi_grep', () => {
     const controller = new AbortController(); controller.abort()
     await expect(multiGrepTool.run({ searches: [{ pattern: 'alpha' }] }, { ...ctx, signal: controller.signal })).rejects.toThrow(/ECANCELED/)
   })
+
+  it('passes independent page bounds through each batch search', async () => {
+    const out = await multiGrepTool.run({ searches: [
+      { pattern: 'alpha', path: 'src/a.ts', output_mode: 'content', limit: 1, offset: 1 },
+      { pattern: 'beta', path: 'src', output_mode: 'count', limit: 1 },
+    ] }, ctx)
+    expect(out).toContain(':3:你好 alpha')
+    expect(out).not.toContain(':1:alpha')
+    expect(out).toContain('next_offset=1')
+  })
+
+  it('preserves earlier and later successful searches when an independent path fails', async () => {
+    try {
+      await multiGrepTool.run({ searches: [
+        { pattern: 'alpha', path: 'src/a.ts', output_mode: 'content' },
+        { pattern: 'beta', path: 'src/missing.ts' },
+        { pattern: 'gamma', path: 'src/b.ts', output_mode: 'content' },
+      ] }, ctx)
+      expect.fail('partial failure must not be reported as success')
+    } catch (error) {
+      expect(String(error)).toContain('EPARTIAL')
+      expect(String(error)).toContain('search[1] (failed)')
+      expect(String(error)).toContain(':1:alpha')
+      expect(String(error)).toContain(':2:gamma')
+    }
+  })
+
 })

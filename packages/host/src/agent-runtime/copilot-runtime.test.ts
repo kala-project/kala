@@ -586,6 +586,32 @@ describe('Copilot runtime custom tools', () => {
     expect(store.get(record.sessionId)?.state.messages).toHaveLength(1)
   })
 
+  it.each(['partial', 'unconfirmed'])('gives the SDK model actionable failure text rather than only a code: %s', async (kind) => {
+    const name = kind === 'partial' ? 'read_files' : 'shell'
+    const failure = { code: kind === 'partial' ? 'EPARTIAL' : 'transport_lost', category: 'execution', outcome: kind === 'partial' ? 'failed' : 'indeterminate', retryable: false, responsibility: 'system' } as const
+    const content = kind === 'partial' ? 'ERROR: EPARTIAL: .' : 'acknowledgement missing'
+    const runtime = new CopilotAgentRuntime({
+      store,
+      tools: { callTool: async () => ({ ok: false, content, failure }), cancelPending() {} },
+      broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError() {} },
+    }, { enabled: true, sessionsDir: dir })
+    const record = await store.create({
+      sessionId: 'copilot-error-feedback', agentRuntime: 'copilot',
+      config: createConfig({ tools: [{ name, description: 'Test failure feedback', inputSchema: { type: 'object' }, requiresApproval: false }] }),
+    })
+    await runtime.start()
+    await runtime.send(record, { text: 'Inspect the result.', model: 'gpt-5.4-mini' })
+    const result = await sdk.configs.at(-1)?.tools.find((tool) => tool.name === name)?.handler({}, { toolCallId: 'error-feedback-call' })
+    expect(result?.resultType).toBe('failure')
+    expect(result?.textResultForLlm).toContain('What happened:')
+    expect(result?.textResultForLlm).toContain('Next step:')
+    expect(result?.textResultForLlm).toContain(content)
+    expect(result?.error).toBe(result?.textResultForLlm)
+    expect(result?.textResultForLlm).toContain(kind === 'partial' ? 'details are missing or truncated' : 'side effects are unknown')
+    const stored = store.get(record.sessionId)?.state.messages.flatMap((message) => message.content).find((item) => item.type === 'tool_result' && item.callId === 'error-feedback-call')
+    expect(stored?.type === 'tool_result' ? stored.content : undefined).toBe(result?.textResultForLlm)
+  })
+
   it('delegates an SDK custom tool call to the configured runtime dispatcher', async () => {
     const callTool = vi.fn(async () => ({ ok: true, content: 'host tool result' }))
     const tools: ToolDispatcher = {
@@ -1346,7 +1372,10 @@ describe('Copilot runtime custom tools', () => {
       },
     })
     const tool = sdk.configs.at(-1)?.tools.find((candidate) => candidate.name === 'inspect')
-    await expect(tool?.handler({}, { toolCallId: 'late-tool' })).resolves.toMatchObject({ error: 'cancelled' })
+    await expect(tool?.handler({}, { toolCallId: 'late-tool' })).resolves.toMatchObject({
+      error: expect.stringContaining('The operation was cancelled.'),
+      textResultForLlm: expect.stringContaining('Do not restart automatically.'),
+    })
     expect(callTool).not.toHaveBeenCalled()
 
     const newResponse = {

@@ -7,6 +7,7 @@
  */
 
 import type { ToolSchema } from '@agent-kernel/kernel'
+import { WEB_SEARCH_DEFAULT_LIMIT, WEB_SEARCH_MAX_LIMIT, WEB_SEARCH_MAX_PAGE, WEB_SEARCH_MAX_QUERIES, WEB_SEARCH_MAX_TOTAL_RESULTS, WEB_SEARCH_MAX_PAGES, WEB_SEARCH_MAX_REQUESTS } from './web-search/contract.js'
 import { ComputerInputActionSchema, ComputerSemanticActionSchema } from '@agent-kernel/shared'
 import { z } from 'zod'
 
@@ -43,10 +44,12 @@ export const DEFAULT_KALA_SYSTEM_PROMPT = [
   'First determine what kind of help the user wants. For questions, explanations, reviews, or design discussions, inspect relevant evidence as needed and answer the question; do not turn a request for analysis into unrequested implementation or deployment. For implementation tasks, inspect the relevant code before changing it, then carry the work through with focused edits and the narrowest reliable verification.',
   'Work pragmatically: inspect the codebase before changing it, make focused edits, and verify the result with the narrowest reliable tests.',
   'Prefer existing project patterns over new abstractions. Use fast search tools first, especially ripgrep-backed search, before broad file reads.',
+  'For research, choose search breadth to fit the question: batch independent queries, set result counts explicitly when coverage matters, and inspect further pages or reformulate when the first results are insufficient. Stop when evidence answers the question, not automatically after one page or only after exhausting a quota. Distinguish returned results from total coverage and use primary sources to verify claims.',
   'Treat filesystem, shell, network, and memory tools as real side effects. Avoid destructive actions unless the user clearly requested them or approval policy permits them.',
   'When editing, keep unrelated files and user changes intact. Do not revert work you did not make.',
+  'After an edit context or revision mismatch, re-read the current target and revise the edit; do not blindly retry, disable revision protection, broaden replace_all, or overwrite the file to force success. An acknowledgement timeout means execution may already have occurred: inspect current state before retrying side effects. Preserve successful sections of partially failed batches and retry only failed or omitted work. Read the human-readable outcome, state and next-step guidance together with the original diagnostic details; an error code or retryable flag alone never proves rollback, absence of side effects, or safety to repeat an operation. If the cause or completed work remains unknown, report that uncertainty instead of inventing a recovery.',
   'If the user asks you to modify files, run commands, or continue unfinished work, either ask a necessary clarification, explain a real blocker, or continue by using tools. Do not claim that you changed, ran, verified, or completed something unless a tool result confirms it.',
-  'For multi-step work, keep a concise task list and update it as the state changes. Mark work complete only after verification.',
+  'For multi-step work, keep a concise current-goal plan, not a session-wide history or project backlog. Within the same goal update incrementally; on an explicit switch to independent work, replace the graph after explicitly accounting for unfinished work in a handoff, durable note or the new plan. Remove verified completed branches after their outcome is recorded; clear the graph when the goal is finished and no current work remains. Keep node text short; evidence belongs in artifacts and the conversation. Do not create a graph for simple questions or one-step actions. Mark work complete only after verification.',
   'Delegate only when a bounded independent or parallel task has a clear benefit that outweighs a new agent’s startup and repo exploration. Do small lookups, single-file edits, and narrow tests yourself; do not delegate merely to reduce your context pressure. When delegating, pass the objective, verified facts and relevant files, remaining questions, edit scope, verification, and expected output; the child does not inherit your exploration.',
   TOOL_INTENTION_SYSTEM_INSTRUCTION,
   'Respond in the user’s current language unless they request another language. Keep code, identifiers, commands, and quoted text in their natural form.',
@@ -57,7 +60,7 @@ export const DEFAULT_KALA_SYSTEM_PROMPT = [
 export function createBuiltinAgentModule(systemPrompt = DEFAULT_KALA_SYSTEM_PROMPT): AgentModule {
   return {
     id: 'coding-agent-kala',
-    version: '2026-10-03',
+    version: '2026-10-30.2',
     label: 'Kala Prompt',
     systemPrompt: systemPromptPlugin(systemPrompt),
     toolsets: [catalogToolset, skillToolset, humanInputToolset, filesystemToolset, shellToolset, planningToolset, agentToolset, webToolset, memoryToolset, computerToolset],
@@ -67,7 +70,7 @@ export function createBuiltinAgentModule(systemPrompt = DEFAULT_KALA_SYSTEM_PROM
 function systemPromptPlugin(prompt: string): SystemPromptPlugin {
   return {
     id: 'kala-system-prompt',
-    version: '2026-10-03',
+    version: '2026-10-30.2',
     label: 'Kala System Prompt',
     render: () => prompt,
   }
@@ -163,14 +166,14 @@ const humanInputToolset: ToolsetPlugin = {
 
 const filesystemToolset: ToolsetPlugin = {
   id: 'filesystem',
-  version: '2026-07-15',
+  version: '2026-10-30.2',
   label: 'Filesystem',
   provideTools() {
     return [
       tool('read_file', 'executor', 'read', false, 'read_file', {
         purpose: 'Read one UTF-8 text file. Returns batcat-style line-numbered output plus a content revision for safe follow-up edits.',
         whenToUse: ['Inspect one source file, config, log, or doc before making decisions.', 'Read targeted ranges when the file is large.'],
-        constraints: ['Use absolute paths.', 'Do not read secrets unless required for the user task.'],
+        constraints: ['Use absolute paths.', 'Do not read secrets unless required for the user task.', 'Host/SDK temporary output paths may not be readable from the Executor workspace. On EACCES do not widen sandbox access; narrow the original tool output or use an authorized session artifact channel.'],
       }, {
         type: 'object', required: ['path'], properties: {
           path: { type: 'string', description: 'Absolute path to the file.' },
@@ -181,11 +184,11 @@ const filesystemToolset: ToolsetPlugin = {
       tool('read_files', 'executor', 'read', false, 'read_files', {
         purpose: 'Read multiple UTF-8 text files in one call. Returns batcat-style sections with file headers and line numbers.',
         whenToUse: ['Inspect related implementation, interface, and test files together.', 'Reduce repeated file-read tool calls when the exact files are already known.'],
-        constraints: ['Use absolute paths.', 'Keep the file list focused; use search_files or find_files before broad reads.'],
+        constraints: ['Use absolute paths.', 'Keep the file list focused; use glob or multi_grep before broad reads.', 'Runtime file failures preserve independent successful sections and return EPARTIAL; cancellation still stops immediately. max_bytes bounds section/diagnostic content (excluding the error-code wrapper and concise model-facing recovery envelope). Truncation reports attempted and unattempted counts; request failed or omitted files/ranges separately.'],
       }, {
         type: 'object', required: ['files'], properties: {
           files: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', required: ['path'], properties: { path: { type: 'string' }, offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1 } } } },
-          max_bytes: { type: 'integer', minimum: 1, maximum: 1000000, description: 'Maximum combined output bytes.' },
+          max_bytes: { type: 'integer', minimum: 1, maximum: 1000000, description: 'Maximum combined file-section/diagnostic bytes; excludes the error-code wrapper and concise failure-recovery envelope.' },
         },
       }),
       tool('ls', 'executor', 'read', false, 'ls', {
@@ -196,13 +199,13 @@ const filesystemToolset: ToolsetPlugin = {
       tool('glob', 'executor', 'read', false, 'glob', {
         purpose: 'Find files matching a glob pattern. Results are sorted by mtime descending.',
         whenToUse: ['Locate files by name or extension.', 'Find likely implementation or test files.'],
-        constraints: ['Prefer precise patterns to broad workspace scans.'],
-      }, { type: 'object', required: ['pattern'], properties: { pattern: { type: 'string' }, path: { type: 'string' } } }),
+        constraints: ['Use path to constrain the search root; omission uses the workspace cwd.', 'Prefer precise patterns to broad workspace scans. Use limit/offset and returned next_offset for further pages; ordering is mtime descending with path tie-breaks in an unchanged workspace.', 'A traversal-limit warning means incomplete scope, not zero additional matches; narrow path/pattern.'],
+      }, { type: 'object', required: ['pattern'], properties: { pattern: { type: 'string' }, path: { type: 'string', description: 'Directory to search; defaults to workspace cwd.' }, limit: { type: 'integer', minimum: 1, maximum: 1000, default: 1000, description: 'Maximum file paths returned in this page.' }, offset: { type: 'integer', minimum: 0, default: 0, description: 'Number of sorted matching paths to skip; use returned next_offset.' } } }),
       tool('multi_grep', 'executor', 'read', false, 'multi_grep', {
         purpose: 'Run multiple independent regex searches in one ordered Tool call, preserving every child result.',
         whenToUse: ['Investigate several related symbols or failure signatures together.', 'Reduce repeated grep calls while preserving per-search output sections.'],
-        constraints: ['Keep each search scoped where possible.', 'Use at most 20 searches; large aggregate output is preserved through the standard overflow channel.'],
-      }, { type: 'object', required: ['searches'], properties: { searches: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', required: ['pattern'], properties: { pattern: { type: 'string' }, path: { type: 'string' }, glob: { type: 'string' }, output_mode: { type: 'string', enum: ['content', 'files_with_matches', 'count'] }, case_insensitive: { type: 'boolean' } } } } } }),
+        constraints: ['Batch independent symbols or hypotheses in searches instead of serial single-pattern calls when useful; one focused search remains appropriate for a narrow lookup.', 'Keep each search scoped with path/glob. Default output_mode is files_with_matches; use content for matching lines or count for per-file counts.', 'Each search supports limit/offset. Follow next_offset with the same pattern/scope/mode to continue; an incomplete-scan warning requires narrowing scope, not assuming all files were searched.', 'Per-search runtime failures preserve other result sections and report the overall call as EPARTIAL; invalid batch parameters are rejected before searching. Cancellation still stops the batch.', 'Use at most 20 searches; large aggregate output is preserved through the standard overflow channel.'],
+      }, { type: 'object', required: ['searches'], properties: { searches: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', required: ['pattern'], properties: { pattern: { type: 'string' }, path: { type: 'string' }, glob: { type: 'string' }, output_mode: { type: 'string', enum: ['content', 'files_with_matches', 'count'], default: 'files_with_matches' }, limit: { type: 'integer', minimum: 1, maximum: 1000, default: 1000, description: 'Maximum returned rows per search: matching lines in content mode, files otherwise.' }, offset: { type: 'integer', minimum: 0, default: 0, description: 'Matching rows to skip in stable path/line order; use returned next_offset for more.' }, case_insensitive: { type: 'boolean' } } } } } }),
       tool('write_file', 'executor', 'write', true, 'write_file', {
         purpose: 'Create or fully overwrite one UTF-8 text file, creating parent directories as needed.',
         whenToUse: ['Create new files or fully replace generated files.'],
@@ -221,7 +224,7 @@ const filesystemToolset: ToolsetPlugin = {
       tool('apply_file_patch', 'executor', 'write', true, 'apply_file_patch', {
         purpose: 'Apply a patch-format file mutation. Supports add, update, delete, and move operations; a patch may touch one file or many files.',
         whenToUse: ['Apply complex line-level changes.', 'Create, delete, move, or update files from one patch-format description.'],
-        constraints: ['Patch context must match exactly.', 'Prefer replace_in_file for one small exact replacement.', 'Use the Kala patch format beginning with *** Begin Patch and ending with *** End Patch.'],
+        constraints: ['Patch context must match exactly; re-read on mismatch rather than retrying stale context or forcing an overwrite.', 'Prefer replace_in_file for one small exact replacement.', 'Use the Kala patch format beginning with *** Begin Patch and ending with *** End Patch. Separate noncontiguous update hunks with @@; context lines start with a space, removals with -, additions with +.', 'Each file update validates all ordered exact hunks before writing. Cross-file operations are not transactional: EPARTIAL reports earlier applied operations; inspect the receipt and do not replay the entire patch.'],
       }, { type: 'object', required: ['patch'], properties: { patch: { type: 'string', description: 'Patch text beginning with *** Begin Patch and ending with *** End Patch.' } } }),
     ]
   },
@@ -229,19 +232,19 @@ const filesystemToolset: ToolsetPlugin = {
 
 const shellToolset: ToolsetPlugin = {
   id: 'shell',
-  version: '2026-07-15',
+  version: '2026-10-30.2',
   label: 'Shell',
   provideTools() {
     return [
       tool('shell', 'executor', 'shell', true, 'bash', {
         purpose: 'Run a native shell command inside the executor sandbox. Uses PowerShell or cmd on Windows and a POSIX shell on macOS/Linux.',
         whenToUse: ['Run tests, builds, linters, package scripts, or precise shell inspections.', 'Use background mode for long-running commands.'],
-        constraints: ['Use syntax for the selected Workspace operating system.', 'Avoid destructive commands unless explicitly requested.', 'Set timeout_seconds to the expected command duration for foreground commands.', 'Use run_in_background for long-running commands, servers, experiments, or commands that need polling.'],
+        constraints: ['Use syntax for the selected Workspace operating system.', 'Avoid destructive commands unless explicitly requested.', 'Set timeout_seconds to the expected command duration for foreground commands.', 'Use run_in_background for long-running commands, servers, experiments, or commands that need polling.', 'An ack timeout is an unknown execution outcome, not proof the command did not run or stopped; inspect effects before retrying.'],
       }, { type: 'object', required: ['command'], properties: { command: { type: 'string' }, shell: { type: 'string', enum: ['auto', 'powershell', 'cmd', 'bash', 'zsh', 'sh'] }, cwd: { type: 'string' }, timeout_seconds: { type: 'integer', minimum: 1, description: 'Maximum foreground command runtime in seconds. Pick a value appropriate to the command.' }, run_in_background: { type: 'boolean' } } }),
       tool('bash_output', 'executor', 'shell', false, 'bash_output', {
         purpose: 'Read output from a background bash task by task_id.',
         whenToUse: ['Poll long-running tests, builds, dev servers, or experiments.'],
-        constraints: ['Poll frequently enough to avoid wasting time.', 'Use offsets to avoid rereading huge output.'],
+        constraints: ['Use block=true and a bounded timeout_ms while waiting instead of rapid empty polls; stop polling when the task has exited.', 'Use offsets to avoid rereading huge output. An ack timeout does not imply the background task was stopped.'],
       }, { type: 'object', required: ['task_id'], properties: { task_id: { type: 'string' }, offset: { type: 'integer', minimum: 0 }, block: { type: 'boolean' }, timeout_ms: { type: 'integer', minimum: 1 } } }),
       tool('kill_shell', 'executor', 'shell', true, 'kill_shell', {
         purpose: 'Stop a background bash task by task_id.',
@@ -254,14 +257,14 @@ const shellToolset: ToolsetPlugin = {
 
 const planningToolset: ToolsetPlugin = {
   id: 'planning',
-  version: '2026-07-15',
+  version: '2026-10-30.2',
   label: 'Planning',
   provideTools() {
     return [
       tool('todo_graph', 'host', 'read', false, 'todo_graph', {
         purpose: 'Create and maintain a session task dependency graph with parallel branches and blocked work. Operations are atomic.',
         whenToUse: ['Use when tasks have prerequisites, fan-out/fan-in, blocked work, or parallel execution.', 'Use for complex implementation plans that cannot be represented accurately as a linear list.'],
-        constraints: ['Use stable semantic node IDs.', 'Add only real dependencies; do not turn ordering preferences into edges.', 'Blocked nodes cannot be in_progress, but multiple unblocked nodes may be in_progress.', 'Prefer incremental operations after initial replace.', 'Mark completed only after verification.'],
+        constraints: ['Maintain only the current goal, not a session history; keep node text concise and evidence in artifacts.', 'On an explicit independent-task switch use replace, first accounting for unfinished work rather than silently discarding it.', 'After recording outcomes, remove completed branches with remove_node (cascade removes incident edges, not descendant tasks); clear when no current work remains.', 'Use stable semantic node IDs.', 'Add only real dependencies; do not turn ordering preferences into edges.', 'Blocked nodes cannot be in_progress, but multiple unblocked nodes may be in_progress.', 'Prefer incremental operations within the same goal; use replace for a new independent goal, not endless add_node.', 'Mark completed only after verification.'],
       }, todoGraphSchema),
     ]
   },
@@ -297,19 +300,19 @@ const agentToolset: ToolsetPlugin = {
 
 const webToolset: ToolsetPlugin = {
   id: 'web',
-  version: '2026-07-15',
+  version: '2026-10-30.2',
   label: 'Web',
   provideTools() {
     return [
       tool('websearch', 'host', 'network', false, 'websearch', {
-        purpose: 'Search the web and return top results as text.',
+        purpose: 'Search one query or a bounded batch of independent queries, with explicit provider pagination, multi-page requests and result counts.',
         whenToUse: ['Look up current information, documentation, error messages, or facts not in the conversation.'],
-        constraints: ['Prefer official or primary sources when possible.', 'Do not use web search for facts already available in the workspace.'],
-      }, { type: 'object', required: ['query'], properties: { query: { type: 'string', description: 'The search query.' }, limit: { type: 'integer', minimum: 1, maximum: 10, description: 'Maximum results to return.' } } }),
+        constraints: ['Provide exactly one of query or queries. Batch independent research angles instead of serial one-query calls when useful.', `Default ${WEB_SEARCH_DEFAULT_LIMIT} results per query is for quick lookup; choose 10–20 or more for broader research as needed, up to ${WEB_SEARCH_MAX_TOTAL_RESULTS} requested results and ${WEB_SEARCH_MAX_REQUESTS} provider requests per call (queries × pages).`, 'Use pages to fetch several consecutive pages in one call when useful. If evidence is insufficient, continue with page+pages using the same query and limit, or reformulate. Do not treat the first page as exhaustive or fetch extra pages merely to fill a quota.', 'Provider pages can overlap, change or return fewer results than requested; deduplicate URLs and verify important claims with webfetch.', 'Quota or credential failures require provider account/configuration correction, not repeated queries. For 429 honor bounded backoff guidance; no automatic retry or fallback provider is performed.', 'Prefer official or primary sources when possible.', 'Do not use web search for facts already available in the workspace.'],
+      }, { type: 'object', properties: { query: { type: 'string', minLength: 1, description: 'One search query; mutually exclusive with queries.' }, queries: { type: 'array', minItems: 1, maxItems: WEB_SEARCH_MAX_QUERIES, items: { type: 'string', minLength: 1 }, description: 'Independent unique queries, each using the shared page and limit; mutually exclusive with query.' }, limit: { type: 'integer', minimum: 1, maximum: WEB_SEARCH_MAX_LIMIT, default: WEB_SEARCH_DEFAULT_LIMIT, description: `Requested results per query per provider page, not a guaranteed count. limit × number of queries × pages must not exceed ${WEB_SEARCH_MAX_TOTAL_RESULTS}.` }, page: { type: 'integer', minimum: 1, maximum: WEB_SEARCH_MAX_PAGE, default: 1, description: '1-based provider page. Keep query and limit unchanged when continuing; pages are not a stable snapshot.' }, pages: { type: 'integer', minimum: 1, maximum: WEB_SEARCH_MAX_PAGES, default: 1, description: `Consecutive provider pages to fetch starting at page. queries × pages <= ${WEB_SEARCH_MAX_REQUESTS}; limit × queries × pages <= ${WEB_SEARCH_MAX_TOTAL_RESULTS}; last page <= ${WEB_SEARCH_MAX_PAGE}.` } } }),
       tool('webfetch', 'executor', 'network', false, 'webfetch', {
         purpose: 'Fetch a web page by URL and return readable text extracted from HTML or plain text.',
         whenToUse: ['Open a promising search result or official source.', 'Inspect source pages while answering web research questions.'],
-        constraints: ['Use absolute http(s) URLs.', 'Prefer primary sources and cite the page used when the task asks for evidence.'],
+        constraints: ['Use absolute http(s) URLs.', 'Prefer primary sources and cite the page used when the task asks for evidence.', '401/403 are access failures, not permission to bypass restrictions; use an authorized source. For 404 verify the URL or search the source; for 429 back off rather than repeating the same fetch in a tight loop.'],
       }, { type: 'object', required: ['url'], properties: { url: { type: 'string', description: 'Absolute http(s) URL to fetch.' }, maxChars: { type: 'integer', minimum: 1, maximum: 50000, description: 'Maximum characters of extracted page text to return.' } } }),
     ]
   },
@@ -384,7 +387,7 @@ const todoGraphSchema = {
         type: 'object', required: ['op'],
         properties: {
           op: { type: 'string', enum: ['replace', 'add_node', 'update_node', 'remove_node', 'add_edge', 'remove_edge', 'clear'] },
-          nodes: { type: 'array', items: todoGraphNodeSchema }, edges: { type: 'array', items: todoGraphEdgeSchema },
+          nodes: { type: 'array', description: 'Required for replace: the complete next node set.', items: todoGraphNodeSchema }, edges: { type: 'array', description: 'For replace, omission means an empty edge set, never historical edges.', items: todoGraphEdgeSchema },
           node: todoGraphNodeSchema, id: { type: 'string' }, content: { type: 'string', minLength: 1, maxLength: 500 },
           status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'cancelled'] },
           priority: { type: ['string', 'null'], enum: ['high', 'medium', 'low', null] },

@@ -18,6 +18,21 @@ const empty: TodoGraphSnapshot = {
 }
 
 describe('todo graph', () => {
+  it('defaults omitted replacement edges to empty, never to historical edges', () => {
+    const nodes = [
+      { id: 'a', content: 'A', status: 'pending' },
+      { id: 'b', content: 'B', status: 'pending' },
+    ]
+    const previous = applyTodoGraphOperations(empty, [{ op: 'replace', nodes, edges: [{ from: 'a', to: 'b' }] }])
+    const replaced = applyTodoGraphOperations(previous, [{ op: 'replace', nodes }])
+    expect(replaced.edges).toEqual([])
+    expect(replaced.ready).toEqual(['a', 'b'])
+    expect(previous.edges).toEqual([{ from: 'a', to: 'b' }])
+    for (const edges of [null, {}, 'invalid']) {
+      expect(() => applyTodoGraphOperations(previous, [{ op: 'replace', nodes, edges }])).toThrow(/EINVAL/)
+    }
+  })
+
   it('creates branches and derives ready and blocked nodes', () => {
     const graph = applyTodoGraphOperations(empty, [{
       op: 'replace',
@@ -38,6 +53,20 @@ describe('todo graph', () => {
     expect(graph.revision).toBe(1)
     expect(graph.ready).toEqual(['host', 'ui'])
     expect(graph.blocked).toEqual([{ id: 'test', waitingOn: ['host', 'ui'] }])
+  })
+
+  it('removes incident edges, replaces and clears without mutating historical graphs', () => {
+    const graph = applyTodoGraphOperations(empty, [{ op: 'replace', nodes: [
+      { id: 'old', content: 'Verified outcome', status: 'completed' },
+      { id: 'pending', content: 'Explicit handoff required', status: 'pending' },
+    ], edges: [{ from: 'old', to: 'pending' }] }])
+    expect(() => applyTodoGraphOperations(graph, [{ op: 'remove_node', id: 'old' }])).toThrow(/ECONFLICT/)
+    const pruned = applyTodoGraphOperations(graph, [{ op: 'remove_node', id: 'old', cascade: true }])
+    expect(pruned.nodes.map((n) => n.id)).toEqual(['pending'])
+    expect(pruned.edges).toEqual([])
+    const replaced = applyTodoGraphOperations(pruned, [{ op: 'replace', nodes: [{ id: 'current', content: 'Current goal', status: 'in_progress' }], edges: [] }])
+    expect(applyTodoGraphOperations(replaced, [{ op: 'clear' }])).toMatchObject({ nodes: [], edges: [], summary: { total: 0 }, ready: [], blocked: [] })
+    expect(graph.nodes).toHaveLength(2)
   })
 
   it('rejects cycles atomically', () => {

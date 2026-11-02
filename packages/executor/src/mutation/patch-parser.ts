@@ -4,7 +4,7 @@ export type ParsedPatchOperation =
   | { readonly kind: 'add'; readonly path: string; readonly content: string }
   | { readonly kind: 'delete'; readonly path: string }
   | { readonly kind: 'move'; readonly path: string; readonly newPath: string }
-  | { readonly kind: 'update'; readonly path: string; readonly oldText: string; readonly newText: string }
+  | { readonly kind: 'update'; readonly path: string; readonly hunks: readonly { oldText: string; newText: string }[] }
 
 export function parseFilePatch(input: string): ParsedPatchOperation[] {
   const lines = input.replaceAll('\r\n', '\n').split('\n')
@@ -40,11 +40,19 @@ export function parseFilePatch(input: string): ParsedPatchOperation[] {
         i++
         continue
       }
-      const oldLines: string[] = []
-      const newLines: string[] = []
+      const hunks: { oldText: string; newText: string }[] = []
+      let oldLines: string[] = []
+      let newLines: string[] = []
+      const flushHunk = (): void => {
+        if (oldLines.length === 0 && newLines.length === 0) return
+        hunks.push({ oldText: oldLines.join('\n'), newText: newLines.join('\n') })
+        oldLines = []
+        newLines = []
+      }
       while (i < lines.length && !lines[i]!.startsWith('*** ')) {
         const item = lines[i]!
         if (item.startsWith('@@')) {
+          flushHunk()
           i++
           continue
         }
@@ -63,8 +71,9 @@ export function parseFilePatch(input: string): ParsedPatchOperation[] {
         }
         i++
       }
-      if (oldLines.length === 0 && newLines.length === 0) throw new ToolError('EPATCHPARSE', `empty update hunk for ${path}`)
-      ops.push({ kind: 'update', path, oldText: oldLines.join('\n'), newText: newLines.join('\n') })
+      flushHunk()
+      if (hunks.length === 0) throw new ToolError('EPATCHPARSE', `empty update hunk for ${path}`)
+      ops.push({ kind: 'update', path, hunks })
       continue
     }
     if (line === '') {

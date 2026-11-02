@@ -30,6 +30,7 @@ import type {
 import { step } from '@agent-kernel/kernel'
 
 import { TOOL_INTENTION_SYSTEM_INSTRUCTION } from './builtin-tools.js'
+import { formatToolFailureForAgent } from './tool-feedback.js'
 import { activeToolsFor } from './extensions/tool-catalog.js'
 import { intentActivatedTools, toolCatalogRevision, visibleTools } from './tool-disclosure.js'
 import { TurnTimingTracker, timedSpan } from './turn-timing.js'
@@ -1262,7 +1263,12 @@ async function dispatchToolResult(
   const write = async (): Promise<void> => {
     const record = deps.store.get(sessionId)
     const desktopImage = ok && record?.state.pendingCalls.some((call) => call.callId === callId && call.name === 'computer_use') && parseComputerScreenshotResult(content)
-    const capped = desktopImage ? content : capToolResultForContext(content, contextLimitForSession(deps, sessionId, record))
+    const explained = ok ? content : formatToolFailureForAgent({
+      content,
+      toolName: record?.state.pendingCalls.find((call) => call.callId === callId)?.name,
+      failure,
+    })
+    const capped = desktopImage ? explained : capToolResultForContext(explained, contextLimitForSession(deps, sessionId, record))
     await dispatchOne(
       deps,
       sessionId,

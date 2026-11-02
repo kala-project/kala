@@ -112,6 +112,22 @@ describe('bash', () => {
     expect(out).toContain('--- exit code: 0')
   })
 
+  it.skipIf(process.platform === 'win32').each(['timeout', 'abort'])('terminates the POSIX foreground group on %s, not just the waiting shell', async (reason) => {
+    const controller = new AbortController()
+    const timer = reason === 'abort' ? setTimeout(() => controller.abort(), 100) : undefined
+    try {
+      const out = JSON.parse(await bashTool.run(
+        { shell: 'sh', command: 'sleep 2 & wait', timeoutMs: reason === 'timeout' ? 100 : 5_000, capture_separate_streams: true },
+        makeCtx(root, controller.signal),
+      ))
+      expect(out.timedOut).toBe(reason === 'timeout')
+      expect(out.aborted).toBe(reason === 'abort')
+      expect(out.durationMs).toBeLessThan(1_000)
+    } finally {
+      clearTimeout(timer)
+    }
+  })
+
   it('honours timeoutMs by killing the process', async () => {
     const out = await bashTool.run(
       { command: 'sleep 5', timeoutMs: 200 },

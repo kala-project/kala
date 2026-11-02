@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createBuiltinTools } from './builtin-tools.js'
+import { DEFAULT_KALA_SYSTEM_PROMPT, createBuiltinTools } from './builtin-tools.js'
 
 describe('built-in tool intent schema',()=>{
   it('keeps websearch execution on the Host',()=>{
@@ -76,4 +76,26 @@ describe('built-in tool intent schema',()=>{
       expect((tool.inputSchema.required as string[]|undefined)?.filter((key)=>key==='_intent')).toEqual(['_intent'])
     }
   })
+
+  it('exposes web batches, provider pages and local search pagination', () => {
+    const tools = createBuiltinTools()
+    const web = tools.find((t) => t.name === 'websearch')!
+    expect(web.inputSchema.properties).toMatchObject({
+      limit: { maximum: 100, default: 5 }, page: { minimum: 1, maximum: 10 }, pages: { maximum: 5, default: 1 }, queries: { minItems: 1, maxItems: 5 },
+    })
+    expect(web.description).toContain('same query and limit')
+    const item = (tools.find((t) => t.name === 'multi_grep')!.inputSchema.properties as Record<string, any>).searches.items
+    expect(item.properties).toMatchObject({ limit: { maximum: 1000 }, offset: { minimum: 0 } })
+    expect(tools.find((t) => t.name === 'glob')!.inputSchema.properties).toMatchObject({ path: { type: 'string' }, limit: { maximum: 1000 } })
+  })
+
+  it('scopes plans to the current goal with explicit handoffs and adaptive search', () => {
+    const todo = createBuiltinTools().find((t) => t.name === 'todo_graph')!
+    expect(todo.description).toContain('remove_node')
+    expect(todo.description).toContain('unfinished work')
+    expect(todo.description).toContain('clear when no current work remains')
+    expect(DEFAULT_KALA_SYSTEM_PROMPT).toContain('not a session-wide history')
+    expect(DEFAULT_KALA_SYSTEM_PROMPT).toContain('not automatically after one page')
+  })
+
 })

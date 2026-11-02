@@ -101,7 +101,17 @@ export async function applyFilePatchMutation(input: { patch: string }, ctx: Reso
   if (operations.length === 0) throw new ToolError('EPATCHPARSE', 'patch contains no operations')
   const changes: FileChangeResult[] = []
   for (const operation of operations) {
-    changes.push(await applyPatchOperation(operation, ctx))
+    try {
+      throwIfAborted(ctx as ToolContext)
+      changes.push(await applyPatchOperation(operation, ctx))
+    } catch (error) {
+      if (changes.length === 0) throw error
+      const fileIoError = error instanceof Error && 'errno' in error && typeof error.errno === 'number'
+        && 'code' in error && typeof error.code === 'string'
+      if (!(error instanceof ToolError) && !fileIoError) throw error
+      throw new ToolError(error instanceof ToolError && error.code === 'ECANCELED' ? 'ECANCELED' : 'EPARTIAL',
+        `${changes.length}/${operations.length} file operations applied; earlier changes remain applied (no cross-file rollback). Inspect the receipt and retry only remaining work.\nFailed operation: ${operation.kind} ${operation.path}\n${error.message}\n\n${stringifyMutationResult({ ok: true, summary: 'Already-applied file operations, not whole-patch success', files: changes })}`)
+    }
   }
   return stringifyMutationResult({
     ok: true,
@@ -117,12 +127,14 @@ async function applyPatchOperation(operation: ParsedPatchOperation, ctx: Resolve
       const exists = await stat(resolved).then(() => true, () => false)
       if (exists) throw new ToolError('EEXIST', `file already exists: ${operation.path}`)
       await mkdir(dirname(resolved), { recursive: true })
+      throwIfAborted(ctx as ToolContext)
       await writeFile(resolved, operation.content, 'utf8')
       const stats = createUnifiedDiff(resolved, '', normalizeLineEndings(operation.content))
       return { path: resolved, operation: 'created', additions: stats.additions, deletions: stats.deletions, diff: stats.diff, bytes_after: Buffer.byteLength(operation.content, 'utf8') }
     }
     if (operation.kind === 'delete') {
       const source = await loadTextFile(resolved).catch((err) => mapLoadError(err, operation.path))
+      throwIfAborted(ctx as ToolContext)
       await rm(resolved)
       const before = normalizeLineEndings(source.body)
       const stats = createUnifiedDiff(resolved, before, '')
@@ -133,21 +145,23 @@ async function applyPatchOperation(operation: ParsedPatchOperation, ctx: Resolve
       const exists = await stat(target).then(() => true, () => false)
       if (exists) throw new ToolError('EEXIST', `move target already exists: ${operation.newPath}`)
       await mkdir(dirname(target), { recursive: true })
+      throwIfAborted(ctx as ToolContext)
       await rename(resolved, target)
       return { path: target, old_path: resolved, operation: 'moved', additions: 0, deletions: 0, diff: `rename ${resolved} => ${target}` }
     }
     const source = await loadTextFile(resolved).catch((err) => mapLoadError(err, operation.path))
     const bodyLf = normalizeLineEndings(source.body)
-    const { text: nextBodyLf } = applyExactReplacements(bodyLf, [{
-      oldString: normalizeLineEndings(operation.oldText),
-      newString: normalizeLineEndings(operation.newText),
+    const { text: nextBodyLf } = applyExactReplacements(bodyLf, operation.hunks.map((hunk) => ({
+      oldString: normalizeLineEndings(hunk.oldText),
+      newString: normalizeLineEndings(hunk.newText),
       replaceAll: false,
-    }])
+    })))
     const nextText = serializeTextFile(nextBodyLf, source)
     const latest = await loadTextFile(resolved)
     if (!sameBytes(latest.bytes, source.bytes)) {
       throw new ToolError('ESTALE', `file changed while applying patch: ${operation.path}; read it again and retry`)
     }
+    throwIfAborted(ctx as ToolContext)
     await writeFile(resolved, nextText, 'utf8')
     const stats = createUnifiedDiff(resolved, bodyLf, nextBodyLf)
     return { path: resolved, operation: 'modified', additions: stats.additions, deletions: stats.deletions, diff: stats.diff, bytes_before: source.bytes.length, bytes_after: Buffer.byteLength(nextText, 'utf8') }

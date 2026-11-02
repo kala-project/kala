@@ -30,6 +30,44 @@ describe('apply_file_patch', () => {
     expect(JSON.parse(out)).toMatchObject({ ok: true, files: [{ operation: 'created' }, { operation: 'modified' }] })
   })
 
+  it('applies separate hunks in a file and rejects a later invalid hunk without writing', async () => {
+    const p = join(root, 'hunks.txt')
+    const before = 'one\ntwo\nkeep\nthree\nfour\n'
+    writeFileSync(p, before)
+    const patch = `*** Begin Patch
+*** Update File: ${p}
+@@
+ one
+-two
++TWO
+@@
+ three
+-four
++FOUR
+*** End Patch`
+    await expect(applyFilePatchTool.run({ patch: patch.replace('-four', '-missing') }, makeCtx(root))).rejects.toThrow(/ENOTFOUND/)
+    expect(readFileSync(p, 'utf8')).toBe(before)
+    await applyFilePatchTool.run({ patch }, makeCtx(root))
+    expect(readFileSync(p, 'utf8')).toBe('one\nTWO\nkeep\nthree\nFOUR\n')
+  })
+
+  it.each(['missing', 'filesystem'])('reports already-applied files when a later operation fails: %s', async (failure) => {
+    const p = join(root, 'created.txt')
+    const failingOperation = failure === 'missing'
+      ? `*** Delete File: ${join(root, 'missing.txt')}`
+      : `*** Add File: ${join(p, 'child.txt')}\n+invalid parent`
+    const error = await applyFilePatchTool.run({ patch: `*** Begin Patch
+*** Add File: ${p}
++retained
+${failingOperation}
+*** End Patch` }, makeCtx(root)).catch((error: Error) => error)
+    expect(readFileSync(p, 'utf8')).toBe('retained\n')
+    expect(error).toMatchObject({ code: 'EPARTIAL' })
+    expect(String(error)).toContain('1/2 file operations applied')
+    expect(String(error)).toContain(p)
+    if (failure === 'missing') expect(String(error)).toContain('ENOENT')
+  })
+
   it('deletes files', async () => {
     const p = join(root, 'gone.txt')
     writeFileSync(p, 'bye')

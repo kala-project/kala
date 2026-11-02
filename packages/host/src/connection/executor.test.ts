@@ -256,6 +256,19 @@ describe('ExecutorRegistry', () => {
     await expect(p).resolves.toEqual({ ok: true, content: 'ok' })
   })
 
+  it.each([['bash_output', true, 60_000, 66_000], ['bash_output', true, 120_000, 132_000], ['bash_output', false, 120_000, 60_000], ['shell', false, undefined, 132_000]] as const)('budgets acknowledgement separately from %s blocking=%s timeout=%s', async (name, block, timeoutMs, expected) => {
+    const reg = createExecutorRegistry(fakeIo() as never, makeResolver({ 'sess-poll': 'ws-default' }), 60_000)
+    const sock = makeFakeSocket('s-poll')
+    reg.attach(sock as never, announceOf('e-poll'))
+    const input = name === 'shell' ? { command: 'sleep 120', timeout_seconds: 120 } : { task_id: 'task', block, timeout_ms: timeoutMs }
+    const p = reg.callTool('sess-poll', callEffect('c-poll', name, undefined, input))
+    const payload = sock.emitted[0]!.payload as ToolCallMessage
+    expect(payload.input).toEqual(input)
+    expect(payload.ackTimeoutMs).toBe(expected)
+    sock.emitted[0]!.ack!({ callId: 'c-poll', ok: true, content: 'done' })
+    await expect(p).resolves.toMatchObject({ ok: true })
+  })
+
   it('fails pending calls when the executor disconnects with no replacement', async () => {
     const reg = createExecutorRegistry(
       fakeIo() as never,
@@ -480,8 +493,8 @@ describe('ExecutorRegistry', () => {
       await vi.advanceTimersByTimeAsync(150)
       await expect(p).resolves.toMatchObject({
         ok: false,
-        content: 'tool call ack timed out after 100ms',
-        failure: { code: 'tool_ack_timeout', outcome: 'indeterminate', retryable: false, timeoutStage: 'acknowledgement' },
+        content: 'tool call ack timed out after 100ms; execution outcome is unknown. Inspect current state before retrying; do not blindly repeat side effects.',
+        failure: { code: 'tool_ack_timeout', category: 'infrastructure', outcome: 'indeterminate', retryable: false, responsibility: 'system', timeoutStage: 'acknowledgement' },
       })
     } finally {
       vi.useRealTimers()
@@ -515,8 +528,8 @@ describe('ExecutorRegistry', () => {
       await vi.advanceTimersByTimeAsync(1)
       await expect(pending).resolves.toMatchObject({
         ok: false,
-        content: 'tool call ack timed out after 100ms (post-reconnect)',
-        failure: { code: 'tool_ack_timeout', outcome: 'indeterminate', retryable: false },
+        content: 'tool call ack timed out after 100ms (post-reconnect); execution outcome is unknown. Inspect current state before retrying; do not blindly repeat side effects.',
+        failure: { code: 'tool_ack_timeout', category: 'infrastructure', outcome: 'indeterminate', retryable: false, responsibility: 'system', timeoutStage: 'acknowledgement' },
       })
     } finally {
       vi.useRealTimers()

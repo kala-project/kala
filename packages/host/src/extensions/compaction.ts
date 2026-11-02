@@ -108,7 +108,7 @@ Rules:
 - Preserve opaque identifiers exactly as written: UUIDs, hashes, commit IDs, session IDs, hostnames, ports, URLs, file names, room IDs, and socket IDs.
 - Write summary bodies in the primary language used by the conversation. Keep section headings exactly as shown.
 - Do not copy API keys, bearer tokens, passwords, cookies, or private key material. If such a value matters, describe the credential source or configuration shape and redact the secret value.
-- Preserve todo/task state from todo_graph (including dependencies, ready/blocked state, and active nodes), legacy/history todowrite calls, or equivalent tool calls.
+- Preserve the latest current-goal todo_graph state, including active/blocked nodes and real dependencies. A later clear/replace supersedes older snapshots: never resurrect removed or completed historical branches. Summarize completed outcomes separately as evidence, not as tasks to re-add. Explicitly retain handoffs for unfinished work outside the current goal. If only legacy todowrite exists, preserve its latest unfinished plan, not its completed history.
 - Preserve tool-result evidence, but summarize noisy logs to the command, exit/status, and decisive lines.
 - Use terse bullets, not prose paragraphs.
 - Do NOT address the user. Do NOT ask questions. Do NOT describe that you are summarizing or continuing anything.

@@ -312,8 +312,10 @@ function parseOperation(value: unknown, index: number): Operation {
   const op = rec.op
   if (op === 'clear') return { op }
   if (op === 'replace') {
-    if (!Array.isArray(rec.nodes) || !Array.isArray(rec.edges)) throw new GraphError('EINVAL', `operations[${index}] replace requires nodes and edges arrays`)
-    return { op, nodes: rec.nodes.map((node, i) => parseNode(node, `operations[${index}].nodes[${i}]`)), edges: rec.edges.map((edge, i) => parseEdge(edge, `operations[${index}].edges[${i}]`)) }
+    if (!Array.isArray(rec.nodes)) throw new GraphError('EINVAL', `operations[${index}] replace requires a nodes array`)
+    const edges = rec.edges === undefined ? [] : rec.edges
+    if (!Array.isArray(edges)) throw new GraphError('EINVAL', `operations[${index}].edges must be an array when supplied`)
+    return { op, nodes: rec.nodes.map((node, i) => parseNode(node, `operations[${index}].nodes[${i}]`)), edges: edges.map((edge, i) => parseEdge(edge, `operations[${index}].edges[${i}]`)) }
   }
   if (op === 'add_node') return { op, node: parseNode(rec.node, `operations[${index}].node`) }
   if (op === 'update_node') {

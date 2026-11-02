@@ -815,6 +815,29 @@ describe('host loop', () => {
     expect(seen[0]?.model).toBe('gpt-5.5')
   })
 
+  it('keeps actionable failure guidance in actual model input after context capping', async () => {
+    const script = scriptedLlm([
+      { message: { role: 'assistant', content: [{ type: 'tool_call', callId: 'failed-read', name: 'read', input: {} }] } },
+      { message: { role: 'assistant', content: [{ type: 'text', text: 'Reported the blocker.' }] } },
+    ])
+    const llm = { ...script, call: vi.fn(script.call) }
+    const failure = { code: 'transport_lost', category: 'infrastructure', outcome: 'indeterminate', retryable: false, responsibility: 'system' } as const
+    const loop = runHostLoop({
+      store, llm, broadcast: silentBroadcast(),
+      tools: nullTools({ callTool: async () => ({ ok: false, content: 'original diagnostic\n' + 'x'.repeat(100_000), failure }) }),
+    })
+    await loop.dispatch(sessionId, { kind: 'user_message', text: 'Inspect the target.' })
+    const modelResult = llm.call.mock.calls.at(-1)?.[0].messages.flatMap((message) => message.content).find((item) => item.type === 'tool_result')
+    expect(modelResult).toMatchObject({ ok: false, failure })
+    if (modelResult?.type !== 'tool_result') throw new Error('No tool result reached the model')
+    expect(modelResult.content).toContain('What happened:')
+    expect(modelResult.content).toContain('side effects are unknown')
+    expect(modelResult.content).toContain('Next step:')
+    expect(modelResult.content).toContain('Do not launch a duplicate')
+    expect(modelResult.content).toContain('original diagnostic')
+    expect(modelResult.content).toContain('omitted from tool result')
+  })
+
   it('drives a tool call round-trip', async () => {
     const llm = scriptedLlm([
       {
