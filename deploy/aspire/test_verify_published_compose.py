@@ -101,10 +101,115 @@ class PublishedTopology(unittest.TestCase):
         self.services['gateway']['environment']['KALA_DEDICATED_INGRESS_MODE'] = 'external'
         self.services['gateway']['ports'] = [{'target': 13001, 'published': '13001', 'protocol': 'tcp', 'host_ip': '127.0.0.1'}]
 
-    def check(self):
+    def check(self, compose=None):
         result = SimpleNamespace(returncode=0, stdout=json.dumps({'services': self.services}))
         with patch.object(verify.subprocess, 'run', return_value=result):
-            verify.check(self.root / 'compose.yaml', self.root / 'published.env')
+            return verify.check(compose or self.root / 'compose.yaml', self.root / 'published.env')
+
+    def enable_bounded_execution(self):
+        self.services['gateway']['environment']['KALA_DEDICATED_EXECUTION_PROFILE'] = 'bounded-v1'
+        self.services['runtime']['environment'].update({
+            'COPILOT_CLI_PATH': '/app/copilot-runtime/copilot-runtime',
+            'TMPDIR': '/app/packages/host/.runtime-tmp',
+            'KALA_RUNTIME_HOST_DATA_ROOT': '/app/packages/host/.runtime-tmp/kala'})
+        for name, service in self.services.items():
+            service.setdefault('deploy', {'resources': {'limits': {'cpus': '1.0', 'memory': '512M'}}})
+            service.setdefault('logging', {'driver': 'json-file', 'options': {'max-size': '10m', 'max-file': '3'}})
+            if name in ('runtime', 'gateway', 'dashboard'):
+                service.update(user='65532:65532', read_only=True, cap_drop=['ALL'], security_opt=['no-new-privileges:true'],
+                    tmpfs=['/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777'])
+        self.services['runtime']['tmpfs'].append('/app/packages/host/.runtime-tmp:rw,noexec,nosuid,nodev,size=512m,uid=65532,gid=65532,mode=0700')
+
+    def test_execution_profile_four_shapes_and_legacy_evidence(self):
+        self.assertEqual(verify.check_execution_profile(self.services), 'legacy-unmarked')
+        self.enable_bounded_execution(); self.check()
+        self.enable_observability(); self.check()
+        self.enable_external_ingress(); self.check()
+        for name in verify.OBSERVABILITY: self.services.pop(name)
+        self.check()
+        self.services['gateway']['environment']['KALA_DEDICATED_EXECUTION_PROFILE'] = 'unknown'
+        with self.assertRaisesRegex(ValueError, 'Unknown Dedicated execution profile'): self.check()
+
+    def test_execution_profile_cannot_hide_unbounded_or_writable_apps(self):
+        import copy
+        self.enable_bounded_execution(); original = copy.deepcopy(self.services)
+        bad = [('runtime', 'read_only', False), ('gateway', 'user', '0:0'), ('dashboard', 'cap_drop', []),
+            ('runtime', 'security_opt', ['no-new-privileges:true', 'no-new-privileges:false']),
+            ('gateway', 'privileged', True), ('gateway', 'pid', 'host'), ('runtime', 'cap_add', ['ALL']),
+            ('runtime', 'tmpfs', ['/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777']),
+            ('runtime', 'tmpfs', ['/tmp:rw,exec,nosuid,nodev,size=64m,mode=1777']),
+            ('runtime', 'tmpfs', original['runtime']['tmpfs'] + ['/app:rw,noexec,nosuid,nodev,size=64m']),
+            ('runtime', 'tmpfs', [s.replace('size=512m', 'size=1g') for s in original['runtime']['tmpfs']]),
+            ('runtime', 'tmpfs', [s.replace('mode=0700', 'mode=0777') for s in original['runtime']['tmpfs']])]
+        for name, key, value in bad:
+            with self.subTest(service=name, field=key):
+                self.services = copy.deepcopy(original); self.services[name][key] = value
+                with self.assertRaises(ValueError): self.check()
+        for key, values in [('cpus', [0, -1, 'NaN', 'Infinity', True]), ('memory', [0, -1, 'unlimited', 2**64, True])]:
+            for value in values:
+                self.services = copy.deepcopy(original)
+                self.services['postgres']['deploy']['resources']['limits'][key] = value
+                with self.assertRaisesRegex(ValueError, 'positive finite'): self.check()
+        self.services = copy.deepcopy(original)
+        self.services['runtime']['environment']['COPILOT_CLI_PATH'] = '/tmp/copilot-runtime'
+        with self.assertRaisesRegex(ValueError, 'immutable SDK'): self.check()
+
+    def test_pid_finalization_is_only_additive_and_requires_intact_bundle(self):
+        import copy
+        import yaml
+        import finalize_published_compose as publication
+        self.enable_bounded_execution()
+        self.assertEqual(self.check(), 'bounded-v1')
+        self.services['gateway']['environment']['KALA_DEDICATED_EXECUTION_PROFILE'] = 'bounded-v2'
+        source = self.root / 'template.yaml'; output = self.root / 'ready.yaml'
+        document = {'services': copy.deepcopy(self.services), 'name': 'own-publication'}
+        source.write_text(yaml.safe_dump(document, sort_keys=False)); original = source.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'raw templates'): self.check(source)
+        publication.finalize(source, output)
+        finalized = yaml.safe_load(output.read_bytes()); stripped = copy.deepcopy(finalized)
+        for name, service in stripped['services'].items():
+            self.assertEqual(service.pop('pids_limit'), verify.PID_LIMITS[name])
+            self.assertEqual(service['deploy']['resources']['limits'].pop('pids'), verify.PID_LIMITS[name])
+        self.assertEqual(stripped, document)
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(publication.receipt_path(output).stat().st_mode & 0o777, 0o600)
+        self.services = finalized['services']
+        self.assertEqual(self.check(output), 'bounded-v2')
+        for invalid in (None, 0, -1, True, 513):
+            self.services['runtime']['pids_limit'] = invalid
+            with self.assertRaisesRegex(ValueError, 'PID budgets'): self.check(output)
+        self.services['runtime']['pids_limit'] = verify.PID_LIMITS['runtime']
+        frozen = output.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'already exists'): publication.finalize(source, output)
+        self.assertEqual(output.read_bytes(), frozen)
+        source.write_bytes(original + b'\n# changed after publication\n')
+        with self.assertRaisesRegex(ValueError, 'intact PID-only'): self.check(output)
+        source.write_bytes(original)
+        output.write_bytes(frozen + b'\n# altered output\n')
+        with self.assertRaisesRegex(ValueError, 'intact PID-only'): self.check(output)
+
+    def test_pid_publication_preserves_interrupted_outputs_and_rejects_ambiguous_yaml(self):
+        import yaml
+        import finalize_published_compose as publication
+        self.enable_bounded_execution()
+        self.services['gateway']['environment']['KALA_DEDICATED_EXECUTION_PROFILE'] = 'bounded-v2'
+        source = self.root / 'template.yaml'; output = self.root / 'interrupted.yaml'
+        source.write_text(yaml.safe_dump({'services': self.services}))
+        create = publication.create_private
+        def fail_receipt(path, content):
+            if path == publication.receipt_path(output): raise OSError('injected interruption')
+            create(path, content)
+        with patch.object(publication, 'create_private', side_effect=fail_receipt):
+            with self.assertRaises(OSError): publication.finalize(source, output)
+        self.assertTrue(output.is_file()); self.assertFalse(publication.receipt_path(output).exists())
+        with self.assertRaises(OSError): publication.verify_receipt(output)
+        with self.assertRaisesRegex(ValueError, 'already exists'): publication.finalize(source, output)
+        for malformed in (b'services: {}\nservices: {}\n', b'services: &a {self: *a}\n'):
+            with self.assertRaises(ValueError): publication.load_template(malformed)
+        with self.assertRaises(ValueError): publication.finalize(source, self.root.parent / 'elsewhere.yaml')
+        alias = self.root / 'alias.yaml'; alias.symlink_to(source)
+        with self.assertRaises(ValueError): publication.finalize(alias, self.root / 'other.yaml')
 
     def test_only_existing_canonical_disjoint_authorities_are_accepted(self):
         self.check()

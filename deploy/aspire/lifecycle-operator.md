@@ -2,13 +2,19 @@
 
 The backup/restore/full-upgrade lane is a **cold**, root-operated lifecycle for either the reviewed six-service `bundled-caddy` graph or five-service `external` ingress graph, with optional observability forms of nine or eight resources respectively. It is not a live backup, an HA failover system, or an external Executor-effects reconciler. Any command/tool effect not durably acknowledged before maintenance remains **unknown** and is never replayed by these tools.
 
+New AppHost output declares the [bounded execution profile](./README.md#bounded-execution-profile). Current bounded-v2 admission requires CPU/memory/log bounds, exact per-container PID budgets in both Compose fields, and the reviewed unprivileged read-only application roots, noexec scratch and immutable SDK path. Unmarked frozen inputs remain `legacy-unmarked`, not proof of that profile. Apply a profile/configuration change only through a separately reviewed same-schema full cold transition; Dashboard-only and control-schema7→9 lanes still reject non-image graph changes. Restore retains the original frozen configuration rather than silently adding new protections. Runtime/Gateway/UI tmpfs scratch is deliberately neither archived nor restored; PG/SILO/private recovery roots remain authoritative. Limits do not replace target-host capacity or real model/Executor acceptance.
+
+For bounded-v2, `aspire publish` emits a **raw template**, not deployable input. First run the [offline PID-only finalizer](./README.md#publishing-shape); use its `docker-compose.ready.yaml` for every command below. Retain the unchanged raw template, ready Compose and `<ready filename>.publication.json` together in the same directory **inside the recovery root**, with the separately protected `.env`. Admission rechecks both hashes and the exact transformation on every use. Moving only the ready file, changing either YAML, or losing the receipt is not a valid recovery/rollback input. The finalizer never overwrites an existing output or receipt; partial publication is diagnostic evidence, not something an operator command silently repairs.
+
+When retaining current and target publications in one Compose project directory, choose distinct raw-template and ready basenames **before** finalization; do not rename a receipt-bound source afterward. The examples below use `current.ready.yaml` and `target.ready.yaml` in that shared protected directory. Image-only lanes require both valid bundles and the same frozen profile/PID configuration; neither lane enables v2 or tunes its budgets. A profile change still requires the separate reviewed full cold configuration transition. Old legacy/v1 archives remain their original versions and do not acquire a receipt requirement retroactively.
+
 ## Boundary and protected inputs
 
 All commands take a nonblocking host lock (default `/run/kala-dedicated/lifecycle.lock` in a root-private directory), use finite timeouts, suppress resolved Compose diagnostics, and require root. Backup and restore in both ingress modes require the selected Docker endpoint to be a local Unix socket; TCP/SSH/remote contexts fail before lifecycle mutations. Bundled mode additionally constrains Caddy volume mountpoints to that daemon's reported local data root. External mode has no application-owned named volumes and does not inspect or create Caddy volumes. The threat boundary is one host: root can bypass the lock or fencing.
 
 The Compose file, parameter file and compatibility policy must be root-owned private regular non-symlink files. The recovery root is root-owned `0700`; its private installation/key files may belong to the unprivileged container UID so the actual application can read them. Initialization secret inputs remain separate root-owned files. The operator supplies one curated private `--recovery-root`; it must contain the complete material needed to reconstruct the installation, including every non-data bind source, not merely copies with matching filenames:
 
-- the published Compose and parameter inputs/configuration;
+- the complete published Compose bundle (raw template, ready file and publication receipt for v2), parameter inputs and configuration;
 - `deployment.json`, installation ID, and Runtime state master key;
 - database/SILO credentials and initialization/Owner recovery secrets retained by local policy;
 - any private application-side TLS configuration required for this installation.
@@ -24,10 +30,10 @@ All mode-selected regular-file bytes are preserved. SILO therefore includes all 
 ## Status and cold backup
 
 ```sh
-sudo ./lifecycle-status.sh --compose /secure/kala-recovery/published/docker-compose.yaml --env /secure/kala-recovery/published/.env
+sudo ./lifecycle-status.sh --compose /secure/kala-recovery/published/docker-compose.ready.yaml --env /secure/kala-recovery/published/.env
 
 sudo ./backup.sh \
-  --compose /secure/kala-recovery/published/docker-compose.yaml \
+  --compose /secure/kala-recovery/published/docker-compose.ready.yaml \
   --env /secure/kala-recovery/published/.env \
   --recovery-root /secure/kala-recovery \
   --installation-id-relative protected/installation_id \
@@ -85,8 +91,8 @@ Prepare three **existing, canonical, root-owned, mode 0700, empty, pairwise-disj
 
 ```sh
 sudo ./recovery.sh \
-  --source-compose /secure/source/docker-compose.yaml --source-env /secure/source.env \
-  --target-compose /secure/restore/docker-compose.yaml --target-env /secure/restore.env \
+  --source-compose /secure/source/docker-compose.ready.yaml --source-env /secure/source.env \
+  --target-compose /secure/restore/docker-compose.ready.yaml --target-env /secure/restore.env \
   --artifact /offline/kala-backups/2026-10-29T0830Z \
   --policy /secure/compatibility.json \
   --postgres-destination /srv/kala-restore/postgres \
@@ -108,13 +114,13 @@ Artifact schemaVersion 2 remains readable as a bundled five-root artifact. Legac
 
 ```sh
 sudo ./upgrade.sh preflight \
-  --current-compose /secure/current/docker-compose.yaml --current-env /secure/current.env \
-  --target-compose /secure/target/docker-compose.yaml --target-env /secure/target.env \
+  --current-compose /secure/kala-recovery/published/current.ready.yaml --current-env /secure/kala-recovery/published/current.env \
+  --target-compose /secure/kala-recovery/published/target.ready.yaml --target-env /secure/kala-recovery/published/target.env \
   --policy /secure/compatibility.json
 
 sudo ./upgrade.sh apply \
-  --current-compose /secure/current/docker-compose.yaml --current-env /secure/current.env \
-  --target-compose /secure/target/docker-compose.yaml --target-env /secure/target.env \
+  --current-compose /secure/kala-recovery/published/current.ready.yaml --current-env /secure/kala-recovery/published/current.env \
+  --target-compose /secure/kala-recovery/published/target.ready.yaml --target-env /secure/kala-recovery/published/target.env \
   --policy /secure/compatibility.json \
   --recovery-root /secure/kala-recovery \
   --installation-id-relative protected/installation_id \
@@ -141,13 +147,13 @@ The deployment-mode SoT distinguishes this Compose lane from the old systemd Sup
 
 ```bash
 sudo python3 ./lifecycle_operator.py dashboard-preflight \
-  --current-compose /secure/current/docker-compose.yaml --current-env /secure/current.env \
-  --target-compose /secure/target/docker-compose.yaml --target-env /secure/target.env \
+  --current-compose /secure/kala-recovery/published/current.ready.yaml --current-env /secure/kala-recovery/published/current.env \
+  --target-compose /secure/kala-recovery/published/target.ready.yaml --target-env /secure/kala-recovery/published/target.env \
   --policy /secure/compatibility.json
 
 sudo python3 ./lifecycle_operator.py dashboard-upgrade \
-  --current-compose /secure/current/docker-compose.yaml --current-env /secure/current.env \
-  --target-compose /secure/target/docker-compose.yaml --target-env /secure/target.env \
+  --current-compose /secure/kala-recovery/published/current.ready.yaml --current-env /secure/kala-recovery/published/current.env \
+  --target-compose /secure/kala-recovery/published/target.ready.yaml --target-env /secure/kala-recovery/published/target.env \
   --policy /secure/compatibility.json --receipt /secure/receipts/dashboard-forward.json \
   --start-timeout 120
 

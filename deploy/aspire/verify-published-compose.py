@@ -7,11 +7,14 @@ Never echo resolved Compose: it may contain credentials from the .env file.
 """
 
 import json
+import math
 import re
 import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+
+from execution_profile import PID_LIMITS
 
 EXPECTED = {'ingress', 'gateway', 'runtime', 'dashboard', 'postgres', 'silo'}
 OBSERVABILITY = {'observability-dashboard', 'otel-collector', 'observability-readiness'}
@@ -20,7 +23,81 @@ ACCEPTED_SHAPES = (EXPECTED, EXPECTED | OBSERVABILITY, EXTERNAL, EXTERNAL | OBSE
 IMAGE = re.compile(r'^[^\s]+@sha256:[0-9a-fA-F]{64}$')
 
 
-def check(compose: Path, env: Path) -> None:
+def memory_bytes(value) -> int:
+    if isinstance(value, bool):
+        raise ValueError('bounded-v1 requires positive finite resource limits')
+    match = re.fullmatch(r'([0-9]+)([bkmg]?)(?:i?b)?', str(value).lower())
+    amount = int(match[1]) * 1024 ** 'bkmg'.index(match[2] or 'b') if match else 0
+    if not 0 < amount < 2**63:
+        raise ValueError('bounded-v1 requires positive finite resource limits')
+    return amount
+
+
+def check_execution_profile(services: dict) -> str:
+    profile = services['gateway'].get('environment', {}).get('KALA_DEDICATED_EXECUTION_PROFILE')
+    if profile is None:
+        return 'legacy-unmarked'
+    if profile not in ('bounded-v1', 'bounded-v2'):
+        raise ValueError('Unknown Dedicated execution profile')
+    for name, service in services.items():
+        if profile == 'bounded-v2' and (type(service.get('pids_limit')) is not int or service['pids_limit'] != PID_LIMITS.get(name)):
+            raise ValueError('bounded-v2 requires finalized container PID budgets; raw templates are not deployable')
+        limits = service.get('deploy', {}).get('resources', {}).get('limits', {})
+        if profile == 'bounded-v2' and (type(limits.get('pids')) is not int or limits['pids'] != PID_LIMITS[name]
+                or 'nproc' in service.get('ulimits', {})):
+            raise ValueError('bounded-v2 requires consistent cgroup PID budgets, never shared-UID nproc')
+        try:
+            cpu = float(limits.get('cpus', 0))
+        except (ValueError, TypeError):
+            cpu = 0
+        if isinstance(limits.get('cpus'), bool) or not math.isfinite(cpu) or cpu <= 0:
+            raise ValueError('bounded-v1 requires positive finite resource limits')
+        memory_bytes(limits.get('memory', 0))
+        logging = service.get('logging', {})
+        expected = ('1m', '1') if name == 'observability-readiness' else ('10m', '3')
+        if logging.get('driver') != 'json-file' or (logging.get('options', {}).get('max-size'), str(logging.get('options', {}).get('max-file'))) != expected:
+            raise ValueError('bounded-v1 requires bounded Docker logs')
+        if (service.get('privileged') or service.get('cap_add') or service.get('devices') or service.get('device_cgroup_rules')
+                or service.get('use_api_socket') or any(service.get(key) == 'host' for key in ('pid', 'ipc', 'network_mode'))):
+            raise ValueError('bounded-v1 refuses elevated privileges and host namespaces')
+    for name in ('runtime', 'gateway', 'dashboard'):
+        service = services[name]
+        if (service.get('user') != '65532:65532' or service.get('read_only') is not True
+                or set(service.get('cap_drop', [])) != {'ALL'}
+                or service.get('security_opt') not in (['no-new-privileges:true'], ['no-new-privileges'])):
+            raise ValueError('bounded-v1 application isolation must not be weakened')
+        expected = {'/tmp': 64 * 1024**2}
+        if name == 'runtime':
+            expected['/app/packages/host/.runtime-tmp'] = 512 * 1024**2
+        actual = {}
+        for entry in service.get('tmpfs', []):
+            path, separator, options = entry.partition(':')
+            flags = options.split(',')
+            if not separator or path in actual or not {'rw', 'noexec', 'nosuid', 'nodev'} <= set(flags) or {'exec', 'suid', 'dev'} & set(flags):
+                raise ValueError('bounded-v1 scratch must remain bounded and noexec/nosuid/nodev')
+            settings = dict(flag.split('=', 1) for flag in flags if '=' in flag)
+            if (len(flags) != len(set(flags)) or len(settings) != sum('=' in flag for flag in flags)
+                    or not set(flags) - set(flag for flag in flags if '=' in flag) <= {'rw', 'noexec', 'nosuid', 'nodev'}
+                    or set(settings) - {'size', 'uid', 'gid', 'mode'}):
+                raise ValueError('bounded-v1 refuses ambiguous scratch options')
+            if path not in expected or memory_bytes(settings.get('size', 0)) > expected[path]:
+                raise ValueError('bounded-v1 scratch path or capacity is unreviewed')
+            if path == '/app/packages/host/.runtime-tmp' and any(settings.get(key) != value for key, value in {'uid': '65532', 'gid': '65532', 'mode': '0700'}.items()):
+                raise ValueError('bounded-v1 Runtime scratch must be private to the application UID')
+            if path == '/tmp' and settings != {'size': settings.get('size'), 'mode': '1777'}:
+                raise ValueError('bounded-v1 temporary directory must retain the reviewed permissions')
+            actual[path] = True
+        if set(actual) != set(expected):
+            raise ValueError('bounded-v1 requires the reviewed disposable scratch mounts')
+    environment = services['runtime'].get('environment', {})
+    if (environment.get('COPILOT_CLI_PATH') != '/app/copilot-runtime/copilot-runtime'
+            or environment.get('TMPDIR') != '/app/packages/host/.runtime-tmp'
+            or environment.get('KALA_RUNTIME_HOST_DATA_ROOT') != '/app/packages/host/.runtime-tmp/kala'):
+        raise ValueError('bounded-v1 Runtime must use immutable SDK code and reviewed scratch')
+    return profile
+
+
+def check(compose: Path, env: Path) -> str:
     if not compose.is_file() or not env.is_file():
         raise ValueError('Compose file and parameter file are both required')
     result = subprocess.run(
@@ -233,14 +310,22 @@ def check(compose: Path, env: Path) -> None:
     a, b = data_sources
     if a == b or a in b.parents or b in a.parents:
         raise ValueError('PostgreSQL and SILO data directories must be disjoint, not equal or nested')
+    profile = check_execution_profile(services)
+    if profile == 'bounded-v2':
+        from finalize_published_compose import verify_receipt
+        try:
+            verify_receipt(compose)
+        except (ValueError, KeyError, TypeError, OSError):
+            raise ValueError('bounded-v2 requires an intact PID-only publication bundle and receipt') from None
+    return profile
 
 
 if __name__ == '__main__':
     try:
         if len(sys.argv) != 3:
             raise ValueError('usage: verify-published-compose.py <docker-compose.yaml> <.env>')
-        check(Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve())
+        execution_profile = check(Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve())
     except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
         print(f'Aspire Compose topology rejected: {error}', file=sys.stderr)
         sys.exit(1)
-    print('Aspire Compose topology accepted; runtime and recovery acceptance still required')
+    print(f'Aspire Compose topology accepted; execution profile: {execution_profile}; runtime and recovery acceptance still required')

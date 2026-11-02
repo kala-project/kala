@@ -155,6 +155,7 @@ var runtime = builder.AddContainer("runtime", runtimeImage)
     .WithEnvironment("KALA_DEPLOYMENT_CONFIG", "/etc/kala/deployment.json")
     // Container-writable scratch inside the unprivileged Host package; PG/S3 remain the authorities.
     .WithEnvironment("KALA_RUNTIME_HOST_DATA_ROOT", "/app/packages/host/.runtime-tmp/kala")
+    .WithEnvironment("COPILOT_CLI_PATH", "/app/copilot-runtime/copilot-runtime")
     .WithEnvironment("KALA_RUNTIME_AUTHORITY_ORIGIN", "http://gateway:13001")
     .WithEnvironment("TMPDIR", "/app/packages/host/.runtime-tmp")
     .WithEnvironment("KALA_RUNTIME_HOST_RELEASE_ASSETS_DIR", "/app/release")
@@ -202,6 +203,7 @@ if (otelCollector is not null && observabilityReadiness is not null)
 
 var gateway = builder.AddContainer("gateway", gatewayImage)
     .WithEnvironment("KALA_DEDICATED_INGRESS_MODE", ingressMode)
+    .WithEnvironment("KALA_DEDICATED_EXECUTION_PROFILE", "bounded-v2")
     .WithEnvironment("KALA_DEPLOYMENT_CONFIG", "/etc/kala/deployment.json")
     .WithEnvironment("KALA_INGRESS_PORT", "13001")
     .WithEnvironment("KALA_INGRESS_LISTEN_HOST", "0.0.0.0")
@@ -263,7 +265,28 @@ WithReadiness(runtime, "CMD", "/nodejs/bin/node", "-e", "fetch('http://127.0.0.1
 WithReadiness(gateway, "CMD", "/nodejs/bin/node", "-e", "const q=require('node:http').get('http://127.0.0.1:13001/healthz',{headers:{Host:new URL(process.env.KALA_PUBLIC_URLS).host},timeout:3000},r=>{r.resume();process.exit(r.statusCode===200?0:1)});q.on('error',()=>process.exit(1));q.on('timeout',()=>q.destroy())");
 if (ingress is not null)
     WithReadiness(ingress, "CMD", "wget", "-q", "--spider", "-T", "3", "http://127.0.0.1:8081/healthz");
+// Limits include scratch pages; they are ceilings, not host-capacity reservations.
+postgres.PublishAsDockerComposeService((_, service) => WithResourceLimits(service, "1.0", "512M"));
+silo.PublishAsDockerComposeService((_, service) => WithResourceLimits(service, "1.0", "512M"));
+runtime.PublishAsDockerComposeService((_, service) => {
+    WithResourceLimits(service, "2.0", "2048M");
+    WithApplicationIsolation(service);
+    service.Tmpfs.Add("/app/packages/host/.runtime-tmp:rw,noexec,nosuid,nodev,size=512m,uid=65532,gid=65532,mode=0700");
+});
+gateway.PublishAsDockerComposeService((_, service) => { WithResourceLimits(service, "1.0", "512M"); WithApplicationIsolation(service); });
+dashboard.PublishAsDockerComposeService((_, service) => { WithResourceLimits(service, "0.5", "256M"); WithApplicationIsolation(service); });
+if (ingress is not null)
+    ingress.PublishAsDockerComposeService((_, service) => WithResourceLimits(service, "0.25", "128M"));
 builder.Build().Run();
+
+static void WithApplicationIsolation(Aspire.Hosting.Docker.Resources.ComposeNodes.Service service)
+{
+    service.User = "65532:65532";
+    service.ReadOnly = true;
+    service.CapDrop.Add("ALL");
+    service.SecurityOpt.Add("no-new-privileges:true");
+    service.Tmpfs.Add("/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777");
+}
 
 static void WithReadiness(IResourceBuilder<ContainerResource> resource, params string[] command)
 {

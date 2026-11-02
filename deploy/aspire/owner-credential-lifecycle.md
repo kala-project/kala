@@ -77,11 +77,11 @@ Success is one JSON record with event `dedicated_owner_password_reset`. Treat us
 
 There is **no claimed generic online rotation** for PostgreSQL role passwords, SILO/S3 access keys, inter-service authentication secrets, or private TLS material in this repository. The lifecycle operator can cold-backup, verify a published six-service topology, and start a reviewed staged configuration; it does not coordinate provider-side credential replacement, dual-key overlap, rollback, or revocation. Do not improvise an in-place `ALTER ROLE`, SILO key deletion, or one-container-only restart and call it supported rotation.
 
-For a separately reviewed, service-specific procedure, stage root-owned published inputs and first run the existing topology validators without exposing resolved secret values:
+For a separately reviewed, service-specific procedure, stage root-owned published inputs and first run the existing topology validators without exposing resolved secret values. For bounded-v2 this means the complete [raw/ready/receipt publication bundle](./README.md#publishing-shape) in one directory and its separately protected `.env`; changing a parameter is not permission to rewrite either YAML or discard the receipt:
 
 ```sh
-sudo docker compose --env-file /secure/staged.env -f /secure/staged/docker-compose.yaml config --quiet
-sudo python3 ./verify-published-compose.py /secure/staged/docker-compose.yaml /secure/staged.env
+sudo docker compose --env-file /secure/staged.env -f /secure/staged/docker-compose.ready.yaml config --quiet
+sudo python3 ./verify-published-compose.py /secure/staged/docker-compose.ready.yaml /secure/staged.env
 ```
 
 Only if that credential's producer and every consumer have a documented overlap/revocation sequence may operators use the existing cold backup and controlled startup procedure in `lifecycle-operator.md`. Validation proves topology/config parsing, **not** that a new database/SILO/service credential works. Keep the old credential available for the reviewed rollback window, test through the normal ingress after bounded startup, then revoke it at its authority. If no provider-specific sequence exists, rotation remains unsupported and must stop at planning.

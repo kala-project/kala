@@ -32,14 +32,23 @@ PROJECT='kala-dedicated-proof-'+uuid.uuid4().hex[:12]
 BIN=ROOT/'bin';BIN.mkdir();(BIN/'docker').write_text('#!/bin/sh\nexec sudo -n --preserve-env=COMPOSE_PROJECT_NAME,KALA_ASPIRE_INIT_DIR,KALA_ASPIRE_SECRETS_DIR,KALA_MC_IMAGE /usr/bin/docker --host unix:///var/run/docker.sock "$@"\n');(BIN/'docker').chmod(0o700)
 ENV={k:v for k,v in os.environ.items() if not k.startswith(('KALA_','OIDC_','COMPOSE_','DOCKER_','Parameters__','ASPIRE_','NUGET_','COPILOT_')) and k not in ('GH_TOKEN','GITHUB_TOKEN')}
 HOME=pathlib.Path(tempfile.mkdtemp(prefix='kala-aspire-home-'))
+owned=json.loads((ROOT/'owned-fixture.json').read_text());owned['privateCliHome']=str(HOME)
+(ROOT/'owned-fixture.json').write_text(json.dumps(owned))
 ENV.update({'HOME':str(HOME),'DOTNET_CLI_HOME':str(HOME),'XDG_CONFIG_HOME':str(HOME/'.config'),'NUGET_PACKAGES':str(pathlib.Path.home()/'.nuget/packages'),'DOTNET_GENERATE_ASPNET_CERTIFICATE':'false'})
 ENV.update({'PATH':str(BIN)+':'+str(TOOLS/'dotnet')+':'+ENV['PATH'],'DOTNET_ROOT':str(TOOLS/'dotnet'),'DOTNET_CLI_TELEMETRY_OPTOUT':'1','ASPIRE_CLI_TELEMETRY_OPTOUT':'1','COMPOSE_PROJECT_NAME':PROJECT})
 def run(args,log=None,check=True,timeout=300):
  p=subprocess.run([str(x) for x in args],env=ENV,capture_output=True,text=True,timeout=timeout,cwd=REPO)
  if log:(ROOT/log).write_text(p.stdout+'\n'+p.stderr)
- if check and p.returncode:raise RuntimeError('Fixture command failed; inspect protected '+str(log or 'diagnostics'))
+ if check and p.returncode:
+  if not log:(ROOT/'command-failed.log').write_text(p.stdout+'\n'+p.stderr)
+  raise RuntimeError('Fixture command failed; inspect protected '+str(log or 'command-failed.log'))
  return p
 D=[str(BIN/'docker')]
+def publish(output, log):
+ run([TOOLS/'aspire-cli/aspire','publish','--apphost',REPO/'deploy/aspire/Kala.Dedicated.AppHost.csproj','--output-path',output,'--non-interactive','--nologo'],log,timeout=300)
+ final=output/'docker-compose.ready.yaml'
+ run(['python3',REPO/'deploy/aspire/finalize_published_compose.py','--source',output/'docker-compose.yaml','--output',final],log+'.finalize')
+ return final
 for image in images.values(): run(D+['image','inspect',image],timeout=30)
 # Only synthetic credentials and empty, owned authorities are created.
 secret_dir=ROOT/'secrets';secret_dir.mkdir(mode=0o700)
@@ -66,12 +75,10 @@ with socket.socket() as s:s.bind(('127.0.0.1',0));handoff=s.getsockname()[1]
 ENV.update(KALA_INGRESS_MODE='external',KALA_GATEWAY_LOOPBACK_PORT=str(handoff),KALA_DEPLOYMENT_CONFIG_FILE=str(REC/'deployment.json'))
 for n in images:ENV['KALA_'+('EDGE' if n=='ingress' else n.upper())+'_IMAGE']=images[n]
 OUT=REC/'published'
-run([TOOLS/'aspire-cli/aspire','publish','--apphost',REPO/'deploy/aspire/Kala.Dedicated.AppHost.csproj','--output-path',OUT,'--non-interactive','--nologo'],'publish.log',timeout=300)
-compose=OUT/'docker-compose.yaml';envfile=OUT/'.env';doc=yaml.safe_load(compose.read_text());svcs=doc['services']; assignments={}
-# Only resource budgets are added to the published graph: entrypoints/commands,
-# health checks, mounts and all native application code remain untouched.
-for name,svc in svcs.items():
- svc.setdefault('deploy',{}).setdefault('resources',{})['limits']={'cpus':'1.0','memory':'1024M' if name=='runtime' else '512M'}
+compose=publish(OUT,'publish.log')
+envfile=OUT/'.env';doc=yaml.safe_load(compose.read_text());svcs=doc['services']; assignments={}
+# Run the published execution baseline unchanged; only parameter values are filled.
+assert svcs['gateway']['environment']['KALA_DEDICATED_EXECUTION_PROFILE']=='bounded-v2'
 def assign(template,value):
  match=re.fullmatch(r'\$\{([A-Za-z_][A-Za-z0-9_]*)(?:[^}]*)\}',str(template))
  if match:assignments[match[1]]=str(value)
@@ -86,9 +93,7 @@ for n,svc in svcs.items():
   if m['type']=='bind':
    source=ROOT/('postgres' if n=='postgres' else 'silo') if n in ['postgres','silo'] else files[m['target']]
    assign(m['source'],source)
-for name,volume in doc.get('volumes',{}).items():
- if volume.get('external'):raise RuntimeError('Fixture must not use external volumes')
- volume['name']=PROJECT+'-'+name
+if doc.get('volumes'):raise RuntimeError('External native fixture must not use named volumes')
 raw={}
 for line in envfile.read_text().splitlines():
  match=re.match(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$',line)
@@ -96,7 +101,7 @@ for line in envfile.read_text().splitlines():
 for k,v in assignments.items():raw[k]=json.dumps(v)
 raw['COMPOSE_PROJECT_NAME']=json.dumps(PROJECT)
 envfile.write_text(''.join(f'{k}={v}\n' for k,v in raw.items()));envfile.chmod(0o600)
-compose.write_text(yaml.safe_dump(doc,sort_keys=False));compose.chmod(0o600)
+compose.chmod(0o600)  # Finalized bytes remain bound to their publication receipt.
 ENV['DOCKER_HOST']='unix:///var/run/docker.sock'
 ENV.update(KALA_MC_IMAGE=images['silo'],KALA_DEDICATED_ORGANIZATION_NAME='Dedicated lifecycle fixture',KALA_ASPIRE_START_TIMEOUT_SECONDS='180')
 C=D+['compose','--project-directory',str(OUT),'--env-file',str(envfile),'-f',str(compose)]
@@ -104,7 +109,7 @@ rendered=json.loads(run(C+['config','--format','json']).stdout)
 assert rendered['name']==PROJECT,'Refuse to start a non-fixture Compose project'
 init=['sudo','-n','--preserve-env=COMPOSE_PROJECT_NAME,DOCKER_HOST,KALA_MC_IMAGE,KALA_DEDICATED_ORGANIZATION_NAME,KALA_ASPIRE_START_TIMEOUT_SECONDS','bash',REPO/'deploy/aspire/initialize.sh',compose,envfile,secret_dir]
 import time, hashlib
-summary={'sourceRevision':run(['git','rev-parse','HEAD']).stdout.strip(),'workingTreePaths':run(['git','diff','--name-only']).stdout.splitlines(),'project':PROJECT,'images':images,'imageProvenance':{k:v for k,v in record.items() if k!='images'},'phases':[],'kind':'native-control-only','overallAcceptance':'blocked','agentExecutorGate':'blocked-no-independent-copilot-authentication','modelRequestsInitiatedByHarness':0,'kernelProvider':'placeholder-key-and-unreachable-endpoint-infrastructure-only','resourceBudgetOverrideOnly':True}
+summary={'sourceRevision':run(['git','rev-parse','HEAD']).stdout.strip(),'workingTreePaths':run(['git','diff','--name-only']).stdout.splitlines(),'project':PROJECT,'images':images,'imageProvenance':{k:v for k,v in record.items() if k!='images'},'phases':[],'kind':'native-control-only','overallAcceptance':'blocked','agentExecutorGate':'blocked-no-independent-copilot-authentication','modelRequestsInitiatedByHarness':0,'kernelProvider':'placeholder-key-and-unreachable-endpoint-infrastructure-only','resourceBudgetOverrideOnly':False,'executionProfile':'bounded-v2'}
 summary['driverSha256']=hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest()
 proxy=None;TC=None
 OP=['sudo','-n','--preserve-env=COMPOSE_PROJECT_NAME,DOCKER_HOST']
@@ -149,12 +154,38 @@ s.on('server:agent_runtimes',p=>{catalog=p.runtimes;done()});s.on('connect',()=>
  assert not copilot['available'] and copilot['status']!='ready','Unexpected ambient Copilot identity'
  return proof
 
+def bounded_execution_probe(phase):
+ proof={}
+ script=(REPO/'deploy/aspire/bounded-execution-probe.mjs').read_text()
+ for name in sorted(images):
+  container=run(C+['ps','--quiet',name]).stdout.strip(); assert container
+  actual=json.loads(run(D+['inspect','--format','{{json .HostConfig}}',container]).stdout)
+  limits=rendered['services'][name]['deploy']['resources']['limits']
+  assert actual['Memory']==int(limits['memory']) and actual['NanoCpus']==round(float(limits['cpus'])*1_000_000_000)
+  assert actual['PidsLimit']==rendered['services'][name]['pids_limit']
+  proof[name]={'memoryBytes':actual['Memory'],'nanoCpus':actual['NanoCpus'],'pidsLimit':actual['PidsLimit']}
+  if name in ('runtime','gateway','dashboard'):
+   assert actual['ReadonlyRootfs'] and set(actual['CapDrop'])=={'ALL'}
+   assert 'no-new-privileges' in ' '.join(actual['SecurityOpt'])
+   command=C+['exec','-T','-w','/app/packages/host' if name=='runtime' else '/app',
+    '-e','KALA_EXECUTION_PROBE_ROLE='+name,'-e','KALA_EXECUTION_PROBE_PHASE='+phase,name,
+    '/nodejs/bin/node','--input-type=module','--eval',script]
+   result=run(command,'bounded-'+name+'-'+phase+'.log',timeout=90)
+   observed=json.loads(result.stdout)
+   assert observed['memoryMax']==actual['Memory'] and observed['pidsMax']==actual['PidsLimit']
+   proof[name]['kernelProbe']=observed
+  else:
+   maximum=int(run(C+['exec','-T',name,'cat','/sys/fs/cgroup/pids.max']).stdout.strip())
+   assert maximum==actual['PidsLimit']
+   proof[name]['kernelPidsMax']=maximum
+ return proof
+
 try:
  # A second real publish verifies the opt-in shape without deploying a fake identity.
  authout=REC/'auth-published'; ENV['KALA_COPILOT_AUTH_MODE']='github-token'
- run([TOOLS/'aspire-cli/aspire','publish','--apphost',REPO/'deploy/aspire/Kala.Dedicated.AppHost.csproj','--output-path',authout,'--non-interactive','--nologo'],'auth-publish.log',timeout=300)
+ authcompose=publish(authout,'auth-publish.log')
  ENV.pop('KALA_COPILOT_AUTH_MODE')
- authdoc=yaml.safe_load((authout/'docker-compose.yaml').read_text())
+ authdoc=yaml.safe_load(authcompose.read_text())
  authenv=authdoc['services']['runtime']['environment']
  assert authenv['KALA_DEDICATED_COPILOT_AUTH_MODE']=='github-token'
  binding=authenv['COPILOT_GITHUB_TOKEN']; match=re.fullmatch(r'\$\{([A-Za-z_][A-Za-z0-9_]*)(?:[^}]*)\}',binding); assert match
@@ -166,7 +197,7 @@ try:
  for key in ('COPILOT_GITHUB_TOKEN','GH_TOKEN','GITHUB_TOKEN'): ENV[key]='ambient-fixture-token-not-a-credential'
  for token,expected in [('',False),('fixture-placeholder-never-used-for-model',True)]:
   (authout/'.env').write_text(envfile.read_text()+match[1]+'='+json.dumps(token)+'\n')
-  gate=run(['python3',REPO/'deploy/aspire/verify-published-compose.py',authout/'docker-compose.yaml',authout/'.env'],check=False)
+  gate=run(['python3',REPO/'deploy/aspire/verify-published-compose.py',authcompose,authout/'.env'],check=False)
   assert (gate.returncode==0)==expected,'Real published authentication admission mismatch'
  for key in ('COPILOT_GITHUB_TOKEN','GH_TOKEN','GITHUB_TOKEN'): ENV.pop(key)
  summary.update(copilotParameterEnvironment=match[1],ambientSdkVariablesIgnored=True)
@@ -178,6 +209,8 @@ try:
  run(init+['--acknowledge-external-ingress-fenced','--resume-initialized'],'resume.log',timeout=300)
  assert set(run(C+['ps','--services','--status','running']).stdout.splitlines())==set(images)
  phase('five_native_services_initialized_claimed_and_healthy')
+ summary['executionBefore']=bounded_execution_probe('before')
+ phase('published_limits_kernel_isolation_noexec_scratch_and_immutable_sdk_pair_verified')
  startproxy()
  ctx=ssl.create_default_context(cafile=str(PKI/'server.crt'));jar=http.cookiejar.CookieJar()
  opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),urllib.request.HTTPSHandler(context=ctx),urllib.request.HTTPCookieProcessor(jar))
@@ -214,6 +247,7 @@ try:
  for path,document in docs.items():
   with opener.open(origin+path,timeout=15) as response: assert json.load(response)==document
  summary['socketAfter']=websocket_probe()
+ summary['executionAfter']=bounded_execution_probe('after')
  phase('native_app_containers_recreated_owner_cookie_and_pg_state_persisted')
  summary.update(nativeControlGate='passed',cookieSha256=cookie_before,externalCertificateSha256=cert_hash,documents={path:{'revision':doc['revision'],'contentSha256':hashlib.sha256(doc['content'].encode()).hexdigest()} for path,doc in docs.items()})
 except Exception as error:

@@ -61,6 +61,10 @@ secret_directory_mode=$(stat -c '%a' "$KALA_ASPIRE_SECRETS_DIR")
 project_directory=$(dirname "$compose_file")
 compose=(docker compose --project-directory "$project_directory" --env-file "$env_file" -f "$compose_file")
 compose_init=(docker compose --project-directory "$project_directory" --env-file "$env_file" -f "$compose_file" -f "$KALA_ASPIRE_INIT_DIR/compose.initialize.yaml")
+# Fenced one-off jobs read root-private initialization projections and packaged
+# application code. Drop ambient capabilities; only DAC_OVERRIDE is needed for
+# image code owned by the application UID. Never grant it to steady-state apps.
+init_run=(run --rm --no-deps --user 0:0 --cap-drop ALL --cap-add DAC_OVERRIDE)
 python3 "$KALA_ASPIRE_INIT_DIR/verify-published-compose.py" "$compose_file" "$env_file"
 resolved_services=$("${compose[@]}" config --services)
 if grep -qx 'otel-collector' <<<"$resolved_services"; then
@@ -108,7 +112,7 @@ done
 "${compose[@]}" up -d --wait --wait-timeout "$start_timeout" --no-deps postgres silo
 
 if [[ $operation_mode != --resume-initialized ]]; then
-"${compose[@]}" run --rm --no-deps --user 0:0 \
+"${compose[@]}" "${init_run[@]}" \
   -v "$secret_mount" -v "$operator_mount" \
   -e "KALA_ASPIRE_OBSERVABILITY=$observability_enabled" \
   runtime /operator/initialize-postgres.mjs
@@ -118,7 +122,7 @@ if [[ $operation_mode != --resume-initialized ]]; then
 "${compose_init[@]}" run --rm --no-deps silo-provision
 
 # Claim all three empty authorities before creating application schemas. Partial claims intentionally fail closed.
-"${compose[@]}" run --rm --no-deps --user 0:0 -v "$secret_mount" \
+"${compose[@]}" "${init_run[@]}" -v "$secret_mount" \
   -e KALA_INSTALLATION_ID_FILE=/run/kala-init-secrets/installation_id \
   -e KALA_FRESH_CLAIM_CONTROL_DATABASE_URL_FILE=/run/kala-init-secrets/control_owner_url \
   -e KALA_FRESH_CLAIM_RUNTIME_DATABASE_URL_FILE=/run/kala-init-secrets/runtime_owner_url \
@@ -132,7 +136,7 @@ if [[ $operation_mode != --resume-initialized ]]; then
   runtime packages/host/dist/bin/kala-fresh-storage-claim.js
 
 # These real image CLIs migrate as owner and grant only steady-state DML/read privileges.
-"${compose[@]}" run --rm --no-deps --user 0:0 -v "$secret_mount" \
+"${compose[@]}" "${init_run[@]}" -v "$secret_mount" \
   -e KALA_INGRESS_DATABASE_URL= \
   -e KALA_INGRESS_DATABASE_URL_FILE=/run/kala-init-secrets/control_owner_url \
   -e KALA_INGRESS_REQUIRE_EXISTING_DATABASE=1 \
@@ -140,7 +144,7 @@ if [[ $operation_mode != --resume-initialized ]]; then
   -e KALA_INGRESS_MIGRATIONS_DIR=/app/packages/runtime-ingress-gateway/migrations \
   gateway packages/runtime-ingress-gateway/dist/src/bin/init-control-plane.js
 
-"${compose[@]}" run --rm --no-deps --user 0:0 -v "$secret_mount" \
+"${compose[@]}" "${init_run[@]}" -v "$secret_mount" \
   -e KALA_POSTGRES_MIGRATION_CONNECTION_STRING_FILE=/run/kala-init-secrets/runtime_owner_url \
   runtime packages/host/dist/bin/kala-postgres-migrate.js \
   --runtime-role kala_runtime --gateway-runtime-reader-role kala_runtime_reader
@@ -149,7 +153,7 @@ fi
 
 # Atomic and deliberately non-idempotent: a retry after an ambiguous result must be investigated, never auto-accepted.
 owner_args=(
-  run --rm --no-deps --user 0:0 -v "$secret_mount"
+  "${init_run[@]}" -v "$secret_mount"
   -e KALA_INGRESS_DATABASE_URL=
   -e KALA_INGRESS_DATABASE_URL_FILE=/run/kala-init-secrets/control_owner_url
   -e KALA_DEDICATED_OWNER_PASSWORD_FILE=/run/kala-init-secrets/owner_password

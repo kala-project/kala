@@ -20,6 +20,7 @@ GATEWAY = 'kala-dedicated-parented-gateway@sha256:53b3352e4f673365cb6615a4171ec8
 RUNTIME = 'kala-dedicated-parented-runtime@sha256:f608d94689aeb5a97e0803ef0f9976569d954835f383144af31f699ec3d6f3dd'
 POSTGRES = 'postgres@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36'
 SILO = 'pgsty/silo@sha256:2636fc4155d9a7e41ff58cdb65ddd13ba9304e67184e13c25bc5cb34016269d7'
+NATIVE_CLI_MEMORY = '256m'  # Real CLI package loading needs more headroom than mock recipients.
 SCRIPT = r"""
 import http from 'node:http';import fs from 'node:fs';import pg from 'pg';
 const role=process.env.FIXTURE_ROLE;
@@ -107,6 +108,7 @@ class ControlUpgradeDockerTests(unittest.TestCase):
             for name in ('gateway','runtime'):
                 init['services'][name]['entrypoint'] = ['/nodejs/bin/node']
                 init['services'][name]['working_dir'] = '/app'
+                init['services'][name]['mem_limit'] = NATIVE_CLI_MEMORY
             init_file = recovery/'initialize.json';init_file.write_text(json.dumps(init))
             projects.append((init_file,env))
             with mock.patch.dict(os.environ, {'KALA_MC_IMAGE':SILO,'KALA_DEDICATED_ORGANIZATION_NAME':'Schema acceptance','KALA_ASPIRE_START_TIMEOUT_SECONDS':'120'}):
@@ -116,7 +118,7 @@ class ControlUpgradeDockerTests(unittest.TestCase):
                     diagnostic = '\n'.join((initialized.stdout+'\n'+initialized.stderr).splitlines()[-18:])
                     for value in values.values():
                         if isinstance(value,str):diagnostic=diagnostic.replace(value,'[fixture-value-redacted]')
-                    self.fail('isolated initialization failed: '+diagnostic)
+                    self.fail(f'isolated initialization failed (exit {initialized.returncode}): '+diagnostic)
 
             def pair(document, material, label):
                 source=material/'active.json';source.write_text(json.dumps(document))
@@ -149,7 +151,9 @@ class ControlUpgradeDockerTests(unittest.TestCase):
                 material=Path(args.recovery_root)/'init-secrets';config=op.compose_config(Path(args.current_compose),Path(args.current_env))
                 ids=op.container_ids(Path(args.current_compose),Path(args.current_env),('postgres',))
                 networks=json.loads(op.run(['docker','inspect','--format','{{json .NetworkSettings.Networks}}',ids['postgres']],timeout=30).stdout)
-                cmd=['docker','run','--rm','--pull=never','--network',next(iter(networks)),'--memory','128m','--user','0:0',
+                # Native Owner CLI needs package-loading headroom; 128 MiB can exit 137.
+                # This isolated verification job remains bounded below the production Gateway ceiling.
+                cmd=['docker','run','--rm','--pull=never','--network',next(iter(networks)),'--memory',NATIVE_CLI_MEMORY,'--user','0:0',
                     '--mount',f'type=bind,src={material/"control_owner_url"},dst=/run/owner-url,readonly',
                     '--mount',f'type=bind,src={material/"owner_password"},dst=/run/owner-password,readonly',
                     '--mount',f'type=bind,src={Path(args.recovery_root)/"deployment.json"},dst=/run/deployment.json,readonly',

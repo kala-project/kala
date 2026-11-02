@@ -1,0 +1,304 @@
+{
+  "schemaVersion": 1,
+  "kind": "dedicated-bounded-v1-execution-acceptance",
+  "contractCommit": "b73b7c89",
+  "overallBusinessAcceptance": "blocked",
+  "executionProfileGate": "passed",
+  "nativeControl": {
+    "sourceRevision": "b73b7c89034d4b1290714038247c2a617971fddf",
+    "workingTreePaths": [
+      "deploy/aspire/Program.cs",
+      "deploy/aspire/initialize.sh",
+      "deploy/aspire/native-control-acceptance.py",
+      "deploy/aspire/test_verify_published_compose.py",
+      "deploy/aspire/verify-published-compose.py"
+    ],
+    "project": "kala-dedicated-proof-a3f603fc0f45",
+    "images": {
+      "runtime": "kala-dedicated-parented-runtime@sha256:f608d94689aeb5a97e0803ef0f9976569d954835f383144af31f699ec3d6f3dd",
+      "gateway": "kala-dedicated-schema-candidate-20261030@sha256:45dbf1e1e0004bc87ac9db1c14b7045f0044af1d2c9524a8b7c210306904e79b",
+      "dashboard": "kala-dedicated-lifecycle-dashboard@sha256:2a4ffff831fc37d620bbfc6c802246a930cd94c5f68565a8d7b9b7f11f35429c",
+      "postgres": "postgres@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36",
+      "silo": "pgsty/silo@sha256:2636fc4155d9a7e41ff58cdb65ddd13ba9304e67184e13c25bc5cb34016269d7"
+    },
+    "imageProvenance": {
+      "runtimeSource": "2d04bcea",
+      "dashboardSource": "c948fe30",
+      "gatewayProvenance": "Experimental local overlay: current cf27bf49 Gateway emitted code and unchanged migrations over cached 2d04bcea base; not a full release build or signed artifact."
+    },
+    "phases": [
+      "real_aspire_publish_default_and_runtime_only_opt_in_auth_gate",
+      "five_native_services_initialized_claimed_and_healthy",
+      "published_limits_kernel_isolation_noexec_scratch_and_immutable_sdk_pair_verified",
+      "native_ui_verified_tls_owner_identity_and_business_socket_ready",
+      "native_user_state_writes_revision_conflicts_and_authority_rejection",
+      "native_app_containers_recreated_owner_cookie_and_pg_state_persisted"
+    ],
+    "kind": "native-control-only",
+    "overallAcceptance": "blocked",
+    "agentExecutorGate": "blocked-no-independent-copilot-authentication",
+    "modelRequestsInitiatedByHarness": 0,
+    "kernelProvider": "placeholder-key-and-unreachable-endpoint-infrastructure-only",
+    "resourceBudgetOverrideOnly": false,
+    "executionProfile": "bounded-v1",
+    "driverSha256": "5a6ebbb49e09cd16683fa6873829127037695ed000f14fab933641b18639d97e",
+    "copilotParameterEnvironment": "DEDICATED_COPILOT_GITHUB_TOKEN",
+    "ambientSdkVariablesIgnored": true,
+    "executionBefore": {
+      "dashboard": {
+        "memoryBytes": 268435456,
+        "nanoCpus": 500000000,
+        "kernelProbe": {
+          "role": "dashboard",
+          "phase": "before",
+          "uid": 65532,
+          "noNewPrivileges": true,
+          "capabilitiesEmpty": true,
+          "imageRootWriteDenied": true,
+          "temporaryDirectExecutionDenied": true,
+          "memoryMax": 268435456
+        }
+      },
+      "gateway": {
+        "memoryBytes": 536870912,
+        "nanoCpus": 1000000000,
+        "kernelProbe": {
+          "role": "gateway",
+          "phase": "before",
+          "uid": 65532,
+          "noNewPrivileges": true,
+          "capabilitiesEmpty": true,
+          "imageRootWriteDenied": true,
+          "temporaryDirectExecutionDenied": true,
+          "memoryMax": 536870912
+        }
+      },
+      "postgres": {
+        "memoryBytes": 536870912,
+        "nanoCpus": 1000000000
+      },
+      "runtime": {
+        "memoryBytes": 2147483648,
+        "nanoCpus": 2000000000,
+        "kernelProbe": {
+          "role": "runtime",
+          "phase": "before",
+          "uid": 65532,
+          "noNewPrivileges": true,
+          "capabilitiesEmpty": true,
+          "imageRootWriteDenied": true,
+          "temporaryDirectExecutionDenied": true,
+          "memoryMax": 2147483648,
+          "scratchCapacityBytes": 536870912,
+          "scratchPrivate": true,
+          "scratchDirectExecutionDenied": true,
+          "immutableSdkPairStarted": true,
+          "sdkAuthenticated": false
+        }
+      },
+      "silo": {
+        "memoryBytes": 536870912,
+        "nanoCpus": 1000000000
+      }
+    },
+    "socketBefore": {
+      "authenticatedSessionListRoundTrip": true,
+      "runtimes": [
+        {
+          "id": "kernel",
+          "available": true,
+          "status": "ready"
+        },
+        {
+          "id": "copilot",
+          "available": false,
+          "status": "unavailable"
+        }
+      ]
+    },
+    "socketAfter": {
+      "authenticatedSessionListRoundTrip": true,
+      "runtimes": [
+        {
+          "id": "kernel",
+          "available": true,
+          "status": "ready"
+        },
+        {
+          "id": "copilot",
+          "available": false,
+          "status": "unavailable"
+        }
+      ]
+    },
+    "executionAfter": {
+      "dashboard": {
+        "memoryBytes": 268435456,
+        "nanoCpus": 500000000,
+        "kernelProbe": {
+          "role": "dashboard",
+          "phase": "after",
+          "uid": 65532,
+          "noNewPrivileges": true,
+          "capabilitiesEmpty": true,
+          "imageRootWriteDenied": true,
+          "temporaryDirectExecutionDenied": true,
+          "memoryMax": 268435456
+        }
+      },
+      "gateway": {
+        "memoryBytes": 536870912,
+        "nanoCpus": 1000000000,
+        "kernelProbe": {
+          "role": "gateway",
+          "phase": "after",
+          "uid": 65532,
+          "noNewPrivileges": true,
+          "capabilitiesEmpty": true,
+          "imageRootWriteDenied": true,
+          "temporaryDirectExecutionDenied": true,
+          "memoryMax": 536870912
+        }
+      },
+      "postgres": {
+        "memoryBytes": 536870912,
+        "nanoCpus": 1000000000
+      },
+      "runtime": {
+        "memoryBytes": 2147483648,
+        "nanoCpus": 2000000000,
+        "kernelProbe": {
+          "role": "runtime",
+          "phase": "after",
+          "uid": 65532,
+          "noNewPrivileges": true,
+          "capabilitiesEmpty": true,
+          "imageRootWriteDenied": true,
+          "temporaryDirectExecutionDenied": true,
+          "memoryMax": 2147483648,
+          "scratchCapacityBytes": 536870912,
+          "scratchPrivate": true,
+          "scratchDirectExecutionDenied": true,
+          "oldScratchAbsent": true
+        }
+      },
+      "silo": {
+        "memoryBytes": 536870912,
+        "nanoCpus": 1000000000
+      }
+    },
+    "nativeControlGate": "passed",
+    "cookieSha256": "4ad818669552879129dfe95f1656a33638321d8deadfc901605b88a1befc8ad5",
+    "externalCertificateSha256": "af96c2df8dbb49828a062fab0733203fbc8ff415966ff00e0891ff63fd3e61a4",
+    "documents": {
+      "/memo": {
+        "revision": 1,
+        "contentSha256": "d8b9cdbda288efb20393ad50efaf26f0a6c8d1592f4e0bb2d48ea8b808a892d9"
+      },
+      "/user/session-tabs": {
+        "revision": 1,
+        "contentSha256": "97e33988ba167a74e564a3b1992ae45c1a8bfb504310cf0267b6053bcbde455c"
+      }
+    },
+    "cleanupContainersConfirmed": true
+  },
+  "publicationMatrix": {
+    "kind": "real-aspire-four-shape-publication-only",
+    "appHostSha256": "c7ad60564204ce2f2b4a9a47250d79d262cc02209f4002c9f8b9feff7c5ef702",
+    "verifierSha256": "2a8d2d03a6bf40a9d76aae54324873662ccb2045859e936f9499259dd7adf71d",
+    "shapes": [
+      {
+        "ingressMode": "bundled-caddy",
+        "telemetry": false,
+        "services": [
+          "dashboard",
+          "gateway",
+          "ingress",
+          "postgres",
+          "runtime",
+          "silo"
+        ],
+        "memoryLimitSumBytes": 4160749568,
+        "fullTopologyAndExecutionAdmission": "passed",
+        "servicesStarted": false
+      },
+      {
+        "ingressMode": "bundled-caddy",
+        "telemetry": true,
+        "services": [
+          "dashboard",
+          "gateway",
+          "ingress",
+          "observability-dashboard",
+          "observability-readiness",
+          "otel-collector",
+          "postgres",
+          "runtime",
+          "silo"
+        ],
+        "memoryLimitSumBytes": 4865392640,
+        "fullTopologyAndExecutionAdmission": "passed",
+        "servicesStarted": false
+      },
+      {
+        "ingressMode": "external",
+        "telemetry": false,
+        "services": [
+          "dashboard",
+          "gateway",
+          "postgres",
+          "runtime",
+          "silo"
+        ],
+        "memoryLimitSumBytes": 4026531840,
+        "fullTopologyAndExecutionAdmission": "passed",
+        "servicesStarted": false
+      },
+      {
+        "ingressMode": "external",
+        "telemetry": true,
+        "services": [
+          "dashboard",
+          "gateway",
+          "observability-dashboard",
+          "observability-readiness",
+          "otel-collector",
+          "postgres",
+          "runtime",
+          "silo"
+        ],
+        "memoryLimitSumBytes": 4731174912,
+        "fullTopologyAndExecutionAdmission": "passed",
+        "servicesStarted": false
+      }
+    ],
+    "noDockerResourcesCreated": true,
+    "notRuntimeOrModelAcceptance": true
+  },
+  "verifiedSourceSha256": {
+    "deploy/aspire/Program.cs": "c7ad60564204ce2f2b4a9a47250d79d262cc02209f4002c9f8b9feff7c5ef702",
+    "deploy/aspire/verify-published-compose.py": "2a8d2d03a6bf40a9d76aae54324873662ccb2045859e936f9499259dd7adf71d",
+    "deploy/aspire/initialize.sh": "e613fd0dea3b486e4354e131a6ba7797fcd68964dc9acad60a3f49c6c0efa426",
+    "deploy/aspire/native-control-acceptance.py": "5a6ebbb49e09cd16683fa6873829127037695ed000f14fab933641b18639d97e",
+    "deploy/aspire/bounded-execution-probe.mjs": "ce44f3ead6d40c2ef10c39c6b3e8869138db01b4894dc6caacb1be4086a5ebae"
+  },
+  "regression": {
+    "pythonTests": 44,
+    "seconds": 276.573,
+    "realDockerControlUpgradeRecoveryAndDashboardProtocol": true,
+    "appHostBuild": "passed",
+    "retainedBuildWarning": "ASPIRE010"
+  },
+  "initialFailure": {
+    "reason": "After capability removal the root initialization CLI could not read application-owned private package metadata; fixed fenced one-off jobs to drop ALL and add only DAC_OVERRIDE, not steady-state apps.",
+    "cleanupContainersConfirmed": true
+  },
+  "boundaries": [
+    "Only the external five-service native graph was run; bundled/telemetry shapes passed real publication plus full topology/execution admission, not runtime acceptance.",
+    "No resource override, application entrypoint/command/probe substitution or model request in the native run. Kernel provider remains an explicit placeholder with unreachable endpoint.",
+    "Actual immutable SDK/native-library pair started on a read-only root with noexec scratch and returned unauthenticated, not a model turn. Independent authentication and real Agent/Executor continuation remain blocked.",
+    "Docker CPU config and cgroup memory limits were checked without deliberate exhaustion, OOM or host pressure. Limits are not reservations or a production concurrency/HA guarantee.",
+    "Gateway remains an experimental emitted-code overlay; cached Runtime/UI source equivalence was checked, not signed/full release provenance.",
+    "Data-service root/capability reduction, PID budgets, target-host sizing/soak, public TLS, durable observability and full production lifecycle remain open."
+  ]
+}

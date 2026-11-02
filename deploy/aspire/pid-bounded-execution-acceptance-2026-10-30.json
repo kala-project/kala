@@ -1,0 +1,468 @@
+{
+  "schemaVersion": 1,
+  "evidenceDate": "2026-10-30",
+  "kind": "bounded-v2-PID-publication-and-native-control-only",
+  "implementationCommit": "8d5d30fb7fe84b12eb764809e5691b32142e8256",
+  "sourceBinding": "Native execution captured the earlier HEAD with implementation changes; these exact file hashes and immutable implementation commit bind the tested code, including newly added modules. The control fixture budget was corrected after the native run; native source and four-shape publication source remained byte-identical.",
+  "sourceSha256": {
+    "deploy/aspire/Program.cs": "ae81cc4b231ce217b9040291b9f8d497855a256415c6adc7d32e30e2a319f0ad",
+    "deploy/aspire/execution_profile.py": "4c89d5bccdea035d5aea4a27519647c7961b7f8836081bb4a53aee396deda06a",
+    "deploy/aspire/finalize_published_compose.py": "69af54996d6dddde3edacb63c17c0e74da8929ba07df0ecd6037c8de0be0e4ae",
+    "deploy/aspire/verify-published-compose.py": "2b7e450c5d29e8a0e1b2a688e14a3016b04e06d6b38ea0f40fade050a3f87aa5",
+    "deploy/aspire/native-control-acceptance.py": "77c63cf219601380c5df0c24af225b7411605698d12cf9726fff2892ccb7b57e",
+    "deploy/aspire/bounded-execution-probe.mjs": "e4e59bfc12412480a0632884bd1e143c6b77cc72f78ddce7f3995069766ee5b2",
+    "deploy/aspire/test_verify_published_compose.py": "d0c700b78a2fd64ca31b8464a4974469e7852d2a24df84961052d533c32aa496",
+    "deploy/aspire/control_upgrade_test.py": "b4f2ace72f3d9f7d84a3f0f6e2fc138805f87d71fce9a23dfbe3d1e043bd8bb9",
+    "deploy/aspire/initialize.sh": "e613fd0dea3b486e4354e131a6ba7797fcd68964dc9acad60a3f49c6c0efa426"
+  },
+  "overallAcceptance": "blocked",
+  "agentExecutorGate": "blocked-no-independent-copilot-authentication",
+  "pidExecutionGate": "passed",
+  "modelRequestsInitiatedByHarness": 0,
+  "resourceBudgetOverrideOnly": false,
+  "publicationBundles": {
+    "published": {
+      "receiptSha256": "de227403423a6006e17e679acb5e190c09c4c3420947709c57168b59c553a52b",
+      "transformationReceipt": {
+        "outputSha256": "662d2d1490b85b6a8f541aa86cb14d98e5fd4332c9f2354bc7118a80fb96e450",
+        "pidLimits": {
+          "dashboard": 64,
+          "gateway": 128,
+          "postgres": 256,
+          "runtime": 512,
+          "silo": 512
+        },
+        "profile": "bounded-v2",
+        "schemaVersion": 1,
+        "scope": "PID-only publication; not deployment or runtime acceptance",
+        "sourceFile": "docker-compose.yaml",
+        "sourceSha256": "7c4587aa5dba30c21ae4d7164fe4c1573c49a897d22304996d7cce8e60963823"
+      }
+    },
+    "auth-published": {
+      "receiptSha256": "0a50c5ad20a7ab2b780a58a66b76333fabc397ff96789c47738eaacdaf84a457",
+      "transformationReceipt": {
+        "outputSha256": "4f75cdd811ce34125d5255f9fd9aa8c030a3f796458247414b8e4d6401004f68",
+        "pidLimits": {
+          "dashboard": 64,
+          "gateway": 128,
+          "postgres": 256,
+          "runtime": 512,
+          "silo": 512
+        },
+        "profile": "bounded-v2",
+        "schemaVersion": 1,
+        "scope": "PID-only publication; not deployment or runtime acceptance",
+        "sourceFile": "docker-compose.yaml",
+        "sourceSha256": "bb6128acb9d10f2f77954287a8ae954fa9a3962361ac8fcae9847a47c93f2f5a"
+      }
+    }
+  },
+  "fourShapePublication": {
+    "kind": "real-four-shape-PID-publication-only",
+    "sourceSha256": {
+      "deploy/aspire/Program.cs": "ae81cc4b231ce217b9040291b9f8d497855a256415c6adc7d32e30e2a319f0ad",
+      "deploy/aspire/verify-published-compose.py": "2b7e450c5d29e8a0e1b2a688e14a3016b04e06d6b38ea0f40fade050a3f87aa5",
+      "deploy/aspire/execution_profile.py": "4c89d5bccdea035d5aea4a27519647c7961b7f8836081bb4a53aee396deda06a",
+      "deploy/aspire/finalize_published_compose.py": "69af54996d6dddde3edacb63c17c0e74da8929ba07df0ecd6037c8de0be0e4ae"
+    },
+    "shapes": [
+      {
+        "ingressMode": "bundled-caddy",
+        "telemetry": false,
+        "services": [
+          "dashboard",
+          "gateway",
+          "ingress",
+          "postgres",
+          "runtime",
+          "silo"
+        ],
+        "pidLimits": {
+          "dashboard": 64,
+          "gateway": 128,
+          "ingress": 128,
+          "postgres": 256,
+          "runtime": 512,
+          "silo": 512
+        },
+        "rawTemplateRejected": true,
+        "finalizedBundleAdmission": "passed",
+        "servicesStarted": false
+      },
+      {
+        "ingressMode": "bundled-caddy",
+        "telemetry": true,
+        "services": [
+          "dashboard",
+          "gateway",
+          "ingress",
+          "observability-dashboard",
+          "observability-readiness",
+          "otel-collector",
+          "postgres",
+          "runtime",
+          "silo"
+        ],
+        "pidLimits": {
+          "dashboard": 64,
+          "gateway": 128,
+          "ingress": 128,
+          "observability-dashboard": 256,
+          "observability-readiness": 32,
+          "otel-collector": 128,
+          "postgres": 256,
+          "runtime": 512,
+          "silo": 512
+        },
+        "rawTemplateRejected": true,
+        "finalizedBundleAdmission": "passed",
+        "servicesStarted": false
+      },
+      {
+        "ingressMode": "external",
+        "telemetry": false,
+        "services": [
+          "dashboard",
+          "gateway",
+          "postgres",
+          "runtime",
+          "silo"
+        ],
+        "pidLimits": {
+          "dashboard": 64,
+          "gateway": 128,
+          "postgres": 256,
+          "runtime": 512,
+          "silo": 512
+        },
+        "rawTemplateRejected": true,
+        "finalizedBundleAdmission": "passed",
+        "servicesStarted": false
+      },
+      {
+        "ingressMode": "external",
+        "telemetry": true,
+        "services": [
+          "dashboard",
+          "gateway",
+          "observability-dashboard",
+          "observability-readiness",
+          "otel-collector",
+          "postgres",
+          "runtime",
+          "silo"
+        ],
+        "pidLimits": {
+          "dashboard": 64,
+          "gateway": 128,
+          "observability-dashboard": 256,
+          "observability-readiness": 32,
+          "otel-collector": 128,
+          "postgres": 256,
+          "runtime": 512,
+          "silo": 512
+        },
+        "rawTemplateRejected": true,
+        "finalizedBundleAdmission": "passed",
+        "servicesStarted": false
+      }
+    ],
+    "noDockerResourcesCreated": true
+  },
+  "nativeControl": {
+    "sourceRevision": "0c917f0528af84fb2df5f94da75f2ad646dbd5b8",
+    "workingTreePaths": [
+      "deploy/aspire/Program.cs",
+      "deploy/aspire/bounded-execution-probe.mjs",
+      "deploy/aspire/native-control-acceptance.py",
+      "deploy/aspire/test_verify_published_compose.py",
+      "deploy/aspire/verify-published-compose.py",
+      "docs/architecture/deployment-mode-contract.md"
+    ],
+    "project": "kala-dedicated-proof-4aa421741028",
+    "images": {
+      "runtime": "kala-dedicated-parented-runtime@sha256:f608d94689aeb5a97e0803ef0f9976569d954835f383144af31f699ec3d6f3dd",
+      "gateway": "kala-dedicated-schema-candidate-20261030@sha256:45dbf1e1e0004bc87ac9db1c14b7045f0044af1d2c9524a8b7c210306904e79b",
+      "dashboard": "kala-dedicated-lifecycle-dashboard@sha256:2a4ffff831fc37d620bbfc6c802246a930cd94c5f68565a8d7b9b7f11f35429c",
+      "postgres": "postgres@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36",
+      "silo": "pgsty/silo@sha256:2636fc4155d9a7e41ff58cdb65ddd13ba9304e67184e13c25bc5cb34016269d7"
+    },
+    "imageProvenance": {
+      "runtimeSource": "2d04bcea",
+      "dashboardSource": "c948fe30",
+      "gatewayProvenance": "Experimental local overlay: current cf27bf49 Gateway emitted code and unchanged migrations over cached 2d04bcea base; not a full release build or signed artifact."
+    },
+    "phases": [
+      "real_aspire_publish_default_and_runtime_only_opt_in_auth_gate",
+      "five_native_services_initialized_claimed_and_healthy",
+      "published_limits_kernel_isolation_noexec_scratch_and_immutable_sdk_pair_verified",
+      "native_ui_verified_tls_owner_identity_and_business_socket_ready",
+      "native_user_state_writes_revision_conflicts_and_authority_rejection",
+      "native_app_containers_recreated_owner_cookie_and_pg_state_persisted"
+    ],
+    "kind": "native-control-only",
+    "overallAcceptance": "blocked",
+    "agentExecutorGate": "blocked-no-independent-copilot-authentication",
+    "modelRequestsInitiatedByHarness": 0,
+    "kernelProvider": "placeholder-key-and-unreachable-endpoint-infrastructure-only",
+    "resourceBudgetOverrideOnly": false,
+    "executionProfile": "bounded-v2",
+    "driverSha256": "77c63cf219601380c5df0c24af225b7411605698d12cf9726fff2892ccb7b57e",
+    "copilotParameterEnvironment": "DEDICATED_COPILOT_GITHUB_TOKEN",
+    "ambientSdkVariablesIgnored": true,
+    "executionBefore": {
+      "dashboard": {
+        "memoryBytes": 268435456,
+        "nanoCpus": 500000000,
+        "pidsLimit": 64,
+        "kernelProbe": {
+          "role": "dashboard",
+          "phase": "before",
+          "uid": 65532,
+          "noNewPrivileges": true,
+          "capabilitiesEmpty": true,
+          "imageRootWriteDenied": true,
+          "temporaryDirectExecutionDenied": true,
+          "memoryMax": 268435456,
+          "pidsMax": 64
+        }
+      },
+      "gateway": {
+        "memoryBytes": 536870912,
+        "nanoCpus": 1000000000,
+        "pidsLimit": 128,
+        "kernelProbe": {
+          "role": "gateway",
+          "phase": "before",
+          "uid": 65532,
+          "noNewPrivileges": true,
+          "capabilitiesEmpty": true,
+          "imageRootWriteDenied": true,
+          "temporaryDirectExecutionDenied": true,
+          "memoryMax": 536870912,
+          "pidsMax": 128
+        }
+      },
+      "postgres": {
+        "memoryBytes": 536870912,
+        "nanoCpus": 1000000000,
+        "pidsLimit": 256,
+        "kernelPidsMax": 256
+      },
+      "runtime": {
+        "memoryBytes": 2147483648,
+        "nanoCpus": 2000000000,
+        "pidsLimit": 512,
+        "kernelProbe": {
+          "role": "runtime",
+          "phase": "before",
+          "uid": 65532,
+          "noNewPrivileges": true,
+          "capabilitiesEmpty": true,
+          "imageRootWriteDenied": true,
+          "temporaryDirectExecutionDenied": true,
+          "memoryMax": 2147483648,
+          "pidsMax": 512,
+          "scratchCapacityBytes": 536870912,
+          "scratchPrivate": true,
+          "scratchDirectExecutionDenied": true,
+          "immutableSdkPairStarted": true,
+          "sdkAuthenticated": false
+        }
+      },
+      "silo": {
+        "memoryBytes": 536870912,
+        "nanoCpus": 1000000000,
+        "pidsLimit": 512,
+        "kernelPidsMax": 512
+      }
+    },
+    "socketBefore": {
+      "authenticatedSessionListRoundTrip": true,
+      "runtimes": [
+        {
+          "id": "kernel",
+          "available": true,
+          "status": "ready"
+        },
+        {
+          "id": "copilot",
+          "available": false,
+          "status": "unavailable"
+        }
+      ]
+    },
+    "socketAfter": {
+      "authenticatedSessionListRoundTrip": true,
+      "runtimes": [
+        {
+          "id": "kernel",
+          "available": true,
+          "status": "ready"
+        },
+        {
+          "id": "copilot",
+          "available": false,
+          "status": "unavailable"
+        }
+      ]
+    },
+    "executionAfter": {
+      "dashboard": {
+        "memoryBytes": 268435456,
+        "nanoCpus": 500000000,
+        "pidsLimit": 64,
+        "kernelProbe": {
+          "role": "dashboard",
+          "phase": "after",
+          "uid": 65532,
+          "noNewPrivileges": true,
+          "capabilitiesEmpty": true,
+          "imageRootWriteDenied": true,
+          "temporaryDirectExecutionDenied": true,
+          "memoryMax": 268435456,
+          "pidsMax": 64
+        }
+      },
+      "gateway": {
+        "memoryBytes": 536870912,
+        "nanoCpus": 1000000000,
+        "pidsLimit": 128,
+        "kernelProbe": {
+          "role": "gateway",
+          "phase": "after",
+          "uid": 65532,
+          "noNewPrivileges": true,
+          "capabilitiesEmpty": true,
+          "imageRootWriteDenied": true,
+          "temporaryDirectExecutionDenied": true,
+          "memoryMax": 536870912,
+          "pidsMax": 128
+        }
+      },
+      "postgres": {
+        "memoryBytes": 536870912,
+        "nanoCpus": 1000000000,
+        "pidsLimit": 256,
+        "kernelPidsMax": 256
+      },
+      "runtime": {
+        "memoryBytes": 2147483648,
+        "nanoCpus": 2000000000,
+        "pidsLimit": 512,
+        "kernelProbe": {
+          "role": "runtime",
+          "phase": "after",
+          "uid": 65532,
+          "noNewPrivileges": true,
+          "capabilitiesEmpty": true,
+          "imageRootWriteDenied": true,
+          "temporaryDirectExecutionDenied": true,
+          "memoryMax": 2147483648,
+          "pidsMax": 512,
+          "scratchCapacityBytes": 536870912,
+          "scratchPrivate": true,
+          "scratchDirectExecutionDenied": true,
+          "oldScratchAbsent": true
+        }
+      },
+      "silo": {
+        "memoryBytes": 536870912,
+        "nanoCpus": 1000000000,
+        "pidsLimit": 512,
+        "kernelPidsMax": 512
+      }
+    },
+    "nativeControlGate": "passed",
+    "cookieSha256": "813078c359cfdf61cbd3971c186638513efff441351fd9dbedd4d37521dc8b40",
+    "externalCertificateSha256": "c5091b622ae6c4ff901d2e4178294d3d8bddae5cb51d727e0ff09a3ea584bd62",
+    "documents": {
+      "/memo": {
+        "revision": 1,
+        "contentSha256": "ced234c02028be2b2960e9c4fd1291012d6dafb317427b1f1baea15af967f78d"
+      },
+      "/user/session-tabs": {
+        "revision": 1,
+        "contentSha256": "0567e076d71e7a0e001b61a4c87cc332d80a1540cdcd29fc7f88261a17ac707e"
+      }
+    },
+    "cleanupContainersConfirmed": true
+  },
+  "regressionCoverage": {
+    "passedScenarios": 46,
+    "singleCombinedGreenRun": false,
+    "method": "The 45 unchanged scenarios passed in each complete attempt. Only the modified control-upgrade scenario was then rerun, fail-fast, and passed. No repeated run of the other 45 was required.",
+    "controlUpgradeFinal": {
+      "tests": 1,
+      "passed": true,
+      "durationSeconds": 123.968,
+      "logSha256": "27a754e00df5280f3d1eaaac3739f1f644f67fbc345d2394b925a52faf2ebe61"
+    },
+    "fullAttempts": [
+      {
+        "tests": 46,
+        "passed": 45,
+        "durationSeconds": 213.066,
+        "failure": "Native Owner verification one-off exited 137 under a 128MiB probe ceiling."
+      },
+      {
+        "tests": 46,
+        "passed": 45,
+        "durationSeconds": 166.936,
+        "failure": "Initialization still inherited the lightweight mock 128MiB ceiling; this separate real-CLI lane had not yet received the budget correction.",
+        "logSha256": "8d77bfe2b0b61e855838c69f2eb341c05046e9900a6d618c5bdbccfaabbe006a"
+      }
+    ],
+    "fixtureCorrection": "Both real initialization CLIs and separate Owner verification now use bounded 256MiB. Steady protocol mock recipients remain 128MiB. No product limits, migration/grant assertions, unknown-result stops or recovery checks were weakened. Exit 137 was observed; the specific historical OOM event was not independently recovered."
+  },
+  "buildAndSyntax": {
+    "appHost": "passed; existing ASPIRE010 warning retained",
+    "pythonCompile": "passed",
+    "nodeSyntax": "passed"
+  },
+  "earlierPublicationAttempt": {
+    "stage": "Compose config before any application/data-service startup",
+    "failure": "Only service.pids_limit had been added; Compose rejected inconsistency with deploy.resources.limits.pids.",
+    "correction": "PID-only finalization now adds both equal standard fields; both fields are checked by admission and stripped together in the exact graph-preservation regression."
+  },
+  "boundaries": {
+    "sameUidDifferentCgroupLimitsObserved": {
+      "uid": 65532,
+      "runtime": 512,
+      "gateway": 128,
+      "dashboard": 64
+    },
+    "pidsCountThreads": true,
+    "processExhaustionExperiment": false,
+    "sharedUidNprocQuota": false,
+    "productionConcurrencyCapacity": "not-accepted",
+    "fullBoundedV2NativeColdRecovery": "not-exercised-by-this-receipt; legacy protocol upgrade/recovery compatibility is separate",
+    "publicTLSAndHA": "not-accepted",
+    "signedReleaseProvenance": "not-accepted; cached Linux test images and documented Gateway overlay only",
+    "telemetryAndBundledServicesStartedByMatrix": false,
+    "existingInstanceOperations": false,
+    "pushPerformed": false
+  },
+  "cleanup": {
+    "ownedNativeFixtureDirectoriesRemoved": true,
+    "privateMatrixDirectoryRemoved": true,
+    "projectProof": [
+      {
+        "project": "kala-dedicated-proof-735561297e07",
+        "containersNetworksVolumesAbsent": true,
+        "ownedFixtureRemoved": true,
+        "attributedCliHomesAbsent": true
+      },
+      {
+        "project": "kala-dedicated-proof-4aa421741028",
+        "containersNetworksVolumesAbsent": true,
+        "ownedFixtureRemoved": true,
+        "attributedCliHomesAbsent": true
+      }
+    ],
+    "protocolFixtureContainersAndNetworksAbsent": true,
+    "noGlobalPrune": true,
+    "noImagesBuiltPulledOrDeleted": true
+  }
+}
