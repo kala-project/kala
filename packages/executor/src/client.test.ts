@@ -3,7 +3,7 @@ import { createServer } from 'node:http'
 import { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ulid } from 'ulid'
 
 import { createConfig } from '@agent-kernel/kernel'
@@ -381,9 +381,14 @@ describe('executor end-to-end', () => {
       sandboxRoots: [sandboxRoot],
     })
     await executor.ready
+    await vi.waitFor(() => expect(server.executorsSnapshot().some((entry) => entry.workspaceId === workspaceId)).toBe(true))
 
     const cwdChanged = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('cwd never changed')), 3000)
+      dashboard.on('session:error', (error) => {
+        clearTimeout(timer)
+        reject(new Error(`cwd change rejected: ${error.message}`))
+      })
       dashboard.on('state:changed', (p) => {
         if (p.state.cwd === child) {
           clearTimeout(timer)
