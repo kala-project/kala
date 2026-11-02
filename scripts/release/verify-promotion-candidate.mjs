@@ -5,6 +5,7 @@ import { basename, join, resolve } from 'node:path'
 import { collectRcEvidence, requiredReleaseEvidence, verifyRcEvidenceSet } from './rc-evidence.mjs'
 import { verifyReleaseChecksums } from './release-checksums.mjs'
 import { windowsServiceHostManifestMetadata } from './windows-service-host.mjs'
+import { POSIX_PORTABLE_MANAGER, WINDOWS_PORTABLE_MANAGER } from './portable-manager.mjs'
 
 const directory = resolve(required('--directory'))
 const evidenceDirectory = resolve(required('--evidence'))
@@ -21,7 +22,7 @@ const expectedAssets = [
   ...targets.flatMap((target) => [`kala-copilot-runtime-${target}`, `kala-copilot-runtime-node-${target}.node`]),
   'kala-dashboard-with-runtime.cjs', 'kala-runtime.cjs', 'kala-executor.cjs', 'kala-dedicated-ingress.cjs', 'kala-dedicated-deploy-supervisor.cjs',
   'kala-dashboard.tar.gz', 'kala-docs.tar.gz', 'kala-dedicated-support.tar.gz', 'kala-release-metadata.tar.gz',
-  'run.sh', 'kala-dedicated.mjs', 'kala-model-catalog-seed.json',
+  'run.sh', POSIX_PORTABLE_MANAGER, WINDOWS_PORTABLE_MANAGER, 'kala-dedicated.mjs', 'kala-model-catalog-seed.json',
 ].sort()
 
 if (manifest.version !== tag.slice(1)) fail('current release manifest version does not match the promoted tag')

@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import test from 'node:test'
 import { requiredReleaseEvidence } from './rc-evidence.mjs'
 import { windowsServiceHostManifestMetadata } from './windows-service-host.mjs'
+import { POSIX_PORTABLE_MANAGER, WINDOWS_PORTABLE_MANAGER } from './portable-manager.mjs'
 
 const reconcile = join(import.meta.dirname, 'reconcile-github-release-assets.mjs')
 const verifyPromotion = join(import.meta.dirname, 'verify-promotion-candidate.mjs')
@@ -285,7 +286,7 @@ test('promotion verifier binds the closed current draft to four accepted Portabl
       ...targets.flatMap((target) => [`kala-copilot-runtime-${target}`, `kala-copilot-runtime-node-${target}.node`]),
       'kala-dashboard-with-runtime.cjs', 'kala-runtime.cjs', 'kala-executor.cjs', 'kala-dedicated-ingress.cjs', 'kala-dedicated-deploy-supervisor.cjs',
       'kala-dashboard.tar.gz', 'kala-docs.tar.gz', 'kala-dedicated-support.tar.gz', 'kala-release-metadata.tar.gz',
-      'run.sh', 'kala-dedicated.mjs', 'kala-model-catalog-seed.json',
+      'run.sh', POSIX_PORTABLE_MANAGER, WINDOWS_PORTABLE_MANAGER, 'kala-dedicated.mjs', 'kala-model-catalog-seed.json',
     ]
     for (const [index, name] of assets.entries()) writeFileSync(join(candidate, name), `asset-${index}\n`)
     const nativeInventory = {
@@ -310,10 +311,33 @@ test('promotion verifier binds the closed current draft to four accepted Portabl
       }))
     }
     const args = [verifyPromotion, '--directory', candidate, '--evidence', evidence, '--aggregate', aggregate, '--tag', tag, '--revision', revision]
-    assert.equal(spawnSync(process.execPath, args, { encoding: 'utf8' }).status, 0)
+    let result = spawnSync(process.execPath, args, { encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+
+    const manifestPath = join(candidate, 'manifest.json')
+    const originalManifest = readFileSync(manifestPath, 'utf8')
+    for (const manager of [POSIX_PORTABLE_MANAGER, WINDOWS_PORTABLE_MANAGER]) {
+      const manifest = JSON.parse(originalManifest)
+      manifest.assets = assets.filter((name) => name !== manager)
+      writeFileSync(manifestPath, JSON.stringify(manifest) + '\n')
+      writeChecksums(candidate, [...assets, 'manifest.json'])
+      result = spawnSync(process.execPath, args, { encoding: 'utf8' })
+      assert.notEqual(result.status, 0, `promotion must require ${manager} in the manifest`)
+      assert.match(result.stderr, /exact checksummed assets/u)
+      writeFileSync(manifestPath, originalManifest)
+      writeChecksums(candidate, [...assets, 'manifest.json'])
+
+      const path = join(candidate, manager)
+      const bytes = readFileSync(path)
+      unlinkSync(path)
+      result = spawnSync(process.execPath, args, { encoding: 'utf8' })
+      assert.notEqual(result.status, 0, `promotion must require the ${manager} file`)
+      assert.match(result.stderr, /inventory is not closed/u)
+      writeFileSync(path, bytes)
+    }
 
     writeFileSync(join(candidate, 'stale-debug.zip'), 'stale')
-    let result = spawnSync(process.execPath, args, { encoding: 'utf8' })
+    result = spawnSync(process.execPath, args, { encoding: 'utf8' })
     assert.notEqual(result.status, 0)
     assert.match(result.stderr, /inventory is not closed/u)
     unlinkSync(join(candidate, 'stale-debug.zip'))
