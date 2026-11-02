@@ -360,6 +360,10 @@ integrationDescribe('PostgresRuntimeResourceOwnershipStore isolated PostgreSQL i
     try {
       const initial = { sessionId: scope.resourceId, organizationId, state: { cursor: 0 } }
       await old.create(initial)
+      await old.initializeEmptyNativePosixSession(scope.resourceId)
+      const oldNative = old.nativePosixSessionFs(scope.resourceId)
+      await oldNative.create('/epoch', 0o600)
+      await oldNative.write('/epoch', 0, Buffer.from([0, 1, 255]))
       const queued = { id: 'queued-old', operationId: 'queued-old', text: 'one', mode: 'queue' as const, createdAt: new Date().toISOString() }
       await old.messageQueue.enqueue(scope.resourceId, queued, 'back')
       const claim = (await old.messageQueue.claimHead(scope.resourceId, 'writer-a', 5_000)).claim!
@@ -380,6 +384,7 @@ integrationDescribe('PostgresRuntimeResourceOwnershipStore isolated PostgreSQL i
       }, 5_000)
       expect(ownerA.expiresAt.getTime()).toBeGreaterThan(Date.now())
       await expect(old.create(initial)).rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+      await expect(oldNative.write('/epoch', 0, Buffer.from('stale'))).rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
       await expect(old.messageQueue.load(scope.resourceId)).rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
       await expect(old.messageQueue.loadOrInitialize(scope.resourceId, async () => ({ items: [], cancelledOperationIds: [] })))
         .rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
@@ -401,6 +406,7 @@ integrationDescribe('PostgresRuntimeResourceOwnershipStore isolated PostgreSQL i
       const live = new PostgresSessionAuthority(hotState, organizationId, {
         schemaManagement: 'external', unitId, resourceOwnerForSession: () => ownerB,
       })
+      await expect(live.nativePosixSessionFs(scope.resourceId).read('/epoch', 0, 3)).resolves.toEqual(Buffer.from([0, 1, 255]))
       await live.messageQueue.enqueue(scope.resourceId, { ...queued, id: 'queued-new', operationId: 'queued-new' }, 'back')
       expect((await live.messageQueue.load(scope.resourceId)).items.map((item) => item.operationId)).toEqual(['queued-old', 'queued-new'])
       await expect(live.mutate(scope.resourceId, {

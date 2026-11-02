@@ -8,6 +8,7 @@ import {
   type RuntimeUnitPlacementLease,
 } from './postgres-runtime-unit-placement-store.js'
 import { assertResourceOwner, type RuntimeResourceOwnership } from './postgres-runtime-resource-ownership.js'
+import { decodePostgresJson, stringifyPostgresJson } from './postgres-json.js'
 
 type QueryResultRow = Record<string, unknown>
 export type SqlQueryResult<Row extends QueryResultRow = QueryResultRow> = {
@@ -253,7 +254,7 @@ export class PostgresHotStateStore {
     validateText(input.idempotencyKey, 'idempotencyKey')
     validateText(input.eventType, 'eventType')
     if (input.payload === undefined) throw new TypeError('payload must be JSON-serializable and not undefined')
-    const encodedPayload = JSON.stringify(input.payload)
+    const encodedPayload = stringifyPostgresJson(input.payload)
     if (encodedPayload === undefined) throw new TypeError('payload must be JSON-serializable and not undefined')
 
     return this.database.transaction(async (transaction) => {
@@ -416,7 +417,7 @@ function hotStateEvent<Payload>(row: EventRow): HotStateEvent<Payload> {
     generation: BigInt(row.generation),
     idempotencyKey: row.idempotency_key,
     eventType: row.event_type,
-    payload: row.payload as Payload,
+    payload: decodePostgresJson(row.payload) as Payload,
     createdAt: row.created_at,
   }
 }

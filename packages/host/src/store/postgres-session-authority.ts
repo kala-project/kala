@@ -10,6 +10,7 @@ import {
   LeaseHeldError,
   type HotStateEvent,
   type HotStateScope,
+  type HotStateSqlExecutor,
   type PostgresHotStateStore,
 } from '../tenant-runtime/postgres-hot-state.js'
 import {
@@ -30,9 +31,14 @@ import {
   createNativeSessionFsProvider,
   nativeFsPlan,
   nativeFsSchemaStatements,
+  validateNativeFsLimits,
+  type NativeFsLimits,
   type NativeFsQuery,
   type NativeFsTables,
 } from './native-session-fs.js'
+import { nativePosixSchemaStatements, PostgresNativePosixFileSystem, type NativePosixFileSystem } from './native-posix-fs.js'
+import { assertNativeFsAdmission, lockNativeFsAdmission, nativeFsAdmissionSchemaStatements } from './native-fs-admission.js'
+import { decodePostgresJson, stringifyPostgresJson } from '../tenant-runtime/postgres-json.js'
 
 export { SessionDeletingError } from './session-authority.js'
 export type { PersistedSessionDocument, SessionAuthorityMutation } from './session-authority.js'
@@ -97,6 +103,9 @@ export class PostgresSessionAuthority implements SessionAuthority {
   readonly #eventsTable: string
   readonly #projectionTable: string
   readonly #nativeFsTables: NativeFsTables
+  readonly #nativeFsLimits: Readonly<NativeFsLimits>
+  readonly #schemaName: string
+  readonly #nativeFsAdmissionTable: string
   readonly #schemaManagement: PostgresSchemaManagement
   readonly #resourceOwnerForSession?: (sessionId: string) => RuntimeResourceOwnership | undefined
   readonly #prepareSessionOwner?: (sessionId: string) => Promise<void>
@@ -113,6 +122,7 @@ export class PostgresSessionAuthority implements SessionAuthority {
       leaseTtlMs?: number
       leaseWaitMs?: number
       schemaManagement?: PostgresSchemaManagement
+      nativeFsLimits?: NativeFsLimits
       /** Required with resourceOwnerForSession; never derive this Unit ID from client input. */
       unitId?: string
       /** Opt-in: must return the manager's live owner lease; never trust a client-provided token. */
@@ -124,7 +134,10 @@ export class PostgresSessionAuthority implements SessionAuthority {
     if (!tenantId) throw new TypeError('tenantId must be a non-empty string')
     const schemaName = options.schema ?? 'public'
     const schema = quoteIdentifier(schemaName)
+    this.#schemaName = schemaName
+    this.#nativeFsAdmissionTable = `${schema}.tenant_session_native_fs_admission`
     this.#ownerIdPrefix = options.ownerId ?? 'session-store'
+    this.#nativeFsLimits = validateNativeFsLimits(options.nativeFsLimits ?? {})
     this.#eventsTable = `${schema}.tenant_runtime_hot_events`
     this.#projectionTable = `${schema}.tenant_session_latest_projection`
     this.#nativeFsTables = {
@@ -162,7 +175,7 @@ export class PostgresSessionAuthority implements SessionAuthority {
         // cannot publish a new Queue item, even on the same live owner.
         const result = await transaction.query<{ document: PersistedSessionDocument | null }>(`SELECT document
           FROM ${this.#projectionTable} WHERE tenant_id = $1 AND session_id = $2 FOR SHARE`, [this.tenantId, sessionId])
-        const document = result.rows[0]?.document
+        const document = decodePostgresJson(result.rows[0]?.document)
         if (!document || sessionDeletion(document)) throw new SessionDeletingError(sessionId)
       },
       ...(this.#resourceOwnerForSession ? {
@@ -191,7 +204,13 @@ export class PostgresSessionAuthority implements SessionAuthority {
       updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
       PRIMARY KEY (tenant_id, session_id)
     )`)
-    for (const statement of nativeFsSchemaStatements(this.#nativeFsTables)) {
+    for (const statement of nativeFsSchemaStatements(this.#nativeFsTables, true)) {
+      await this.hotState.database.query(statement)
+    }
+    for (const statement of nativePosixSchemaStatements(quoteIdentifier(this.#schemaName))) {
+      await this.hotState.database.query(statement)
+    }
+    for (const statement of nativeFsAdmissionSchemaStatements(quoteIdentifier(this.#schemaName))) {
       await this.hotState.database.query(statement)
     }
   }
@@ -215,12 +234,14 @@ export class PostgresSessionAuthority implements SessionAuthority {
           FROM ${this.#projectionTable}
           WHERE tenant_id = $1 AND session_id = $2
           FOR SHARE`, [this.tenantId, sessionId])
-        const document = projected.rows[0]?.document
+        const document = decodePostgresJson(projected.rows[0]?.document)
         if (!document) throw new Error(`Session not found: ${sessionId}`)
         if (sessionDeletion(document)) throw new SessionDeletingError(sessionId)
         if (hasNonemptyLegacyNativeFs(document[LEGACY_NATIVE_FS_FIELD])) {
           throw new Error(`Session ${sessionId} has unsupported nonempty ${LEGACY_NATIVE_FS_FIELD} data; automatic native filesystem migration is not supported`)
         }
+        assertNativeFsAdmission(await lockNativeFsAdmission(transaction, this.#nativeFsAdmissionTable,
+          this.tenantId, sessionId), 'text')
 
         await transaction.query(`INSERT INTO ${this.#nativeFsTables.usage}
           (tenant_id, session_id, total_bytes, total_nodes)
@@ -229,7 +250,7 @@ export class PostgresSessionAuthority implements SessionAuthority {
         await transaction.query(`SELECT total_bytes, total_nodes FROM ${this.#nativeFsTables.usage}
           WHERE tenant_id = $1 AND session_id = $2 FOR UPDATE`, [this.tenantId, sessionId])
 
-        const plan = nativeFsPlan(request, this.#nativeFsTables, this.tenantId, sessionId)
+        const plan = nativeFsPlan(request, this.#nativeFsTables, this.tenantId, sessionId, this.#nativeFsLimits)
         let step = plan.next()
         while (!step.done) {
           const query = step.value as NativeFsQuery
@@ -238,6 +259,99 @@ export class PostgresSessionAuthority implements SessionAuthority {
         }
         return step.value
       })
+    })
+  }
+
+  /** One mount is pinned to one owner epoch; it can never follow a new lease. */
+  nativePosixSessionFs(sessionId: string, options: { importId?: string } = {}): NativePosixFileSystem {
+    validateSessionId(sessionId)
+    let ownerEpoch: string | undefined
+    return new PostgresNativePosixFileSystem(this.tenantId, sessionId, async operation => {
+      return this.#nativePosixTransaction(sessionId, async transaction => {
+        assertNativeFsAdmission(await lockNativeFsAdmission(transaction, this.#nativeFsAdmissionTable,
+          this.tenantId, sessionId), 'posix', options.importId)
+        return operation(transaction)
+      }, owner => {
+        if (ownerEpoch !== undefined && ownerEpoch !== owner.ownerToken) throw new RuntimeResourceOwnershipFencedError()
+        ownerEpoch = owner.ownerToken
+      })
+    }, { schema: this.#schemaName, limits: this.#nativeFsLimits })
+  }
+
+  /** Trusted migration barrier: freezes the text adapter without deleting its recovery rows. */
+  async beginNativePosixImport(sessionId: string, importId: string): Promise<void> {
+    if (!/^[a-z0-9._-]{1,128}$/iu.test(importId)) throw new TypeError('Invalid native import ID')
+    await this.#nativePosixTransaction(sessionId, async transaction => {
+      const admission = await lockNativeFsAdmission(transaction, this.#nativeFsAdmissionTable, this.tenantId, sessionId)
+      if (admission.backend === 'posix-import' && admission.importId === importId) return
+      if (admission.backend !== 'text') throw new Error('Native import conflicts with existing admission')
+      await transaction.query(`UPDATE ${this.#nativeFsAdmissionTable}
+        SET backend='posix-import',import_id=$3,updated_at=clock_timestamp()
+        WHERE tenant_id=$1 AND session_id=$2`, [this.tenantId, sessionId, importId])
+    })
+  }
+
+  /** The operator supplies the SHA-256 of its full, byte-verified import manifest. */
+  async completeNativePosixImport(sessionId: string, importId: string, manifestSha256: string): Promise<void> {
+    if (!/^[a-z0-9._-]{1,128}$/iu.test(importId)) throw new TypeError('Invalid native import ID')
+    if (!/^[a-f0-9]{64}$/u.test(manifestSha256)) throw new TypeError('Invalid native import manifest SHA-256')
+    await this.#nativePosixTransaction(sessionId, async transaction => {
+      const admission = await lockNativeFsAdmission(transaction, this.#nativeFsAdmissionTable, this.tenantId, sessionId)
+      if (admission.backend === 'posix' && admission.importId === importId && admission.manifestSha256 === manifestSha256) return
+      assertNativeFsAdmission(admission, 'posix', importId)
+      const events = await transaction.query(`SELECT 1 FROM ${quoteIdentifier(this.#schemaName)}.tenant_session_native_posix_nodes
+        WHERE tenant_id=$1 AND session_id=$2 AND path='/events.jsonl' AND kind='file' AND bytes>0`,
+      [this.tenantId, sessionId])
+      if (!events.rows.length) throw new Error('Cannot admit native import without its persisted events.jsonl')
+      await transaction.query(`UPDATE ${this.#nativeFsAdmissionTable}
+        SET backend='posix',manifest_sha256=$3,updated_at=clock_timestamp()
+        WHERE tenant_id=$1 AND session_id=$2`, [this.tenantId, sessionId, manifestSha256])
+    })
+  }
+
+  /** Never initializes an empty native tree over an existing conversation. */
+  async initializeEmptyNativePosixSession(sessionId: string): Promise<void> {
+    await this.#nativePosixTransaction(sessionId, async (transaction, document) => {
+      const admission = await lockNativeFsAdmission(transaction, this.#nativeFsAdmissionTable, this.tenantId, sessionId)
+      if (admission.backend === 'posix') return
+      const messages: unknown = Reflect.get(document.state, 'messages')
+      if (admission.backend !== 'text' || document.state.cursor !== 0
+        || (messages !== undefined && !Array.isArray(messages))
+        || (Array.isArray(messages) && messages.some(
+          message => typeof message !== 'object' || message === null || !('role' in message) || message.role !== 'system'))) {
+        throw new Error('Existing conversation requires explicit native filesystem import')
+      }
+      const existing = await transaction.query(`SELECT 1 FROM ${this.#nativeFsTables.nodes}
+        WHERE tenant_id=$1 AND session_id=$2
+        UNION ALL SELECT 1 FROM ${quoteIdentifier(this.#schemaName)}.tenant_session_native_posix_nodes
+        WHERE tenant_id=$1 AND session_id=$2 LIMIT 1`, [this.tenantId, sessionId])
+      if (existing.rows.length) throw new Error('Existing native files require explicit native filesystem import')
+      await transaction.query(`UPDATE ${this.#nativeFsAdmissionTable}
+        SET backend='posix',updated_at=clock_timestamp() WHERE tenant_id=$1 AND session_id=$2`, [this.tenantId, sessionId])
+    })
+  }
+
+  async #nativePosixTransaction<T>(
+    sessionId: string,
+    operation: (transaction: HotStateSqlExecutor, document: PersistedSessionDocument) => Promise<T>,
+    pinOwner?: (owner: RuntimeResourceOwnership) => void,
+  ): Promise<T> {
+    validateSessionId(sessionId)
+    await this.#prepareSessionOwner?.(sessionId)
+    const owner = this.#currentOwner(sessionId)
+    if (owner) pinOwner?.(owner)
+    return this.hotState.database.transaction(async transaction => {
+      if (owner) await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(sessionId), owner)
+      const projected = await transaction.query<{ document: PersistedSessionDocument | null }>(`SELECT document
+        FROM ${this.#projectionTable} WHERE tenant_id=$1 AND session_id=$2 FOR SHARE`, [this.tenantId, sessionId])
+      const document = decodePostgresJson(projected.rows[0]?.document)
+      if (!document) throw new Error(`Session not found: ${sessionId}`)
+      if (sessionDeletion(document)) throw new SessionDeletingError(sessionId)
+      if (hasNonemptyLegacyNativeFs(document[LEGACY_NATIVE_FS_FIELD])) {
+        throw new Error(`Session ${sessionId} requires explicit legacy native filesystem migration`)
+      }
+      await transaction.query('SET LOCAL synchronous_commit = on')
+      return operation(transaction, document)
     })
   }
 
@@ -333,12 +447,16 @@ export class PostgresSessionAuthority implements SessionAuthority {
               updated_at = EXCLUDED.updated_at
             WHERE ${this.#projectionTable}.version = $5
             RETURNING version`, [
-            this.tenantId, sessionId, event.sequence, JSON.stringify(next ?? null), expectedVersion,
+            this.tenantId, sessionId, event.sequence, stringifyPostgresJson(next ?? null), expectedVersion,
           ])
           if (updated.rowCount !== 1) throw new ProjectionConflictError()
           if (mutation.eventType === 'session.deleted' && next === undefined) {
             await transaction.query(`DELETE FROM ${this.#nativeFsTables.usage}
               WHERE tenant_id = $1 AND session_id = $2`, [this.tenantId, sessionId])
+            await transaction.query(`DELETE FROM ${quoteIdentifier(this.#schemaName)}.tenant_session_native_posix_usage
+              WHERE tenant_id=$1 AND session_id=$2`, [this.tenantId, sessionId])
+            await transaction.query(`DELETE FROM ${this.#nativeFsAdmissionTable}
+              WHERE tenant_id=$1 AND session_id=$2`, [this.tenantId, sessionId])
           }
         }, this.#currentOwner(sessionId))
         return next
@@ -407,14 +525,14 @@ export class PostgresSessionAuthority implements SessionAuthority {
         AND document->$2->>'requestedAt' IS NOT NULL
         AND session_id > $3
       ORDER BY session_id LIMIT $4`, [this.tenantId, SESSION_DELETION_FIELD, afterSessionId, limit])
-    return result.rows.map(({ document }) => document).filter((document) => Boolean(sessionDeletion(document)))
+    return result.rows.map(({ document }) => decodePostgresJson(document)).filter((document) => Boolean(sessionDeletion(document)))
   }
 
   async loadDeleting(sessionId: string): Promise<PersistedSessionDocument | undefined> {
     validateSessionId(sessionId)
     const result = await this.hotState.database.query<{ document: PersistedSessionDocument | null }>(`SELECT document
       FROM ${this.#projectionTable} WHERE tenant_id = $1 AND session_id = $2`, [this.tenantId, sessionId])
-    const document = result.rows[0]?.document
+    const document = decodePostgresJson(result.rows[0]?.document)
     return document && sessionDeletion(document) ? document : undefined
   }
 
@@ -430,7 +548,7 @@ export class PostgresSessionAuthority implements SessionAuthority {
   async findOperation(sessionId: string, operationId: string): Promise<SessionOperationMatch | undefined> {
     validateSessionId(sessionId)
     if (!operationId) throw new TypeError('operationId must be a non-empty string')
-    const result = await this.hotState.database.query<{ entry: EventEntry | RuntimeMetadataEntry }>(`SELECT payload->'entry' AS entry
+    const result = await this.hotState.database.query<{ payload: { entry: EventEntry | RuntimeMetadataEntry } }>(`SELECT payload
       FROM ${this.#eventsTable}
       WHERE tenant_id = $1 AND scope_type = 'session' AND scope_id = $2
         AND payload ? 'entry'
@@ -439,7 +557,7 @@ export class PostgresSessionAuthority implements SessionAuthority {
           OR payload #>> '{entry,payload,operationId}' = $3
         )
       ORDER BY sequence DESC LIMIT 1`, [this.tenantId, sessionId, operationId])
-    const entry = result.rows[0]?.entry
+    const entry = decodePostgresJson(result.rows[0]?.payload)?.entry
     if (!entry) return undefined
     if (entry.kind === 'event' && entry.event.kind === 'user_message' && entry.event.operationId === operationId) {
       return { kind: 'event', cursor: entry.seq, event: entry.event }
@@ -458,23 +576,23 @@ export class PostgresSessionAuthority implements SessionAuthority {
   async findLatestRuntimeMetadata(sessionId: string, action: string): Promise<RuntimeMetadataEntry | undefined> {
     validateSessionId(sessionId)
     if (!action) throw new TypeError('runtime metadata action is required')
-    const result = await this.hotState.database.query<{ entry: RuntimeMetadataEntry }>(`SELECT payload->'entry' AS entry
+    const result = await this.hotState.database.query<{ payload: { entry: RuntimeMetadataEntry } }>(`SELECT payload
       FROM ${this.#eventsTable}
       WHERE tenant_id = $1 AND scope_type = 'session' AND scope_id = $2
         AND payload #>> '{entry,kind}' = 'runtime_metadata'
         AND payload #>> '{entry,action}' = $3
       ORDER BY sequence DESC LIMIT 1`, [this.tenantId, sessionId, action])
-    return result.rows[0]?.entry
+    return decodePostgresJson(result.rows[0]?.payload)?.entry
   }
 
   async readEventEntries(sessionId: string): Promise<readonly EventEntry[]> {
     validateSessionId(sessionId)
-    const result = await this.hotState.database.query<{ entry: EventEntry }>(`SELECT payload->'entry' AS entry
+    const result = await this.hotState.database.query<{ payload: { entry: EventEntry } }>(`SELECT payload
       FROM ${this.#eventsTable}
       WHERE tenant_id = $1 AND scope_type = 'session' AND scope_id = $2
         AND payload #>> '{entry,kind}' = 'event'
       ORDER BY sequence ASC`, [this.tenantId, sessionId])
-    return result.rows.map(({ entry }) => entry)
+    return result.rows.map(({ payload }) => decodePostgresJson(payload).entry)
   }
 
   async readHistory(sessionId: string): Promise<ParsedHistory> {
@@ -498,7 +616,7 @@ export class PostgresSessionAuthority implements SessionAuthority {
       : await this.hotState.database.query<HistoryRow>(statement, parameters)
     const created = result.rows[0]
     if (!created || created.event_type !== 'session.created') throw new Error(`Session ${sessionId} has no creation history`)
-    const initialDocument = applySessionEvent(undefined, created.payload)
+    const initialDocument = applySessionEvent(undefined, decodePostgresJson(created.payload))
     if (!initialDocument || initialDocument.sessionId !== sessionId
       || !initialDocument.state || !Number.isSafeInteger(initialDocument.state.cursor)
       || !initialDocument.config || typeof initialDocument.config !== 'object') {
@@ -506,7 +624,8 @@ export class PostgresSessionAuthority implements SessionAuthority {
     }
     const events: EventEntry[] = []
     const runtimeMetadata: RuntimeMetadataEntry[] = []
-    for (const { entry } of result.rows) {
+    for (const { payload } of result.rows) {
+      const entry = decodePostgresJson(payload).entry
       if (entry?.kind === 'event') events.push(entry)
       else if (entry?.kind === 'runtime_metadata') runtimeMetadata.push(entry)
     }
@@ -567,7 +686,8 @@ export class PostgresSessionAuthority implements SessionAuthority {
   async #projection(sessionId: string): Promise<ProjectionRow | undefined> {
     const result = await this.hotState.database.query<ProjectionRow>(`SELECT version, document
       FROM ${this.#projectionTable} WHERE tenant_id = $1 AND session_id = $2`, [this.tenantId, sessionId])
-    return result.rows[0]
+    const row = result.rows[0]
+    return row ? { ...row, document: decodePostgresJson(row.document) } : undefined
   }
 
   async #checkpoint(sessionId: string, version: bigint, document: PersistedSessionDocument | null): Promise<void> {
@@ -583,7 +703,7 @@ export class PostgresSessionAuthority implements SessionAuthority {
         VALUES ($1, $2, $3, $4::jsonb, clock_timestamp())
         ON CONFLICT (tenant_id, session_id) DO UPDATE SET
           version = EXCLUDED.version, document = EXCLUDED.document, updated_at = EXCLUDED.updated_at
-        WHERE ${this.#projectionTable}.version < EXCLUDED.version`, [this.tenantId, sessionId, version, JSON.stringify(document)])
+        WHERE ${this.#projectionTable}.version < EXCLUDED.version`, [this.tenantId, sessionId, version, stringifyPostgresJson(document)])
     })
   }
 
@@ -592,7 +712,8 @@ export class PostgresSessionAuthority implements SessionAuthority {
       FROM ${this.#eventsTable}
       WHERE tenant_id = $1 AND scope_type = 'session' AND scope_id = $2 AND idempotency_key = $3`,
     [this.tenantId, sessionId, mutationId])
-    return result.rows[0]
+    const row = result.rows[0]
+    return row ? { ...row, payload: decodePostgresJson(row.payload) } : undefined
   }
 
   async #documentBefore(sessionId: string, sequence: bigint): Promise<PersistedSessionDocument | undefined> {
@@ -613,10 +734,11 @@ export class PostgresSessionAuthority implements SessionAuthority {
         AND sequence > $3 AND sequence <= $4
       ORDER BY sequence ASC`, [this.tenantId, sessionId, version, sequence])
     for (const row of result.rows) {
-      if (isDeltaSessionEvent(row.payload) && BigInt(row.payload.baseVersion) !== version) {
-        throw new Error(`Session audit delta at sequence ${row.sequence} is based on ${row.payload.baseVersion}, expected ${version}`)
+      const payload = decodePostgresJson(row.payload)
+      if (isDeltaSessionEvent(payload) && BigInt(payload.baseVersion) !== version) {
+        throw new Error(`Session audit delta at sequence ${row.sequence} is based on ${payload.baseVersion}, expected ${version}`)
       }
-      document = applySessionEvent(document, row.payload)
+      document = applySessionEvent(document, payload)
       version = BigInt(row.sequence)
     }
     if (version !== sequence) throw new Error(`Session audit history ends at ${version}, expected ${sequence}`)
@@ -636,7 +758,7 @@ export class PostgresSessionAuthority implements SessionAuthority {
       generation: BigInt(row.generation),
       idempotencyKey: row.idempotency_key,
       eventType: row.event_type,
-      payload: row.payload,
+      payload: decodePostgresJson(row.payload),
       createdAt: row.created_at,
     }
   }

@@ -1,0 +1,18 @@
+[Unit]
+Description=Kala PostgreSQL native filesystem mount broker
+After=local-fs.target
+Before=docker.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/install -d -m 0700 -o 65532 -g 65532 /run/kala-native-posix
+ExecStartPre=/bin/sh -ec '/usr/bin/mountpoint -q /run/kala-native-posix || /bin/mount --bind /run/kala-native-posix /run/kala-native-posix'
+ExecStartPre=/bin/mount --make-rshared /run/kala-native-posix
+ExecStart=/usr/bin/python3 /usr/local/lib/kala/kala-native-mount-broker.py /run/kala-native-posix /usr/local/lib/kala/kala-native-fuse
+TimeoutStopSec=90
+UMask=0077
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

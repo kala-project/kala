@@ -99,6 +99,8 @@ const sdk = vi.hoisted(() => ({
     },
   })),
 }))
+const nativeMount = vi.hoisted(() => ({ mount: vi.fn(), close: vi.fn(async () => {}), assertReady: vi.fn(async () => {}) }))
+vi.mock('./native-posix-mount.js', () => ({ mountNativePosixSession: nativeMount.mount }))
 
 vi.mock('@github/copilot-sdk', () => ({
   RuntimeConnection: {
@@ -182,6 +184,10 @@ describe('Copilot runtime custom tools', () => {
   let store: SessionStore
 
   beforeEach(() => {
+    nativeMount.mount.mockReset()
+    nativeMount.close.mockClear()
+    nativeMount.assertReady.mockReset()
+    nativeMount.assertReady.mockResolvedValue()
     sdk.configs.length = 0
     sdk.clientOptions.length = 0
     sdk.resumeConfigs.length = 0
@@ -202,6 +208,63 @@ describe('Copilot runtime custom tools', () => {
     sdk.getEvents.mockImplementation(async () => sdk.historyEvents)
     dir = mkdtempSync(join(tmpdir(), 'copilot-runtime-tools-'))
     store = new SessionStore(dir)
+  })
+
+  it('uses an admitted POSIX mount and dedicated SDK client without the whole-file string transport', async () => {
+    store = new SessionStore(join(dir, 'sessions'), { authority: new SqliteSessionAuthority(join(dir, 'state.sqlite')) })
+    await store.initialize()
+    vi.spyOn(store, 'initializeEmptyCopilotNativePosixSession').mockResolvedValue()
+    vi.spyOn(store, 'copilotNativePosixSessionFs').mockReturnValue({
+      stat: async () => ({ kind: 'directory', bytes: 0, mode: 0o700, modifiedAt: 0, createdAt: 0 }),
+      readdir: async () => [], create: async () => {}, mkdir: async () => {}, read: async () => Buffer.alloc(0),
+      write: async () => {}, truncate: async () => {}, remove: async () => {}, rename: async () => {},
+      chmod: async () => {}, touch: async () => {}, sync: async () => {},
+    })
+    nativeMount.mount.mockResolvedValue({ baseDirectory: join(dir, 'mounted-home'), close: nativeMount.close,
+      assertReady: nativeMount.assertReady })
+    const runtime = new CopilotAgentRuntime({
+      store, tools: { async callTool() { return { ok: true, content: 'unused' } }, cancelPending() {} },
+      broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError() {} },
+    }, { enabled: true, sessionsDir: join(dir, 'sessions'), nativePosixRoot: join(dir, 'operator-mounts') })
+    const record = await store.create({ sessionId: 'native-posix-sdk', agentRuntime: 'copilot', config: createConfig({ tools: [] }) })
+    sdk.resumeSucceeds = true
+    sdk.responses.push({ type: 'assistant.message', id: 'mounted-one', data: { content: 'mounted answer' } })
+    await runtime.start()
+    await runtime.send(record, { text: 'one', operationId: 'native-posix-one' })
+    await vi.waitFor(() => expect(record.state.status).toBe('done'))
+    expect(sdk.clientOptions).toHaveLength(2)
+    expect(sdk.clientOptions[1]?.baseDirectory).toBe(join(dir, 'mounted-home'))
+    expect(sdk.clientOptions.every(options => !('sessionFs' in options))).toBe(true)
+    expect(sdk.resumeConfigs[0]).not.toHaveProperty('createSessionFsProvider')
+    const sent = sdk.sentMessages.length
+    nativeMount.assertReady.mockRejectedValueOnce(new Error('Native POSIX mount is unavailable'))
+    await runtime.send(record, { text: 'must not use a disconnected mount', operationId: 'native-posix-lost' })
+    expect(record.state.status).toBe('error')
+    expect(sdk.sentMessages).toHaveLength(sent)
+    await runtime.close()
+    expect(nativeMount.close).toHaveBeenCalledOnce()
+  })
+
+  it('does not fall back to text or local storage when the POSIX mount broker fails', async () => {
+    store = new SessionStore(join(dir, 'sessions'), { authority: new SqliteSessionAuthority(join(dir, 'state.sqlite')) })
+    await store.initialize()
+    vi.spyOn(store, 'initializeEmptyCopilotNativePosixSession').mockResolvedValue()
+    const native = vi.spyOn(store, 'copilotNativePosixSessionFs')
+    native.mockImplementation(() => { throw new Error('native authority not admitted') })
+    const onError = vi.fn()
+    const runtime = new CopilotAgentRuntime({
+      store, tools: { async callTool() { return { ok: true, content: 'unused' } }, cancelPending() {} },
+      broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError },
+    }, { enabled: true, sessionsDir: join(dir, 'sessions'), nativePosixRoot: join(dir, 'operator-mounts') })
+    const record = await store.create({ sessionId: 'native-posix-failed', agentRuntime: 'copilot', config: createConfig({ tools: [] }) })
+    await runtime.start()
+    await runtime.send(record, { text: 'must not run', operationId: 'native-posix-failed' })
+    expect(record.state.status).toBe('error')
+    expect(sdk.sentMessages).toHaveLength(0)
+    expect(sdk.configs).toHaveLength(0)
+    expect(sdk.resumeConfigs).toHaveLength(0)
+    expect(onError).toHaveBeenCalledWith(record.sessionId, 'native authority not admitted')
+    await runtime.close()
   })
 
   it('uses native SessionFs for durable authority and preserves the user request when native resume fails', async () => {

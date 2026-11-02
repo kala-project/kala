@@ -57,6 +57,7 @@ import { step } from '@agent-kernel/kernel'
 import { toolLockFor } from '../tool-version.js'
 import { writeJsonFile } from '../tenant-runtime/atomic-json-file.js'
 import type { PersistedSessionDocument, SessionAuthority } from './session-authority.js'
+import type { NativePosixFileSystem } from './native-posix-fs.js'
 import type { SessionFsProvider } from '@github/copilot-sdk'
 
 export type SessionRecord = {
@@ -476,6 +477,24 @@ export class SessionStore {
   copilotSessionFs(sessionId: string): SessionFsProvider {
     const provider = this.options.authority?.nativeSessionFs?.(sessionId)
     if (!provider) throw new Error('Durable Copilot native file authority is unavailable')
+    return this.guardNativeFileSystem(sessionId, provider)
+  }
+
+  copilotNativePosixSessionFs(sessionId: string): NativePosixFileSystem {
+    const provider = this.options.authority?.nativePosixSessionFs?.(sessionId)
+    if (!provider) throw new Error('Durable Copilot binary native file authority is unavailable')
+    return this.guardNativeFileSystem(sessionId, provider)
+  }
+
+  async initializeEmptyCopilotNativePosixSession(sessionId: string): Promise<void> {
+    await this.authorityReady
+    const initialize = this.options.authority?.initializeEmptyNativePosixSession
+    if (!initialize) throw new Error('Durable Copilot binary native file authority is unavailable')
+    const releaseMutation = this.beginStorageMutation([sessionId])
+    try { await initialize.call(this.options.authority, sessionId) } finally { releaseMutation() }
+  }
+
+  private guardNativeFileSystem<T extends object>(sessionId: string, provider: T): T {
     // Guard local cleanup leases as well as the backend's deletion/owner fence.
     return new Proxy(provider, {
       get: (target, property) => {
@@ -483,8 +502,12 @@ export class SessionStore {
         if (typeof value !== 'function') return value
         return async (...args: unknown[]) => {
           await this.authorityReady
-          this.assertStorageWritable(sessionId)
-          return Reflect.apply(value, target, args)
+          const releaseMutation = this.beginStorageMutation([sessionId])
+          try {
+            return await Reflect.apply(value, target, args)
+          } finally {
+            releaseMutation()
+          }
         }
       },
     })

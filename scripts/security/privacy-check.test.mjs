@@ -24,7 +24,17 @@ test('does not allow an entire real email domain for one historical dependency n
   const findings = scan('docs/example.md', `contact@${domain}`)
   assert(findings.some(({ rule }) => rule === 'privacy.non-example-email'))
   assert.equal(formatFindings(findings).includes(domain), false)
-  assert(policy.ruleExceptions.every((exception) => exception.path === 'pnpm-lock.yaml' && exception.rule === 'privacy.non-example-email'))
+  assert(policy.ruleExceptions.filter((exception) => exception.rule === 'privacy.non-example-email')
+    .every((exception) => exception.path === 'pnpm-lock.yaml'))
+})
+
+test('allows the synthetic native SDK mount suffix only in the exact reviewed broker bytes', () => {
+  const path = 'scripts/native-session-fs/kala-native-mount-broker.py'
+  const content = readFileSync(join(root, path), 'utf8')
+  assert.equal(policy.allowedHomeUsers.has('session-state'), false)
+  assert.deepEqual(scan(path, content), [])
+  assert(scan(path, content + '\n').some(({ rule }) => rule === 'privacy.personal-home'))
+  assert(scan('docs/example.py', content).some(({ rule }) => rule === 'privacy.personal-home'))
 })
 
 test('blocks structural private data without echoing matched values', () => {

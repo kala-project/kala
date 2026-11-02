@@ -60,7 +60,7 @@ describe('PostgreSQL migrations', () => {
   it('applies the initial migration once under an advisory lock and is idempotent', async () => {
     const client = new FakeClient()
     const first = await runPostgresMigrations(pool(client))
-    expect(first).toEqual({ previousVersion: 0, currentVersion: 8, appliedVersions: [1, 2, 3, 4, 5, 6, 7, 8] })
+    expect(first).toEqual({ previousVersion: 0, currentVersion: 11, appliedVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] })
     expect(client.statements[0]).toContain('pg_advisory_lock')
     expect(client.statements).toContain('BEGIN')
     expect(client.statements).toContain('COMMIT')
@@ -76,7 +76,7 @@ describe('PostgreSQL migrations', () => {
 
     client.statements.length = 0
     const second = await runPostgresMigrations(pool(client))
-    expect(second).toEqual({ previousVersion: 8, currentVersion: 8, appliedVersions: [] })
+    expect(second).toEqual({ previousVersion: 11, currentVersion: 11, appliedVersions: [] })
     expect(client.statements).not.toContain('BEGIN')
     expect(client.releaseCount).toBe(2)
   })
@@ -94,18 +94,21 @@ describe('PostgreSQL migrations', () => {
     await expect(assertPostgresSchemaCurrent(client)).rejects.toThrow('does not match this release')
   })
 
-  it('upgrades v7 with only the additive organization prompt table', async () => {
+  it('upgrades v7 with the additive prompt table and lossless native counter widening', async () => {
     const client = new FakeClient()
     await runPostgresMigrations(pool(client))
-    client.applied.pop()
+    client.applied.splice(7)
     client.statements.length = 0
     await expect(runPostgresMigrations(pool(client))).resolves.toEqual({
-      previousVersion: 7, currentVersion: 8, appliedVersions: [8],
+      previousVersion: 7, currentVersion: 11, appliedVersions: [8, 9, 10, 11],
     })
     const changes = client.statements.filter((statement) => /^(CREATE|ALTER|DROP|DELETE|UPDATE)/u.test(statement)
       && !statement.includes('kala_schema_migrations'))
-    expect(changes).toHaveLength(1)
+    expect(changes).toHaveLength(8)
     expect(changes[0]).toContain('CREATE TABLE IF NOT EXISTS "public".tenant_agent_prompt_settings')
+    expect(changes.slice(1, 4).every(statement => statement.startsWith('ALTER TABLE') && statement.includes('TYPE bigint'))).toBe(true)
+    expect(changes.slice(4, 7).every(statement => statement.startsWith('CREATE TABLE') && statement.includes('native_posix'))).toBe(true)
+    expect(changes[7]).toContain('tenant_session_native_fs_admission')
   })
 
   it('grants DML only on migrated Runtime tables and SELECT only on migration history', async () => {
@@ -122,7 +125,7 @@ describe('PostgreSQL migrations', () => {
     expect(grants).toContain('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "public"."tenant_session_native_fs_chunks" TO "kala_runtime"')
     expect(grants.some((statement) => statement.includes('ALL TABLES'))).toBe(false)
     expect(grants).toContain('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "public"."tenant_agent_prompt_settings" TO "kala_runtime"')
-    expect(grants.filter((statement) => statement.includes('SELECT, INSERT, UPDATE, DELETE'))).toHaveLength(25)
+    expect(grants.filter((statement) => statement.includes('SELECT, INSERT, UPDATE, DELETE'))).toHaveLength(29)
     expect(client.statements.at(-1)).toBe('COMMIT')
     await expect(grantPostgresRuntimePrivileges(pool(client), { runtimeRole: 'invalid;role' })).rejects.toThrow('identifier')
   })

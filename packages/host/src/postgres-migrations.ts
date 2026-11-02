@@ -3,6 +3,8 @@ import { createRequire } from 'node:module'
 
 import { nativeFsSchemaStatements, type NativeFsTables } from './store/native-session-fs.js'
 import { agentSettingsSchemaStatements } from './tenant-runtime/postgres-agent-settings.js'
+import { nativePosixSchemaStatements } from './store/native-posix-fs.js'
+import { nativeFsAdmissionSchemaStatements } from './store/native-fs-admission.js'
 
 export type PostgresSchemaManagement = 'initialize' | 'external'
 
@@ -87,6 +89,30 @@ const migrations: readonly PostgresMigration[] = [
     version: 8,
     name: 'organization_agent_prompt_settings',
     statements: agentSettingsSchemaStatements,
+  },
+  {
+    version: 9,
+    name: 'native_session_storage_wide_counters',
+    statements: (schema) => [
+      `ALTER TABLE ${schema}.tenant_session_native_fs_usage
+        ALTER COLUMN total_bytes TYPE bigint,
+        ALTER COLUMN total_nodes TYPE bigint`,
+      `ALTER TABLE ${schema}.tenant_session_native_fs_nodes
+        ALTER COLUMN bytes TYPE bigint,
+        ALTER COLUMN next_chunk TYPE bigint`,
+      `ALTER TABLE ${schema}.tenant_session_native_fs_chunks
+        ALTER COLUMN chunk_no TYPE bigint`,
+    ],
+  },
+  {
+    version: 10,
+    name: 'binary_native_posix_filesystem',
+    statements: nativePosixSchemaStatements,
+  },
+  {
+    version: 11,
+    name: 'exclusive_native_filesystem_admission',
+    statements: nativeFsAdmissionSchemaStatements,
   },
 ]
 

@@ -34,6 +34,7 @@ import type {
 import type { SessionRecord } from '../store/session.js'
 import { findPersistedToolResult } from '../store/log.js'
 import { messageOperationFingerprint } from '../message-operation-fingerprint.js'
+import { mountNativePosixSession, type NativePosixMount } from './native-posix-mount.js'
 import type {
   AgentRuntime,
   AgentRuntimeContext,
@@ -79,12 +80,15 @@ export type CopilotAgentRuntimeOptions = {
   runtimeEntryPath?: string
   backgroundCompactionThreshold?: number
   bufferExhaustionThreshold?: number
+  nativePosixRoot?: string
 }
 
 export class CopilotAgentRuntime implements AgentRuntime {
   readonly id = 'copilot' as const
   private client: CopilotClient | undefined
   private sdk: typeof import('@github/copilot-sdk') | undefined
+  private readonly nativeClients = new Map<string, { client: CopilotClient; mount: NativePosixMount }>()
+  private cliPath: string | undefined
   private readonly sessions = new Map<string, CopilotSession>()
   private readonly sessionSystemPrompts = new Map<string, string>()
   private readonly approvals = new Map<string, PendingApproval>()
@@ -121,6 +125,9 @@ export class CopilotAgentRuntime implements AgentRuntime {
       throw new Error('Copilot compaction thresholds must satisfy 0 < background < blocking <= 1')
     }
     this.compactionPolicy = copilotRuntimeCompactionPolicy(backgroundThreshold, blockingThreshold)
+    if (options.nativePosixRoot && !context.store.usesExternalAuthority) {
+      throw new Error('PG-backed native POSIX storage requires an external Session authority')
+    }
     this.status = options.enabled ? 'unavailable' : 'disabled'
     this.reason = options.enabled ? 'Copilot runtime is starting' : 'Copilot runtime is disabled'
   }
@@ -142,6 +149,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
             this.options.runtimeEntryPath ?? process.argv[1] ?? process.execPath,
             baseDirectory,
           )
+      this.cliPath = configuredCliPath ?? packagedCliPath
       this.client = new CopilotClient({
         mode: 'empty',
         connection: RuntimeConnection.forStdio({
@@ -149,7 +157,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
           ...(configuredCliPath || packagedCliPath ? { path: configuredCliPath ?? packagedCliPath } : {}),
         }),
         baseDirectory,
-        ...(this.context.store.usesExternalAuthority ? {
+        ...(this.context.store.usesExternalAuthority && !this.options.nativePosixRoot ? {
           sessionFs: { initialCwd: '/workspace', sessionStatePath: '/session-state', conventions: 'posix' as const },
         } : {}),
         ...(this.options.gitHubToken ? { gitHubToken: this.options.gitHubToken, useLoggedInUser: false } : {}),
@@ -210,6 +218,9 @@ export class CopilotAgentRuntime implements AgentRuntime {
     // fence every event from the SDK Session configured with this prompt.
     const turnSystemPrompt = record.config.systemPrompt ?? 'You are an AI coding agent.'
     const canCreateNativeSession = !record.state.messages.some((message) => message.role !== 'system')
+    if (this.options.nativePosixRoot && canCreateNativeSession) {
+      await this.context.store.initializeEmptyCopilotNativePosixSession(record.sessionId)
+    }
     const generation = (this.turnGenerations.get(record.sessionId) ?? 0) + 1
     const requestId = randomUUID()
     const timing = {
@@ -441,7 +452,16 @@ export class CopilotAgentRuntime implements AgentRuntime {
     this.contextEventTimes.delete(record.sessionId)
     this.contextTokenHighWater.delete(record.sessionId)
     this.activeTurnTimings.delete(record.sessionId)
-    await this.client?.deleteSession(record.externalSessionId ?? record.sessionId).catch(() => undefined)
+    if (this.options.nativePosixRoot) {
+      const native = this.nativeClients.get(record.sessionId)
+      if (native) {
+        await native.client.stop()
+        await native.mount.close()
+        this.nativeClients.delete(record.sessionId)
+      }
+    } else {
+      await this.client?.deleteSession(record.externalSessionId ?? record.sessionId).catch(() => undefined)
+    }
   }
 
   async close(): Promise<void> {
@@ -460,6 +480,15 @@ export class CopilotAgentRuntime implements AgentRuntime {
     this.activeTurnTimings.clear()
     if (this.client) await this.client.stop()
     this.client = undefined
+    const failures: unknown[] = []
+    for (const [sessionId, native] of this.nativeClients) {
+      try {
+        await native.client.stop()
+        await native.mount.close()
+        this.nativeClients.delete(sessionId)
+      } catch (error) { failures.push(error) }
+    }
+    if (failures.length) throw new AggregateError(failures, 'Failed to close native Copilot mounts')
   }
 
   private async ensureSession(
@@ -467,6 +496,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
     canCreateNativeSession = !record.state.messages.some((message) => message.role !== 'system'),
   ): Promise<CopilotSession> {
     const effectivePrompt = record.config.systemPrompt ?? 'You are an AI coding agent.'
+    await this.nativeClients.get(record.sessionId)?.mount.assertReady()
     const existing = this.sessions.get(record.sessionId)
     if (existing && this.sessionSystemPrompts.get(record.sessionId) === effectivePrompt) return existing
     if (existing) {
@@ -480,9 +510,39 @@ export class CopilotAgentRuntime implements AgentRuntime {
       throw new Error(this.reason ?? 'Copilot runtime is unavailable')
     }
     const config = this.sessionConfig(record, model)
+    let client = this.client
+    if (this.options.nativePosixRoot) {
+      let native = this.nativeClients.get(record.sessionId)
+      if (!native) {
+        await this.context.assertSessionEffectOwner?.(record.sessionId)
+        const mount = await mountNativePosixSession({
+          root: this.options.nativePosixRoot,
+          sessionId: record.externalSessionId ?? record.sessionId,
+          scope: `${this.options.sessionsDir}\0${record.sessionId}`,
+          fs: this.context.store.copilotNativePosixSessionFs(record.sessionId),
+          onError: error => this.context.broadcast.onError(record.sessionId,
+            error instanceof Error ? error.message : String(error)),
+        })
+        const connection = this.sdk!.RuntimeConnection.forStdio({
+          args: ['--no-remote-export'], ...(this.cliPath ? { path: this.cliPath } : {}),
+        })
+        const dedicatedClient = new this.sdk!.CopilotClient({
+          mode: 'empty', connection, baseDirectory: mount.baseDirectory,
+          ...(this.options.gitHubToken ? { gitHubToken: this.options.gitHubToken, useLoggedInUser: false } : {}),
+        })
+        try { await dedicatedClient.start() } catch (error) {
+          await dedicatedClient.stop()
+          await mount.close()
+          throw error
+        }
+        native = { client: dedicatedClient, mount }
+        this.nativeClients.set(record.sessionId, native)
+      }
+      client = native.client
+    }
     let session: CopilotSession
     try {
-      session = await this.client.resumeSession(record.externalSessionId ?? record.sessionId, {
+      session = await client.resumeSession(record.externalSessionId ?? record.sessionId, {
         ...config,
         continuePendingWork: false,
       })
@@ -492,7 +552,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
       if (this.context.store.usesExternalAuthority && !canCreateNativeSession) {
         throw new Error('Copilot native continuation could not be resumed; refusing to replace persisted conversation with an empty SDK session', { cause: error })
       }
-      session = await this.client.createSession({
+      session = await client.createSession({
         ...config,
         sessionId: record.externalSessionId ?? record.sessionId,
       })
@@ -523,7 +583,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
     const workingDirectory = join(this.options.sessionsDir, '..')
     return {
       clientName: 'agent-runlab',
-      ...(this.context.store.usesExternalAuthority ? {
+      ...(this.context.store.usesExternalAuthority && !this.options.nativePosixRoot ? {
         createSessionFsProvider: () => this.context.store.copilotSessionFs(record.sessionId),
       } : {}),
       ...(model ? { model } : {}),

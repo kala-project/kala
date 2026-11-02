@@ -2,6 +2,7 @@ import type { SessionFsProvider } from '@github/copilot-sdk'
 import type { EventEntry, RuntimeMetadataEntry } from '@agent-kernel/shared'
 
 import type { ParsedHistory, SessionOperationMatch } from './log.js'
+import type { NativePosixFileSystem } from './native-posix-fs.js'
 
 export type PersistedSessionDocument = Record<string, unknown> & {
   sessionId: string
@@ -28,6 +29,9 @@ export interface SessionAuthority {
   currentOwnerCacheKey?(sessionId: string): string | undefined
   /** Native SDK files are independent rows/chunks, never Session document snapshots. */
   nativeSessionFs?(sessionId: string): SessionFsProvider
+  /** Available only after explicit binary authority admission; never an empty-tree fallback. */
+  nativePosixSessionFs?(sessionId: string): NativePosixFileSystem
+  initializeEmptyNativePosixSession?(sessionId: string): Promise<void>
   load(sessionId: string): Promise<PersistedSessionDocument | undefined>
   mutate(sessionId: string, mutation: SessionAuthorityMutation): Promise<PersistedSessionDocument | undefined>
   create(

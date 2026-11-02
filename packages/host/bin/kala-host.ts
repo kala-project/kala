@@ -70,6 +70,7 @@ import {
 import { startHostServer } from '../src/server.js'
 import { selectPortableInstallation } from '../src/store/portable-installation.js'
 import { SqliteSessionAuthority } from '../src/store/sqlite-session-authority.js'
+import { nativeFsLimitsFromEnv } from '../src/store/native-session-fs.js'
 import { SqliteMessageQueueStore } from '../src/store/sqlite-message-queue.js'
 import { SqliteLocalObjects } from '../src/store/sqlite-local-objects.js'
 import { SqliteSessionArtifactStore } from '../src/store/sqlite-session-artifact-store.js'
@@ -169,6 +170,7 @@ async function main(): Promise<void> {
     printVersion()
     return
   }
+  const nativeFsLimits = nativeFsLimitsFromEnv(process.env)
 
   const deployment = loadProductDeploymentConfig({
     configPath: process.env.KALA_DEPLOYMENT_CONFIG,
@@ -197,7 +199,7 @@ async function main(): Promise<void> {
     throw new Error('Portable SQLite fresh installation is only valid for the Portable product')
   }
   const portableDatabasePath = join(stateRoot, 'state.sqlite')
-  const sqliteSessions = portableAuthority === 'sqlite' ? new SqliteSessionAuthority(portableDatabasePath) : undefined
+  const sqliteSessions = portableAuthority === 'sqlite' ? new SqliteSessionAuthority(portableDatabasePath, { nativeFsLimits }) : undefined
   const sqliteQueue = portableAuthority === 'sqlite' ? new SqliteMessageQueueStore(portableDatabasePath) : undefined
   const localObjects = portableAuthority === 'sqlite' ? new SqliteLocalObjects(stateRoot) : undefined
   const sqliteArtifacts = localObjects ? new SqliteSessionArtifactStore(stateRoot, { objects: localObjects }) : undefined

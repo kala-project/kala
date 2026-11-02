@@ -58,18 +58,18 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
   it('migrates from zero idempotently, then supports core DML while rejecting Runtime DDL', async () => {
     await expect(migratePostgres({ connectionString: adminUrl })).resolves.toMatchObject({
       previousVersion: 0,
-      currentVersion: 8,
-      appliedVersions: [1, 2, 3, 4, 5, 6, 7, 8],
+      currentVersion: 11,
+      appliedVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
     })
     await expect(migratePostgres({ connectionString: adminUrl })).resolves.toMatchObject({
-      previousVersion: 8,
-      currentVersion: 8,
+      previousVersion: 11,
+      currentVersion: 11,
       appliedVersions: [],
     })
 
     const admin = new Pool({ connectionString: adminUrl })
     const tables = await admin.query("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")
-    expect(tables.rows.map((row) => row.tablename)).toHaveLength(27)
+    expect(tables.rows.map((row) => row.tablename)).toHaveLength(31)
     expect(tables.rows.map((row) => row.tablename)).toEqual(expect.arrayContaining([
       'tenant_object_capacity_accounts',
       'tenant_object_capacity_allocations',
@@ -79,6 +79,10 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
       'tenant_session_native_fs_usage',
       'tenant_session_native_fs_nodes',
       'tenant_session_native_fs_chunks',
+      'tenant_session_native_posix_usage',
+      'tenant_session_native_posix_nodes',
+      'tenant_session_native_posix_blocks',
+      'tenant_session_native_fs_admission',
       'tenant_agent_prompt_settings',
     ]))
     await admin.query(`CREATE ROLE kala_runtime LOGIN PASSWORD '${runtimePassword.replaceAll("'", "''")}'`)
@@ -113,7 +117,7 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
     await reader.end()
 
     const runtime = new Pool({ connectionString: runtimeUrl })
-    await expect(assertPostgresSchemaCurrent(runtime)).resolves.toBe(8)
+    await expect(assertPostgresSchemaCurrent(runtime)).resolves.toBe(11)
     await expect(runtime.query('SELECT * FROM tenant_runtime_unit_protocol_gates')).resolves.toMatchObject({ rowCount: 0 })
     await expect(runtime.query(`INSERT INTO tenant_runtime_unit_protocol_gates
       (organization_id, unit_id, feature_version, barrier_generation) VALUES ('org', 'unit', 1, 1)`))
@@ -135,6 +139,14 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
     await native.writeFile('/session-state/events.jsonl', 'operator-migrated native DML\n')
     await native.appendFile('/session-state/events.jsonl', 'append without DDL\n')
     await expect(native.readFile('/session-state/events.jsonl')).resolves.toBe('operator-migrated native DML\nappend without DDL\n')
+    const counters = new Pool({ connectionString: runtimeUrl })
+    await counters.query(`UPDATE tenant_session_native_fs_usage SET total_bytes = 3221225472
+      WHERE tenant_id = 'org_native' AND session_id = 'native_dml'`)
+    await native.appendFile('/session-state/events.jsonl', 'beyond former 32-bit accounting\n')
+    await expect(counters.query(`SELECT total_bytes FROM tenant_session_native_fs_usage
+      WHERE tenant_id = 'org_native' AND session_id = 'native_dml'`))
+      .resolves.toMatchObject({ rows: [{ total_bytes: String(3221225472 + Buffer.byteLength('beyond former 32-bit accounting\n')) }] })
+    await counters.end()
     await nativeAuthority.requestDeletion('native_dml')
     await nativeAuthority.delete('native_dml')
 

@@ -14,32 +14,61 @@ export type NativeFsRequest =
 
 /** SQLite executes the complete plan synchronously; PG awaits it in one fenced transaction. */
 export type NativeFsPlan = Generator<NativeFsQuery, unknown, NativeFsQueryResult>
-export const MAX_NATIVE_SESSION_BYTES = 256 * 1024 * 1024
-export const MAX_NATIVE_FILE_BYTES = 128 * 1024 * 1024
-const MAX_NODES = 10_000
+export type NativeFsLimits = {
+  /** Undefined or zero means no administrator-imposed quota. */
+  maxSessionBytes?: number
+  maxFileBytes?: number
+  maxNodes?: number
+}
 const CHUNK_CHARACTERS = 16 * 1024
+
+export function validateNativeFsLimits(limits: NativeFsLimits): Readonly<NativeFsLimits> {
+  for (const [name, value] of Object.entries(limits)) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
+      throw new TypeError(`${name} must be a non-negative safe integer; zero means unlimited`)
+    }
+  }
+  return Object.freeze({ ...limits })
+}
+
+export function nativeFsLimitsFromEnv(env: NodeJS.ProcessEnv): Readonly<NativeFsLimits> {
+  const read = (name: string): number | undefined => {
+    const value = env[name]
+    if (value === undefined) return undefined
+    if (!/^\d+$/u.test(value.trim()) || !Number.isSafeInteger(Number(value))) {
+      throw new TypeError(`${name} must be a non-negative safe integer; zero means unlimited`)
+    }
+    return Number(value)
+  }
+  return validateNativeFsLimits({
+    maxSessionBytes: read('KALA_NATIVE_FS_MAX_SESSION_BYTES'),
+    maxFileBytes: read('KALA_NATIVE_FS_MAX_FILE_BYTES'),
+    maxNodes: read('KALA_NATIVE_FS_MAX_NODES'),
+  })
+}
 
 type Node = { path: string; kind: 'file' | 'directory'; bytes: number; next_chunk: number; created_at: string; modified_at: string }
 
-export function nativeFsSchemaStatements(t: NativeFsTables): readonly string[] {
+export function nativeFsSchemaStatements(t: NativeFsTables, wideCounters = false): readonly string[] {
+  const integer = wideCounters ? 'BIGINT' : 'INTEGER'
   return [
     `CREATE TABLE IF NOT EXISTS ${t.usage} (
       tenant_id TEXT NOT NULL, session_id TEXT NOT NULL,
-      total_bytes INTEGER NOT NULL CHECK (total_bytes >= 0),
-      total_nodes INTEGER NOT NULL CHECK (total_nodes >= 0),
+      total_bytes ${integer} NOT NULL CHECK (total_bytes >= 0),
+      total_nodes ${integer} NOT NULL CHECK (total_nodes >= 0),
       PRIMARY KEY (tenant_id, session_id)
     )`,
     `CREATE TABLE IF NOT EXISTS ${t.nodes} (
       tenant_id TEXT NOT NULL, session_id TEXT NOT NULL, path TEXT NOT NULL,
       kind TEXT NOT NULL CHECK (kind IN ('file', 'directory')),
-      bytes INTEGER NOT NULL CHECK (bytes >= 0), next_chunk INTEGER NOT NULL CHECK (next_chunk >= 0),
+      bytes ${integer} NOT NULL CHECK (bytes >= 0), next_chunk ${integer} NOT NULL CHECK (next_chunk >= 0),
       created_at TEXT NOT NULL, modified_at TEXT NOT NULL,
       PRIMARY KEY (tenant_id, session_id, path),
       FOREIGN KEY (tenant_id, session_id) REFERENCES ${t.usage} (tenant_id, session_id) ON DELETE CASCADE
     )`,
     `CREATE TABLE IF NOT EXISTS ${t.chunks} (
       tenant_id TEXT NOT NULL, session_id TEXT NOT NULL, path TEXT NOT NULL,
-      chunk_no INTEGER NOT NULL CHECK (chunk_no >= 0), content TEXT NOT NULL,
+      chunk_no ${integer} NOT NULL CHECK (chunk_no >= 0), content TEXT NOT NULL,
       bytes INTEGER NOT NULL CHECK (bytes >= 0), sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
       PRIMARY KEY (tenant_id, session_id, path, chunk_no),
       FOREIGN KEY (tenant_id, session_id, path) REFERENCES ${t.nodes} (tenant_id, session_id, path) ON DELETE CASCADE ON UPDATE CASCADE
@@ -71,7 +100,7 @@ function* chunks(content: string): Generator<string> {
  * Append reads metadata only and INSERTs new immutable chunks; old native
  * history is never copied into Session projections or their audit events.
  */
-export function* nativeFsPlan(request: NativeFsRequest, t: NativeFsTables, tenantId: string, sessionId: string): NativeFsPlan {
+export function* nativeFsPlan(request: NativeFsRequest, t: NativeFsTables, tenantId: string, sessionId: string, limits: Readonly<NativeFsLimits> = {}): NativeFsPlan {
   const base = 'tenant_id = ? AND session_id = ?'
   const scope = [tenantId, sessionId]
   const p = pathKey(request.path)
@@ -80,9 +109,11 @@ export function* nativeFsPlan(request: NativeFsRequest, t: NativeFsTables, tenan
   if (!usage) fail('EIO', 'SDK native storage usage row is missing')
   let totalBytes = Number(usage.total_bytes), totalNodes = Number(usage.total_nodes)
   function account(bytes: number, nodes: number) {
+    const previousBytes = totalBytes, previousNodes = totalNodes
     totalBytes += bytes; totalNodes += nodes
     if (!Number.isSafeInteger(totalBytes) || !Number.isSafeInteger(totalNodes) || totalBytes < 0 || totalNodes < 0) fail('EIO', 'SDK native storage accounting is corrupt')
-    if (totalBytes > MAX_NATIVE_SESSION_BYTES || totalNodes > MAX_NODES) fail('ENOSPC', 'SDK native session storage quota exceeded')
+    if ((limits.maxSessionBytes && totalBytes > limits.maxSessionBytes && totalBytes > previousBytes)
+      || (limits.maxNodes && totalNodes > limits.maxNodes && totalNodes > previousNodes)) fail('ENOSPC', 'SDK native session storage quota exceeded')
   }
   function* get(path: string): Generator<NativeFsQuery, Node | undefined, NativeFsQueryResult> {
     if (path === '/') return { path, kind: 'directory', bytes: 0, next_chunk: 0, created_at: new Date(0).toISOString(), modified_at: new Date(0).toISOString() }
@@ -128,7 +159,6 @@ export function* nativeFsPlan(request: NativeFsRequest, t: NativeFsTables, tenan
     case 'readFile': {
       if (!entry) fail('ENOENT', 'SDK session file does not exist')
       if (entry.kind !== 'file') fail('EISDIR', 'SDK session path is a directory')
-      if (entry.bytes > MAX_NATIVE_FILE_BYTES) fail('EIO', 'SDK native file size exceeds supported limit')
       const result = yield { sql: `SELECT chunk_no, content, bytes, sha256 FROM ${t.chunks} WHERE ${base} AND path = ? ORDER BY chunk_no`, values: [...scope, p] }
       let size = 0
       const text: string[] = []
@@ -153,7 +183,7 @@ export function* nativeFsPlan(request: NativeFsRequest, t: NativeFsTables, tenan
       const added = Buffer.byteLength(request.content)
       const before = entry?.bytes ?? 0
       const after = (request.op === 'append' ? before : 0) + added
-      if (after > MAX_NATIVE_FILE_BYTES) fail('ENOSPC', 'SDK native file exceeds the supported 128 MiB limit')
+      if (limits.maxFileBytes && after > limits.maxFileBytes && after > before) fail('ENOSPC', 'SDK native file storage quota exceeded')
       yield* parents(p)
       account(after - before, entry ? 0 : 1)
       if (!entry) {

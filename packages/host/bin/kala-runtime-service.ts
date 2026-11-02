@@ -34,6 +34,7 @@ import { UnitResourceGovernor } from '../src/tenant-runtime/resource-governor.js
 import type { TenantRuntimeUnitId } from '../src/tenant-runtime/unit.js'
 import { createPostgresHotStateStore } from '../src/tenant-runtime/postgres-hot-state.js'
 import { PostgresSessionAuthority } from '../src/store/postgres-session-authority.js'
+import { nativeFsLimitsFromEnv, type NativeFsLimits } from '../src/store/native-session-fs.js'
 import { createPrivateCloudObjectStorage } from '../src/artifacts/private-cloud-storage.js'
 import { PostgresTenantStateStore, loadPostgresStateMasterKey } from '../src/tenant-runtime/postgres-state.js'
 import { PostgresMemoStore } from '../src/memo-store.js'
@@ -57,6 +58,7 @@ function required(name: string): string {
 }
 
 async function main(): Promise<void> {
+  const nativeFsLimits = nativeFsLimitsFromEnv(process.env)
   const experimentalStorage = await readExperimentalDockerStorageConfig()
   const sessionOwnershipFlag = process.env.KALA_RUNTIME_EXPERIMENTAL_SESSION_OWNERSHIP
   if (sessionOwnershipFlag !== undefined && sessionOwnershipFlag !== '1') {
@@ -164,9 +166,10 @@ async function main(): Promise<void> {
       })
     : undefined
   const catalogPath = process.env.KALA_RUNTIME_HOST_LLM_CATALOG_FILE?.trim()
-  const runtimeProvider = catalogPath
+  const runtimeCatalog = catalogPath ? await loadRuntimeProviderCatalog(catalogPath) : undefined
+  const runtimeProvider = runtimeCatalog
     ? await createRuntimeProviderRuntime(
-        await loadRuntimeProviderCatalog(catalogPath),
+        runtimeCatalog,
         new ExplicitLLMClientFactory(createConfiguredSecretResolver(process.env)
           ?? new FileSecretResolver(process.env.KALA_RUNTIME_HOST_SECRET_ROOT ?? '/run/kala-secrets')),
       )
@@ -271,7 +274,7 @@ async function main(): Promise<void> {
       }
       const persistentStorage = experimentalStorage && experimentalStateMasterKey && organizationId && placementLease
         ? await createExperimentalUnitStorage(experimentalStorage, organizationId, id, experimentalStateMasterKey,
-            placementLease, maxArtifactBytes, telemetry, sessionOwnership)
+            placementLease, maxArtifactBytes, telemetry, nativeFsLimits, sessionOwnership)
         : undefined
       const agentSettings = persistentStorage?.agentSettings
       let currentAgentSettings = persistentStorage?.initialAgentSettings
@@ -306,7 +309,11 @@ async function main(): Promise<void> {
           ? await Promise.all([persistentStorage.executorIdentityStore.snapshot(), persistentStorage.executorIdentityStore.inviteSnapshot()])
           : [[], []]
         return {
-          providers: [], defaultModel: runtimeProvider.defaultModel, hooks: [],
+          providers: runtimeCatalog?.providers.map(provider => ({
+            id: provider.id, label: provider.label ?? provider.id, wire: provider.wire, baseUrl: provider.baseUrl,
+            models: runtimeProvider.models.filter(model => model.providerId === provider.id),
+          })) ?? [],
+          defaultModel: runtimeProvider.defaultModel, hooks: [],
           versions: { host: packageJson.version, protocol: PROTOCOL_VERSION },
           agentModule: currentAgentModule().metadata,
           ...(prompt && agentSettings ? { agentPrompt: { ...prompt, configPath: agentSettings.configPath } } : {}),
@@ -534,6 +541,7 @@ async function createExperimentalUnitStorage(
   placementLease: RuntimeUnitPlacementLease,
   maxArtifactBytes: number,
   telemetry: OnlineTelemetry | undefined,
+  nativeFsLimits: Readonly<NativeFsLimits>,
   sessionOwnership?: RuntimeSessionOwnership,
 ) {
   const hotState = createPostgresHotStateStore({
@@ -632,6 +640,7 @@ async function createExperimentalUnitStorage(
     return {
       sessionAuthority: new PostgresSessionAuthority(hotState, organizationId, {
         schemaManagement: config.schemaManagement,
+        nativeFsLimits,
         ...(sessionOwnership ? {
           unitId,
           resourceOwnerForSession: (sessionId: string) => sessionOwnership.activeLease(sessionId),

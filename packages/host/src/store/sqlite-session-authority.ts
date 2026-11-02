@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite'
 import type { EventEntry, RuntimeMetadataEntry } from '@agent-kernel/shared'
 
 import type { ParsedHistory, SessionOperationMatch } from './log.js'
-import { createNativeSessionFsProvider, nativeFsPlan, nativeFsSchemaStatements, type NativeFsTables } from './native-session-fs.js'
+import { createNativeSessionFsProvider, nativeFsPlan, nativeFsSchemaStatements, validateNativeFsLimits, type NativeFsLimits, type NativeFsTables } from './native-session-fs.js'
 import {
   SessionDeletingError,
   type PersistedSessionDocument,
@@ -49,8 +49,11 @@ type EventRow = {
  */
 export class SqliteSessionAuthority implements SessionAuthority {
   #database?: DatabaseSync
+  readonly #nativeFsLimits: Readonly<NativeFsLimits>
 
-  constructor(readonly databasePath: string) {}
+  constructor(readonly databasePath: string, options: { nativeFsLimits?: NativeFsLimits } = {}) {
+    this.#nativeFsLimits = validateNativeFsLimits(options.nativeFsLimits ?? {})
+  }
 
   async initialize(): Promise<void> {
     if (this.#database) return
@@ -106,7 +109,7 @@ export class SqliteSessionAuthority implements SessionAuthority {
         }
         database.prepare(`INSERT INTO ${NATIVE_FS_TABLES.usage} (tenant_id, session_id, total_bytes, total_nodes)
           VALUES ('', ?, 0, 0) ON CONFLICT (tenant_id, session_id) DO NOTHING`).run(sessionId)
-        const plan = nativeFsPlan(request, NATIVE_FS_TABLES, '', sessionId)
+        const plan = nativeFsPlan(request, NATIVE_FS_TABLES, '', sessionId, this.#nativeFsLimits)
         let next = plan.next()
         while (!next.done) {
           const statement = database.prepare(next.value.sql)

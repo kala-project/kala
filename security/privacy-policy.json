@@ -88,6 +88,7 @@
     "packages/dashboard/src/prototype/fonts/lato-semibold-latin.woff2"
   ],
   "ruleExceptions": [
+    { "rule": "privacy.personal-home", "path": "scripts/native-session-fs/kala-native-mount-broker.py", "contentSha256": "78f658d4c76b13fb71f7c3a1e6c65ee673127bd19e7232123beeffe27f53e501", "reason": "The fixed home/session-state suffix identifies synthetic SDK FUSE mounts under the operator-owned native root, not a personal home directory; exact bytes only." },
     { "rule": "privacy.non-example-email", "path": "pnpm-lock.yaml", "contentSha256": "6c0084e434cce8a734b2daea780518606a6d019f9c5acd7aa5e4266c28ea9084", "reason": "Historical third-party dependency deprecation notice cites its public maintainer contact; not project or user data." },
     { "rule": "privacy.non-example-email", "path": "pnpm-lock.yaml", "contentSha256": "d9fde70e390eaa2068ca13d487ef6020b2dd9d122249886e699de1a374e62063", "reason": "Historical third-party dependency deprecation notice cites its public maintainer contact; not project or user data." },
     { "rule": "privacy.non-example-email", "path": "pnpm-lock.yaml", "contentSha256": "8251bbb1d074838f92c1f6e110264cecd23e66fedac512d8c49a8bd837a4a5eb", "reason": "Historical third-party dependency deprecation notice cites its public maintainer contact; not project or user data." },

@@ -12,6 +12,7 @@ import { loadPersistedMessageQueueState, persistMessageQueueSnapshot } from '../
 import { createPostgresHotStateStore, LeaseFencedError, type PostgresHotStateStore } from '../tenant-runtime/postgres-hot-state.js'
 import { PostgresSessionAuthority, SessionDeletingError } from './postgres-session-authority.js'
 import { SessionNotFoundError, SessionStore } from './session.js'
+import { NATIVE_POSIX_BLOCK_BYTES } from './native-posix-fs.js'
 
 const execFileAsync = promisify(execFile)
 const integrationDescribe = process.env.KALA_RUN_POSTGRES_INTEGRATION === '1' ? describe : describe.skip
@@ -47,10 +48,10 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     await docker('rm', '--force', containerName).catch(() => undefined)
   }, 30_000)
 
-  function makeAuthority(owner: string): PostgresSessionAuthority {
+  function makeAuthority(owner: string, tenantId = 'tenant-a'): PostgresSessionAuthority {
     const hot = createPostgresHotStateStore({ connectionString, applicationName: `${testProject}-${owner}` })
     hotStores.push(hot)
-    return new PostgresSessionAuthority(hot, 'tenant-a', { ownerId: owner, leaseTtlMs: 2_000, leaseWaitMs: 5_000 })
+    return new PostgresSessionAuthority(hot, tenantId, { ownerId: owner, leaseTtlMs: 2_000, leaseWaitMs: 5_000 })
   }
 
   function makeStore(owner: string, deleteRegisteredArtifacts?: (sessionId: string) => Promise<void>): { store: SessionStore; root: string; authority: PostgresSessionAuthority } {
@@ -60,6 +61,143 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     const authority = makeAuthority(owner)
     return { store: new SessionStore(root, { authority, deleteRegisteredArtifacts }), root, authority }
   }
+
+  it('persists binary native ranges across clients without whole-file text encoding', async () => {
+    const writer = makeAuthority('posix-ranges', 'posix-a')
+    await writer.initialize()
+    await writer.create({ sessionId: 'posix-ranges', state: { cursor: 0 } })
+    await writer.initializeEmptyNativePosixSession('posix-ranges')
+    const native = writer.nativePosixSessionFs('posix-ranges')
+    await native.mkdir('/checkpoints', 0o700)
+    await native.create('/checkpoints/events', 0o600)
+    const original = Buffer.alloc(NATIVE_POSIX_BLOCK_BYTES * 2 + 5, 0x81)
+    original[0] = 0; original[original.length - 1] = 0xff
+    await native.write('/checkpoints/events', 0, original)
+    await native.write('/checkpoints/events', NATIVE_POSIX_BLOCK_BYTES - 2, Buffer.from([0, 0xfe, 0xfd, 0]))
+    original.set([0, 0xfe, 0xfd, 0], NATIVE_POSIX_BLOCK_BYTES - 2)
+    await native.sync('/checkpoints/events')
+    const reader = makeAuthority('posix-ranges-reader', 'posix-a').nativePosixSessionFs('posix-ranges')
+    await expect(reader.read('/checkpoints/events', 0, original.length)).resolves.toEqual(original)
+    await expect(reader.read('/checkpoints/events', original.length, 100)).resolves.toEqual(Buffer.alloc(0))
+    await expect(reader.readdir('/checkpoints')).resolves.toEqual(['events'])
+    await expect(reader.read('/checkpoints/events', -1, 1)).rejects.toMatchObject({ code: 'EINVAL' })
+    await expect(reader.read('/checkpoints/events', 0, 1024 * 1024 + 1)).rejects.toMatchObject({ code: 'EINVAL' })
+    await expect(reader.stat('/../events')).rejects.toMatchObject({ code: 'EINVAL' })
+    const other = new PostgresSessionAuthority(writer.hotState, 'tenant-b')
+    await other.create({ sessionId: 'posix-ranges', state: { cursor: 0 } })
+    await other.initializeEmptyNativePosixSession('posix-ranges')
+    await expect(other.nativePosixSessionFs('posix-ranges').stat('/checkpoints')).rejects.toMatchObject({ code: 'ENOENT' })
+    await writer.requestDeletion('posix-ranges')
+    await expect(reader.read('/checkpoints/events', 0, 1)).rejects.toBeInstanceOf(SessionDeletingError)
+    await writer.delete('posix-ranges')
+    const { rows } = await writer.hotState.database.query(`SELECT count(*)::int AS count
+      FROM tenant_session_native_posix_blocks WHERE tenant_id='posix-a' AND session_id='posix-ranges'`)
+    expect(rows).toEqual([{ count: 0 }])
+  })
+
+  it('zeroes native gaps and truncated tails and atomically renames binary subtrees', async () => {
+    const authority = makeAuthority('posix-truncate', 'posix-a')
+    await authority.initialize()
+    await authority.create({ sessionId: 'posix-truncate', state: { cursor: 0 } })
+    await authority.initializeEmptyNativePosixSession('posix-truncate')
+    const native = authority.nativePosixSessionFs('posix-truncate')
+    await native.mkdir('/one', 0o700)
+    await native.create('/one/cache.db', 0o600)
+    await native.write('/one/cache.db', NATIVE_POSIX_BLOCK_BYTES + 2, Buffer.from([255]))
+    const initial = await native.read('/one/cache.db', 0, NATIVE_POSIX_BLOCK_BYTES + 3)
+    expect(initial.subarray(0, -1)).toEqual(Buffer.alloc(initial.length - 1))
+    expect(initial.at(-1)).toBe(255)
+    await native.truncate('/one/cache.db', NATIVE_POSIX_BLOCK_BYTES + 1)
+    await native.truncate('/one/cache.db', NATIVE_POSIX_BLOCK_BYTES + 4)
+    await expect(native.read('/one/cache.db', NATIVE_POSIX_BLOCK_BYTES, 4)).resolves.toEqual(Buffer.alloc(4))
+    await native.rename('/one', '/two')
+    await expect(native.stat('/one/cache.db')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(native.stat('/two/cache.db')).resolves.toMatchObject({ bytes: NATIVE_POSIX_BLOCK_BYTES + 4 })
+    await expect(native.remove('/two', true)).rejects.toMatchObject({ code: 'ENOTEMPTY' })
+    await native.create('/replacement', 0o600)
+    await native.write('/replacement', 0, Buffer.from('old'))
+    await native.rename('/two/cache.db', '/replacement')
+    await expect(native.read('/replacement', NATIVE_POSIX_BLOCK_BYTES, 4)).resolves.toEqual(Buffer.alloc(4))
+    await native.remove('/two', true)
+    await native.truncate('/replacement', 0)
+    await expect(native.read('/replacement', 0, 10)).resolves.toEqual(Buffer.alloc(0))
+    const { rows } = await authority.hotState.database.query(`SELECT total_bytes,total_nodes
+      FROM tenant_session_native_posix_usage WHERE tenant_id='posix-a' AND session_id='posix-truncate'`)
+    expect(rows).toEqual([{ total_bytes: '0', total_nodes: '1' }])
+  })
+
+  it('rolls native quotas back without losing committed bytes and detects block corruption', async () => {
+    const hot = createPostgresHotStateStore({ connectionString })
+    hotStores.push(hot)
+    const authority = new PostgresSessionAuthority(hot, 'posix-a', { nativeFsLimits: { maxSessionBytes: 4 } })
+    await authority.initialize()
+    await authority.create({ sessionId: 'posix-quota', state: { cursor: 0 } })
+    await authority.initializeEmptyNativePosixSession('posix-quota')
+    const native = authority.nativePosixSessionFs('posix-quota')
+    await native.create('/cache.db', 0o600)
+    await native.write('/cache.db', 0, Buffer.from([0, 1, 0xff, 3]))
+    await expect(native.write('/cache.db', 3, Buffer.from([1, 2]))).rejects.toMatchObject({ code: 'ENOSPC' })
+    await expect(native.read('/cache.db', 0, 8)).resolves.toEqual(Buffer.from([0, 1, 0xff, 3]))
+    await hot.database.query(`UPDATE tenant_session_native_posix_blocks SET sha256=repeat('0',64)
+      WHERE tenant_id='posix-a' AND session_id='posix-quota' AND path='/cache.db'`)
+    await expect(native.read('/cache.db', 0, 1)).rejects.toMatchObject({ code: 'EIO' })
+  })
+
+  it('freezes text writes during a recoverable native import and admits exactly one verified binary authority', async () => {
+    const authority = makeAuthority('posix-admission', 'posix-admission')
+    await authority.initialize()
+    const sessionId = 'imported'
+    await authority.create({ sessionId, state: { cursor: 42, messages: [{ role: 'user' }] } })
+    const text = authority.nativeSessionFs(sessionId)
+    await text.writeFile('/session-state/events.jsonl', 'legacy text recovery\n')
+    const native = authority.nativePosixSessionFs(sessionId)
+    await expect(native.create('/events.jsonl', 0o600)).rejects.toThrow('blocked by text')
+    await expect(authority.initializeEmptyNativePosixSession(sessionId)).rejects.toThrow('explicit native filesystem import')
+    await authority.beginNativePosixImport(sessionId, 'import-one')
+    await authority.beginNativePosixImport(sessionId, 'import-one')
+    await expect(authority.beginNativePosixImport(sessionId, 'import-two')).rejects.toThrow('conflicts')
+    await expect(text.appendFile('/session-state/events.jsonl', 'late')).rejects.toThrow('blocked by posix-import')
+    await expect(native.stat('/')).rejects.toThrow('blocked by posix-import')
+    await expect(authority.nativePosixSessionFs(sessionId, { importId: 'import-two' }).stat('/')).rejects.toThrow('blocked')
+    const importer = authority.nativePosixSessionFs(sessionId, { importId: 'import-one' })
+    await expect(authority.completeNativePosixImport(sessionId, 'import-one', 'a'.repeat(64))).rejects.toThrow('events.jsonl')
+    await importer.create('/events.jsonl', 0o600)
+    const bytes = Buffer.from([0, 255, 1, 128])
+    await importer.write('/events.jsonl', 0, bytes)
+    await expect(importer.read('/events.jsonl', 0, bytes.length)).resolves.toEqual(bytes)
+    await authority.completeNativePosixImport(sessionId, 'import-one', 'a'.repeat(64))
+    await authority.completeNativePosixImport(sessionId, 'import-one', 'a'.repeat(64))
+    await expect(authority.completeNativePosixImport(sessionId, 'import-one', 'b'.repeat(64))).rejects.toThrow('blocked')
+    await expect(importer.write('/events.jsonl', 0, Buffer.from('stale importer'))).rejects.toThrow('blocked by posix')
+    await expect(native.read('/events.jsonl', 0, bytes.length)).resolves.toEqual(bytes)
+    await expect(text.readFile('/session-state/events.jsonl')).rejects.toThrow('blocked by posix')
+    const recovery = await authority.hotState.database.query(`SELECT content FROM tenant_session_native_fs_chunks
+      WHERE tenant_id=$1 AND session_id=$2`, ['posix-admission', sessionId])
+    expect(recovery.rows.map(row => row.content).join('')).toBe('legacy text recovery\n')
+    await authority.requestDeletion(sessionId)
+    await authority.delete(sessionId)
+    const admission = await authority.hotState.database.query(`SELECT 1 FROM tenant_session_native_fs_admission
+      WHERE tenant_id=$1 AND session_id=$2`, ['posix-admission', sessionId])
+    expect(admission.rows).toEqual([])
+  })
+
+  it('applies local cleanup leases and quarantine guards to binary native files', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kala-posix-cleanup-'))
+    roots.push(root)
+    const authority = makeAuthority('posix-cleanup', 'posix-a')
+    const store = new SessionStore(join(root, 'sessions'), { authority })
+    const record = await store.create({ sessionId: 'posix-cleanup', agentRuntime: 'copilot', config })
+    await authority.initializeEmptyNativePosixSession(record.sessionId)
+    const native = store.copilotNativePosixSessionFs(record.sessionId)
+    await native.create('/cache.db', 0o600)
+    await native.write('/cache.db', 0, Buffer.from([0, 255]))
+    await store.withStorageMutationLease([record.sessionId], async () => {
+      await expect(native.write('/cache.db', 0, Buffer.from([1]))).rejects.toThrow('locked for storage cleanup')
+    })
+    await expect(native.read('/cache.db', 0, 2)).resolves.toEqual(Buffer.from([0, 255]))
+    store.installStorageTombstones([record.sessionId])
+    await expect(native.read('/cache.db', 0, 2)).rejects.toThrow('quarantined')
+  })
 
   it('recovers committed state in a new process without creating Session JSONL directories', async () => {
     const first = makeStore('recovery-writer')
@@ -81,6 +219,27 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     expect(await second.store.listSessionIdsForOrganization('org-a')).toEqual(['recovery-session'])
     expect((await second.store.listSummaries())[0]).toMatchObject({ sessionId: 'recovery-session', eventCount: 1 })
     expect(existsSync(second.root)).toBe(false)
+  })
+
+  it('preserves NUL and lone surrogate tool text in projections, audit replay and extracted history', async () => {
+    const authority = makeAuthority('binary-tool-text', 'binary-tool-text')
+    await authority.initialize()
+    const text = 'binary\0tool\ud800output\udfff🙂'
+    const sessionId = 'binary-tool-text'
+    await authority.create({ sessionId, state: { cursor: 0 }, config: { prompt: text } })
+    const entry = { kind: 'runtime_metadata', sessionId, ts: new Date().toISOString(),
+      action: 'copilot.user_message', payload: { text, operationId: 'binary-text-operation' } } as const
+    await authority.mutate(sessionId, { mutationId: 'binary-text', eventType: 'session.runtime_projection',
+      entry, apply: current => current && { ...current, output: text } })
+    await expect(authority.load(sessionId)).resolves.toMatchObject({ output: text })
+    await expect(authority.findOperation(sessionId, 'binary-text-operation')).resolves.toMatchObject({ text })
+    await expect(authority.findLatestRuntimeMetadata(sessionId, entry.action)).resolves.toEqual(entry)
+    expect((await authority.readHistory(sessionId)).runtimeMetadata).toEqual([entry])
+    await authority.hotState.database.query(`DELETE FROM tenant_session_latest_projection
+      WHERE tenant_id=$1 AND session_id=$2`, ['binary-tool-text', sessionId])
+    await expect(authority.load(sessionId)).resolves.toMatchObject({ output: text, config: { prompt: text } })
+    await expect(authority.mutate(sessionId, { mutationId: 'binary-text', eventType: 'session.runtime_projection',
+      entry, apply: current => current && { ...current, output: text } })).resolves.toMatchObject({ output: text })
   })
 
   it('replays delta audit history in another client when the latest projection is missing', async () => {
