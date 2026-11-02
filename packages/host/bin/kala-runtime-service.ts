@@ -47,6 +47,7 @@ import { loadOrCreateVapidKeys } from '../src/push/vapid.js'
 import { PostgresWorkspaceAliasStore } from '../src/store/postgres-workspace-alias.js'
 import { PostgresExecutorInstallationStore } from '../src/store/postgres-executor-installation.js'
 import { PostgresExecutorIdentityStore } from '../src/store/postgres-executor-identity.js'
+import { isPublicExecutorInstallAssetRequest } from '../src/http/executor-installation-routes.js'
 import { initializePrivateCloudExperimentalStorageSchema } from '../src/store/postgres-private-cloud-storage.js'
 import { checkPostgresSchemaVersion, initializeExperimentalRuntimeResourceOwnershipSchema, type PostgresSchemaManagement } from '../src/postgres-migrations.js'
 import { assertPostgresInstallationClaim, assertS3InstallationClaim, createPostgresClaimPool, createS3ClaimClient } from '../src/storage/fresh-install-claim.js'
@@ -196,12 +197,6 @@ async function main(): Promise<void> {
   // Anonymous downloads must never be bound to whichever organization happens
   // to be active. This reserved unit exposes only shared, read-only installers.
   const publicInstallerUnitId = 'public-installer'
-  const isPublicInstallerRequest = (request: import('node:http').IncomingMessage): boolean => {
-    const path = (request.url ?? '').split('?', 1)[0] ?? ''
-    return (request.method === 'GET' || request.method === 'HEAD')
-      && (path === '/install' || path === '/install.ps1' || path === '/install/invite.ps1'
-        || path.startsWith('/install/assets/') || path.startsWith('/release-assets/'))
-  }
   const tlsPaths = [
     process.env.KALA_RUNTIME_TLS_KEY_FILE,
     process.env.KALA_RUNTIME_TLS_CERT_FILE,
@@ -232,7 +227,7 @@ async function main(): Promise<void> {
     } : {}),
     resolveUnitId: (request) => {
       const value = request.headers['x-agent-runlab-runtime-unit']
-      if (value === publicInstallerUnitId) return releaseAssetsDir && isPublicInstallerRequest(request) ? value : undefined
+      if (value === publicInstallerUnitId) return releaseAssetsDir && isPublicExecutorInstallAssetRequest(request) ? value : undefined
       return typeof value === 'string' ? value : undefined
     },
     factory: async (id) => {

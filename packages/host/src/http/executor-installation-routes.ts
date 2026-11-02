@@ -10,6 +10,13 @@ import type { ExecutorIdentityStorage } from '../store/executor-identity.js'
 import { claimRoute } from './routes.js'
 import { validatedPublicOrigin } from './public-access-gate.js'
 
+export function isPublicExecutorInstallAssetRequest(request: Pick<IncomingMessage, 'method' | 'url'>): boolean {
+  const path = (request.url ?? '').split('?', 1)[0] ?? ''
+  return (request.method === 'GET' || request.method === 'HEAD')
+    && (path === '/install' || path === '/install.ps1' || path === '/install/invite.sh' || path === '/install/invite.ps1'
+      || path.startsWith('/install/assets/') || path.startsWith('/release-assets/'))
+}
+
 export function attachExecutorInstallationRoutes(server: HttpServer, options: {
   store: ExecutorInstallationStorage
   identities?: ExecutorIdentityStorage

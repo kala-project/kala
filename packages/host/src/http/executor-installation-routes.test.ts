@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { attachExecutorInstallationRoutes } from './executor-installation-routes.js'
+import { attachExecutorInstallationRoutes, isPublicExecutorInstallAssetRequest } from './executor-installation-routes.js'
 import { ExecutorInstallationStore } from '../store/executor-installation.js'
 import { ExecutorIdentityStore } from '../store/executor-identity.js'
 
@@ -13,6 +13,17 @@ const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh'
 const hasPowerShell = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'], { encoding: 'utf8' }).status === 0
 
 describe('executor installation routes', () => {
+  it('routes read-only invite bootstraps through the shared installer Unit, not tenant or claim paths', () => {
+    for (const url of ['/install', '/install.ps1', '/install/invite.sh', '/install/invite.ps1', '/install/assets/run.sh', '/release-assets/SHA256SUMS']) {
+      expect(isPublicExecutorInstallAssetRequest({ method: 'GET', url })).toBe(true)
+      expect(isPublicExecutorInstallAssetRequest({ method: 'HEAD', url })).toBe(true)
+      expect(isPublicExecutorInstallAssetRequest({ method: 'POST', url })).toBe(false)
+    }
+    for (const url of ['/install/session', '/install/invite.sh/other', '/auth/executor-invites', '/api/executor-installs']) {
+      expect(isPublicExecutorInstallAssetRequest({ method: 'GET', url })).toBe(false)
+    }
+  })
+
   const servers: ReturnType<typeof createServer>[] = []
   afterEach(async () => { await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve())))) })
 
