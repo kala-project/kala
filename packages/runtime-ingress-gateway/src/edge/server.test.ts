@@ -55,9 +55,14 @@ describe('Private Cloud edge request path', () => {
       expect(request.headers['x-api-key']).toBe('protected-aspire-key')
       if (fail) { response.writeHead(503); response.end(); return }
       response.setHeader('content-type', 'application/json')
-      response.end(JSON.stringify(request.url?.endsWith('/resources')
+      const body = JSON.stringify(request.url?.endsWith('/resources')
         ? [{ name: 'kala-runtime', hasLogs: true, hasMetrics: true, hasTraces: true }]
-        : { totalCount: 0, data: {} }))
+        : { totalCount: 0, data: {} })
+      if (request.url?.includes('/spans?')) {
+        setTimeout(() => response.end(body), 3_200)
+      } else {
+        response.end(body)
+      }
     })
     await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
     running.push({ close: () => new Promise<void>(resolve => upstream.close(() => resolve())) })
@@ -84,6 +89,7 @@ describe('Private Cloud edge request path', () => {
     expect((await fetch(`${origin}/organization/observability`, { method: 'POST', headers })).status).toBe(405)
     fail = true
     expect((await fetch(`${origin}/organization/observability`, { headers })).status).toBe(503)
+    await vi.waitFor(() => expect(reads).toBe(6))
     const findAccess = organizations.findAccess.bind(organizations)
     const roleOverride = vi.spyOn(organizations, 'findAccess').mockImplementation(async identity => {
       const access = await findAccess(identity)

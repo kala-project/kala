@@ -945,7 +945,8 @@ export async function startRuntimeIngressGateway(options: {
         const snapshot: OperatorObservabilitySnapshot = await loadOperatorObservability(async path => {
           const upstream = await requestRuntime(observation.origin, `/api/telemetry/${path}`, 'GET',
             { 'x-api-key': observation.apiKey }, undefined, undefined,
-            { signal: AbortSignal.timeout(3_000), maxResponseBytes: 2_097_152 })
+            // SQLite trace queries scan retained history, even with a small result limit.
+            { signal: AbortSignal.timeout(10_000), maxResponseBytes: 2_097_152 })
           if (upstream.status !== 200) throw new Error('observability_upstream_unavailable')
           return JSON.parse(upstream.body.toString('utf8')) as unknown
         })
