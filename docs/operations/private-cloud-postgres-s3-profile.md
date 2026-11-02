@@ -95,3 +95,48 @@ The Runtime service injects a control-authority client into each Unit. Set `KALA
 The Gateway may start after Runtime readiness. Missing/unavailable authority must retain claims rather than falsely mark them failed, and pending queue work is checked again before model/Shell dispatch. An unavailable pre-dispatch check releases its non-executed claim and enters a bounded local retry pass; explicit denial leaves the accepted operation blocked for inspection/Stop rather than changing identity. Already-started effects keep the existing unknown/receipt policy, not this pre-dispatch retry policy. Browser logout alone is not schedule revocation; current principal/Organization authority is what matters.
 
 Delegated queue content is immutable. Only its original principal can edit/resume a schedule; Owner/Admin can pause/delete another principal's definition but cannot rewrite or resume it under that identity. Create a new definition to delegate your own authority. Old scheduled queue entries without durable attribution fail closed and need explicit inspection/Stop/recreation, never guessed attribution. Versioned persisted modes and metadata envelope v4 make older readers reject newly delegated work instead of ignoring its authorization field. Drain/upgrade all old scheduling replicas before enabling the policy; do not roll back while delegated work is pending. This is Organization/principal enforcement, **not** the still-unimplemented end-to-end Workspace grant and broadcast/list isolation capability.
+
+
+## External secret references (source-only, opt-in)
+
+The [deployment-mode contract](../architecture/deployment-mode-contract.md) is the secret-lifecycle SoT. Runtime and Gateway now share a **Node-only** `@agent-kernel/shared/secret-resolver` entry point. This is not a new secret store and does not provision OpenBao, an issuer, workload policies or HA. The stock Compose evaluation profiles still copy local bootstrap files; they do not automatically forward the following variables from a host environment file. Inject them into the actual workload through operator-owned manifests/overrides. Existing installations are unchanged.
+
+Select `KALA_SECRET_RESOLVER=openbao-jwt` with these operator-controlled values:
+
+| Variable | Meaning |
+|---|---|
+| `KALA_OPENBAO_ADDR` | Explicit HTTPS origin, with no credentials, path, query or fragment |
+| `KALA_OPENBAO_AUTH_MOUNT` | Single-segment JWT auth mount, for example `workload` |
+| `KALA_OPENBAO_ROLE` | Workload-specific JWT role, not a user-selected role |
+| `KALA_OPENBAO_JWT_FILE` | Read-only projected JWT supplied and rotated by the workload issuer/platform |
+| `KALA_OPENBAO_KV_MOUNT` | Fixed single-segment KV-v2 mount, for example `kala` |
+
+Use normal TLS verification; a private CA may be supplied by Node's `NODE_EXTRA_CA_CERTS` at process startup. Never disable certificate validation. `KALA_OPENBAO_ALLOW_LOOPBACK_HTTP=1` permits only explicit loopback HTTP for isolated evaluation and must not be used as a production transport setting. No static OpenBao root token or long-lived service token is accepted by this adapter. Use an operator-managed active/forwarding service endpoint: the client deliberately refuses leader/HTTP redirects, so an HA front door must not depend on the client following them.
+
+Configure the OpenBao JWT role with verified issuer/signing keys, bound audience and workload claims (including the intended service identity), a read-only policy restricted to that workload's required paths, and issued token TTL/max TTL of **at most 60 seconds**. The adapter rejects longer issued leases, caches only the short login token in memory, and never renews it or persists it. Each resolution rereads the projected JWT; a changed JWT forces a new login and an unreadable JWT denies resolution. Cached-token reuse ends before its lease/60-second bound. Revoke outstanding OpenBao tokens when immediate identity revocation is required; changing the issuer's grant alone does not invalidate already-issued tokens. Use separate Gateway/Runtime identities and policies. Auth mounts and KV mounts are fixed by the operator, not chosen by the reference.
+
+Provider catalogs retain their existing structure/model refs; change only the relevant `credentialRef` to `bao:providers/openai#apiKey`, for example. It reads field `apiKey` from the fixed mount's KV-v2 `providers/openai` path. Empty/malformed refs, traversal and missing/non-string fields fail closed. Selecting OpenBao does not enable mixed `file:`/`env:` refs or fallback to a local provider secret. Each new top-level LLM call reads the current value; an in-progress call/stream keeps its admitted credential and is not replayed for rotation. A denied read does not silently reauthenticate and dispatch; a later independent call may log in again if currently authorized.
+
+A minimal **operator-owned Provider-only** override for the existing Runtime service looks like this (supply a catalog containing `bao:` refs through the existing `KALA_PROVIDER_CATALOG_FILE` selection):
+
+```yaml
+services:
+  runtime-host:
+    environment:
+      KALA_SECRET_RESOLVER: openbao-jwt
+      KALA_OPENBAO_ADDR: https://secrets.example
+      KALA_OPENBAO_AUTH_MOUNT: workload
+      KALA_OPENBAO_KV_MOUNT: kala
+      KALA_OPENBAO_ROLE: kala-runtime
+      KALA_OPENBAO_JWT_FILE: /run/kala-identity/jwt
+    volumes:
+      - ${KALA_RUNTIME_IDENTITY_DIR:?operator-projected identity directory}:/run/kala-identity:ro
+```
+
+Mount the **directory**, not one immutable JWT inode, so atomic projection replacement is visible. A parallel `runtime-host-b` needs its own configured identity directory/role and the same resolver selection; do not assume the first service's override is inherited. This snippet is not a complete deployment, does not remove the evaluation init service's local-file prerequisites and has not been applied to an existing environment.
+
+For names already read through `readRequiredSecretEnv`, choose exactly one nonempty `NAME`, `NAME_FILE` or `NAME_REF`. `_REF` uses the selected resolver; missing selection or external failure never falls back to local values. In particular, Runtime's environment-based `KALA_RUNTIME_HOST_LLM_API_KEY_REF` also resolves per call. Runtime PG/S3 credentials, Gateway control-PG/Runtime-reader connection strings, OIDC client secret, ingress/session secret and routing-ticket key can be resolved at startup through their existing names plus `_REF`; clear the corresponding nonempty direct/`_FILE` setting in an override. A configured control-PG ref must not fall back to JSON control stores when resolution fails.
+
+These bootstrap consumers still capture values for their lifetime. Rotate them with coordinated drain/replacement, compatible peer credentials and health-check configuration; this work does not rotate existing DB pools/S3/OIDC clients or ingress/routing keys in place. TLS certificate paths and the Runtime state master-key file remain separate file/recovery boundaries, not generic `_REF` consumers. Preserve the correct state encryption key with the durable recovery set; replacing it is not credential rotation. Native SDK/third-party credentials outside this factory also retain their own lifecycle. Do not label the full installation file-free or secret-recoverable from this adapter alone.
+
+Resolution is bounded to five seconds, JWT input to 64 KiB, and each service response to 256 KiB; redirects are rejected. Denial, authority unavailability and configuration errors contain no external response body, JWT or secret value. No positive secret-value cache or automatic model retry is added. Source verification uses the fixed OpenBao 2.7.2 image in a random-name disposable dev container with synthetic identity/secret data and a local HTTP Provider fixture; it is not real OIDC/model/SDK, verified production TLS, OpenBao failover/unseal, backup/restore or performance acceptance. Run the opt-in case with `KALA_RUN_OPENBAO_INTEGRATION=1` and Host's `src/llm/openbao.integration.test.ts`; the container and tiny identity scratch are cleaned in `finally`.

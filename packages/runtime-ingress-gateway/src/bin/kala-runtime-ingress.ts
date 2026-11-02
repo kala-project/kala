@@ -123,12 +123,12 @@ async function main(): Promise<void> {
         ...(enterpriseSso ? { enterpriseSso } : {}),
       }
   const hostOrigin = await readRequiredSecretEnv('KALA_RUNTIME_HOST_ORIGIN')
-  const readerFile = process.env.KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING_FILE
-  const readerDirect = process.env.KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING
-  if (readerFile !== undefined && readerDirect !== undefined) {
-    throw new Error('Gateway Runtime reader connection string and its _FILE variant are mutually exclusive')
-  }
-  const runtimePlacementConfig = readExperimentalRuntimePlacementConfig(readerFile !== undefined
+  const readerConfigured = [
+    process.env.KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING,
+    process.env.KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING_FILE,
+    process.env.KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING_REF,
+  ].some((value) => Boolean(value?.trim()))
+  const runtimePlacementConfig = readExperimentalRuntimePlacementConfig(readerConfigured
     ? { ...process.env, KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING:
         await readRequiredSecretEnv('KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING') }
     : process.env)
@@ -138,6 +138,7 @@ async function main(): Promise<void> {
   const routingTicketConfigured = [
     process.env.KALA_INGRESS_RUNTIME_ROUTING_TICKET_KEY,
     process.env.KALA_INGRESS_RUNTIME_ROUTING_TICKET_KEY_FILE,
+    process.env.KALA_INGRESS_RUNTIME_ROUTING_TICKET_KEY_REF,
     process.env.KALA_INGRESS_RUNTIME_ROUTING_TICKET_AUDIENCE,
     process.env.KALA_INGRESS_RUNTIME_ROUTING_TICKET_MAX_TTL_MS,
   ].some((value) => Boolean(value?.trim()))

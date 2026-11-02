@@ -1,6 +1,8 @@
 import type { LLMAdapter } from './adapter.js'
 import { anthropicAdapter } from './anthropic.js'
 import { openaiAdapter } from './openai.js'
+import type { SecretResolver } from '@agent-kernel/shared/secret-resolver'
+export type { SecretResolver } from '@agent-kernel/shared/secret-resolver'
 
 export type LLMProviderConfig = {
   id: string
@@ -9,17 +11,23 @@ export type LLMProviderConfig = {
   baseUrl: string
   credentialRef: string
 }
-export interface SecretResolver { resolve(reference: string): Promise<string> }
 export interface LLMClientFactory { create(config: LLMProviderConfig): Promise<LLMAdapter> }
 
 export class ExplicitLLMClientFactory implements LLMClientFactory {
   constructor(private readonly secrets: SecretResolver) {}
   async create(config: LLMProviderConfig): Promise<LLMAdapter> {
-    const apiKey = await this.secrets.resolve(config.credentialRef)
-    if (!apiKey) throw new Error(`LLM credential reference could not be resolved: ${config.credentialRef}`)
-    return config.wire === 'anthropic'
+    const make = (apiKey: string) => config.wire === 'anthropic'
       ? anthropicAdapter({ apiKey, model: config.model, apiUrl: `${config.baseUrl.replace(/\/$/u, '')}/v1/messages` })
       : openaiAdapter({ apiKey, model: config.model, baseUrl: config.baseUrl })
+    const resolve = async (signal?: AbortSignal) => {
+      const value = await this.secrets.resolve(config.credentialRef, signal)
+      if (!value) throw new Error('LLM credential could not be resolved')
+      signal?.throwIfAborted()
+      return value
+    }
+    // Validate startup readiness, but never retain the resolved credential in the adapter.
+    const name = make(await resolve()).name
+    return { name, call: async (params) => make(await resolve(params.signal)).call(params) }
   }
 }
 

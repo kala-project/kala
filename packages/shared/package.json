@@ -45,6 +45,10 @@
       "types": "./dist/workspace-exec.d.ts",
       "import": "./dist/workspace-exec.js"
     },
+    "./secret-resolver": {
+      "types": "./dist/secret-resolver.d.ts",
+      "import": "./dist/secret-resolver.js"
+    },
     "./runtime-logger": {
       "types": "./dist/runtime-logger.d.ts",
       "import": "./dist/runtime-logger.js"

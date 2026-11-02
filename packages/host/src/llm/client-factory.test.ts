@@ -6,7 +6,7 @@ describe('ExplicitLLMClientFactory', () => {
     const resolve = vi.fn().mockResolvedValue('secret')
     const factory = new ExplicitLLMClientFactory({ resolve })
     const adapter = await factory.create({ id: 'p', wire: 'openai', model: 'm', baseUrl: 'http://provider/v1', credentialRef: 'ref' })
-    expect(resolve).toHaveBeenCalledWith('ref')
+    expect(resolve).toHaveBeenCalledWith('ref', undefined)
     expect(adapter.name).toBe('openai:m')
   })
 })

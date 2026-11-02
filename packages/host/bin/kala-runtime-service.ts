@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path'
 import process from 'node:process'
 
 import { AGENT_RUNTIME_CAPABILITIES, FULL_RUNTIME_CAPABILITIES, productVariant } from '@agent-kernel/shared'
+import { createConfiguredSecretResolver } from '@agent-kernel/shared/secret-resolver'
 
 import { createScheduledPrincipalAuthorizer } from '../src/scheduled-tasks/authorization.js'
 import { startLoopbackHostRuntimeUnit } from '../src/tenant-runtime/loopback-host-unit.js'
@@ -156,7 +157,8 @@ async function main(): Promise<void> {
   const runtimeProvider = catalogPath
     ? await createRuntimeProviderRuntime(
         await loadRuntimeProviderCatalog(catalogPath),
-        new ExplicitLLMClientFactory(new FileSecretResolver(process.env.KALA_RUNTIME_HOST_SECRET_ROOT ?? '/run/kala-secrets')),
+        new ExplicitLLMClientFactory(createConfiguredSecretResolver(process.env)
+          ?? new FileSecretResolver(process.env.KALA_RUNTIME_HOST_SECRET_ROOT ?? '/run/kala-secrets')),
       )
     : await createEnvironmentRuntimeProvider()
   const agentModule = resolveBuiltinAgentModule()
@@ -403,15 +405,15 @@ const EXPERIMENTAL_STORAGE_ENV = [
 async function readExperimentalDockerStorageConfig(): Promise<ExperimentalDockerStorageConfig | undefined> {
   const enabled = process.env[EXPERIMENTAL_STORAGE_FLAG]
   const configured = EXPERIMENTAL_STORAGE_ENV.some((name) => process.env[name] !== undefined)
-    || EXPERIMENTAL_STORAGE_SECRET_ENV.some((name) => process.env[name] !== undefined || process.env[`${name}_FILE`] !== undefined)
+    || EXPERIMENTAL_STORAGE_SECRET_ENV.some((name) => process.env[name] !== undefined || process.env[`${name}_FILE`] !== undefined || process.env[`${name}_REF`] !== undefined)
   if (enabled === undefined && !configured) return undefined
   if (enabled !== '1') {
     throw new Error(`${EXPERIMENTAL_STORAGE_FLAG}=1 is required when experimental DB/S3 storage is configured`)
   }
   const values = Object.fromEntries(EXPERIMENTAL_STORAGE_ENV.map((name) => [name, required(name)]))
-  const connectionString = await readRequiredExperimentalStorageSecret('KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING')
-  const accessKeyId = await readRequiredExperimentalStorageSecret('KALA_RUNTIME_EXPERIMENTAL_S3_ACCESS_KEY_ID')
-  const secretAccessKey = await readRequiredExperimentalStorageSecret('KALA_RUNTIME_EXPERIMENTAL_S3_SECRET_ACCESS_KEY')
+  const connectionString = await readRequiredSecretEnv('KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING')
+  const accessKeyId = await readRequiredSecretEnv('KALA_RUNTIME_EXPERIMENTAL_S3_ACCESS_KEY_ID')
+  const secretAccessKey = await readRequiredSecretEnv('KALA_RUNTIME_EXPERIMENTAL_S3_SECRET_ACCESS_KEY')
   const maxObjectBytes = Number(values.KALA_RUNTIME_EXPERIMENTAL_S3_MAX_OBJECT_BYTES)
   if (!Number.isSafeInteger(maxObjectBytes) || maxObjectBytes < 1) {
     throw new Error('KALA_RUNTIME_EXPERIMENTAL_S3_MAX_OBJECT_BYTES must be a positive safe integer')
@@ -443,13 +445,6 @@ async function readExperimentalDockerStorageConfig(): Promise<ExperimentalDocker
     stateMasterKeyFile: values.KALA_RUNTIME_EXPERIMENTAL_STATE_MASTER_KEY_FILE!,
     schemaManagement: schemaMode === 'versioned' ? 'external' : 'initialize',
   }
-}
-
-async function readRequiredExperimentalStorageSecret(name: typeof EXPERIMENTAL_STORAGE_SECRET_ENV[number]): Promise<string> {
-  if (process.env[name] !== undefined && process.env[`${name}_FILE`] !== undefined) {
-    throw new Error(`${name} and ${name}_FILE are mutually exclusive`)
-  }
-  return readRequiredSecretEnv(name)
 }
 
 async function trustedOrganizationId(catalog: RuntimeUnitMaterializationCatalog, id: TenantRuntimeUnitId): Promise<string> {
@@ -623,12 +618,11 @@ async function directoryBytes(paths: readonly string[]): Promise<number> {
 }
 
 async function createEnvironmentRuntimeProvider() {
-  const llmApiKey = await readRequiredSecretEnv('KALA_RUNTIME_HOST_LLM_API_KEY')
   const model = required('KALA_RUNTIME_HOST_LLM_MODEL')
   const wire = process.env.KALA_RUNTIME_HOST_LLM_WIRE ?? 'openai'
   if (wire !== 'openai' && wire !== 'anthropic') throw new Error('KALA_RUNTIME_HOST_LLM_WIRE must be openai or anthropic')
   const baseUrl = required('KALA_RUNTIME_HOST_LLM_BASE_URL')
-  const llm = await new ExplicitLLMClientFactory({ resolve: async () => llmApiKey }).create({ id: 'runtime-provider', wire, model, baseUrl, credentialRef: 'runtime-secret' })
+  const llm = await new ExplicitLLMClientFactory({ resolve: (_reference, signal) => readRequiredSecretEnv('KALA_RUNTIME_HOST_LLM_API_KEY', signal) }).create({ id: 'runtime-provider', wire, model, baseUrl, credentialRef: 'runtime-secret' })
   return { llm, models: [{ id: model, ref: model, providerId: wire, provider: wire, label: model }], defaultModel: model }
 }
 
