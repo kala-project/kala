@@ -238,14 +238,17 @@ async function main(): Promise<void> {
     if (!dedicated || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('invalid Dedicated observability origin')
   }
   const identityConsoleUrl = process.env.KALA_IDENTITY_CONSOLE_URL
-  const observabilityUrl = process.env.KALA_ASPIRE_DASHBOARD_URL ?? (observationOrigin ? 'http://127.0.0.1:18888' : undefined)
+  const observabilityUrl = process.env.KALA_ASPIRE_DASHBOARD_URL
   if (observabilityUrl) {
     const url = new URL(observabilityUrl)
     if (!dedicated || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('invalid Dedicated Aspire dashboard URL')
   }
+  const aspireTokenFile = process.env.KALA_ASPIRE_BROWSER_TOKEN_FILE
+  if (aspireTokenFile && (!dedicated || !observabilityUrl)) throw new Error('Aspire token access requires a Dedicated dashboard URL')
   const operatorServices = dedicated && (observabilityUrl || identityConsoleUrl) ? {
     ...(identityConsoleUrl ? { identityConsoleUrl } : {}),
     ...(observabilityUrl ? { observabilityUrl } : {}),
+    ...(aspireTokenFile ? { readObservabilityToken: () => readRequiredSecretEnv('KALA_ASPIRE_BROWSER_TOKEN') } : {}),
   } : undefined
   const gateway = await startRuntimeIngressGateway({
     port,

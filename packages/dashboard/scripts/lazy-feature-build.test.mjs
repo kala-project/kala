@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, rm, stat, symlink } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url'
 import test from 'node:test'
 import { JSDOM } from 'jsdom'
 import { lazyFeatureBuild } from './lazy-feature-build.mjs'
-import { buildSteps, inheritedEnvironment, systemdBudget } from './build.mjs'
+import { buildSteps, inheritedEnvironment, normalizePublishedPermissions, systemdBudget } from './build.mjs'
 
 const require = createRequire(import.meta.url)
 const viteRequire = createRequire(require.resolve('vite/package.json'))
@@ -27,6 +27,34 @@ test('build entry keeps sequential bounded steps and an invocation-only hard bud
   assert.ok(systemdBudget.includes('KillMode=control-group'))
   assert.ok(systemdBudget.includes('LimitCORE=0'))
   assert.deepEqual(inheritedEnvironment({ PRIVATE_TOKEN: 'never-on-command-line', 'invalid-name': 'ignored' }), ['--setenv=PRIVATE_TOKEN'])
+})
+
+test('published assets remain readable by a non-owner runtime after a private build umask', { skip: process.platform === 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kala-static-permissions-'))
+  try {
+    const icons = join(root, 'icons')
+    const logo = join(icons, 'octopus-web.svg')
+    await mkdir(icons, { mode: 0o700 })
+    await writeFile(logo, '<svg xmlns="http://www.w3.org/2000/svg"/>', { mode: 0o600 })
+    normalizePublishedPermissions(root)
+    assert.ok((await stat(root)).mode & 0o001)
+    assert.ok((await stat(icons)).mode & 0o001)
+    assert.ok((await stat(logo)).mode & 0o004)
+    assert.equal((await stat(logo)).mode & 0o022, 0)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('published permissions reject symlinks instead of changing files outside the output', { skip: process.platform === 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'kala-static-symlink-'))
+  try {
+    const output = join(root, 'dist')
+    const privateFile = join(root, 'private')
+    await mkdir(output)
+    await writeFile(privateFile, 'private', { mode: 0o600 })
+    await symlink(privateFile, join(output, 'asset'))
+    assert.throws(() => normalizePublishedPermissions(output), /Unsupported published asset/u)
+    assert.equal((await stat(privateFile)).mode & 0o777, 0o600)
+  } finally { await rm(root, { recursive: true, force: true }) }
 })
 
 test('real lazy ESM assets preserve Shiki languages/themes and Mermaid diagram imports', async () => {

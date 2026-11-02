@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AttachedExecutor, ExecutorMcpConfigureRequest, ManagedMcpServer } from '@agent-kernel/shared'
 
 import type { AuditEntry } from '../audit-log.js'
+import type { ExecutorMcpTarget } from '../connection/executor.js'
 import { attachMcpSettingsRoutes } from './mcp-settings-routes.js'
 
 describe('managed MCP settings routes', () => {
@@ -21,11 +22,12 @@ describe('managed MCP settings routes', () => {
     statusServers?: Array<{ name: string }>
     configureResult?: { ok: boolean; error?: string }
     trusted?: boolean
+    organizationId?: string
   } = {}) {
     const binding = options.binding ?? { id: 'inst-managed', workspaceId: 'ws-managed' }
     const executor = options.executor === undefined ? { workspaceId: binding.workspaceId, installId: binding.id } : options.executor
     const auditEntries: AuditEntry[] = []
-    const configureMcp = vi.fn(async (_workspaceId: string, _installId: string, _payload: ExecutorMcpConfigureRequest) => options.configureResult ?? { ok: true })
+    const configureMcp = vi.fn(async (_workspaceId: string, _target: ExecutorMcpTarget, _payload: ExecutorMcpConfigureRequest) => options.configureResult ?? { ok: true })
     const mcpConfigStatus = vi.fn(async () => ({ ok: true, servers: options.statusServers ?? [] }))
     const server = createServer()
     servers.push(server)
@@ -45,10 +47,12 @@ describe('managed MCP settings routes', () => {
           ...executor,
         } as AttachedExecutor] : [],
         hasTrustedManagedExecutor: (workspaceId, installId) => options.trusted !== false && workspaceId === binding.workspaceId && installId === binding.id,
+        hasTrustedWorkspaceExecutor: (workspaceId, executorId) => options.trusted !== false && workspaceId === executor?.workspaceId && executorId === 'exec-managed',
         configureMcp,
         mcpConfigStatus,
       },
       tenancy: options.tenancy ?? 'single-tenant',
+      ...(options.organizationId ? { organizationId: options.organizationId } : {}),
       ...(options.auth ? { auth: options.auth } : {}),
       audit: { log: (entry) => auditEntries.push(entry) },
     })
@@ -74,6 +78,26 @@ describe('managed MCP settings routes', () => {
     expect(configureMcp).not.toHaveBeenCalled()
     expect(mcpConfigStatus).not.toHaveBeenCalled()
   })
+
+  it('manages an organization-enrolled workspace without manufacturing a native installation', async () => {
+      const { url, mcpConfigStatus, configureMcp } = await start({ organizationId: 'org-a', executor: { workspaceId: 'ws-enrolled' } })
+      const headers = { 'x-agent-runlab-principal': 'owner', 'x-agent-runlab-organization-id': 'org-a', 'x-agent-runlab-organization-role': 'owner' }
+      expect((await fetch(`${url}/settings/mcp?workspaceId=ws-enrolled`, { headers })).status).toBe(200)
+      expect(mcpConfigStatus).toHaveBeenCalledWith('ws-enrolled', { executorId: 'exec-managed' }, expect.any(String))
+      expect((await fetch(`${url}/settings/mcp`, { method: 'PUT', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ workspaceId: 'ws-enrolled', servers: [] }) })).status).toBe(200)
+      expect(configureMcp).toHaveBeenCalledWith('ws-enrolled', { executorId: 'exec-managed' }, { requestId: expect.any(String), servers: [] })
+    })
+
+    it('rejects other organizations and untrusted sockets on the enrolled management path', async () => {
+      for (const trusted of [true, false]) {
+        const { url, mcpConfigStatus } = await start({ organizationId: 'org-a', executor: { workspaceId: 'ws-enrolled' }, trusted })
+        for (const organizationId of ['org-a', 'org-b']) {
+          const response = await fetch(`${url}/settings/mcp?workspaceId=ws-enrolled`, { headers: { 'x-agent-runlab-principal': 'owner', 'x-agent-runlab-organization-id': organizationId, 'x-agent-runlab-organization-role': 'owner' } })
+          expect(response.status).toBe(organizationId === 'org-b' ? 403 : trusted ? 200 : 409)
+        }
+        expect(mcpConfigStatus).toHaveBeenCalledTimes(trusted ? 1 : 0)
+      }
+    })
 
   it('requires owner or admin role for ingress authentication', async () => {
     const { url, mcpConfigStatus } = await start()

@@ -372,6 +372,7 @@ async function main(): Promise<void> {
         hooks: runtimeHooks.hooks,
         hookRunner: runtimeHooks.hookRunner,
         requireIngressIdentity: true,
+        ...(organizationId ? { executorManagementOrganizationId: organizationId } : {}),
         authorizeScheduledPrincipal: createScheduledPrincipalAuthorizer({
           origin: process.env.KALA_RUNTIME_AUTHORITY_ORIGIN,
           serviceSecret: ingressSecret,

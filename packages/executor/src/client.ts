@@ -148,13 +148,11 @@ export type ExecutorOptions = {
   receiptStorePath?: string | false
   networkPolicy?: import('@agent-kernel/shared').NetworkPolicy
   mcpServers?: readonly McpServerConfig[]
-  /** Capability supplied only by the CLI after parsing a native managed config. */
+  /** Capability supplied only by the CLI after parsing a private managed config. */
   managedMcpConfig?: {
     path: string
-    installationSource: 'dashboard-native'
-    installationId: string
     configurationSource: 'managed-config'
-  }
+  } & ({ installationSource: 'dashboard-native'; installationId: string } | { installationSource: 'private-cloud-invite' | 'enrolled-config'; workspaceId: string })
   mcpInitializeTimeoutMs?: number
   mcpCallTimeoutMs?: number
 }
@@ -530,10 +528,10 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
   const managedMcp = options.managedMcpConfig
   const dashboardMcpAllowed = Boolean(
     managedMcp &&
-    managedMcp.installationSource === 'dashboard-native' &&
     managedMcp.configurationSource === 'managed-config' &&
-    managedMcp.installationId.length > 0 &&
-    managedMcp.installationId === options.installId &&
+    (managedMcp.installationSource === 'dashboard-native'
+      ? managedMcp.installationId.length > 0 && managedMcp.installationId === options.installId
+      : (managedMcp.installationSource === 'private-cloud-invite' || managedMcp.installationSource === 'enrolled-config') && managedMcp.workspaceId.length > 0 && managedMcp.workspaceId === options.workspaceId) &&
     managedMcp.path.length > 0,
   )
   let mcpConfigQueue: Promise<void> = Promise.resolve()

@@ -211,6 +211,30 @@ describe('ExecutorRegistry', () => {
     await expect(configure).resolves.toEqual({ ok: true })
   })
 
+  it('revalidates enrolled workspace authority and rejects stale MCP replies and foreign targets', async () => {
+    let authorized = true
+    const registry = createExecutorRegistry(fakeIo() as never, makeResolver(), 5_000, undefined, 0, async () => authorized)
+    const socket = makeFakeSocket('enrolled')
+    socket.data.executorIdentity = { accepted: true, workspaceId: 'ws-enrolled' }
+    registry.attach(socket as never, announceOf('enrolled', 'ws-enrolled'))
+    expect(registry.hasTrustedWorkspaceExecutor('ws-enrolled', 'other')).toBe(false)
+    expect(registry.hasTrustedWorkspaceExecutor('foreign', 'enrolled')).toBe(false)
+    expect(registry.hasTrustedWorkspaceExecutor('ws-enrolled', 'enrolled')).toBe(true)
+    const status = registry.mcpConfigStatus('ws-enrolled', { executorId: 'enrolled' }, 'read')
+    await vi.waitFor(() => expect(socket.emitted).toHaveLength(1))
+    socket.emitted[0]!.ack!({ ok: true, servers: [] } as never)
+    await expect(status).resolves.toEqual({ ok: true, servers: [] })
+    const update = registry.configureMcp('ws-enrolled', { executorId: 'enrolled' }, { requestId: 'update', servers: [] })
+    await vi.waitFor(() => expect(socket.emitted).toHaveLength(2))
+    socket.connected = false
+    socket.emitted[1]!.ack!({ ok: true } as never)
+    await expect(update).resolves.toMatchObject({ ok: false })
+    socket.connected = true
+    authorized = false
+    await expect(registry.configureMcp('ws-enrolled', { executorId: 'enrolled' }, { requestId: 'revoked', servers: [] })).resolves.toMatchObject({ ok: false })
+    expect(socket.emitted).toHaveLength(2)
+  })
+
   it('dispatches a tool call and resolves on ack', async () => {
     const reg = createExecutorRegistry(
       fakeIo() as never,

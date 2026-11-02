@@ -1,6 +1,6 @@
 import { createServer } from 'node:http'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -71,6 +71,40 @@ describe('executor installation routes', () => {
         windows: { available: true },
       },
     })
+  })
+
+  it('executes the short trusted invite bootstrap with defaults and rejects unsafe inputs and downloads', async () => {
+    const { url, dir } = await start()
+    const response = await fetch(`${url}/install/invite.sh`)
+    expect(response.status).toBe(200)
+    const script = await response.text()
+    const downloader = [
+      'curl() {',
+      '  [[ "${MOCK_DOWNLOAD_FAIL:-}" != 1 ]] || return 22',
+      '  printf \'#!/usr/bin/env bash\\nprintf "%%s|%%s|%%s|%%s|%%s\\\\n" "$HOST_URL" "$KALA_RELEASE_TRUST" "$KALA_INVITE_INSTALL_MODE" "$KALA_INVITE_PRIVILEGE_MODE" "$1"\\n\' > "$3"',
+      '  printf "%s" "${MOCK_FINAL_URL:-${@: -1}}"',
+      '}',
+    ].join('\n')
+    const run = (env: Record<string, string> = {}) => spawnSync('bash', ['-s'], {
+      input: `${downloader}\n${script}`, encoding: 'utf8',
+      env: { ...process.env, HOST_URL: '', KALA_RELEASE_BASE_URL: '', EXECUTOR_INVITE: 'ak_invite_test', KALA_INVITE_INSTALL_MODE: '', KALA_INVITE_PRIVILEGE_MODE: '', TMPDIR: dir, ...env },
+    })
+    const defaults = run()
+    expect(defaults.status).toBe(0)
+    expect(defaults.stdout.trim()).toBe(`${url}|host|service|privileged|--invite-installer`)
+    const advanced = run({ KALA_INVITE_INSTALL_MODE: 'temporary', KALA_INVITE_PRIVILEGE_MODE: 'restricted' })
+    expect(advanced.status).toBe(0)
+    expect(advanced.stdout.trim()).toBe(`${url}|host|temporary|restricted|--invite-installer`)
+    for (const env of [
+      { HOST_URL: 'https://foreign.test' },
+      { EXECUTOR_INVITE: 'invalid' },
+      { KALA_INVITE_INSTALL_MODE: 'invalid' },
+      { MOCK_DOWNLOAD_FAIL: '1' },
+      { MOCK_FINAL_URL: 'https://foreign.test/run.sh' },
+    ]) {
+      expect(run(env).status).not.toBe(0)
+    }
+    expect(readdirSync(dir)).toEqual([])
   })
 
   it('supports Linux and macOS installs but rejects Windows when trusted release assets are unavailable', async () => {

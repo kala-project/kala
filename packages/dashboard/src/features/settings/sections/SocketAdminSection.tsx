@@ -113,7 +113,18 @@ export function SocketAdminSection({ payload, onPayloadChange, socket }: { paylo
     return <div data-testid="settings-platform-socket-diagnostics">
       <SectionHeader title={t('settings.sections.socketAdmin.label')} subtitle={t(payload.socketAdmin?.authentication === 'gateway-owner' ? 'settings.socketAdmin.ownerDescription' : 'settings.socketAdmin.scopedDescription')} />
       <div className="space-y-4 rounded-md bg-card/60 p-4 text-sm">
-        {payload.socketAdmin?.authentication === 'gateway-owner' && payload.socketAdmin.active ? <Button variant="outline" asChild><a href={payload.socketAdmin.path} target="_blank" rel="noreferrer" data-testid="settings-open-socket-admin"><ExternalLink className="mr-2 h-4 w-4" aria-hidden />{t('settings.socketAdmin.open')}</a></Button> : null}
+        {payload.socketAdmin?.authentication === 'gateway-owner' && payload.socketAdmin.active ? (
+          <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0">
+              <h4 className="text-sm font-medium text-foreground">{t('settings.socketAdmin.openTitle')}</h4>
+              <div className="mt-1 flex min-w-0 items-start gap-2 break-all font-mono text-xs text-muted-foreground">
+                <span className="min-w-0 flex-1">{payload.socketAdmin.path}</span>
+                <CopyButton value={new URL(payload.socketAdmin.path, window.location.origin).href} />
+              </div>
+            </div>
+            <Button size="sm" className="flex-none" asChild><a href={payload.socketAdmin.path} target="_blank" rel="noreferrer" data-testid="settings-open-socket-admin"><ExternalLink className="mr-1.5 h-4 w-4" aria-hidden />{t('settings.socketAdmin.open')}</a></Button>
+          </div>
+        ) : null}
         {payload.socketAdmin?.authentication === 'gateway-owner' && !payload.socketAdmin.active ? <p role="alert" className="text-destructive">{payload.socketAdmin.unavailableReason ?? t('settings.socketAdmin.unavailable')}</p> : null}
         <div>{connected ? t('settings.socketAdmin.connected') : t('settings.socketAdmin.disconnected')}</div>
         <div>{t('settings.socketAdmin.transport')}: <code>{socket?.io.engine?.transport.name ?? '—'}</code></div>
@@ -203,7 +214,7 @@ export function SocketAdminSection({ payload, onPayloadChange, socket }: { paylo
             </div>
           </div>
           {admin.active ? (
-            <Button type="button" variant="outline" size="sm" className="h-8 flex-none" asChild>
+            <Button type="button" size="sm" className="h-8 flex-none" asChild>
               <a href={href} target="_blank" rel="noreferrer">
                 <ExternalLink className="mr-1.5 h-4 w-4" aria-hidden="true" /> {t('settings.socketAdmin.open')}
               </a>

@@ -91,6 +91,42 @@ describe('Private Cloud edge request path', () => {
     expect(reads).toBe(3)
   })
 
+  it('reveals the native Aspire token only on a current same-origin Dedicated Owner request', async () => {
+    const organizations = new TestOrganizationStore()
+    const access = await organizations.getOrCreateForIdentity({ issuer: 'http://identity.example', subject: 'alice' })
+    const readObservabilityToken = vi.fn(async () => 'native-test-token')
+    const operatorServices = { observabilityUrl: 'http://127.0.0.1:28888', readObservabilityToken }
+    const gateway = await createGateway('http://127.0.0.1:9', undefined, { organizations, singleTenantOwner: true, operatorServices })
+    const origin = `http://127.0.0.1:${gateway.port}`
+    const endpoint = `${origin}/auth/aspire/login-token`
+    expect((await fetch(endpoint, { method: 'POST', headers: { origin } })).status).toBe(401)
+    const login = await fetch(`${origin}/auth/login`, { redirect: 'manual' })
+    const callback = await fetch(`${origin}/auth/callback?code=ok`, { headers: { cookie: `ak_login=${cookieValue(login.headers.getSetCookie(), 'ak_login')}` }, redirect: 'manual' })
+    const headers = { cookie: `ak_session=${cookieValue(callback.headers.getSetCookie(), 'ak_session')}`, origin }
+    const profile = await (await fetch(`${origin}/auth/me`, { headers })).text()
+    expect(profile).toContain('"observabilityTokenAvailable":true')
+    expect(profile).not.toContain('native-test-token')
+    expect((await fetch(endpoint, { headers })).status).toBe(405)
+    expect((await fetch(endpoint, { method: 'POST', headers: { ...headers, origin: 'https://foreign.test' } })).status).toBe(403)
+    expect(readObservabilityToken).not.toHaveBeenCalled()
+    const response = await fetch(endpoint, { method: 'POST', headers })
+    expect(response.status).toBe(200)
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(await response.json()).toEqual({ token: 'native-test-token' })
+    readObservabilityToken.mockImplementationOnce(async () => { throw new Error('private file path') })
+    const failure = await fetch(endpoint, { method: 'POST', headers })
+    expect(failure.status).toBe(503)
+    expect(await failure.json()).toEqual({ error: 'aspire_token_unavailable' })
+    readObservabilityToken.mockImplementationOnce(async () => {
+      organizations.setStatus(access.organization.id, 'suspended')
+      return 'must-not-leak'
+    })
+    expect((await fetch(endpoint, { method: 'POST', headers })).status).toBe(403)
+    organizations.setStatus(access.organization.id, 'active')
+    const shared = await createGateway('http://127.0.0.1:9', undefined, { organizations, operatorServices })
+    expect((await fetch(`http://127.0.0.1:${shared.port}/auth/aspire/login-token`, { method: 'POST' })).status).toBe(404)
+  })
+
   it('advertises native Aspire access only to the Dedicated Owner without fetching telemetry', async () => {
     let reads = 0
     const upstream = createServer((_request, response) => {
@@ -310,6 +346,10 @@ describe('Private Cloud edge request path', () => {
     const inviteHead = await fetch(`http://127.0.0.1:${gateway.port}/install/invite.ps1`, { method: 'HEAD' })
     expect(inviteHead.status).toBe(200)
     expect(requests.map((request) => request.url)).toEqual(['/install/assets/run.sh', '/install/invite.ps1', '/install/invite.ps1'])
+    expect((await fetch(`http://127.0.0.1:${gateway.port}/install/invite.sh`)).status).toBe(200)
+    expect((await fetch(`http://127.0.0.1:${gateway.port}/install/invite.sh`, { method: 'HEAD' })).status).toBe(200)
+    expect((await fetch(`http://127.0.0.1:${gateway.port}/install/invite.sh`, { method: 'POST' })).status).toBe(405)
+    expect((await fetch(`http://127.0.0.1:${gateway.port}/install/invite.sh?invite=forbidden`)).status).toBe(400)
     expect(requests.every((request) => request.unit === 'public-installer' && request.secret === 'gateway-secret')).toBe(true)
     const inviteWrite = await fetch(`http://127.0.0.1:${gateway.port}/install/invite.ps1`, { method: 'POST' })
     expect(inviteWrite.status).toBe(405)
@@ -319,7 +359,7 @@ describe('Private Cloud edge request path', () => {
     expect(assetWrite.status).toBe(401)
     const session = await fetch(`http://127.0.0.1:${gateway.port}/install/session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
     expect(session.status).toBe(401)
-    expect(requests).toHaveLength(3)
+    expect(requests).toHaveLength(5)
   })
 
   it('binds administrator-created Executor invites to one organization and rejects anonymous, member, and cross-origin creation', async () => {

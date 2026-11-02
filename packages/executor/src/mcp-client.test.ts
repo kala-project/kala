@@ -234,6 +234,7 @@ describe('MCP stdio client manager', () => {
       managedMcpConfig: { path: configPath, installationSource: 'dashboard-native', installationId: 'install-1', configurationSource: 'managed-config' },
       mcpInitializeTimeoutMs: 1_000,
     })
+
     inbound.emit('connect')
     await executor.ready
 
@@ -247,6 +248,31 @@ describe('MCP stdio client manager', () => {
     expect((emitted.filter((item) => item.event === 'executor:announce').at(-1)?.args[0] as { tools: string[] }).tools).toEqual(['old__echo'])
     await waitFor(() => existsSync(candidateClosed))
     await executor.close()
+  })
+
+  it('persists invite-managed MCP and refuses a capability for a different workspace', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'kala-invite-mcp-'))
+    temporaryRoots.push(root)
+    const configPath = join(root, 'executor.json')
+    const initial = { version: 1, workspaceId: 'workspace', installationSource: 'private-cloud-invite', routeHint: 'retained', mcpServers: [] }
+    writeFileSync(configPath, JSON.stringify(initial), { mode: 0o600 })
+    for (const installationSource of ['private-cloud-invite', 'enrolled-config'] as const) {
+    for (const workspaceId of ['other-workspace', 'workspace']) {
+      writeFileSync(configPath, JSON.stringify(initial), { mode: 0o600 })
+      const { inbound, socket } = testSocket()
+      const executor = startExecutor({
+        host: 'http://localhost', workspaceId: 'workspace', tools: [], receiptStorePath: false, ioFactory: (() => socket) as never,
+        managedMcpConfig: { path: configPath, installationSource, workspaceId, configurationSource: 'managed-config' },
+      })
+      inbound.emit('connect')
+      await executor.ready
+      const servers = [server('invite-server')]
+      const reply = await request<{ ok: boolean }>(inbound, 'executor:mcp_configure', { requestId: 'invite-update', servers })
+      expect(reply.ok).toBe(workspaceId === 'workspace')
+      expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual(workspaceId === 'workspace' ? { ...initial, mcpServers: servers } : initial)
+      await executor.close()
+    }
+    }
   })
 
   it('rejects unknown fields, env secrets, unsafe files, and unmanaged Executors', async () => {

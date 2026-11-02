@@ -273,9 +273,26 @@ describe('ConnectionStatus', () => {
     expect(screen.getByTestId('session-behind-health')).toBeTruthy()
   })
 
-  it('keeps an unselected sidebar brand free of a replacement status entry', () => {
+  it('renders the fallback brand when no status entry is supplied', () => {
     render(<SidebarBrand />)
     expect(screen.queryByTestId('sidebar-connection-status')).toBeNull()
+  })
+
+  it('opens host connection health before selecting a session without claiming session synchronization', () => {
+    const resync = vi.fn()
+    render(
+      <ConnectionStatusProvider socket={socketWithRtt() as never} status="ready" transport="websocket" cursor={0} executorConnected={false} sessionSelected={false} onResync={resync}>
+        <SidebarBrand connectionStatus={<ConnectionStatusEntry appearance="brand" triggerId="desktop-sidebar" />} />
+      </ConnectionStatusProvider>,
+    )
+    fireEvent.click(screen.getByTestId('sidebar-connection-status'))
+    const popover = within(screen.getByTestId('connection-status-popover'))
+    expect(popover.getByText('Connection health')).toBeTruthy()
+    expect(popover.queryByText('Session sync')).toBeNull()
+    expect(popover.queryByText('Synchronized')).toBeNull()
+    expect(popover.queryByText('Executor')).toBeNull()
+    fireEvent.click(popover.getByRole('button', { name: 'Resync' }))
+    expect(resync).toHaveBeenCalledOnce()
   })
 
   it('marks the overall connection as failed after repeated latency probe timeouts', async () => {

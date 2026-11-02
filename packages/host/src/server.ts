@@ -158,6 +158,8 @@ export type HostServerOptions = {
   executorInstallationStore?: ExecutorInstallationStorage
   /** Executor identity authority. Private Cloud injects an organization/unit-bound PostgreSQL implementation. */
   executorIdentityStore?: ExecutorIdentityStorage
+  /** Trusted Unit organization, never inferred from an Executor announcement. */
+  executorManagementOrganizationId?: string
   /** DAG authority. Private Cloud must inject a tenant/unit-scoped PostgreSQL implementation. */
   dagStore?: DagStorage
   /** Scheduled-task authority. Omit to retain the local state.json backend. */
@@ -653,6 +655,7 @@ export async function startHostServer(
     installations: executorInstallations,
     executors,
     tenancy,
+    ...(options.executorManagementOrganizationId ? { organizationId: options.executorManagementOrganizationId } : {}),
     ...(auth ? { auth } : {}),
     audit,
   })

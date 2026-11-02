@@ -563,13 +563,17 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
     : managed
       ? managed.mcpServers ?? []
       : parseMcpServers(process.env.MCP_SERVERS)
-  const managedMcpConfig = args.config && managed?.installationSource === 'dashboard-native' &&
-    typeof managed.installationId === 'string' && managed.installationId.length > 0 &&
-    args.mcpServers.length === 0 && process.env.MCP_SERVERS === undefined
+  const managedMcpIdentity = managed?.installationSource === 'dashboard-native' && managed.installationId
+    ? { installationSource: 'dashboard-native' as const, installationId: managed.installationId }
+    : managed?.installationSource === 'private-cloud-invite' && managed.workspaceId
+      ? { installationSource: 'private-cloud-invite' as const, workspaceId: managed.workspaceId }
+      : managed?.installationSource === 'dashboard-native' && token?.startsWith('ak_exec_')
+        ? { installationSource: 'enrolled-config' as const, workspaceId: managed.workspaceId ?? loadOrCreateWorkspaceId(undefined, profile) }
+        : undefined
+  const managedMcpConfig = args.config && managedMcpIdentity && args.mcpServers.length === 0 && process.env.MCP_SERVERS === undefined
     ? {
         path: resolve(args.config),
-        installationSource: 'dashboard-native' as const,
-        installationId: managed.installationId,
+        ...managedMcpIdentity,
         configurationSource: 'managed-config' as const,
       }
     : undefined

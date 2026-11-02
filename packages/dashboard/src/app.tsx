@@ -1279,6 +1279,8 @@ export function App(): JSX.Element {
   )
   const metadataIsCurrentSession = metadataTargetSessionId !== null && metadataTargetSessionId === activeSessionId
   const hasSelectedSession = currentSession !== undefined
+  const connectionSocket = hasSelectedSession ? transportSocket : controlSocket
+  const connectionStatus = connectionStatusForTransport(connectionSocket, transportStatus, connectedSocketRef.current === connectionSocket)
   // Private Cloud Simple Chat has no workspace executor by design. Do not block the
   // empty-session entry point on an executor snapshot that is irrelevant there.
   // A Session directory is useful as soon as its own snapshot arrives. The
@@ -1612,12 +1614,17 @@ export function App(): JSX.Element {
     )
   }, [currentSession?.workspaceId, control.executors])
   const resyncSession = useCallback(() => {
+    if (!hasSelectedSession) {
+      if (controlSocket) dashboardConnectionManager(controlSocket).refresh('global')
+      else notify.error(t('common.disconnected'))
+      return
+    }
     if (sessionRouteTickets) {
       session.reconnect()
       return
     }
     if (session.socket && activeSessionId) dashboardConnectionManager(session.socket).refresh(`session:${activeSessionId}`)
-  }, [activeSessionId, session, sessionRouteTickets])
+  }, [activeSessionId, controlSocket, hasSelectedSession, session, sessionRouteTickets, t])
   const sessionWorkspaceKnownOffline = Boolean(
     runtimeCapabilities.workspace &&
       hasSelectedSession &&
@@ -2103,14 +2110,14 @@ export function App(): JSX.Element {
 
   return (
     <PwaLifecycleHost>
-    <ConnectionStatusProvider enabled={hasSelectedSession} socket={session.socket} status={transportStatus} transport={session.socket?.io.engine?.transport.name} cursor={session.state?.cursor ?? 0} workspaceId={currentSession?.workspaceId} executorConnected={sessionWorkspaceOnline} onResync={resyncSession}>
+    <ConnectionStatusProvider socket={connectionSocket} status={connectionStatus} transport={connectionSocket?.io.engine?.transport.name} cursor={session.state?.cursor ?? 0} workspaceId={currentSession?.workspaceId} executorConnected={sessionWorkspaceOnline} sessionSelected={hasSelectedSession} onResync={resyncSession}>
     <div className="ak-app-shell ak-workspace-canvas flex flex-row text-foreground">
       {wideLayout && (section !== 'agent' || !explorerOpen) ? (
         <DesktopSessionRail
           onOpenManagement={openDeployment}
           section={section}
           onSelectSection={handleSectionSelect}
-          connectionStatus={hasSelectedSession ? <ConnectionStatusEntry appearance="brand" triggerId="desktop-rail" /> : undefined}
+          connectionStatus={<ConnectionStatusEntry appearance="brand" triggerId="desktop-rail" />}
           onExpand={section === 'agent' ? () => setExplorerOpen(true) : undefined}
           onNewSession={newSession}
           onConnectWorkspace={runtimeCapabilities.workspace ? openConnectWorkspaceDialog : undefined}
@@ -2172,7 +2179,7 @@ export function App(): JSX.Element {
                     <div className="ak-explorer-surface flex h-full min-h-0 flex-col overflow-hidden border-r border-border/35 bg-card/80" data-testid="explorer-surface">
                       <div className="flex flex-none flex-col px-3 py-2">
                         <div className="flex h-9 items-center gap-2">
-                          <SidebarBrand connectionStatus={hasSelectedSession ? <ConnectionStatusEntry appearance="brand" triggerId="desktop-sidebar" /> : null} />
+                          <SidebarBrand connectionStatus={<ConnectionStatusEntry appearance="brand" triggerId="desktop-sidebar" />} />
                           <span className="min-w-0 flex-1" />
                           <SidebarCollapseButton onCollapse={() => setExplorerOpen(false)} />
                         </div>
@@ -2748,7 +2755,7 @@ export function App(): JSX.Element {
           <div className="flex h-full min-h-0 flex-col bg-card text-foreground">
             <div className="flex flex-none flex-col gap-3 border-b border-border/25 bg-card/35 px-3 pb-3 pt-3">
               <div className="flex h-11 items-center gap-2">
-                <DialogTitle asChild><SidebarBrand connectionStatus={hasSelectedSession ? <ConnectionStatusEntry appearance="brand" triggerId="mobile-drawer" /> : null} /></DialogTitle>
+                <DialogTitle asChild><SidebarBrand connectionStatus={<ConnectionStatusEntry appearance="brand" triggerId="mobile-drawer" />} /></DialogTitle>
                 <span className="min-w-0 flex-1" />
                 <Button
                   type="button"
@@ -3710,7 +3717,7 @@ export function connectionStatusForTransport(socket: { connected: boolean } | nu
   return sessionStatus === 'error' ? 'error' : 'connecting'
 }
 
-type ConnectionStatusProps = { socket: DashboardSocket | null; status: string; transport?: string; cursor: number; workspaceId?: string; executorConnected: boolean; onResync(): void; compact?: boolean; appearance?: 'default' | 'brand'; triggerId?: string }
+type ConnectionStatusProps = { socket: DashboardSocket | null; status: string; transport?: string; cursor: number; workspaceId?: string; executorConnected: boolean; sessionSelected?: boolean; onResync(): void; compact?: boolean; appearance?: 'default' | 'brand'; triggerId?: string }
 type ConnectionStatusEntryOptions = Pick<ConnectionStatusProps, 'compact' | 'appearance' | 'triggerId'>
 type ConnectionStatusRenderer = (options: ConnectionStatusEntryOptions) => JSX.Element
 
@@ -3726,7 +3733,7 @@ export function ConnectionStatusEntry(options: ConnectionStatusEntryOptions): JS
   return sharedRenderer(options)
 }
 
-export function ConnectionStatusProvider({ socket, status, transport, cursor, workspaceId, executorConnected, onResync, children, enabled = true }: ConnectionStatusProps & { children: ReactNode; enabled?: boolean }): JSX.Element {
+export function ConnectionStatusProvider({ socket, status, transport, cursor, workspaceId, executorConnected, sessionSelected = true, onResync, children, enabled = true }: ConnectionStatusProps & { children: ReactNode; enabled?: boolean }): JSX.Element {
   const { t } = useTranslation()
   const [openTrigger, setOpenTrigger] = useState<string | null>(null)
   const [hostRtt, setHostRtt] = useState<number | null>(null)
@@ -3889,7 +3896,7 @@ export function ConnectionStatusProvider({ socket, status, transport, cursor, wo
               executorSegment={executorRequired ? { label: t('connectionHealth.hostExecutor'), state: !executorConnected ? t('connectionHealth.offline') : executorError ?? t('common.connected'), tone: executorTone, latency: executorRtt, measuring: checking && executorConnected && executorRtt === null && !executorError } : undefined}
               measuringLabel={t('connectionHealth.measuring')}
             />
-            <HealthRow label={t('connectionHealth.sessionSync')} state={displayStatus === 'ready' ? t('connectionHealth.synchronized') : label} tone={displayStatus === 'ready' ? 'healthy' : displayStatus === 'disconnected' || displayStatus === 'error' ? 'failed' : 'pending'} measuringLabel={t('connectionHealth.measuring')} />
+            {sessionSelected ? <HealthRow label={t('connectionHealth.sessionSync')} state={displayStatus === 'ready' ? t('connectionHealth.synchronized') : label} tone={displayStatus === 'ready' ? 'healthy' : displayStatus === 'disconnected' || displayStatus === 'error' ? 'failed' : 'pending'} measuringLabel={t('connectionHealth.measuring')} /> : null}
           </div>
           <ConnectionHealthCurve key={workspaceId ?? 'chat'} samples={history} executorRequired={executorRequired} now={history[history.length - 1]?.at ?? Date.now()} t={t} />
           <div className="mt-3 flex items-center gap-2"><Button size="sm" variant="outline" className="h-8" disabled={checking || !socket?.connected} onClick={measure}>{t(checking ? 'connectionHealth.measuring' : 'connectionHealth.measureAgain')}</Button><Button size="sm" variant="ghost" className="h-8" onClick={onResync}>{t('connectionHealth.resync')}</Button></div>

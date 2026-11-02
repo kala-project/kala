@@ -23,15 +23,15 @@ export function attachExecutorInstallationRoutes(server: HttpServer, options: {
     if (res.headersSent || res.writableEnded) return
     const url = new URL(req.url ?? '/', 'http://localhost')
     const path = url.pathname
-    if (path === '/install/invite.ps1') {
+    if (path === '/install/invite.ps1' || path === '/install/invite.sh') {
       claimRoute(req)
       if (url.search) { sendError(res, 400, 'query_not_allowed'); return }
       if (req.method !== 'GET' && req.method !== 'HEAD') { res.setHeader('allow', 'GET, HEAD'); sendError(res, 405, 'method_not_allowed'); return }
-      if (!options.windowsReleaseAssetsReady?.()) { sendError(res, 410, 'windows_release_assets_unavailable'); return }
+      if (path.endsWith('.ps1') && !options.windowsReleaseAssetsReady?.()) { sendError(res, 410, 'windows_release_assets_unavailable'); return }
       const origin = requestOrigin(req)
       if (!isSecureInstallRequest(req, origin)) { sendError(res, 400, 'https_required'); return }
-      const body = renderInvitePowerShellBootstrap(origin)
-      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' })
+      const body = path.endsWith('.sh') ? renderInviteShellBootstrap(origin) : renderInvitePowerShellBootstrap(origin)
+      res.writeHead(200, { 'content-type': path.endsWith('.sh') ? 'text/x-shellscript; charset=utf-8' : 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' })
       res.end(req.method === 'HEAD' ? undefined : body)
       return
     }
@@ -305,14 +305,48 @@ try {
 }
 `
 }
+function renderInviteShellBootstrap(origin: string): string {
+  const assets = `${origin}/install/assets`
+  return `#!/usr/bin/env bash
+set -euo pipefail
+expected_host=${quoteSh(origin)}
+expected_assets=${quoteSh(assets)}
+if [[ -n "\${HOST_URL:-}" && "\${HOST_URL%/}" != "$expected_host" ]] || [[ -n "\${KALA_RELEASE_BASE_URL:-}" && "\${KALA_RELEASE_BASE_URL%/}" != "$expected_assets" ]]; then
+  printf '%s\\n' 'Invite installer URLs must match the trusted ingress origin' >&2
+  exit 1
+fi
+if [[ ! "\${EXECUTOR_INVITE:-}" =~ ^ak_invite_[A-Za-z0-9_-]+$ ]]; then
+  printf '%s\\n' 'A valid Executor invite is required' >&2
+  exit 1
+fi
+export HOST_URL="$expected_host" KALA_RELEASE_BASE_URL="$expected_assets" KALA_RELEASE_TRUST=host COMPONENT=executor
+export KALA_INVITE_INSTALL_MODE="\${KALA_INVITE_INSTALL_MODE:-service}"
+export KALA_INVITE_PRIVILEGE_MODE="\${KALA_INVITE_PRIVILEGE_MODE:-privileged}"
+case "$KALA_INVITE_INSTALL_MODE" in service|temporary) ;; *) printf '%s\\n' 'Invalid invite installation mode' >&2; exit 1 ;; esac
+case "$KALA_INVITE_PRIVILEGE_MODE" in privileged|restricted) ;; *) printf '%s\\n' 'Invalid invite privilege mode' >&2; exit 1 ;; esac
+installer=$(mktemp)
+trap 'rm -f "$installer"' EXIT
+final_url=$(curl -fsSL --output "$installer" --write-out '%{url_effective}' "$expected_assets/run.sh")
+if [[ "$final_url" != "$expected_assets/run.sh" ]]; then
+  printf '%s\\n' 'Installer redirect left the trusted ingress asset URL' >&2
+  exit 1
+fi
+bash "$installer" --invite-installer
+`
+}
+
 function renderInvitePowerShellBootstrap(origin: string): string {
   const expectedAssets = `${origin}/install/assets`
   return `$ErrorActionPreference = 'Stop'
 $expectedHost = ${quotePs(origin)}
 $expectedAssets = ${quotePs(expectedAssets)}
-$hostUrl = if ($env:HOST_URL) { $env:HOST_URL.TrimEnd('/') } else { '' }
-$assetBase = if ($env:KALA_RELEASE_BASE_URL) { $env:KALA_RELEASE_BASE_URL.TrimEnd('/') } else { '' }
-if ($hostUrl -cne $expectedHost -or $assetBase -cne $expectedAssets -or $env:KALA_RELEASE_TRUST -ne 'host') { throw 'Invite installer URLs must match the trusted ingress origin' }
+$hostUrl = if ($env:HOST_URL) { $env:HOST_URL.TrimEnd('/') } else { $expectedHost }
+$assetBase = if ($env:KALA_RELEASE_BASE_URL) { $env:KALA_RELEASE_BASE_URL.TrimEnd('/') } else { $expectedAssets }
+if ($hostUrl -cne $expectedHost -or $assetBase -cne $expectedAssets) { throw 'Invite installer URLs must match the trusted ingress origin' }
+$env:HOST_URL = $expectedHost
+$env:KALA_RELEASE_BASE_URL = $expectedAssets
+$env:KALA_RELEASE_TRUST = 'host'
+if (-not $env:KALA_INVITE_INSTALL_MODE) { $env:KALA_INVITE_INSTALL_MODE = 'service' }
 $hostUri = [Uri]$hostUrl
 if ($hostUri.UserInfo -or $hostUri.Query -or $hostUri.Fragment -or ($hostUri.Scheme -ne 'https' -and -not ($hostUri.Scheme -eq 'http' -and $hostUri.IsLoopback))) { throw 'Invite installation requires HTTPS' }
 if ($env:EXECUTOR_INVITE -notmatch '^ak_invite_[A-Za-z0-9_-]+$') { throw 'A valid Executor invite is required' }

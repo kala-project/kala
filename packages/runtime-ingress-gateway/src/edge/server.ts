@@ -76,7 +76,7 @@ function isDocumentNavigation(request: IncomingMessage, pathname: string): boole
 }
 
 function isPublicInstallerPath(pathname: string): boolean {
-  return pathname === '/install' || pathname === '/install.ps1' || pathname === '/install/invite.ps1' || pathname.startsWith('/install/assets/') || pathname.startsWith('/release-assets/')
+  return pathname === '/install' || pathname === '/install.ps1' || pathname === '/install/invite.ps1' || pathname === '/install/invite.sh' || pathname.startsWith('/install/assets/') || pathname.startsWith('/release-assets/')
 }
 
 const DASHBOARD_API_EXACT = new Set(['/models', '/settings', '/memo', '/metrics', '/organization', '/install', '/install.ps1', '/admin'])
@@ -246,6 +246,7 @@ export async function startRuntimeIngressGateway(options: {
   operatorServices?: {
     identityConsoleUrl?: string
     observabilityUrl?: string
+    readObservabilityToken?: () => Promise<string>
   }
   directory: RuntimeAssignmentStore
   organizations?: OrganizationStore
@@ -456,12 +457,12 @@ export async function startRuntimeIngressGateway(options: {
     request.headers['x-forwarded-host'] = requestOrigin.host
     const secure = requestOrigin.protocol === 'https:' ? '; Secure' : ''
     const callbackUri = `${requestOrigin.origin}/auth/callback`
-    if (url.pathname === '/install/invite.ps1' && url.search) {
+    if ((url.pathname === '/install/invite.ps1' || url.pathname === '/install/invite.sh') && url.search) {
       response.writeHead(400, { 'content-type': 'application/json', 'cache-control': 'no-store' })
       response.end(JSON.stringify({ error: 'query_not_allowed' }))
       return
     }
-    if (url.pathname === '/install/invite.ps1' && request.method !== 'GET' && request.method !== 'HEAD') {
+    if ((url.pathname === '/install/invite.ps1' || url.pathname === '/install/invite.sh') && request.method !== 'GET' && request.method !== 'HEAD') {
       response.writeHead(405, { allow: 'GET, HEAD', 'content-type': 'application/json', 'cache-control': 'no-store' })
       response.end(JSON.stringify({ error: 'method_not_allowed' }))
       return
@@ -634,6 +635,32 @@ export async function startRuntimeIngressGateway(options: {
       const sessionToken = await issueBrowserSession(request, identity, access, authentication)
       response.writeHead(302, { location: login.organizationInviteHash ? '/auth/invite-result?status=accepted' : requestOrigin.href, 'set-cookie': [`ak_session=${sessionToken}; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=2592000`, `ak_login=; HttpOnly${secure}; SameSite=Lax; Path=/auth; Max-Age=0`] }); response.end(); return
     }
+    if (url.pathname === '/auth/aspire/login-token') {
+      const json = (status: number, body: object) => {
+        response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', pragma: 'no-cache', 'x-content-type-options': 'nosniff' })
+        response.end(JSON.stringify(body))
+      }
+      if (!options.singleTenantOwner || !options.operatorServices?.readObservabilityToken) { json(404, { error: 'not_available' }); return }
+      if (request.method !== 'POST' || url.search) { json(405, { error: 'method_not_allowed' }); return }
+      if (request.headers.origin !== requestPublicOrigin(request)) { json(403, { error: 'origin_forbidden' }); return }
+      const session = await authenticate(request)
+      if (!session) { json(401, { error: 'authentication_required' }); return }
+      const access = await options.organizations?.findAccess(session.identity)
+      if (!access || access.organization.status !== 'active' || access.membership.role !== 'owner') { json(403, { error: 'owner_required' }); return }
+      try {
+        const token = await options.operatorServices.readObservabilityToken()
+        if (!token || token.length > 4096 || /[\s\0]/u.test(token)) throw new Error('invalid Aspire token')
+        const current = await authenticate(request)
+        const latest = current && await options.organizations?.findAccess(current.identity)
+        if (!current || current.id !== session.id || latest?.organization.id !== access.organization.id || latest.organization.unitId !== access.organization.unitId || latest.organization.status !== 'active' || latest.membership.role !== 'owner') {
+          json(403, { error: 'owner_required' }); return
+        }
+        json(200, { token })
+      } catch {
+        json(503, { error: 'aspire_token_unavailable' })
+      }
+      return
+    }
     if (url.pathname === '/auth/me') {
       if (request.method !== 'GET') { response.writeHead(405, { allow: 'GET', 'cache-control': 'no-store' }); response.end(); return }
       const session = await authenticate(request)
@@ -647,6 +674,7 @@ export async function startRuntimeIngressGateway(options: {
             ...(options.operatorServices.identityConsoleUrl ? { identityConsoleUrl: options.operatorServices.identityConsoleUrl } : {}),
             observability: Boolean(options.operatorServices.observabilityUrl),
             ...(options.operatorServices.observabilityUrl ? { observabilityUrl: options.operatorServices.observabilityUrl } : {}),
+            ...(options.operatorServices.readObservabilityToken ? { observabilityTokenAvailable: true } : {}),
           },
         } : {}),
         ...(access ? { organization: { id: access.organization.id, name: access.organization.name, status: access.organization.status, role: access.membership.role } } : {}),

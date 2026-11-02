@@ -164,14 +164,17 @@ export type ExecutorRegistry = ToolDispatcher & ExecutorLookup & {
   activeSessions(): string[]
   snapshot(): AttachedExecutor[]
   hasTrustedManagedExecutor(workspaceId: string, installId: string): boolean
+  hasTrustedWorkspaceExecutor(workspaceId: string, executorId: string): boolean
   measureLatency(workspaceId: string): Promise<{ rttMs?: number; error?: string }>
-  mcpConfigStatus(workspaceId: string, installId: string, requestId: string): Promise<ExecutorMcpConfigStatusAck>
-  configureMcp(workspaceId: string, installId: string, payload: ExecutorMcpConfigureRequest): Promise<ExecutorMcpConfigureAck>
+  mcpConfigStatus(workspaceId: string, target: ExecutorMcpTarget, requestId: string): Promise<ExecutorMcpConfigStatusAck>
+  configureMcp(workspaceId: string, target: ExecutorMcpTarget, payload: ExecutorMcpConfigureRequest): Promise<ExecutorMcpConfigureAck>
   renameWorkspace(workspaceId: string, workspaceName: string): AttachedExecutor | undefined
   onChange(listener: ExecutorChangeListener): () => void
   /** Wait at a planned pre-dispatch checkpoint until its bound Executor is online. */
   waitForSessionExecutor(sessionId: string, timeoutMs?: number): Promise<boolean>
 }
+
+export type ExecutorMcpTarget = string | { executorId: string }
 
 export function createExecutorRegistry(
   _io: Server,
@@ -401,6 +404,14 @@ export function createExecutorRegistry(
     return identity?.workspaceId === workspaceId && identity.installId === installId ? bind : undefined
   }
 
+  function findMcpBind(workspaceId: string, target: ExecutorMcpTarget): Bind | undefined {
+    if (typeof target === 'string') return findManagedBind(workspaceId, target)
+    if (!authorizeSocket) return undefined
+    const bind = findBindByWorkspace(workspaceId)
+    const identity = bind?.socket.data.executorIdentity as { accepted?: unknown; workspaceId?: unknown } | undefined
+    return bind?.announcement.executorId === target.executorId && identity?.accepted === true && identity.workspaceId === workspaceId ? bind : undefined
+  }
+
   function allPendingBinds(): Iterable<Bind> {
     return (function* () {
       yield* byExecutor.values()
@@ -543,6 +554,9 @@ export function createExecutorRegistry(
     hasTrustedManagedExecutor(workspaceId, installId) {
       return findManagedBind(workspaceId, installId) !== undefined
     },
+    hasTrustedWorkspaceExecutor(workspaceId, executorId) {
+      return findMcpBind(workspaceId, { executorId }) !== undefined
+    },
     async measureLatency(workspaceId) {
       const bind = findBindByWorkspace(workspaceId)
       if (!bind) return { error: 'workspace offline' }
@@ -561,8 +575,8 @@ export function createExecutorRegistry(
         })
       })
     },
-    async mcpConfigStatus(workspaceId, installId, requestId) {
-      const bind = findManagedBind(workspaceId, installId)
+    async mcpConfigStatus(workspaceId, target, requestId) {
+      const bind = findMcpBind(workspaceId, target)
       if (!bind) return { ok: false, error: 'managed executor offline' }
       return await emitMcpManagement<ExecutorMcpConfigStatusAck>(
         bind,
@@ -571,8 +585,8 @@ export function createExecutorRegistry(
         () => ({ ok: false, error: 'managed executor unavailable' }),
       )
     },
-    async configureMcp(workspaceId, installId, payload) {
-      const bind = findManagedBind(workspaceId, installId)
+    async configureMcp(workspaceId, target, payload) {
+      const bind = findMcpBind(workspaceId, target)
       if (!bind) return { ok: false, error: 'managed executor offline' }
       return await emitMcpManagement<ExecutorMcpConfigureAck>(
         bind,

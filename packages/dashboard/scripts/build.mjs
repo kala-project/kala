@@ -1,8 +1,8 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { realpathSync } from 'node:fs'
+import { chmodSync, lstatSync, readdirSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const require = createRequire(import.meta.url)
@@ -24,6 +24,18 @@ export function buildSteps(args = []) {
 // Pass names, never secret values, on systemd-run's command line.
 export function inheritedEnvironment(env) {
   return Object.keys(env).filter((name) => /^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)).map((name) => `--setenv=${name}`)
+}
+
+export function normalizePublishedPermissions(directory) {
+  const info = lstatSync(directory)
+  if (info.isDirectory()) {
+    chmodSync(directory, 0o755)
+    for (const entry of readdirSync(directory)) normalizePublishedPermissions(join(directory, entry))
+  } else if (info.isFile()) {
+    chmodSync(directory, 0o644)
+  } else {
+    throw new Error(`Unsupported published asset: ${directory}`)
+  }
 }
 
 async function run(command, args, { unit } = {}) {
@@ -79,6 +91,9 @@ async function main() {
     const code = await run(process.execPath, step)
     if (code !== 0) return code
   }
+  const outputIndex = args.indexOf('--outDir')
+  const output = outputIndex >= 0 ? args[outputIndex + 1] : args.find((arg) => arg.startsWith('--outDir='))?.slice('--outDir='.length)
+  normalizePublishedPermissions(resolve(dashboard, output ?? (args.includes('--prototype') ? 'dist-prototype' : 'dist')))
   return 0
 }
 

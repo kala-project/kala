@@ -1,4 +1,3 @@
-import { ScrollArea } from '../../components/ui/scroll-area.js'
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ChevronDown, ChevronUp } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -285,10 +284,10 @@ export function RuntimeMetrics({
         ) : null}
       </button>
       {open ? (
-        <ScrollArea
-          className="ak-motion-popover pointer-events-auto absolute inset-x-0 bottom-full z-30 mb-2 w-auto max-h-[min(32rem,calc(100dvh-7rem))] sm:left-auto sm:w-[min(24rem,calc(100vw-1rem))] overflow-x-hidden rounded-lg border border-border/70 bg-popover text-sm shadow-xl"
+        <div
+          className="ak-motion-popover pointer-events-auto absolute inset-x-0 bottom-full z-30 mb-2 w-auto max-h-[min(32rem,calc(100dvh-7rem))] sm:left-auto sm:w-[min(24rem,calc(100vw-1rem))] overflow-y-auto overflow-x-hidden rounded-lg border border-border/70 bg-popover p-4 text-sm shadow-xl"
           data-testid="context-pressure-popover"
-         contentClassName="p-4 min-w-full">
+        >
           <div className="text-lg font-semibold tracking-tight text-foreground">{t('chat.runtimeMetrics.contextWindow')}</div>
 
           <div className="mt-3 flex items-baseline justify-between gap-3">
@@ -490,7 +489,7 @@ export function RuntimeMetrics({
           >
             {t('chat.runtimeMetrics.compactConversation')}
           </button>
-        </ScrollArea>
+        </div>
       ) : null}
     </div>
   )

@@ -76,7 +76,7 @@ describe('McpSection', () => {
     { status: 401, error: 'operator_authentication_required', title: 'Administrator sign-in required', detail: 'This Dashboard session is not authenticated to manage MCP.' },
     { status: 403, error: 'admin_required', title: 'Permission denied', detail: 'Your account does not have permission' },
     { status: 409, error: 'workspace_offline', title: 'Workspace unavailable or unmanaged', detail: 'workspace Executor is offline' },
-    { status: 409, error: 'unmanaged_executor', title: 'Workspace unavailable or unmanaged', detail: 'not bound to a managed Dashboard installation' },
+    { status: 409, error: 'unmanaged_executor', title: 'Workspace unavailable or unmanaged', detail: 'no authenticated Executor available' },
     { status: 502, error: 'mcp_status_unavailable', title: 'MCP request failed', detail: 'Executor did not respond' },
     { status: 500, error: 'internal_service_error', title: 'MCP request failed', detail: 'MCP service could not complete' },
   ])('shows the specific $status load failure without an editor', async ({ status, error, title, detail }) => {

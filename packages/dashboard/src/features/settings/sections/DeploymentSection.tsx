@@ -2,6 +2,7 @@ import type { BuildMetadata, DedicatedDeploymentStatus, DeploymentServices, Exte
 import { PROTOCOL_VERSION } from '@agent-kernel/shared'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
+import { useEffect, useRef, useState } from 'react'
 import { CheckCircle2, ChevronRight, CircleAlert, CloudCog, MonitorUp, Server } from 'lucide-react'
 
 import { CopyButton, SectionHeader, SettingsRecord, SettingsRecordField, SettingsRecordList } from '../controls.js'
@@ -52,8 +53,8 @@ export function DeploymentSection({ payload, host, token, services }: { payload:
         </div>
         {services.observabilityUrl ? <div data-testid="settings-native-aspire">
           <div className="flex items-center gap-1 text-sm font-medium">Aspire<HelpHint label="Aspire">{t('settings.deployment.aspireAccessHelp')}</HelpHint></div>
-          <div className="mt-1 flex min-w-0 items-center gap-2"><code className="min-w-0 break-all text-sm">{services.observabilityUrl}</code><CopyButton value={services.observabilityUrl} /></div>
-          <p className="mt-1 text-sm text-muted-foreground">{t('settings.deployment.aspireLocalAccess')}</p>
+          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2"><code className="min-w-0 break-all text-sm">{services.observabilityUrl}</code><CopyButton value={services.observabilityUrl} /><Button asChild><a href={services.observabilityUrl} target="_blank" rel="noreferrer">{t('settings.socketAdmin.open')}</a></Button></div>
+          {services.observabilityTokenAvailable ? <AspireLoginToken host={host} token={token} /> : null}
         </div> : null}
       </section> : null}
       <div className="mb-4 flex justify-end"><Button variant="outline" disabled={statusQuery.isFetching} onClick={() => { void statusQuery.refetch() }}>{t('settings.socketAdmin.refresh')}</Button></div>
@@ -96,6 +97,47 @@ export function DeploymentSection({ payload, host, token, services }: { payload:
       </details>
     </div>
   )
+}
+
+function AspireLoginToken({ host, token }: { host: string; token?: string }): JSX.Element {
+  const { t } = useTranslation()
+  const [value, setValue] = useState<string>()
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(false)
+  const pending = useRef<AbortController>()
+  useEffect(() => {
+    setValue(undefined)
+    setLoading(false)
+    setError(false)
+    return () => { pending.current?.abort() }
+  }, [host, token])
+  async function show(): Promise<void> {
+    const controller = new AbortController()
+    pending.current = controller
+    setLoading(true)
+    setError(false)
+    try {
+      const response = await fetch(`${host.replace(/\/$/u, '')}/auth/aspire/login-token`, {
+        method: 'POST', cache: 'no-store', credentials: 'include', signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]),
+        headers: token ? { authorization: `Bearer ${token}` } : undefined,
+      })
+      if (!response.ok) throw new Error('Aspire token unavailable')
+      const result: unknown = await response.json()
+      if (!result || typeof result !== 'object' || !('token' in result) || typeof result.token !== 'string' || !result.token) throw new Error('invalid Aspire token')
+      if (!controller.signal.aborted) setValue(result.token)
+    } catch {
+      if (!controller.signal.aborted) setError(true)
+    } finally {
+      if (!controller.signal.aborted) setLoading(false)
+    }
+  }
+  return <div className="mt-3 space-y-2" data-testid="settings-aspire-token">
+    <div className="flex flex-wrap items-center gap-2"><span className="text-sm font-medium">{t('settings.deployment.aspireToken')}</span>
+      <Button variant="outline" size="sm" disabled={loading} onClick={() => { if (value) setValue(undefined); else void show() }}>{t(value ? 'settings.deployment.aspireHideToken' : 'settings.deployment.aspireShowToken')}</Button>
+    </div>
+    {value ? <div className="flex min-w-0 items-center gap-2"><code className="min-w-0 break-all rounded bg-muted px-2 py-1 text-sm" data-testid="settings-aspire-token-value">{value}</code><CopyButton value={value} /></div> : null}
+    {error ? <p role="alert" className="text-sm text-destructive">{t('settings.deployment.aspireTokenUnavailable')}</p> : null}
+  </div>
 }
 
 function OverviewCard({ icon: Icon, label, value, detail, tone }: { icon: typeof Server; label: string; value: string; detail?: string; tone?: 'good' | 'warn' }): JSX.Element { return <div className="rounded-lg border border-border/50 bg-card/60 p-3"><div className="flex items-center gap-2 text-xs text-muted-foreground"><Icon className={tone === 'good' ? 'h-4 w-4 text-emerald-500' : tone === 'warn' ? 'h-4 w-4 text-amber-500' : 'h-4 w-4'} />{label}</div><div className="mt-2 truncate text-sm font-semibold text-foreground" title={value}>{value}</div>{detail ? <div className="mt-1 truncate text-xs text-muted-foreground" title={detail}>{detail}</div> : null}</div> }

@@ -1946,7 +1946,7 @@ export type ExternalDeploymentHealth = {
   checks: readonly { component: 'gateway' | 'runtime' | 'dashboard'; ready: boolean }[]
 }
 
-export type DeploymentServices = { identityConsoleUrl?: string; observability: boolean; observabilityUrl?: string }
+export type DeploymentServices = { identityConsoleUrl?: string; observability: boolean; observabilityUrl?: string; observabilityTokenAvailable?: boolean }
 export type OperatorObservabilitySnapshot = {
   checkedAt: string
   retainedLogs: number

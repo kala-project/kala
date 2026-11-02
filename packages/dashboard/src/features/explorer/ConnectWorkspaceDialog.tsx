@@ -285,18 +285,23 @@ export function ConnectWorkspaceDialog({ open, onOpenChange, host, privateCloud 
         </DialogHeader>
         <ScrollArea className="min-h-0 min-w-0 overflow-x-hidden" contentClassName="p-5 sm:p-7 min-w-full">
           {privateCloud ? (
-            <section className="mx-auto max-w-2xl space-y-4" data-testid="private-cloud-executor-invite">
+            <section className="min-w-0 space-y-5" data-testid="private-cloud-executor-invite">
               <div className="rounded-2xl bg-primary/10 px-4 py-3 text-sm leading-6 text-muted-foreground">
                 <div className="flex items-start gap-2"><ShieldCheck className="mt-1 h-4 w-4 flex-none text-primary" aria-hidden="true" /><p>{t('explorer.connectDialog.organizationInviteDescription')}</p></div>
               </div>
               {canCreateOrganizationInvite ? (
-                <>
-                  <InstallationOptions form={form} expertMode={expertMode} windowsAvailable={windowsAvailable} updateForm={updateForm} toggleExpertMode={toggleExpertMode} />
-                  <SectionLabel index="1" label={t('explorer.connectDialog.runCommand')} />
+                <div className="grid min-w-0 gap-6 lg:grid-cols-[minmax(16rem,0.8fr)_minmax(0,1.2fr)] lg:gap-8">
+                  <section className="min-w-0 space-y-5" aria-label={t('executorPairing.installationOptions')}>
+                    <SectionLabel index="1" label={t('explorer.connectDialog.platform')} />
+                    <InstallationOptions form={form} expertMode={expertMode} windowsAvailable={windowsAvailable} updateForm={updateForm} toggleExpertMode={toggleExpertMode} />
+                  </section>
+                  <section className="min-w-0 space-y-3 lg:border-l lg:border-border/35 lg:pl-8">
+                  <SectionLabel index="2" label={t('explorer.connectDialog.runCommand')} />
                   <TerminalCommand command={command} copied={copied} mode={form.mode} modeLabel={t(`explorer.connectDialog.modes.${form.mode}`)} transitioning={false} onCopy={() => void copy()} />
                   {form.mode === 'temporary' ? <p className="rounded-xl bg-muted/30 px-3 py-2.5 text-xs leading-5 text-muted-foreground">{t('explorer.connectDialog.organizationInviteTerminalHint')}</p> : null}
                   {error || copyError ? <p className="rounded-xl bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{error ?? copyError}</p> : null}
-                </>
+                  </section>
+                </div>
               ) : (
                 <p className="rounded-xl bg-destructive/10 px-4 py-3 text-sm text-destructive" role="alert" data-testid="executor-invite-admin-required">{t('explorer.connectDialog.adminRequired')}</p>
               )}
@@ -454,9 +459,13 @@ function apiEndpoint(host: string | undefined, path: string): string {
 
 function organizationInviteCommand(host: string | undefined, inviteToken: string, platform: ExecutorInstallPlatform, mode: ExecutorInstallMode, privilegeMode: ExecutorPrivilegeMode): string {
   const origin = host ? new URL(host).origin : window.location.origin
-  const assets = `${origin}/install/assets`
-  if (platform === 'windows') return `$env:HOST_URL=${quotePs(origin)}; $env:EXECUTOR_INVITE=${quotePs(inviteToken)}; $env:KALA_RELEASE_BASE_URL=${quotePs(assets)}; $env:KALA_RELEASE_TRUST='host'; $env:KALA_INVITE_INSTALL_MODE=${quotePs(mode)}; irm ${quotePs(`${origin}/install/invite.ps1`)} | iex`
-  return `tmp=$(mktemp) && trap 'rm -f "$tmp"' EXIT && curl -fsSL ${quoteSh(`${assets}/run.sh`)} -o "$tmp" && HOST_URL=${quoteSh(origin)} EXECUTOR_INVITE=${quoteSh(inviteToken)} KALA_RELEASE_BASE_URL=${quoteSh(assets)} KALA_RELEASE_TRUST='host' KALA_INVITE_INSTALL_MODE=${quoteSh(mode)} KALA_INVITE_PRIVILEGE_MODE=${quoteSh(privilegeMode)} COMPONENT=executor bash "$tmp" --invite-installer`
+  if (platform === 'windows') return `$env:EXECUTOR_INVITE=${quotePs(inviteToken)}; $env:KALA_INVITE_INSTALL_MODE=${quotePs(mode)}; irm ${quotePs(`${origin}/install/invite.ps1`)} | iex`
+  const options = [
+    `EXECUTOR_INVITE=${quoteSh(inviteToken)}`,
+    ...(mode === 'temporary' ? ["KALA_INVITE_INSTALL_MODE='temporary'"] : []),
+    ...(mode === 'service' && privilegeMode === 'restricted' ? ["KALA_INVITE_PRIVILEGE_MODE='restricted'"] : []),
+  ].join(' ')
+  return `(set -o pipefail; curl -fsSL ${quoteSh(`${origin}/install/invite.sh`)} | ${options} bash)`
 }
 
 function quoteSh(value: string): string { return `'${value.replace(/'/gu, `'"'"'`)}'` }
