@@ -1,3 +1,4 @@
+using Aspire.Hosting.ApplicationModel;
 using System.Text.RegularExpressions;
 
 var builder = DistributedApplication.CreateBuilder(args);
@@ -25,6 +26,11 @@ var siloImage = RequiredDigestImage("KALA_SILO_IMAGE");
 // and restore these two absolute host directories.
 var postgresDataDirectory = RequiredAbsoluteDirectory("KALA_POSTGRES_DATA_DIR");
 var siloDataDirectory = RequiredAbsoluteDirectory("KALA_SILO_DATA_DIR");
+var pathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+if (postgresDataDirectory.Equals(siloDataDirectory, pathComparison)
+    || postgresDataDirectory.StartsWith(siloDataDirectory + Path.DirectorySeparatorChar, pathComparison)
+    || siloDataDirectory.StartsWith(postgresDataDirectory + Path.DirectorySeparatorChar, pathComparison))
+    throw new InvalidOperationException("PostgreSQL and SILO directories must be disjoint, not equal or nested.");
 var stateMasterKeyFile = RequiredAbsoluteFile("KALA_RUNTIME_STATE_MASTER_KEY_FILE");
 var installationIdFile = RequiredAbsoluteFile("KALA_INSTALLATION_ID_FILE");
 
@@ -123,7 +129,7 @@ var gateway = builder.AddContainer("gateway", gatewayImage)
 
 // Caddy is the only resource with a host-published endpoint. Gateway,
 // Runtime, Dashboard, PostgreSQL, and SILO stay on the Compose network.
-builder.AddContainer("ingress", edgeImage)
+var ingress = builder.AddContainer("ingress", edgeImage)
     .WithEnvironment("KALA_PUBLIC_HOSTNAME", publicHostname)
     .WithBindMount(Path.Combine(builder.AppHostDirectory, "Caddyfile"), "/etc/caddy/Caddyfile", isReadOnly: true)
     .WithVolume("kala-aspire-caddy-data", "/data")
@@ -133,7 +139,23 @@ builder.AddContainer("ingress", edgeImage)
     .WaitFor(gateway)
     .WithImagePullPolicy(ImagePullPolicy.Missing);
 
+// Publish actual Compose health checks; model WaitFor alone is not readiness.
+WithReadiness(postgres, "CMD", "pg_isready", "-U", "postgres", "-d", "postgres");
+WithReadiness(silo, "CMD", "curl", "-fsS", "--max-time", "3", "http://127.0.0.1:9000/minio/health/ready");
+WithReadiness(dashboard, "CMD", "/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:8080/healthz',{signal:AbortSignal.timeout(3000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))");
+WithReadiness(runtime, "CMD", "/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:13002/internal/health',{headers:{'x-agent-runlab-ingress-secret':process.env.KALA_INGRESS_SHARED_SECRET},signal:AbortSignal.timeout(3000)}).then(async r=>process.exit(r.ok&&(await r.json()).state==='ready'?0:1)).catch(()=>process.exit(1))");
+WithReadiness(gateway, "CMD", "/nodejs/bin/node", "-e", "const q=require('node:http').get('http://127.0.0.1:13001/healthz',{headers:{Host:new URL(process.env.KALA_PUBLIC_URLS).host},timeout:3000},r=>{r.resume();process.exit(r.statusCode===200?0:1)});q.on('error',()=>process.exit(1));q.on('timeout',()=>q.destroy())");
+WithReadiness(ingress, "CMD", "wget", "-q", "--spider", "-T", "3", "http://127.0.0.1:8081/healthz");
+
 builder.Build().Run();
+
+static void WithReadiness(IResourceBuilder<ContainerResource> resource, params string[] command)
+{
+    resource.PublishAsDockerComposeService((_, service) => {
+        service.Healthcheck = new() { Test = [.. command], Interval = "5s", Timeout = "4s", Retries = 12, StartPeriod = "20s" };
+        service.Restart = "unless-stopped";
+    });
+}
 
 static string Required(string name)
 {
@@ -154,15 +176,21 @@ static string RequiredDigestImage(string name)
 static string RequiredAbsoluteDirectory(string name)
 {
     var value = Required(name);
-    if (!Path.IsPathFullyQualified(value))
-        throw new InvalidOperationException($"{name} must be an absolute host path.");
-    return value;
+    if (!Path.IsPathFullyQualified(value) || !Directory.Exists(value))
+        throw new InvalidOperationException($"{name} must be an existing absolute host directory.");
+    var canonical = Path.TrimEndingDirectorySeparator(Path.GetFullPath(value));
+    if (canonical == Path.GetPathRoot(canonical))
+        throw new InvalidOperationException($"{name} must not be a filesystem root.");
+    for (DirectoryInfo? directory = new(canonical); directory is not null; directory = directory.Parent)
+        if (directory.LinkTarget is not null)
+            throw new InvalidOperationException($"{name} must not use symlink aliases.");
+    return canonical;
 }
 
 static string RequiredAbsoluteFile(string name)
 {
-    var value = RequiredAbsoluteDirectory(name);
-    return File.Exists(value)
+    var value = Required(name);
+    return Path.IsPathFullyQualified(value) && File.Exists(value)
         ? value
         : throw new InvalidOperationException($"{name} must name an existing host file before publishing.");
 }

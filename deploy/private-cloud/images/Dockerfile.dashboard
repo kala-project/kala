@@ -5,7 +5,9 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY packages/dashboard/package.json packages/dashboard/package.json
 COPY packages/shared/package.json packages/shared/package.json
 COPY packages/kernel/package.json packages/kernel/package.json
-RUN pnpm install --frozen-lockfile --filter @agent-kernel/dashboard...
+# Large editor/diagram packages can exceed the default one-minute fetch on clean workers.
+ARG PNPM_FETCH_TIMEOUT=300000
+RUN pnpm install --frozen-lockfile --fetch-timeout="${PNPM_FETCH_TIMEOUT}" --filter @agent-kernel/dashboard...
 COPY packages/dashboard packages/dashboard
 COPY packages/shared packages/shared
 COPY packages/kernel packages/kernel

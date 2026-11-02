@@ -34,6 +34,12 @@ def check(compose: Path, env: Path) -> None:
             raise ValueError(f'{name} must have an immutable image digest')
         if service.get('privileged') or service.get('network_mode') == 'host':
             raise ValueError(f'{name} has a forbidden host privilege/network setting')
+        health = service.get('healthcheck', {})
+        test = health.get('test', [])
+        if (health.get('disable') or not isinstance(test, list) or len(test) < 2 or test[0] != 'CMD'
+                or health.get('timeout') != '4s' or health.get('interval') != '5s'
+                or health.get('retries') != 12 or health.get('start_period') != '20s'):
+            raise ValueError(f'{name} must retain the reviewed bounded executable health check')
         ports = service.get('ports', [])
         if name == 'ingress':
             if len(ports) != 1 or ports[0].get('target') != 443 or ports[0].get('protocol') != 'tcp':
@@ -70,11 +76,18 @@ def check(compose: Path, env: Path) -> None:
         if len(mounts) != 1 or mounts[0].get('target') != target or mounts[0].get('type') != 'bind':
             raise ValueError(f'{name} requires one protected host data mount')
         source = mounts[0].get('source', '')
-        if not Path(source).is_absolute() or source == '/':
-            raise ValueError(f'{name} data mount must resolve to a dedicated absolute host directory')
-        data_sources.append(source)
-    if data_sources[0] == data_sources[1]:
-        raise ValueError('PostgreSQL and SILO data directories must be distinct')
+        path = Path(source)
+        try:
+            canonical = path.resolve(strict=True)
+        except (OSError, RuntimeError):
+            raise ValueError(f'{name} data mount must be an existing dedicated directory') from None
+        if (not path.is_absolute() or not path.is_dir() or canonical == Path(canonical.anchor)
+                or path.is_symlink() or str(canonical) != source.rstrip('/')):
+            raise ValueError(f'{name} data mount must be an existing canonical non-symlink directory, not root')
+        data_sources.append(canonical)
+    a, b = data_sources
+    if a == b or a in b.parents or b in a.parents:
+        raise ValueError('PostgreSQL and SILO data directories must be disjoint, not equal or nested')
 
 
 if __name__ == '__main__':

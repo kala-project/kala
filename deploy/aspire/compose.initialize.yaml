@@ -6,6 +6,7 @@ services:
     environment:
       MC_CONFIG_DIR: /tmp/mc
       HOME: /tmp
+      GOMEMLIMIT: 128MiB
     volumes:
       - ${KALA_ASPIRE_INIT_DIR:?set by initialize.sh}:/operator:ro
       - ${KALA_ASPIRE_SECRETS_DIR:?set by initialize.sh}/silo_root_access_key:/run/kala-init-secrets/silo_root_access_key:ro
@@ -19,5 +20,5 @@ services:
     read_only: true
     tmpfs: [/tmp]
     pids_limit: 64
-    mem_limit: 128m
+    mem_limit: 256m
     cpus: 0.25

@@ -1,6 +1,6 @@
 import { randomBytes, scrypt as nodeScrypt, timingSafeEqual } from 'node:crypto'
 import type { AuthenticatedIdentity } from '../assignments/store.js'
-import type { ControlPlaneDatabase } from '../persistence/postgres.js'
+import type { ControlPlaneDatabase, SqlExecutor } from '../persistence/postgres.js'
 import { OrganizationProvisioningService } from '../organizations/provisioning.js'
 
 export const DEDICATED_OWNER_ISSUER = 'urn:kala:dedicated-owner'
@@ -33,7 +33,7 @@ type CredentialRow = {
 }
 
 export class PostgresDedicatedOwnerAuthenticator implements DedicatedOwnerAuthenticator {
-  constructor(private readonly database: ControlPlaneDatabase) {}
+  constructor(private readonly database: SqlExecutor) {}
 
   async authenticate(password: string): Promise<DedicatedOwnerAuthentication | undefined> {
     if (!validPasswordShape(password)) return undefined
@@ -76,6 +76,37 @@ export class DedicatedOwnerBootstrapService {
   ) {
     this.provisioning = new OrganizationProvisioningService(database)
     validateParameters(parameters)
+  }
+
+  /** Explicit continuation only: authenticate existing authority, never create/reset it. */
+  async verifyExisting(input: { password: string; organizationName: string; ownerEmail?: string }): Promise<{ organizationId: string; runtimeUnitId: string }> {
+    const expectedEmail = normalizeOptionalEmail(input.ownerEmail)
+    return this.database.transaction(async (transaction) => {
+      await transaction.query("SELECT pg_advisory_xact_lock(hashtextextended('kala-dedicated-owner-bootstrap', 0))")
+      const existing = await transaction.query<{ organization_id: string; runtime_unit_id: string; name: string; email: string | null }>(`
+        SELECT c.organization_id,o.runtime_unit_id,o.name,p.email
+        FROM dedicated_owner_credentials c
+        JOIN principals p ON p.id=c.principal_id
+        JOIN organizations o ON o.id=c.organization_id
+        JOIN organization_memberships m ON m.organization_id=o.id AND m.principal_id=p.id
+        JOIN contract_entitlements e ON e.organization_id=o.id
+        WHERE c.singleton=true AND c.disabled_at IS NULL
+          AND p.kind='human' AND p.issuer=$1 AND p.subject=$2
+          AND o.status='active' AND m.status='active' AND m.role='owner'
+          AND e.starts_at <= now() AND e.ends_at > now()
+          AND (SELECT count(*) FROM organizations)=1
+        FOR UPDATE OF c,p,o,m,e`, [DEDICATED_OWNER_ISSUER, DEDICATED_OWNER_SUBJECT])
+      const row = existing.rows[0]
+      if (existing.rowCount !== 1 || !row || row.name !== input.organizationName.trim()
+        || (expectedEmail !== undefined && row.email !== expectedEmail)) {
+        throw new Error('Existing Dedicated Owner/Organization does not match the expected active installation')
+      }
+      const authenticated = await new PostgresDedicatedOwnerAuthenticator(transaction).authenticate(input.password)
+      if (!authenticated || authenticated.organizationId !== row.organization_id) {
+        throw new Error('Existing Dedicated Owner does not match the protected password; no credentials were changed')
+      }
+      return { organizationId: row.organization_id, runtimeUnitId: row.runtime_unit_id }
+    })
   }
 
   async bootstrap(input: { password: string; organizationName: string; ownerEmail?: string }): Promise<{ organizationId: string; runtimeUnitId: string }> {

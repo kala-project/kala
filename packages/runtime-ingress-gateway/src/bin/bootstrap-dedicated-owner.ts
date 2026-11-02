@@ -22,6 +22,11 @@ export async function readProtectedOwnerPassword(pathValue: string | undefined):
 }
 
 async function main(): Promise<void> {
+  const args = process.argv.slice(2)
+  if (args.length > 1 || (args.length === 1 && args[0] !== '--verify-existing')) {
+    throw new Error('Usage: bootstrap-dedicated-owner [--verify-existing]')
+  }
+  const verifyExisting = args[0] === '--verify-existing'
   const deployment = await loadGatewayProductDeployment(process.env.KALA_DEPLOYMENT_CONFIG)
   if (deployment.variant !== 'dedicated') throw new Error('Dedicated Owner bootstrap requires the Dedicated product deployment')
   if (process.env.KALA_DEDICATED_OWNER_PASSWORD) throw new Error('Dedicated Owner password must be supplied through its protected file, never a direct environment value')
@@ -33,12 +38,13 @@ async function main(): Promise<void> {
     const password = await readProtectedOwnerPassword(process.env.KALA_DEDICATED_OWNER_PASSWORD_FILE)
     const organizationName = process.env.KALA_DEDICATED_ORGANIZATION_NAME?.trim()
     if (!organizationName) throw new Error('KALA_DEDICATED_ORGANIZATION_NAME is required')
-    const result = await new DedicatedOwnerBootstrapService(database).bootstrap({
+    const service = new DedicatedOwnerBootstrapService(database)
+    const result = await service[verifyExisting ? 'verifyExisting' : 'bootstrap']({
       password,
       organizationName,
       ...(process.env.KALA_DEDICATED_OWNER_EMAIL?.trim() ? { ownerEmail: process.env.KALA_DEDICATED_OWNER_EMAIL } : {}),
     })
-    process.stdout.write(`${JSON.stringify({ event: 'dedicated_owner_bootstrapped', organizationId: result.organizationId, runtimeUnitId: result.runtimeUnitId })}\n`)
+    process.stdout.write(`${JSON.stringify({ event: verifyExisting ? 'dedicated_owner_verified' : 'dedicated_owner_bootstrapped', organizationId: result.organizationId, runtimeUnitId: result.runtimeUnitId })}\n`)
   } finally {
     await database.close()
   }

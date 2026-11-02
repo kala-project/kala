@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "kind": "source-only-dedicated-aspire-initialization",
+  "date": "2026-10-29",
+  "applicationSourceRevision": "c948fe30367ef2b863b5f3937ebccc0c676f84f1",
+  "operatorSourceRevision": "d2afae3cfcd3484c478933fef3f099918c9a72c6",
+  "toolchain": {
+    "dotnetSdk": "10.0.403",
+    "aspire": "13.6.3",
+    "dockerCompose": "5.6.1"
+  },
+  "images": {
+    "runtime": "kala-dedicated-lifecycle-runtime@sha256:3e4562e49d534b9f8b5cd69a15d631ca8b7138bc7afe035b764d9982420d92a0",
+    "gateway": "kala-dedicated-lifecycle-gateway@sha256:74f10a6722ae1a755a8fef43544978b49a0612e7e68dd63fe09f5d6062d867d3",
+    "dashboard": "kala-dedicated-lifecycle-dashboard@sha256:2a4ffff831fc37d620bbfc6c802246a930cd94c5f68565a8d7b9b7f11f35429c",
+    "postgres": "postgres@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36",
+    "silo": "pgsty/silo@sha256:2636fc4155d9a7e41ff58cdb65ddd13ba9304e67184e13c25bc5cb34016269d7",
+    "ingress": "caddy@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d"
+  },
+  "passedPhases": [
+    "unsafe_input_refused_before_any_container",
+    "fresh_authorities_and_owner_initialized_apps_stopped",
+    "wrong_owner_continuation_refused",
+    "all_six_actual_services_healthy",
+    "existing_initialized_installation_resumed_without_bootstrap",
+    "ca_verified_https_owner_login",
+    "bad_state_key_start_returns_nonzero_without_success",
+    "corrected_configuration_resumes_without_reinitialization",
+    "owner_browser_session_survives_application_restart"
+  ],
+  "componentChecks": {
+    "gatewayOwnerTests": 8,
+    "topologyTests": 2,
+    "existingReleaseAndPrivacyTests": 22,
+    "appHostBuild": "passed; known ASPIRE010 warning retained"
+  },
+  "passed": true,
+  "scope": [
+    "Fresh synthetic installation only; no existing deployment or user data touched",
+    "Real Aspire publication and six real containers; not a hand-written substitute graph",
+    "Loopback-only public binding and project-specific Caddy volumes are explicit test isolation changes",
+    "Root input rejection creates no containers; initialize-only leaves only PostgreSQL/SILO running",
+    "Known-password continuation never resets credentials or reruns bootstrap/migrations",
+    "CA-verified HTTPS Owner login and retained opaque login session after application restart",
+    "Wrong 32-byte state key is rejected by Runtime checkpoint validation; startup returns nonzero without success",
+    "Owned containers/networks/volumes removed after verification"
+  ],
+  "retainedFailures": [
+    "128 MiB SILO provisioning client OOM confirmed by scoped Docker event; fixed by bounded 256 MiB budget and Go 128 MiB soft limit",
+    "Gateway raw loopback Host returns 400 HOST_NOT_ALLOWED; native HTTP with configured public Host returns 200; no Host allowlist bypass",
+    "Release validator rejected a mismatching test tag; final unsigned build uses package product version and normal asset verification"
+  ],
+  "notAccepted": [
+    "Current-image real model/SDK/Executor turn or implementation-child",
+    "Automated backup/restore or a supported predecessor upgrade/rollback",
+    "Lost-password recovery or credential rotation",
+    "Public ACME issuance/DNS/renewal, production hardening, soak/load or HA",
+    "Signed/supported release, registry publication or deployment to an existing installation"
+  ]
+}
