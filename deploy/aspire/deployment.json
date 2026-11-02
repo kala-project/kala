@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "architecture": "platform",
+  "tenancy": "single-tenant",
+  "runtimeProfile": "full"
+}

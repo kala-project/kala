@@ -1154,26 +1154,29 @@ async function createGateway(
     publicOrigin: 'http://127.0.0.1:0',
     sessions,
     cacheNamespaceSecret: 'test-session-secret-with-sufficient-entropy',
-    secretBox: createSessionSecretBox('test', [{ id: 'test', key: Buffer.alloc(32, 7) }]),
     ingressSecret: 'gateway-secret',
     ...(auth?.organizations ? { organizations: auth.organizations } : {}),
     ...(auth?.rateLimiter ? { rateLimiter: auth.rateLimiter } : {}),
     ...(auth?.serviceAccounts ? { serviceAccounts: auth.serviceAccounts } : {}),
     ...(auth?.socketRecheckMs ? { socketRecheckMs: auth.socketRecheckMs } : {}),
     directory: auth?.directory ?? new MemoryRuntimeAssignmentStore(),
-    loginStates: new MemoryLoginStates(),
-    ...(auth?.enterpriseSso ? { enterpriseSso: auth.enterpriseSso } : {}),
-    oidc: {
-      async authorizationUrl(_redirectUri, authorizationOptions) {
-        const url = new URL('http://identity.example/authorize')
-        if (authorizationOptions?.prompt) url.searchParams.set('prompt', authorizationOptions.prompt)
-        if (authorizationOptions?.idpHint) url.searchParams.set('idp_hint', authorizationOptions.idpHint)
-        auth?.authorizationOptions?.push({ ...(authorizationOptions?.idpHint ? { idpHint: authorizationOptions.idpHint } : {}), ...(authorizationOptions?.loginHint ? { loginHint: authorizationOptions.loginHint } : {}) })
-        return { url, codeVerifier: 'verifier', state: 'state' }
+    authentication: {
+      kind: 'oidc',
+      loginStates: new MemoryLoginStates(),
+      secretBox: createSessionSecretBox('test', [{ id: 'test', key: Buffer.alloc(32, 7) }]),
+      ...(auth?.enterpriseSso ? { enterpriseSso: auth.enterpriseSso } : {}),
+      oidc: {
+        async authorizationUrl(_redirectUri, authorizationOptions) {
+          const url = new URL('http://identity.example/authorize')
+          if (authorizationOptions?.prompt) url.searchParams.set('prompt', authorizationOptions.prompt)
+          if (authorizationOptions?.idpHint) url.searchParams.set('idp_hint', authorizationOptions.idpHint)
+          auth?.authorizationOptions?.push({ ...(authorizationOptions?.idpHint ? { idpHint: authorizationOptions.idpHint } : {}), ...(authorizationOptions?.loginHint ? { loginHint: authorizationOptions.loginHint } : {}) })
+          return { url, codeVerifier: 'verifier', state: 'state' }
+        },
+        async callback() { return { identity: auth?.callbackIdentity?.() ?? { issuer: 'http://identity.example', subject: 'alice', displayName: 'Alice Example', email: 'alice@example.test' } } },
+        async refresh() { return {} },
+        async revokeRefreshToken() {},
       },
-      async callback() { return { identity: auth?.callbackIdentity?.() ?? { issuer: 'http://identity.example', subject: 'alice', displayName: 'Alice Example', email: 'alice@example.test' } } },
-      async refresh() { return {} },
-      async revokeRefreshToken() {},
     },
     ...(provision ? { provision } : {}),
   })

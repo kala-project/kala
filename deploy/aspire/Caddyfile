@@ -1,0 +1,8 @@
+{
+	admin off
+}
+
+{$KALA_PUBLIC_HOSTNAME} {
+	encode zstd gzip
+	reverse_proxy gateway:13001
+}

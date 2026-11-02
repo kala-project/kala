@@ -1,4 +1,6 @@
-# Dedicated Platform Runtime Unit Refactor
+# Dedicated Platform Runtime Unit (existing systemd installations)
+
+> **Historical implementation, not the new-installation target.** This document describes the existing systemd blue/green installer and its self-deployment protocol so installed systems can continue to operate unchanged. The normative new-installation architecture is Aspire-defined Compose, an external deployer, one active Runtime, same-host PostgreSQL/S3-compatible storage and built-in Owner login; see [the deployment-mode contract](./deployment-mode-contract.md). No in-place upgrade from this systemd installation is authorized by the new target.
 
 **Status:** normative implementation and migration contract
 **Scope:** production-grade Dedicated Platform systemd deployment; this installer currently targets one Linux host, while Dedicated itself means single-tenant rather than single-node

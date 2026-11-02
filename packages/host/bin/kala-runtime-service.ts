@@ -93,7 +93,16 @@ async function main(): Promise<void> {
   // binary's default while retaining an explicit opt-out.
   if (process.env.KALA_ALLOW_ALL_OK === undefined) process.env.KALA_ALLOW_ALL_OK = '1'
   const deployment = loadProductDeploymentConfig({ configPath: required('KALA_DEPLOYMENT_CONFIG') })
-  if (productVariant(deployment) !== 'private-cloud') throw new Error('Runtime service requires a Private Cloud deployment config')
+  const product = productVariant(deployment)
+  if (product !== 'private-cloud' && product !== 'dedicated') {
+    throw new Error('Runtime service requires a Platform deployment config')
+  }
+  // Fresh Aspire Dedicated is never permitted to fall back to a local Unit
+  // tree. The existing systemd installer does not launch this service binary.
+  if (product === 'dedicated' && (!experimentalStorage || experimentalStorage.schemaManagement !== 'external'
+    || process.env.KALA_RUNTIME_REQUIRE_INSTALLATION_CLAIM !== '1')) {
+    throw new Error('Dedicated Runtime requires operator-migrated PostgreSQL/S3 and a verified installation claim')
+  }
   const capabilities = deployment.runtimeProfile === 'full' ? FULL_RUNTIME_CAPABILITIES : AGENT_RUNTIME_CAPABILITIES
   const port = Number(process.env.KALA_RUNTIME_KALA_PORT ?? 13002)
   if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('KALA_RUNTIME_KALA_PORT must be a valid port')
@@ -109,6 +118,9 @@ async function main(): Promise<void> {
       })
     : new RuntimeUnitMaterializationStore(join(dataRoot, 'host', 'runtime-unit-catalog.json'))
   await catalog.load()
+  if (product === 'dedicated' && catalog.list().filter((unit) => unit.desiredState !== 'deleted').length > 1) {
+    throw new Error('Dedicated Runtime catalog has more than one active logical Unit')
+  }
   const placementStore = experimentalStorage
     ? createPostgresRuntimeUnitPlacementStore({
         connectionString: experimentalStorage.connectionString,
@@ -178,7 +190,7 @@ async function main(): Promise<void> {
     listenHost: process.env.KALA_RUNTIME_KALA_BIND_HOST ?? '127.0.0.1',
     ingressSecret,
     requireProvisioning: true,
-    maxLoadedUnits: Number(process.env.KALA_RUNTIME_HOST_MAX_LOADED_UNITS ?? 100),
+    maxLoadedUnits: product === 'dedicated' ? 1 : Number(process.env.KALA_RUNTIME_HOST_MAX_LOADED_UNITS ?? 100),
     ...(placementOwnership ? {
       placementOwnership,
       replicaMembership,
@@ -197,6 +209,14 @@ async function main(): Promise<void> {
       return typeof value === 'string' ? value : undefined
     },
     factory: async (id) => {
+      // The read-only public installer route is not a tenant Unit and carries no
+      // Session/Queue authority; it must not consume Dedicated's single Unit slot.
+      if (product === 'dedicated' && id !== publicInstallerUnitId) {
+        const active = catalog.list().filter((unit) => unit.desiredState !== 'deleted')
+        if (active.length !== 1 || active[0]?.unitId !== id) {
+          throw new Error('Dedicated Runtime accepts only its one provisioned logical Unit')
+        }
+      }
       const unitRoot = join(dataRoot, 'tenant-runtime-units', id)
       const organizationId = experimentalStorage && id !== publicInstallerUnitId
         ? await trustedOrganizationId(catalog, id)
@@ -251,6 +271,10 @@ async function main(): Promise<void> {
       const speechCredentialStore = persistentStorage?.speechCredentialStore ?? localSpeechCredentialStore
       return startLoopbackHostRuntimeUnit(id, {
         sessionsDir: join(unitRoot, 'sessions'),
+        // The container entrypoint is in /app/packages/host/dist, while the
+        // verified Copilot CLI platform pair is in /app/release. Discover it
+        // from the published release, not the service script directory.
+        ...(releaseAssetsDir ? { copilot: { runtimeEntryPath: join(releaseAssetsDir, 'kala-runtime.cjs') } } : {}),
         // Trace/message-assembly captures currently write only to the local
         // artifact tree; do not publish disposable captures in PG/S3 mode.
         artifactRootDir: persistentStorage ? false : join(unitRoot, 'artifacts'),

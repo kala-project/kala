@@ -19,9 +19,25 @@ import type { RateLimiter } from '../governance/rate-limit.js'
 import { isOwnerBootstrapToken, ownerBootstrapHash, type OwnerBootstrapGateway } from '../organizations/owner-bootstrap.js'
 import type { RuntimeOriginResolver } from '../runtime-origin/postgres-runtime-origin-resolver.js'
 import type { RuntimeRoutingTicketResolver } from '../runtime-origin/runtime-routing-ticket-resolver.js'
+import type { DedicatedOwnerAuthenticator } from '../auth/dedicated-owner.js'
 
 export type RuntimeIngressGateway = { readonly http: HttpServer; readonly port: number; close(): Promise<void> }
 export type { RuntimeOriginResolver } from '../runtime-origin/postgres-runtime-origin-resolver.js'
+
+export type GatewayAuthentication =
+  | {
+      kind: 'oidc'
+      oidc: OidcClient
+      loginStates: LoginStateStore
+      secretBox: SessionSecretBox
+      ownerBootstrap?: OwnerBootstrapGateway
+      enterpriseSso?: EnterpriseSsoResolver
+    }
+  | {
+      kind: 'dedicated-owner'
+      owner: DedicatedOwnerAuthenticator
+      loginRateLimiter: RateLimiter
+    }
 
 class RuntimeOriginUnavailableError extends Error {
   constructor() { super('runtime_origin_unavailable') }
@@ -139,6 +155,10 @@ function signedOutPage(): string {
   return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Signed out · Kala</title><style>html{color-scheme:light dark}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#09090b;color:#f8fafc;font:16px system-ui,sans-serif}.card{width:min(28rem,calc(100% - 2rem));padding:2rem;border:1px solid #27272a;border-radius:1rem;background:#18181b;box-sizing:border-box}.mark{width:3rem;height:3rem;display:grid;place-items:center;border-radius:.75rem;background:#0f766e;font-weight:800}h1{font-size:1.5rem;margin:1.25rem 0 .5rem}p{color:#a1a1aa;line-height:1.5}a{display:inline-flex;margin-top:1rem;padding:.75rem 1rem;border-radius:.65rem;background:#0f766e;color:white;text-decoration:none;font-weight:650}</style></head><body><main class="card"><div class="mark">AR</div><h1>You are signed out</h1><p>Your Kala browser session has ended. Sign in again when you are ready.</p><a href="/auth/login">Sign in</a></main></body></html>'
 }
 
+function dedicatedOwnerLoginPage(error = false): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Owner sign in · Kala</title></head><body><main><h1>Owner sign in</h1>${error ? '<p role="alert">The password was not accepted.</p>' : ''}<form method="post" action="/auth/login"><label>Password <input name="password" type="password" required autocomplete="current-password" maxlength="1024"></label><button type="submit">Sign in</button></form></main></body></html>`
+}
+
 function inviteResultPage(kind: 'accepted' | 'verified_email_required' | 'email_mismatch' | 'unavailable'): string {
   const copy = {
     accepted: ['Invitation accepted', 'Your verified identity is now connected to the organization.', 'Open Kala'],
@@ -156,19 +176,15 @@ function ownerBootstrapResultPage(result: { bootstrapId: string; confirmationCod
 
 export async function startRuntimeIngressGateway(options: {
   port: number
-  oidc: OidcClient
+  authentication: GatewayAuthentication
   directory: RuntimeAssignmentStore
   organizations?: OrganizationStore
-  ownerBootstrap?: OwnerBootstrapGateway
-  enterpriseSso?: EnterpriseSsoResolver
-  loginStates: LoginStateStore
   hostOrigin: string
   runtimeOriginResolver?: RuntimeOriginResolver
   runtimeRoutingTicketResolver?: RuntimeRoutingTicketResolver
   dashboardOrigin?: string
   sessions: BrowserSessionStore
   cacheNamespaceSecret: string
-  secretBox: SessionSecretBox
   publicOrigin: string
   publicUrls?: readonly PublicUrlPattern[]
   listenHost?: string
@@ -300,9 +316,10 @@ export async function startRuntimeIngressGateway(options: {
     let session = await options.sessions.findByTokenHash(browserSessionTokenHash(token))
     if (!session || !isLive(session, Date.now())) return undefined
     if (session.refreshToken && session.providerRefreshAfter !== undefined && session.providerRefreshAfter <= Date.now()) {
+      if (options.authentication.kind !== 'oidc') return undefined
       try {
-        const result = await options.oidc.refresh(options.secretBox.decrypt(session.refreshToken))
-        const replacement = result.refreshToken ? options.secretBox.encrypt(result.refreshToken) : session.refreshToken
+        const result = await options.authentication.oidc.refresh(options.authentication.secretBox.decrypt(session.refreshToken))
+        const replacement = result.refreshToken ? options.authentication.secretBox.encrypt(result.refreshToken) : session.refreshToken
         session = await options.sessions.updateProvider(session.id, session.refreshToken, {
           refreshToken: replacement,
           providerRefreshAfter: result.accessTokenExpiresAt !== undefined ? result.accessTokenExpiresAt - 5 * 60_000 : Date.now() + 55 * 60_000,
@@ -327,6 +344,27 @@ export async function startRuntimeIngressGateway(options: {
     response.writeHead(403, { 'content-type': 'application/json', 'cache-control': 'no-store' })
     response.end(JSON.stringify({ error: 'forbidden', message: 'same-origin browser request is required' }))
     return false
+  }
+  const issueBrowserSession = async (
+    request: IncomingMessage,
+    identity: AuthenticatedIdentity,
+    access: OrganizationAccess | undefined,
+    provider?: { refreshToken?: string; accessTokenExpiresAt?: number },
+  ): Promise<string> => {
+    const token = randomBytes(32).toString('base64url')
+    const now = Date.now()
+    await options.sessions.create({
+      tokenHash: browserSessionTokenHash(token),
+      identity,
+      cacheNamespace: createHmac('sha256', options.cacheNamespaceSecret).update(access?.organization.id ?? `${identity.issuer}\0${identity.subject}`).digest('base64url').slice(0, 22),
+      device: browserDeviceFromUserAgent(request.headers['user-agent']),
+      createdAt: now,
+      idleExpiresAt: now + 86_400_000,
+      absoluteExpiresAt: now + 30 * 86_400_000,
+      ...(provider?.refreshToken && options.authentication.kind === 'oidc' ? { refreshToken: options.authentication.secretBox.encrypt(provider.refreshToken) } : {}),
+      ...(provider?.accessTokenExpiresAt !== undefined ? { providerRefreshAfter: provider.accessTokenExpiresAt - 5 * 60_000 } : {}),
+    })
+    return token
   }
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? '/', options.publicOrigin)
@@ -369,16 +407,46 @@ export async function startRuntimeIngressGateway(options: {
     }
     if (url.pathname === '/auth/owner-bootstrap') {
       const token = url.searchParams.get('token')?.trim() ?? ''
-      if (!options.ownerBootstrap || !isOwnerBootstrapToken(token)) { response.writeHead(404, { 'cache-control': 'no-store' }); response.end('owner bootstrap unavailable'); return }
+      if (options.authentication.kind !== 'oidc' || !options.authentication.ownerBootstrap || !isOwnerBootstrapToken(token)) { response.writeHead(404, { 'cache-control': 'no-store' }); response.end('owner bootstrap unavailable'); return }
       const tokenHash = ownerBootstrapHash(token)
-      try { await options.ownerBootstrap.assertAvailable(tokenHash) } catch { response.writeHead(410, { 'cache-control': 'no-store' }); response.end('owner bootstrap unavailable'); return }
+      try { await options.authentication.ownerBootstrap.assertAvailable(tokenHash) } catch { response.writeHead(410, { 'cache-control': 'no-store' }); response.end('owner bootstrap unavailable'); return }
       const oidcNonce = randomBytes(24).toString('base64url')
-      const login = await options.oidc.authorizationUrl(callbackUri, { prompt: 'login', nonce: oidcNonce })
+      const login = await options.authentication.oidc.authorizationUrl(callbackUri, { prompt: 'login', nonce: oidcNonce })
       const loginCookie = randomBytes(24).toString('base64url')
-      await options.loginStates.put(loginCookie, { ...login, oidcNonce, redirectUri: callbackUri, expiresAt: Date.now() + 10 * 60_000, ownerBootstrapHash: tokenHash })
+      await options.authentication.loginStates.put(loginCookie, { ...login, oidcNonce, redirectUri: callbackUri, expiresAt: Date.now() + 10 * 60_000, ownerBootstrapHash: tokenHash })
       response.writeHead(302, { location: login.url.href, 'referrer-policy': 'no-referrer', 'cache-control': 'no-store', 'set-cookie': `ak_login=${loginCookie}; HttpOnly${secure}; SameSite=Lax; Path=/auth; Max-Age=600` }); response.end(); return
     }
     if (url.pathname === '/auth/login') {
+      if (options.authentication.kind === 'dedicated-owner') {
+        if (request.method === 'GET') {
+          response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+          response.end(dedicatedOwnerLoginPage()); return
+        }
+        if (request.method !== 'POST') { response.writeHead(405, { allow: 'GET, POST', 'cache-control': 'no-store' }); response.end(); return }
+        if (!requireSameOriginWhenPresent(request, response)) return
+        const remoteAddress = request.socket.remoteAddress ?? 'unknown'
+        if (!enforceRateLimit(response, options.authentication.loginRateLimiter, `dedicated-owner-login:${remoteAddress}`)) return
+        let password = ''
+        try {
+          if (!(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/x-www-form-urlencoded')) throw new Error('invalid content type')
+          const body = await readRequestBody(request, 4_096)
+          password = new URLSearchParams(body.toString('utf8')).get('password') ?? ''
+        } catch {
+          response.writeHead(400, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+          response.end(dedicatedOwnerLoginPage(true)); return
+        }
+        const authenticated = await options.authentication.owner.authenticate(password)
+        const access = authenticated && options.organizations ? await options.organizations.findAccess(authenticated.identity) : undefined
+        if (!authenticated || !access || access.organization.id !== authenticated.organizationId || access.membership.role !== 'owner') {
+          response.writeHead(401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+          response.end(dedicatedOwnerLoginPage(true)); return
+        }
+        if (access.organization.status !== 'active') { denyInactiveOrganization(response, access.organization.status); return }
+        await options.provision?.(access.organization.unitId)
+        const sessionToken = await issueBrowserSession(request, authenticated.identity, access)
+        response.writeHead(303, { location: publicUrl.href, 'cache-control': 'no-store', 'set-cookie': `ak_session=${sessionToken}; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=2592000` })
+        response.end(); return
+      }
       const forceLogin = url.searchParams.get('prompt') === 'login'
       const organizationInviteToken = url.searchParams.get('invite')?.trim()
       if (organizationInviteToken && !/^ak_org_invite_[A-Za-z0-9_-]{43}$/u.test(organizationInviteToken)) {
@@ -386,31 +454,32 @@ export async function startRuntimeIngressGateway(options: {
         response.end(inviteResultPage('unavailable')); return
       }
       const ssoSelector = url.searchParams.get('sso')?.trim()
-      const ssoConnection = ssoSelector && options.enterpriseSso ? await options.enterpriseSso.resolve(ssoSelector) : undefined
+      const ssoConnection = ssoSelector && options.authentication.enterpriseSso ? await options.authentication.enterpriseSso.resolve(ssoSelector) : undefined
       if (ssoSelector && !ssoConnection) {
         response.writeHead(404, { 'content-type': 'application/json', 'cache-control': 'no-store' })
         response.end(JSON.stringify({ error: 'sso_connection_not_found' })); return
       }
       const oidcNonce = randomBytes(24).toString('base64url')
-      const login = await options.oidc.authorizationUrl(callbackUri, {
+      const login = await options.authentication.oidc.authorizationUrl(callbackUri, {
         nonce: oidcNonce,
         ...(forceLogin ? { prompt: 'login' as const } : {}),
         ...(ssoConnection?.loginHint ? { loginHint: ssoConnection.loginHint } : {}),
         ...(ssoConnection ? { idpHint: ssoConnection.providerId } : {}),
       })
       const nonce = randomBytes(24).toString('base64url')
-      await options.loginStates.put(nonce, { ...login, oidcNonce, redirectUri: callbackUri, expiresAt: Date.now() + 10 * 60_000, ...(ssoConnection ? { ssoConnectionId: ssoConnection.id } : {}), ...(organizationInviteToken ? { organizationInviteHash: inviteKey(organizationInviteToken) } : {}) })
+      await options.authentication.loginStates.put(nonce, { ...login, oidcNonce, redirectUri: callbackUri, expiresAt: Date.now() + 10 * 60_000, ...(ssoConnection ? { ssoConnectionId: ssoConnection.id } : {}), ...(organizationInviteToken ? { organizationInviteHash: inviteKey(organizationInviteToken) } : {}) })
       response.writeHead(302, { location: login.url.href, 'referrer-policy': 'no-referrer', 'cache-control': 'no-store', 'set-cookie': `ak_login=${nonce}; HttpOnly${secure}; SameSite=Lax; Path=/auth; Max-Age=600` }); response.end(); return
     }
     if (url.pathname === '/auth/callback') {
+      if (options.authentication.kind !== 'oidc') { response.writeHead(404, { 'cache-control': 'no-store' }); response.end(); return }
       const nonce = cookies(request).ak_login
-      const login = nonce ? await options.loginStates.take(nonce) : undefined
+      const login = nonce ? await options.authentication.loginStates.take(nonce) : undefined
       if (!login) { response.writeHead(400); response.end('invalid login state'); return }
-      const authentication = await options.oidc.callback(url, login.redirectUri, login.codeVerifier, login.state, login.oidcNonce)
+      const authentication = await options.authentication.oidc.callback(url, login.redirectUri, login.codeVerifier, login.state, login.oidcNonce)
       const identity = authentication.identity
       if (login.ownerBootstrapHash) {
         try {
-          const result = await options.ownerBootstrap?.captureCandidate(login.ownerBootstrapHash, identity)
+          const result = await options.authentication.ownerBootstrap?.captureCandidate(login.ownerBootstrapHash, identity)
           if (!result) throw new Error('owner_bootstrap_not_available')
           response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'set-cookie': `ak_login=; HttpOnly${secure}; SameSite=Lax; Path=/auth; Max-Age=0` })
           response.end(ownerBootstrapResultPage(result)); return
@@ -421,8 +490,8 @@ export async function startRuntimeIngressGateway(options: {
         }
       }
       if (login.ssoConnectionId) {
-        const connection = await options.enterpriseSso?.resolve(login.ssoConnectionId)
-        if (!connection || !await options.enterpriseSso!.authorize(connection, identity)) {
+        const connection = await options.authentication.enterpriseSso?.resolve(login.ssoConnectionId)
+        if (!connection || !await options.authentication.enterpriseSso!.authorize(connection, identity)) {
           response.writeHead(403, { 'content-type': 'application/json', 'cache-control': 'no-store' })
           response.end(JSON.stringify({ error: 'sso_authentication_mismatch' })); return
         }
@@ -451,20 +520,8 @@ export async function startRuntimeIngressGateway(options: {
       }
       const assignment = access ? { unitId: access.organization.unitId, identity } : await options.directory.getOrCreateForIdentity(identity)
       await options.provision?.(assignment.unitId)
-      const token = randomBytes(32).toString('base64url')
-      const now = Date.now()
-      await options.sessions.create({
-        tokenHash: browserSessionTokenHash(token),
-        identity,
-        cacheNamespace: createHmac('sha256', options.cacheNamespaceSecret).update(access?.organization.id ?? `${identity.issuer}\0${identity.subject}`).digest('base64url').slice(0, 22),
-        device: browserDeviceFromUserAgent(request.headers['user-agent']),
-        createdAt: now,
-        idleExpiresAt: now + 86_400_000,
-        absoluteExpiresAt: now + 30 * 86_400_000,
-        ...(authentication.refreshToken ? { refreshToken: options.secretBox.encrypt(authentication.refreshToken) } : {}),
-        ...(authentication.accessTokenExpiresAt !== undefined ? { providerRefreshAfter: authentication.accessTokenExpiresAt - 5 * 60_000 } : {}),
-      })
-      response.writeHead(302, { location: login.organizationInviteHash ? '/auth/invite-result?status=accepted' : publicUrl.href, 'set-cookie': [`ak_session=${token}; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=2592000`, `ak_login=; HttpOnly${secure}; SameSite=Lax; Path=/auth; Max-Age=0`] }); response.end(); return
+      const sessionToken = await issueBrowserSession(request, identity, access, authentication)
+      response.writeHead(302, { location: login.organizationInviteHash ? '/auth/invite-result?status=accepted' : publicUrl.href, 'set-cookie': [`ak_session=${sessionToken}; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=2592000`, `ak_login=; HttpOnly${secure}; SameSite=Lax; Path=/auth; Max-Age=0`] }); response.end(); return
     }
     if (url.pathname === '/auth/me') {
       if (request.method !== 'GET') { response.writeHead(405, { allow: 'GET', 'cache-control': 'no-store' }); response.end(); return }
@@ -791,6 +848,16 @@ export async function startRuntimeIngressGateway(options: {
         throw reason
       }
       response.writeHead(204, { 'cache-control': 'no-store' }); response.end(); return
+    }
+    const dedicatedIdentityMutation = options.authentication.kind === 'dedicated-owner' && (
+      (url.pathname === '/organization/invites' && request.method === 'POST')
+      || (/^\/organization\/invites\//u.test(url.pathname) && request.method === 'DELETE')
+      || (url.pathname === '/organization/members' && ['POST', 'PATCH', 'DELETE'].includes(request.method ?? ''))
+      || (url.pathname === '/organization/ownership' && request.method === 'POST')
+    )
+    if (dedicatedIdentityMutation) {
+      response.writeHead(403, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      response.end(JSON.stringify({ error: 'dedicated_single_owner' })); return
     }
     if (url.pathname === '/organization/invites' && request.method === 'POST' && organizationAccess && options.organizations) {
       if (!requireSameOriginWhenPresent(request, response)) return

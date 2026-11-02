@@ -2,21 +2,27 @@
 
 Status: normative
 
-This is the normative **enterprise target**, not a statement that every requirement is present in the current installation or production-certified. It supersedes historical first-release one-user/no-RBAC assumptions in the [Runtime implementation record](./private-cloud-runtime-units.md); that record now describes the Organization model for current scope. Canonical naming and deployment configuration are defined by the [deployment-mode contract](./deployment-mode-contract.md). For what is implemented by default, experimental, or supported by release evidence, consult the [design/status ledger](./private-cloud-design-status.md).
+This is the normative **enterprise target**, not a statement that every requirement is present in the current installation or production-certified. It supersedes historical first-release one-user/no-RBAC assumptions in the [Runtime implementation record](./private-cloud-runtime-units.md); that record now describes the Organization model for current scope. The [deployment-mode contract](./deployment-mode-contract.md) is the sole three-mode target authority; this document refines only Private Cloud invariants and cannot redefine identity, storage, topology or old-install boundaries in that contract. Canonical naming and deployment configuration are defined there. For what is implemented by default, experimental, or supported by release evidence, consult the [design/status ledger](./private-cloud-design-status.md).
 
 ## 1. Topology
 
 ```mermaid
 flowchart LR
-  B[Browser] --> E[Single-domain Edge / Runtime Ingress]
-  E --> IDP[Operator-managed identity provider via OIDC]
+  B[Browser] --> E[Single-domain HA Edge + Gateways]
+  E --> IDP[External operator-managed OIDC]
   E --> CP[Control-plane Ports]
-  E --> RH[RuntimeHost private ingress]
-  CP --> PG[(PostgreSQL)]
-  CP --> VAULT[SecretResolver / OpenBao]
-  CP --> OBJ[ArtifactStore / S3 or MinIO]
-  RH --> U1[TenantRuntimeUnit: Organization A]
-  RH --> U2[TenantRuntimeUnit: Organization B]
+  E --> RA[Runtime replica A / fenced resource owners]
+  E --> RB[Runtime replica B / fenced resource owners]
+  CP --> CPG[(Control PostgreSQL)]
+  RA --> RPG[(Runtime PostgreSQL)]
+  RB --> RPG
+  RA --> OBJ[(External S3-compatible object bytes)]
+  RB --> OBJ
+  CP --> VAULT[External SecretResolver]
+  RA --> VAULT
+  RB --> VAULT
+  RA --> U1[Logical TenantRuntimeUnit: Organization A]
+  RB --> U2[Logical TenantRuntimeUnit: Organization B]
   X1[Customer Executor pool] -->|outbound TLS/WSS| E
   X2[Workspace Executor] -->|outbound TLS/WSS| E
   E --> OTEL[OpenTelemetry Collector]
@@ -30,7 +36,7 @@ Every customer-deployable Private Cloud topology, whether on a customer-operated
 
 Each externally persisted Gateway/Runtime must verify its expected installation identity against every authority it reads before becoming ready: Gateway checks control and Runtime PostgreSQL; Runtime checks Runtime PostgreSQL and S3. A missing, unreadable or mismatched claim fails closed on every process start, not only on first install. Equal installation IDs alone do **not** prove equal backup epochs. Recovery-set markers across control PostgreSQL, Runtime PostgreSQL and S3 may reject *different marked sets* and bind the Runtime state key, but only if all writers were demonstrably stopped throughout marking and provider snapshots; matching markers are not proof of an atomic cross-store snapshot or the absence of writes after marking. Coordinated snapshot/version inventory, key availability, old-owner isolation and credential revocation remain separate mandatory production gates.
 
-Self-managed and cloud-managed infrastructure are interchangeable only when they satisfy the same protocol, isolation, credential, backup/restore, and failure contracts. A cloud service name is not an implicit adapter: Azure Blob, for example, does not satisfy the S3 API without a separately implemented and accepted `ArtifactObjectStore` adapter. The current single-machine Compose/volume release is a legacy installation, **not** a compliant instance of this target; do not recommend it as the Private Cloud HA/scaling architecture or convert existing installations in place by deleting their volumes. The Dedicated mode is outside this Private Cloud change.
+Self-managed and cloud-managed infrastructure are interchangeable only when they satisfy the same protocol, isolation, credential, backup/restore, and failure contracts. A cloud service name is not an implicit adapter: Azure Blob, for example, does not satisfy the S3 API without a separately implemented and accepted `ArtifactObjectStore` adapter. The current single-machine Compose/volume release is a legacy installation, **not** a compliant instance of this target; do not recommend it as the Private Cloud HA/scaling architecture or convert existing installations in place by deleting their volumes. New Dedicated shares the Platform PostgreSQL/S3 Runtime storage semantics but has its own single-Owner identity and one-host Compose deployment contract in the [deployment-mode contract](./deployment-mode-contract.md); this enterprise multi-node/HA contract applies only to Private Cloud. Existing Dedicated systemd installations remain unchanged.
 
 ## 2. Authority matrix
 

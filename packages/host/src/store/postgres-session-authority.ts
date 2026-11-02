@@ -19,35 +19,21 @@ import type { ParsedHistory, SessionOperationMatch } from './log.js'
 import { PostgresMessageQueueStore } from '../postgres-message-queue.js'
 import type { PostgresSchemaManagement } from '../postgres-migrations.js'
 import { parseTenantRuntimeUnitId, type TenantRuntimeUnitId } from '../tenant-runtime/unit.js'
+import {
+  SessionDeletingError,
+  type PersistedSessionDocument,
+  type SessionAuthority,
+  type SessionAuthorityMutation,
+} from './session-authority.js'
 
-export type PersistedSessionDocument = Record<string, unknown> & {
-  sessionId: string
-  state: { cursor: number }
-}
-
-export type SessionAuthorityMutation = {
-  mutationId: string
-  eventType: string
-  entry?: EventEntry | RuntimeMetadataEntry
-  /** Internal cross-Session fence used when child creation depends on a parent owned by this Unit. */
-  fenceSessionId?: string
-  /** Internal deletion-state transitions are the only writes allowed after tombstoning. */
-  allowDeletingSession?: boolean
-  apply(current: PersistedSessionDocument | undefined): PersistedSessionDocument | undefined
-}
+export { SessionDeletingError } from './session-authority.js'
+export type { PersistedSessionDocument, SessionAuthorityMutation } from './session-authority.js'
 
 const SESSION_DELETION_FIELD = '__kalaSessionDeletion'
 
 type SessionDeletionTombstone = {
   requestId: string
   requestedAt: string
-}
-
-export class SessionDeletingError extends Error {
-  constructor(readonly sessionId: string) {
-    super(`Session ${sessionId} is being deleted`)
-    this.name = 'SessionDeletingError'
-  }
 }
 
 type LegacySessionDocumentEvent = {
@@ -97,7 +83,7 @@ type EventRow = Record<string, unknown> & {
  * projection and for exact idempotency checks. Schema-version 2 and unversioned
  * full-document events remain replayable for existing installations.
  */
-export class PostgresSessionAuthority {
+export class PostgresSessionAuthority implements SessionAuthority {
   readonly #ownerIdPrefix: string
   readonly #eventsTable: string
   readonly #projectionTable: string

@@ -12,10 +12,11 @@ afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recur
 describe('control-plane migrations', () => {
   it('keeps release migrations uniquely numbered so a fresh installation can start', async () => {
     const migrations = await readControlPlaneMigrations(join(import.meta.dirname, '../../migrations'))
-    expect(migrations.map(({ version }) => version)).toEqual([1, 2, 3, 4, 5, 6])
+    expect(migrations.map(({ version }) => version)).toEqual([1, 2, 3, 4, 5, 6, 7])
     expect(migrations[1]?.name).toBe('0002_service_accounts_webhooks.sql')
     expect(migrations[2]?.name).toBe('0003_workspace_entitlement.sql')
     expect(migrations[5]?.name).toBe('0006_oidc_login_states.sql')
+    expect(migrations[6]?.name).toBe('0007_dedicated_owner_credentials.sql')
   })
 
   it('loads ordered immutable migration files with checksums', async () => {

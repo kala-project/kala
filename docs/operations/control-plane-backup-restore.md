@@ -1,4 +1,6 @@
-# Control-plane Backup, Restore and PITR
+# Control PostgreSQL backup/restore component — not a whole-product restore
+
+**Scope:** this procedure covers only control PostgreSQL in a named existing installation. A successful dump/PITR restore here does **not** recover a target Dedicated or Private Cloud Session, attachment or Agent. The [three-mode target](../architecture/deployment-mode-contract.md) and [Private Cloud recovery invariant](../architecture/private-cloud-enterprise-architecture-contract.md) take precedence.
 
 ## Objectives
 
@@ -8,10 +10,10 @@ Pilot objective: **RPO 15 minutes, RTO 4 hours**. Contracted production targets 
 
 1. Continuous WAL archive plus daily base backup (or managed PostgreSQL PITR equivalent).
 2. Daily custom-format `pg_dump` for portable recovery and pre-migration backups.
-3. Independent backups for ZITADEL database, object storage and Runtime Unit data. A control-plane dump is not a complete product backup.
+3. Separate provider backups for external identity, Runtime PostgreSQL and S3-compatible object bytes; **independently timed copies do not form a valid whole-product recovery set**. The current command backs up control PostgreSQL only.
 4. Backup manifests include byte length and SHA-256; backup storage is encrypted, access logged and retention controlled.
 
-## Portable backup
+## Portable-format control PostgreSQL dump (not Portable mode)
 
 ```bash
 export KALA_INGRESS_DATABASE_URL='postgresql://...'
@@ -29,7 +31,7 @@ Create an empty disposable database, point `KALA_INGRESS_DATABASE_URL` at it, th
 node scripts/private-cloud-local/verify-control-plane-restore.mjs /secure/backup/control-plane/control-plane-TIMESTAMP.dump
 ```
 
-The verifier checks the manifest, restores with `--exit-on-error`, and reports schema, Organization, membership, browser-session, Audit and Usage counts. Follow with application-level checks for login, authorization, Unit placement and one restored Session.
+The verifier checks the manifest, restores with `--exit-on-error`, and reports schema, Organization, membership, browser-session, Audit and Usage counts. Follow with control-plane checks for login, authorization and Unit placement. Do **not** claim a restored Session from this control-only drill; a Session requires a separately coordinated Runtime PostgreSQL/S3 restore.
 
 A restore drill fails if any of these are missing:
 
@@ -39,7 +41,11 @@ A restore drill fails if any of these are missing:
 - row-count and application-level verification;
 - documented operator and corrective action.
 
-## PITR procedure
+## Complete PG/S3 recovery gate (not implemented by this script)
+
+A whole-product recovery set for **new Dedicated** includes its same-host control and Runtime PostgreSQL databases, SILO object versions/inventory, installation identity, required encryption/state keys and secret references. For **Private Cloud production**, the same logical set uses operator-managed PostgreSQL PITR and external versioned S3 across distinct failure domains. Local PG/S3 is a valid recovery-test substrate, not HA proof. Stop/fence all writers during recovery-set marking and provider snapshots; preserve exact snapshot/version inventory and key material, then restore onto new application nodes. Isolate old owners and revoke old credentials before admitting traffic. Compare installation and recovery markers, but do not mistake matching markers for an atomic cross-store snapshot. Verify browser-session revocation, Session/Queue/pending call and Executor receipts, object references and bytes, real SDK continuation, and explicitly unknown external effects. No complete, validated recovery/rollback operator exists yet; fail closed rather than using this control-only PITR as one.
+
+## Control PostgreSQL PITR component
 
 1. Declare incident and stop/deny control-plane mutations while preserving evidence.
 2. Provision a new PostgreSQL target; never restore over the only copy.

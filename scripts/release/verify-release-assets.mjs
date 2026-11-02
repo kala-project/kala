@@ -200,9 +200,19 @@ if (includesHost) {
       if (expected.get(name) !== createHash('sha256').update(bytes).digest('hex')) fail(`Portable Host embedded SHA256SUMS does not authenticate ${name}`)
     }
   }
-  if (!hostBundle.includes('__KALA_EMBEDDED_DOCS__')
-    || !hostBundle.includes(Buffer.from('# Dedicated Platform Runtime Unit Refactor').toString('base64'))) {
-    fail('release Host bundle is missing embedded product documentation')
+  const docsMarker = 'globalThis.__KALA_EMBEDDED_DOCS__='
+  const docsStart = hostBundle.indexOf(docsMarker)
+  const docsEnd = docsStart < 0 ? -1 : hostBundle.indexOf(';\n', docsStart)
+  let embeddedDocs
+  try {
+    embeddedDocs = docsEnd < 0 ? undefined : JSON.parse(hostBundle.slice(docsStart + docsMarker.length, docsEnd))
+  } catch { /* malformed embedded documentation fails below */ }
+  const contract = Array.isArray(embeddedDocs)
+    ? embeddedDocs.find((entry) => entry.path === 'architecture/deployment-mode-contract.md')
+    : undefined
+  if (typeof contract?.contentBase64 !== 'string'
+    || !Buffer.from(contract.contentBase64, 'base64').toString('utf8').startsWith('# Product Deployment Contract\n')) {
+    fail('release Host bundle is missing the embedded deployment-mode contract')
   }
   const platformRuntime = readFileSync(join(releaseDir, 'kala-runtime.cjs'), 'utf8')
   if (platformRuntime.includes('globalThis.__KALA_EMBEDDED_DASHBOARD__=')) fail('Self-hosted Platform Runtime must not embed Dashboard assets')

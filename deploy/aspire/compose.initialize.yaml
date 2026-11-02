@@ -1,0 +1,23 @@
+services:
+  silo-provision:
+    image: ${KALA_MC_IMAGE:?set KALA_MC_IMAGE to an accepted immutable minio/mc name@sha256 digest}
+    entrypoint: [/bin/sh, /operator/provision-silo.sh]
+    user: "0:0"
+    environment:
+      MC_CONFIG_DIR: /tmp/mc
+      HOME: /tmp
+    volumes:
+      - ${KALA_ASPIRE_INIT_DIR:?set by initialize.sh}:/operator:ro
+      - ${KALA_ASPIRE_SECRETS_DIR:?set by initialize.sh}/silo_root_access_key:/run/kala-init-secrets/silo_root_access_key:ro
+      - ${KALA_ASPIRE_SECRETS_DIR:?set by initialize.sh}/silo_root_secret_key:/run/kala-init-secrets/silo_root_secret_key:ro
+      - ${KALA_ASPIRE_SECRETS_DIR:?set by initialize.sh}/runtime_s3_access_key:/run/kala-init-secrets/runtime_s3_access_key:ro
+      - ${KALA_ASPIRE_SECRETS_DIR:?set by initialize.sh}/runtime_s3_secret_key:/run/kala-init-secrets/runtime_s3_secret_key:ro
+    networks: [aspire]
+    restart: "no"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.25

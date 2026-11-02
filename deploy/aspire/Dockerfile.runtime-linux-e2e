@@ -1,0 +1,66 @@
+# Linux x64 isolated acceptance image; not a cross-platform or signed release.
+# Builds real Host/Executor/Dashboard packages and the CJS-only release assets.
+# No Windows native Executor files are fabricated or embedded.
+FROM node@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS build
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
+RUN corepack enable && corepack prepare pnpm@11.3.0 --activate
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY packages/kernel/package.json packages/kernel/package.json
+COPY packages/shared/package.json packages/shared/package.json
+COPY packages/executor/package.json packages/executor/package.json
+COPY packages/host/package.json packages/host/package.json
+COPY packages/runtime-ingress-gateway/package.json packages/runtime-ingress-gateway/package.json
+COPY packages/dashboard/package.json packages/dashboard/package.json
+RUN pnpm install --frozen-lockfile --filter @agent-kernel/host... --filter @agent-kernel/runtime-ingress-gateway... --filter @agent-kernel/dashboard...
+COPY packages/kernel packages/kernel
+COPY packages/shared packages/shared
+COPY packages/executor packages/executor
+COPY packages/host packages/host
+COPY packages/runtime-ingress-gateway packages/runtime-ingress-gateway
+COPY packages/dashboard packages/dashboard
+COPY docs docs
+COPY deploy/dedicated-systemd deploy/dedicated-systemd
+COPY scripts/deploy scripts/deploy
+COPY resources resources
+RUN pnpm --filter @agent-kernel/kernel build && pnpm --filter @agent-kernel/shared build && pnpm --filter @agent-kernel/executor build && pnpm --filter @agent-kernel/host build && pnpm --filter @agent-kernel/runtime-ingress-gateway build && pnpm --filter @agent-kernel/dashboard build
+COPY scripts/release scripts/release
+ARG SOURCE_REVISION
+ARG RELEASE_TAG
+ARG RELEASE_REPOSITORY
+RUN node scripts/release/build-release-assets.mjs --no-native --repo "$RELEASE_REPOSITORY" --tag "$RELEASE_TAG" --skip-dashboard-build --skip-package-build --source-revision "$SOURCE_REVISION" \
+ && pnpm run verify:release-assets \
+ && rm -rf packages/dashboard \
+ && pnpm deploy --legacy --filter @agent-kernel/host --prod /out/host \
+ && rm -rf /out/host/src /out/host/bin
+
+FROM gcr.io/distroless/nodejs22-debian13@sha256:5ef534d3db0ac0c43bee379af4ae49cfbfc0ef38a46c94c52d87c68f32f34d8a AS node-runtime-source
+FROM scratch AS node-runtime
+COPY --from=node-runtime-source /nodejs/bin/node /nodejs/bin/node
+COPY --from=node-runtime-source /etc/os-release /etc/os-release
+COPY --from=node-runtime-source /etc/debian_version /etc/debian_version
+COPY --from=node-runtime-source /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=node-runtime-source /etc/passwd /etc/passwd
+COPY --from=node-runtime-source /etc/group /etc/group
+COPY --from=node-runtime-source /etc/nsswitch.conf /etc/nsswitch.conf
+COPY --from=node-runtime-source /usr/share/zoneinfo /usr/share/zoneinfo
+COPY --from=node-runtime-source /usr/lib/x86_64-linux-gnu/libdl.so.2 /usr/lib/x86_64-linux-gnu/libdl.so.2
+COPY --from=node-runtime-source /usr/lib/x86_64-linux-gnu/libstdc++.so.6 /usr/lib/x86_64-linux-gnu/libstdc++.so.6
+COPY --from=node-runtime-source /usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33 /usr/lib/x86_64-linux-gnu/libstdc++.so.6.0.33
+COPY --from=node-runtime-source /usr/lib/x86_64-linux-gnu/libm.so.6 /usr/lib/x86_64-linux-gnu/libm.so.6
+COPY --from=node-runtime-source /usr/lib/x86_64-linux-gnu/libgcc_s.so.1 /usr/lib/x86_64-linux-gnu/libgcc_s.so.1
+COPY --from=node-runtime-source /usr/lib/x86_64-linux-gnu/libpthread.so.0 /usr/lib/x86_64-linux-gnu/libpthread.so.0
+COPY --from=node-runtime-source /usr/lib/x86_64-linux-gnu/libc.so.6 /usr/lib/x86_64-linux-gnu/libc.so.6
+COPY --from=node-runtime-source /usr/lib64/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
+COPY --from=node-runtime-source --chmod=1777 /tmp /tmp
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENTRYPOINT ["/nodejs/bin/node"]
+FROM node-runtime AS runtime
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=build --chown=65532:65532 /out/host/ /app/packages/host/
+COPY --from=build --chown=65532:65532 /app/docs/ /app/docs/
+COPY --from=build --chown=65532:65532 /app/release/ /app/release/
+USER 65532:65532
+CMD ["packages/host/dist/bin/kala-runtime-service.js"]

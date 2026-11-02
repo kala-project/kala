@@ -8,7 +8,7 @@ import { Pool } from 'pg'
 
 import { JsonOrganizationStore } from '../organizations/json-store.js'
 import { PostgresOrganizationStore } from '../organizations/postgres-store.js'
-import { startRuntimeIngressGateway } from '../edge/server.js'
+import { startRuntimeIngressGateway, type GatewayAuthentication } from '../edge/server.js'
 import { createOidcClient } from '../auth/oidc-client.js'
 import { readRequiredSecretEnv } from '../config/secret-env.js'
 import { FileLoginStateStore, resolveLoginStateStoreKind } from '../auth/login-state-store.js'
@@ -32,6 +32,8 @@ import {
 } from '../runtime-origin/postgres-runtime-origin-resolver.js'
 import { createPostgresRuntimeResourceOwnerResolver } from '../runtime-origin/postgres-runtime-resource-owner-resolver.js'
 import { RuntimeRoutingTicketResolver } from '../runtime-origin/runtime-routing-ticket-resolver.js'
+import { loadGatewayProductDeployment } from '../config/product-deployment.js'
+import { PostgresDedicatedOwnerAuthenticator } from '../auth/dedicated-owner.js'
 
 interface RecoveryCheckpoint { installation_id: string; checkpoint_id: string; key_sha256: string }
 async function assertPostgresInstallationClaim(connectionString: string, installationId: string, label: string): Promise<RecoveryCheckpoint> {
@@ -60,6 +62,8 @@ async function assertPostgresInstallationClaim(connectionString: string, install
 }
 
 async function main(): Promise<void> {
+  const deployment = await loadGatewayProductDeployment(process.env.KALA_DEPLOYMENT_CONFIG)
+  const dedicated = deployment.variant === 'dedicated'
   const port = Number(process.env.KALA_INGRESS_PORT ?? 13001)
   if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('KALA_INGRESS_PORT must be a valid port')
   const publicUrlValues = requiredPublicUrls()
@@ -71,34 +75,52 @@ async function main(): Promise<void> {
   if (Buffer.byteLength(cacheNamespaceSecret) < 32 || Buffer.byteLength(ingressSecret) < 32) throw new Error('Private Cloud secrets must contain at least 32 bytes')
   let database: ControlPlaneDatabase | undefined
   const controlPlane = await resolveRuntimeIngressControlPlaneMode(process.env, readRequiredSecretEnv)
+  if (dedicated && controlPlane.kind !== 'postgres') throw new Error('Dedicated Gateway requires the PostgreSQL control plane')
   const organizations = controlPlane.kind === 'postgres'
     ? new PostgresOrganizationStore(database = createPostgresControlPlaneDatabase({ connectionString: controlPlane.databaseUrl }))
     : new JsonOrganizationStore(resolve(controlPlane.directoryPath))
   if (organizations instanceof JsonOrganizationStore) await organizations.load()
   else await assertControlPlaneSchema(database!, await readControlPlaneMigrations(resolve(process.env.KALA_INGRESS_MIGRATIONS_DIR ?? 'migrations')))
-  const loginStateStoreKind = resolveLoginStateStoreKind(process.env)
+  const loginStateStoreKind = dedicated ? undefined : resolveLoginStateStoreKind(process.env)
   if (loginStateStoreKind === 'postgres' && !database) {
     throw new Error('KALA_INGRESS_LOGIN_STATE_STORE_KIND=postgres requires the PostgreSQL control plane')
   }
   const loginStates = loginStateStoreKind === 'postgres'
     ? new PostgresLoginStateStore(database!)
-    : new FileLoginStateStore(resolve(await readRequiredSecretEnv('KALA_INGRESS_LOGIN_STATE_STORE')))
+    : loginStateStoreKind === 'file'
+      ? new FileLoginStateStore(resolve(await readRequiredSecretEnv('KALA_INGRESS_LOGIN_STATE_STORE')))
+      : undefined
   if (loginStates instanceof FileLoginStateStore) await loginStates.load()
   const sessions = database
     ? new PostgresBrowserSessionStore(database)
     : new FileBrowserSessionStore(resolve(process.env.KALA_INGRESS_BROWSER_SESSION_STORE ?? `${await readRequiredSecretEnv('KALA_INGRESS_LOGIN_STATE_STORE')}.sessions`))
   if (sessions instanceof FileBrowserSessionStore) await sessions.load()
-  const secretBox = createSessionSecretBox('active', [{ id: 'active', key: Buffer.from(cacheNamespaceSecret).subarray(0, 32) }])
-  const oidc = await createOidcClient({
+  const secretBox = dedicated ? undefined : createSessionSecretBox('active', [{ id: 'active', key: Buffer.from(cacheNamespaceSecret).subarray(0, 32) }])
+  const oidc = dedicated ? undefined : await createOidcClient({
     issuer: new URL(await readRequiredSecretEnv('OIDC_ISSUER')),
     clientId: await readRequiredSecretEnv('OIDC_CLIENT_ID'),
     clientSecret: await readRequiredSecretEnv('OIDC_CLIENT_SECRET'),
     discoveryOrigin: new URL(await readRequiredSecretEnv('KALA_INGRESS_IDENTITY_ORIGIN')),
     allowInsecureHttp: process.env.KALA_INGRESS_ALLOW_INSECURE_HTTP === '1',
   })
-  const enterpriseSso = process.env.KALA_INGRESS_ENTERPRISE_SSO_CONFIG
+  if (dedicated && process.env.KALA_INGRESS_ENTERPRISE_SSO_CONFIG) throw new Error('Dedicated Gateway cannot configure external OIDC or enterprise SSO')
+  const enterpriseSso = !dedicated && process.env.KALA_INGRESS_ENTERPRISE_SSO_CONFIG
     ? await loadEnterpriseSsoResolver(resolve(process.env.KALA_INGRESS_ENTERPRISE_SSO_CONFIG))
     : undefined
+  const authentication: GatewayAuthentication = dedicated
+    ? {
+        kind: 'dedicated-owner',
+        owner: new PostgresDedicatedOwnerAuthenticator(database!),
+        loginRateLimiter: new SlidingWindowRateLimiter({ maxRequests: 5, windowMs: 5 * 60_000 }),
+      }
+    : {
+        kind: 'oidc',
+        oidc: oidc!,
+        loginStates: loginStates!,
+        secretBox: secretBox!,
+        ...(database ? { ownerBootstrap: new OwnerBootstrapService(database) } : {}),
+        ...(enterpriseSso ? { enterpriseSso } : {}),
+      }
   const hostOrigin = await readRequiredSecretEnv('KALA_RUNTIME_HOST_ORIGIN')
   const readerFile = process.env.KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING_FILE
   const readerDirect = process.env.KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING
@@ -125,6 +147,12 @@ async function main(): Promise<void> {
     ? runtimeReaderConnectionString(runtimePlacementConfig, routingTicketConfigured)
     : undefined
   if (runtimeReader?.audit) await auditPostgresRuntimeReaderConnection(runtimeReader.connectionString)
+  if (dedicated && (!runtimePlacementConfig || !runtimeReader)) {
+    throw new Error('Dedicated Gateway requires configured Runtime PostgreSQL placement and reader access')
+  }
+  if (dedicated && process.env.KALA_INGRESS_REQUIRE_INSTALLATION_CLAIM !== '1') {
+    throw new Error('Dedicated Gateway requires the installation claim')
+  }
   if (process.env.KALA_INGRESS_REQUIRE_INSTALLATION_CLAIM !== undefined) {
     if (process.env.KALA_INGRESS_REQUIRE_INSTALLATION_CLAIM !== '1' || controlPlane.kind !== 'postgres' || !runtimeReader) {
       throw new Error('Gateway installation claim requires control and Runtime PostgreSQL')
@@ -200,10 +228,8 @@ async function main(): Promise<void> {
   const gateway = await startRuntimeIngressGateway({
     port,
     listenHost: process.env.KALA_INGRESS_LISTEN_HOST ?? '127.0.0.1',
-    oidc,
+    authentication,
     organizations,
-    ...(database ? { ownerBootstrap: new OwnerBootstrapService(database) } : {}),
-    ...(enterpriseSso ? { enterpriseSso } : {}),
     directory: {
       getOrCreateForIdentity: async (identity) => { const access = await organizations.getOrCreateForIdentity(identity); return { unitId: access.organization.unitId, identity } },
       findByIdentity: async (identity) => { const access = await organizations.findAccess(identity); return access ? { unitId: access.organization.unitId, identity } : undefined },
@@ -211,7 +237,6 @@ async function main(): Promise<void> {
       findUnitByExecutorInvite: (token) => organizations.findUnitByExecutorInvite(token),
       findUnitByExecutorRouteHint: (inviteHash) => organizations.findUnitByExecutorRouteHint(inviteHash),
     },
-    loginStates,
     sessions,
     hostOrigin,
     ...(runtimeOriginResolver ? { runtimeOriginResolver } : {}),
@@ -221,7 +246,6 @@ async function main(): Promise<void> {
     publicOrigin,
     publicUrls,
     cacheNamespaceSecret,
-    secretBox,
     ingressSecret,
     ...(database ? {
       serviceAccounts: new ServiceAccountService(database, {
@@ -253,7 +277,7 @@ async function main(): Promise<void> {
     },
   }) : undefined
   if (database && !retentionScheduler) process.stdout.write(`${JSON.stringify({ event: 'retention_scheduler_disabled' })}\n`)
-  process.stdout.write(`${JSON.stringify({ event: 'private_cloud_gateway_ready', port: gateway.port })}\n`)
+  process.stdout.write(`${JSON.stringify({ event: `${deployment.variant}_gateway_ready`, port: gateway.port })}\n`)
   const close = async (): Promise<void> => { retentionScheduler?.stop(); await gateway.close(); await runtimeResourceOwnerResolver?.close(); await runtimeOriginResolver?.close(); await database?.close(); process.exit(0) }
   process.on('SIGTERM', () => { void close() }); process.on('SIGINT', () => { void close() })
 }

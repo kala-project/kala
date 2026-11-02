@@ -69,6 +69,10 @@ export async function grantControlWriter(database: { query: (sql: string) => Pro
   await database.query(`GRANT CONNECT ON DATABASE runlab_control TO "${role}"`)
   await database.query(`GRANT USAGE ON SCHEMA public TO "${role}"`)
   await database.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "${role}"`)
+  // The running Gateway reads the verifier and records successful logins, but cannot
+  // replace/bootstrap a credential or modify its identity and password columns.
+  await database.query(`REVOKE INSERT, UPDATE, DELETE ON TABLE public.dedicated_owner_credentials FROM "${role}"`)
+  await database.query(`GRANT UPDATE (last_authenticated_at) ON TABLE public.dedicated_owner_credentials TO "${role}"`)
   await database.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "${role}"`)
   // The fresh PG/S3 claim lives outside public; only its immutable marker is readable.
   await database.query(`DO $kala$ BEGIN
@@ -104,7 +108,7 @@ async function readConnectionString(
   const direct = environment[name]?.trim()
   const file = environment[`${name}_FILE`]?.trim()
   if (direct && file) throw new Error(`${name} and ${name}_FILE are mutually exclusive`)
-  const value = direct ?? (file ? (await readSecret(file)).trim() : undefined)
+  const value = direct || (file ? (await readSecret(file)).trim() : undefined)
   if (required && !value) throw new Error(`${name} or ${name}_FILE is required`)
   return value || undefined
 }

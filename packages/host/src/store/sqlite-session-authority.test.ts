@@ -1,0 +1,169 @@
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+
+import { createConfig, step } from '@agent-kernel/kernel'
+import { afterEach, describe, expect, it } from 'vitest'
+
+import { SessionDeletingError } from './session-authority.js'
+import { SessionStore } from './session.js'
+import { SqliteSessionAuthority } from './sqlite-session-authority.js'
+
+const config = createConfig({ tools: [], systemPrompt: 'portable' })
+
+describe('SqliteSessionAuthority', () => {
+  const roots: string[] = []
+  const authorities: SqliteSessionAuthority[] = []
+
+  afterEach(async () => {
+    await Promise.all(authorities.splice(0).map(async (authority) => await authority.close()))
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+  })
+
+  function fixture(): { root: string; databasePath: string; sessionsDir: string } {
+    const root = mkdtempSync(join(tmpdir(), 'kala-sqlite-session-'))
+    roots.push(root)
+    return {
+      root,
+      databasePath: join(root, 'state.sqlite'),
+      sessionsDir: join(root, 'sessions-must-not-be-created'),
+    }
+  }
+
+  function authority(databasePath: string): SqliteSessionAuthority {
+    const value = new SqliteSessionAuthority(databasePath)
+    authorities.push(value)
+    return value
+  }
+
+  it('persists authoritative state and ordered cursor history across restart without JSONL', async () => {
+    const { databasePath, sessionsDir } = fixture()
+    const firstAuthority = authority(databasePath)
+    const first = new SessionStore(sessionsDir, { authority: firstAuthority })
+    const record = await first.create({ sessionId: 'restart-session', config, organizationId: 'org-a' })
+
+    for (const text of ['first', 'second']) {
+      const event = { kind: 'user_message', text } as const
+      const transition = step(record.state, event, record.config)
+      await first.record(record.sessionId, event, transition.effects, transition.next)
+    }
+    await first.appendRuntimeMetadata(record.sessionId, { action: 'portable.checkpoint', payload: { value: 2 } })
+    expect(existsSync(sessionsDir)).toBe(false)
+    await firstAuthority.close()
+
+    const secondAuthority = authority(databasePath)
+    const second = new SessionStore(sessionsDir, { authority: secondAuthority })
+    await second.initialize()
+    const recovered = await second.load(record.sessionId)
+    expect(recovered.state.cursor).toBe(2)
+    expect((await second.readEventEntries(record.sessionId)).map((entry) => [entry.seq, entry.event.kind])).toEqual([
+      [1, 'user_message'],
+      [2, 'user_message'],
+    ])
+    await expect(second.readHistory(record.sessionId)).resolves.toMatchObject({
+      events: [{ seq: 1 }, { seq: 2 }],
+      runtimeMetadata: [{ action: 'portable.checkpoint', payload: { value: 2 } }],
+    })
+    expect(existsSync(sessionsDir)).toBe(false)
+
+    const database = new DatabaseSync(databasePath, { readOnly: true })
+    expect((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(0)
+    database.close()
+  })
+
+  it('rolls back the audit append when projection update fails', async () => {
+    const { databasePath } = fixture()
+    const first = authority(databasePath)
+    await first.initialize()
+    await first.create({ sessionId: 'rollback-session', state: { cursor: 0 }, config: {} })
+    await first.close()
+
+    const setup = new DatabaseSync(databasePath)
+    setup.exec(`
+      CREATE TRIGGER reject_portable_projection_update
+      BEFORE UPDATE ON portable_sessions
+      BEGIN
+        SELECT RAISE(FAIL, 'injected projection failure');
+      END;
+    `)
+    setup.close()
+
+    const failing = authority(databasePath)
+    await failing.initialize()
+    await expect(failing.mutate('rollback-session', {
+      mutationId: 'cursor:1',
+      eventType: 'session.test',
+      apply(current) {
+        if (!current) throw new Error('missing current document')
+        return { ...current, state: { cursor: 1 } }
+      },
+    })).rejects.toThrow('injected projection failure')
+    await failing.close()
+
+    const inspect = new DatabaseSync(databasePath)
+    expect((inspect.prepare(`
+      SELECT COUNT(*) AS count FROM portable_session_events WHERE session_id = ?
+    `).get('rollback-session') as { count: number }).count).toBe(1)
+    expect(JSON.parse((inspect.prepare(`
+      SELECT document FROM portable_sessions WHERE session_id = ?
+    `).get('rollback-session') as { document: string }).document)).toMatchObject({ state: { cursor: 0 } })
+    inspect.exec('DROP TRIGGER reject_portable_projection_update')
+    inspect.close()
+
+    const recovered = authority(databasePath)
+    await recovered.initialize()
+    await expect(recovered.mutate('rollback-session', {
+      mutationId: 'cursor:1',
+      eventType: 'session.test',
+      apply(current) {
+        if (!current) throw new Error('missing current document')
+        return { ...current, state: { cursor: 1 } }
+      },
+    })).resolves.toMatchObject({ state: { cursor: 1 } })
+  })
+
+  it('forks from an exact durable prefix and keeps deletion tombstones recoverable', async () => {
+    const { databasePath, sessionsDir } = fixture()
+    const sqlite = authority(databasePath)
+    const store = new SessionStore(sessionsDir, { authority: sqlite })
+    const parent = await store.create({ sessionId: 'fork-parent', config, organizationId: 'org-a' })
+    for (const text of ['kept', 'not-kept']) {
+      const event = { kind: 'user_message', text } as const
+      const transition = step(parent.state, event, parent.config)
+      await store.record(parent.sessionId, event, transition.effects, transition.next)
+    }
+
+    const child = await store.fork({ sourceSessionId: parent.sessionId, cursor: 1, sessionId: 'fork-child' })
+    expect(child.state.cursor).toBe(1)
+    expect(child.parentSessionId).toBe(parent.sessionId)
+    expect(child.parentCursor).toBe(1)
+    await expect(store.fork({ sourceSessionId: parent.sessionId, cursor: 3, sessionId: 'invalid-child' }))
+      .rejects.toThrow('Invalid fork cursor 3')
+    await expect(sqlite.load('invalid-child')).resolves.toBeUndefined()
+
+    await expect(sqlite.requestDeletion(parent.sessionId, 'delete-parent')).resolves.toBe(true)
+    await expect(sqlite.create(
+      { sessionId: 'late-fork', state: { cursor: 0 }, config: {} },
+      'late-fork-create',
+      { fenceSessionId: parent.sessionId },
+    )).rejects.toBeInstanceOf(SessionDeletingError)
+    await expect(sqlite.load('late-fork')).resolves.toBeUndefined()
+
+    await expect(sqlite.requestDeletion(child.sessionId, 'delete-child')).resolves.toBe(true)
+    await expect(sqlite.load(child.sessionId)).resolves.toBeUndefined()
+    await expect(sqlite.listDeleting()).resolves.toEqual([
+      expect.objectContaining({ sessionId: child.sessionId }),
+      expect.objectContaining({ sessionId: parent.sessionId }),
+    ])
+    await sqlite.close()
+
+    const restarted = authority(databasePath)
+    await restarted.initialize()
+    await expect(restarted.loadDeleting(child.sessionId)).resolves.toMatchObject({ sessionId: child.sessionId })
+    await restarted.delete(child.sessionId, 'finish-delete-child')
+    await expect(restarted.loadDeleting(child.sessionId)).resolves.toBeUndefined()
+    await expect(restarted.create({ sessionId: child.sessionId, state: { cursor: 0 }, config: {} }))
+      .rejects.toBeInstanceOf(SessionDeletingError)
+  })
+})

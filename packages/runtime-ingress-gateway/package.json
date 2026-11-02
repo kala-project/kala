@@ -8,14 +8,16 @@
   "bin": {
     "kala-runtime-ingress": "./dist/src/bin/kala-runtime-ingress.js",
     "agent-runlab-control-plane-migrate": "./dist/src/bin/migrate-control-plane.js",
-    "agent-runlab-control-plane-import-json": "./dist/src/bin/import-json-control.js"
+    "agent-runlab-control-plane-import-json": "./dist/src/bin/import-json-control.js",
+    "kala-dedicated-owner-bootstrap": "./dist/src/bin/bootstrap-dedicated-owner.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --exclude '**/dist/**'",
     "migrate": "node dist/src/bin/migrate-control-plane.js",
-    "import:json": "node dist/src/bin/import-json-control.js"
+    "import:json": "node dist/src/bin/import-json-control.js",
+    "bootstrap:dedicated-owner": "node dist/src/bin/bootstrap-dedicated-owner.js"
   },
   "dependencies": {
     "@agent-kernel/shared": "workspace:*",

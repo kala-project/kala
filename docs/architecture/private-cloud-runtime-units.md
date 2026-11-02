@@ -82,7 +82,7 @@ The identity service is replaceable. A self-hosted ZITADEL deployment is one pos
 
 ### 4.1 `TenantRuntimeUnit`
 
-A `TenantRuntimeUnit` is the complete in-process runtime boundary for one tenant.
+A `TenantRuntimeUnit` is the complete **logical** runtime/isolation boundary for one Organization. The delivered single-node implementation materializes it in one Host process. The Private Cloud production target may serve a logical Unit with multiple healthy Runtime replicas, provided every mutable Session, Task, scheduled job and other resource has one generation-fenced owner at a time. Process-local caches and Socket.IO state are projections, not durable authority.
 
 ```typescript
 export interface TenantRuntimeUnit {
@@ -115,7 +115,7 @@ A Unit owns separate instances of:
 - Unit-scoped caches, timers, hooks, and background work
 - Unit-scoped configuration projection
 
-A Unit must not access another Unit's instances or root directory.
+A Unit must not access another Unit's instances or storage namespace. A local root directory describes only the preserved legacy implementation; the PG/S3 target has no application-node authoritative Unit root.
 
 ### 4.2 `TenantRuntimeUnitRegistry`
 
@@ -185,25 +185,18 @@ query aggregate health
 
 Service-to-service trust is deployment infrastructure, not user authentication. The Host should normally be unreachable from the public Internet; private networking and preferably mTLS protect this API. The Host verifies the Gateway/control-plane service identity but never processes end-user identity claims. It must never trust a public browser-supplied `X-Tenant-ID` header.
 
-## 5. Dedicated composition
+## 5. Dedicated compositions (existing implementation versus new target)
 
-Dedicated creates exactly one Unit:
+Existing systemd Dedicated creates exactly one Unit:
 
 ```text
 Host process
 └── TenantRuntimeUnit(local)
 ```
 
-Properties:
+**Existing systemd installations only:** no Private Cloud Gateway or external IdP is required; historical shared-token authentication, URL/Dashboard behavior, Session files and implicit `local` routing remain unchanged. Do not treat this as a new-installation contract or silently convert existing data.
 
-- no Private Cloud Gateway or identity provider required
-- existing shared-token behavior remains available
-- existing URL and Dashboard bootstrap remain compatible
-- all current features remain enabled
-- existing Session data remains readable
-- all HTTP and Socket.IO ingress routes implicitly to `local`
-
-Dedicated is not a separate implementation. It is a single-Unit composition with a fixed route.
+**New Aspire Compose installations:** one logical Unit with an opaque control-plane-generated Unit ID behind the Platform Gateway, with one active Runtime, built-in single Owner login and revocable browser session in control PostgreSQL, distinct Executor credentials and no external OIDC prerequisite. Runtime receives only trusted service routing/identity, never human password or login state. Dedicated shares Platform Agent/PG/S3 semantics with Private Cloud but not its multi-tenant identity or HA claim. No new Aspire installation is accepted yet.
 
 ```typescript
 const deployment = {
@@ -213,7 +206,7 @@ const deployment = {
 
 ## 6. Private Cloud composition
 
-Private Cloud creates Units as directed by the external control plane:
+Private Cloud creates Units as directed by the external control plane. The following is the **delivered local single-node composition**, not the production scaling topology:
 
 ```text
 Private Cloud Gateway

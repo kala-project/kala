@@ -71,13 +71,16 @@ async function gatewayWith(ownerBootstrap: OwnerBootstrapGateway, identity: Auth
   await sessions.load()
   const gateway = await startRuntimeIngressGateway({
     port: 0, listenHost: '127.0.0.1', publicOrigin: 'http://127.0.0.1:0', hostOrigin: 'http://127.0.0.1:9',
-    directory: new MemoryRuntimeAssignmentStore(), ownerBootstrap, loginStates: new LoginStates(), sessions,
+    directory: new MemoryRuntimeAssignmentStore(), sessions,
     cacheNamespaceSecret: 'owner-bootstrap-test-secret-with-entropy', ingressSecret: 'test-ingress-secret',
-    secretBox: createSessionSecretBox('test', [{ id: 'test', key: Buffer.alloc(32, 5) }]),
-    oidc: {
-      async authorizationUrl(_redirect, options) { return { url: new URL('https://idp.example.test/authorize'), codeVerifier: 'verifier', state: 'state' + (options?.nonce ?? '') } },
-      async callback(_url, _redirect, _verifier, _state, nonce) { nonceSeen?.(nonce); return { identity } },
-      async refresh() { return {} }, async revokeRefreshToken() {},
+    authentication: {
+      kind: 'oidc', ownerBootstrap, loginStates: new LoginStates(),
+      secretBox: createSessionSecretBox('test', [{ id: 'test', key: Buffer.alloc(32, 5) }]),
+      oidc: {
+        async authorizationUrl(_redirect, options) { return { url: new URL('https://idp.example.test/authorize'), codeVerifier: 'verifier', state: 'state' + (options?.nonce ?? '') } },
+        async callback(_url, _redirect, _verifier, _state, nonce) { nonceSeen?.(nonce); return { identity } },
+        async refresh() { return {} }, async revokeRefreshToken() {},
+      },
     },
     ...(provision ? { provision: async () => { provision() } } : {}),
   })

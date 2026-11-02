@@ -56,7 +56,7 @@ import {
 import { step } from '@agent-kernel/kernel'
 import { toolLockFor } from '../tool-version.js'
 import { writeJsonFile } from '../tenant-runtime/atomic-json-file.js'
-import type { PersistedSessionDocument, PostgresSessionAuthority } from './postgres-session-authority.js'
+import type { PersistedSessionDocument, SessionAuthority } from './session-authority.js'
 
 export type SessionRecord = {
   readonly sessionId: string
@@ -402,8 +402,8 @@ export type SessionStoreOptions = {
   deleteRegisteredArtifacts?(sessionId: string): Promise<void>
   /** Marks lazily cached storage measurements stale without doing filesystem I/O. */
   onStorageChanged?(sessionId: string): void
-  /** Private Cloud only. When present, Session state is authoritative in PostgreSQL and JSONL is never used. */
-  authority?: PostgresSessionAuthority
+  /** Opt-in durable authority. When present, Session state is never read from or written to JSONL. */
+  authority?: SessionAuthority
 }
 
 export class SessionNotFoundError extends Error {

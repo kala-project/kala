@@ -1,0 +1,5 @@
+{
+  "appHost": {
+    "path": "deploy/aspire/Kala.Dedicated.AppHost.csproj"
+  }
+}

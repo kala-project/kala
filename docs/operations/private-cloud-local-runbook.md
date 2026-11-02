@@ -1,15 +1,17 @@
-# Private Cloud Runbook
+# Legacy single-machine Private Cloud local-volume/NFS runbook
 
-**Status:** Private Cloud application Compose contract with an independent shared Identity project
+**Status:** preserved implementation procedure for already-installed local-volume/NFS projects only; **not** the new Private Cloud target or an HA topology.
 **Last verified:** 2026-08-20
+
+The [three-mode target SoT](../architecture/deployment-mode-contract.md) and its [Private Cloud refinement](../architecture/private-cloud-enterprise-architecture-contract.md) require PostgreSQL Runtime/control authority and S3-compatible object bytes outside application nodes. Do not create a new deployment from this NFS topology, apply this procedure to new Dedicated, or switch/delete installed volumes in place. The [PG/S3 source evaluation guide](private-cloud-postgres-s3-profile.md) is separately scoped and also not production HA.
 
 ## Scope
 
 The Private Cloud application runs through `deploy/private-cloud/compose.yaml` plus exactly one storage/edge profile selected by `scripts/private-cloud-local/profile.mjs`. It owns the application PostgreSQL, Stable Ingress Gateway, Runtime Host, and application storage. ZITADEL runs in the independent `deploy/identity/compose.yaml` project and is consumed only through OIDC. No Private Cloud daemon or data service is installed directly on the workstation or in LXD.
 
-## Session storage
+## Legacy Session storage (not target authority)
 
-The stack contains:
+The existing NFS-backed stack contains:
 
 - `nfs-server`: digest-pinned NFS-Ganesha userspace NFSv4 server;
 - `nfs-session-data`: ordinary Docker Volume containing the authoritative Session bytes;
@@ -22,11 +24,11 @@ flowchart LR
   NFS --> BV[nfs-session-data Docker Volume]
 ```
 
-Runtime Host therefore always uses real NFS semantics, while NFS-Ganesha and its backing data are managed by the same Docker stack. There is no external NFS configuration and no local-volume fallback for Runtime Host.
+**Only this preserved legacy NFS profile** uses NFS semantics: NFS-Ganesha and its backing data are managed by the same Docker stack. Fresh PG/S3 source installations and the production target do not mount NFS or a local-volume fallback as Runtime authority.
 
 The NFS service is reachable only on the dedicated Docker network at `192.0.2.9:2049`; `127.0.0.1:12049` is exposed for local diagnostics. It is not exposed on the LAN or public ingress.
 
-PostgreSQL remains the control-plane store. MinIO/S3 remains reserved for Artifacts, exports, support bundles, and immutable archives; it is not the active JSONL filesystem.
+In this legacy installation, PostgreSQL is only the control-plane store and Session JSONL remains on the old volume. For the target, Session/Event/Queue authority is Runtime PostgreSQL and object bytes are S3-compatible; S3 is never mounted as a JSONL filesystem.
 
 ## Security boundary
 

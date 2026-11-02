@@ -167,6 +167,7 @@ export type HostServerOptions = {
   copilot?: {
     enabled?: boolean
     gitHubToken?: string
+    runtimeEntryPath?: string
     backgroundCompactionThreshold?: number
     bufferExhaustionThreshold?: number
   }
@@ -2039,6 +2040,7 @@ export async function startHostServer(
     // installed SDK depend on an undocumented per-machine environment variable.
     enabled: options.copilot?.enabled ?? !['0', 'false'].includes((process.env.KALA_COPILOT_ENABLED ?? '').trim().toLowerCase()),
     sessionsDir: options.sessionsDir,
+    ...(options.copilot?.runtimeEntryPath ? { runtimeEntryPath: options.copilot.runtimeEntryPath } : {}),
     ...(options.copilot?.gitHubToken ?? process.env.COPILOT_GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN
       ? { gitHubToken: options.copilot?.gitHubToken ?? process.env.COPILOT_GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN }
       : {}),
