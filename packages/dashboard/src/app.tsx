@@ -3983,8 +3983,8 @@ function ConnectionHealthCurve({ samples, executorRequired, now, t }: { samples:
   const domainStart = recent.length > 0 ? Math.max(windowStart, recent[0]!.at) : windowStart
   const domainMs = Math.max(1, now - domainStart)
   const latencyCeiling = chartLatencyCeiling(recent, executorRequired)
-  const hostPoints = sparklinePoints(recent, (sample) => sample.hostRttMs, domainStart, domainMs, latencyCeiling, plot)
-  const executorPoints = sparklinePoints(recent, (sample) => sample.executorRttMs, domainStart, domainMs, latencyCeiling, plot)
+  const hostPoints = sparklinePoints(recent, (sample) => sample.hostRttMs, domainStart, domainMs, latencyCeiling, plot, plotWidth)
+  const executorPoints = sparklinePoints(recent, (sample) => sample.executorRttMs, domainStart, domainMs, latencyCeiling, plot, plotWidth)
   const failures = recent.filter((sample) => !sample.hostOk || sample.executorRequired && !sample.executorOk)
   const startLabel = formatChartTime(domainStart)
   const endLabel = formatChartTime(now)
@@ -4087,8 +4087,7 @@ function chartLatencyCeiling(samples: readonly ConnectionHealthSample[], executo
   return Math.ceil(maximum / 50) * 50
 }
 
-function sparklinePoints(samples: readonly ConnectionHealthSample[], select: (sample: ConnectionHealthSample) => number | null, start: number, domainMs: number, max: number, plot: { left: number; top: number; bottom: number; right: number }): string | null {
-  const plotWidth = 320 - plot.left - plot.right
+function sparklinePoints(samples: readonly ConnectionHealthSample[], select: (sample: ConnectionHealthSample) => number | null, start: number, domainMs: number, max: number, plot: { left: number; top: number; bottom: number }, plotWidth: number): string | null {
   const plotHeight = plot.bottom - plot.top
   const points = samples.flatMap((sample) => {
     const value = select(sample)

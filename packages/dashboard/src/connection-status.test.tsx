@@ -384,6 +384,35 @@ describe('ConnectionStatus', () => {
     await waitFor(() => expect(screen.getByTestId('connection-health-host-line').getAttribute('points')).toContain('312.0,'))
   })
 
+  it('keeps history lines on their markers when the chart is wider than its initial size', async () => {
+    let wallClock = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => wallClock)
+    vi.spyOn(SVGElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ width: 420 }) as DOMRect)
+    const socket = socketWithRttSeries([100, 200], [1000, 2000])
+
+    render(<ConnectionStatus socket={socket as never} status="ready" cursor={9} workspaceId="w1" executorConnected onResync={() => {}} />)
+    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('1100 ms'))
+    fireEvent.click(screen.getByTestId('connection-status'))
+    wallClock = 30_000
+    fireEvent.click(screen.getByRole('button', { name: 'Measure again' }))
+
+    await waitFor(() => expect(screen.getAllByTestId('connection-health-host-marker')).toHaveLength(2))
+    expect(screen.getByTestId('connection-health-chart').getAttribute('viewBox')).toBe('0 0 420 128')
+    for (const [lineId, markerId] of [
+      ['connection-health-host-line', 'connection-health-host-marker'],
+      ['connection-health-executor-line', 'connection-health-executor-marker'],
+    ]) {
+      const points = screen.getByTestId(lineId).getAttribute('points')!.split(' ')
+      const markers = screen.getAllByTestId(markerId)
+      expect(points).toHaveLength(markers.length)
+      points.forEach((point, index) => {
+        const [x, y] = point.split(',').map(Number)
+        expect(x).toBeCloseTo(Number(markers[index]!.getAttribute('cx')), 1)
+        expect(y).toBeCloseTo(Number(markers[index]!.getAttribute('cy')), 1)
+      })
+    }
+  })
+
   it('exposes per-sample hover details with time and latency', async () => {
     let wallClock = Date.UTC(2026, 8, 6, 16, 25, 0)
     vi.spyOn(Date, 'now').mockImplementation(() => wallClock)
