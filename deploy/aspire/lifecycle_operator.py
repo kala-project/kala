@@ -1093,7 +1093,7 @@ def dashboard_container(compose: Path, env: Path, *, optional: bool = False) -> 
 
 
 def inspect_continuity(container_id: str) -> dict[str, Any]:
-    template = '{"id":{{json .Id}},"image":{{json .Config.Image}},"imageId":{{json .Image}},"configHash":{{json (index .Config.Labels "com.docker.compose.config-hash")}},"restarts":{{json .RestartCount}},"state":{{json .State.Status}},"pid":{{json .State.Pid}},"started":{{json .State.StartedAt}},"oom":{{json .State.OOMKilled}},"exit":{{json .State.ExitCode}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}}}'
+    template = '{"id":{{json .Id}},"image":{{json .Config.Image}},"imageId":{{json .Image}},"configHash":{{json (index .Config.Labels "com.docker.compose.config-hash")}},"restarts":{{json .RestartCount}},"state":{{json .State.Status}},"pid":{{json .State.Pid}},"started":{{json .State.StartedAt}},"oom":{{json .State.OOMKilled}},"exit":{{json .State.ExitCode}},"health":{{if (index .State "Health")}}{{json (index .State "Health").Status}}{{else}}null{{end}}}'
     return json.loads(run(["docker", "inspect", "--format", template, container_id], timeout=30).stdout)
 
 
@@ -1215,6 +1215,271 @@ def dashboard_apply(args: argparse.Namespace, *, rollback: bool = False) -> dict
         "businessEffects": "not-replayed-not-certified"}
 
 
+def load_control_upgrade_policy(path: Path) -> dict[str, Any]:
+    try:
+        policy = json.loads(private_regular(path, "control upgrade policy").read_text())
+    except ValueError:
+        fail("invalid control upgrade policy")
+    required = {"schemaVersion", "reviewId", "predecessorImages", "targetImages", "postgresMajor", "migrationMode", "controlSchema"}
+    if (not isinstance(policy, dict) or set(policy) != required or policy["schemaVersion"] != 2
+            or policy["migrationMode"] != "control-plane-7-to-9"
+            or not isinstance(policy["reviewId"], str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", policy["reviewId"])
+            or not isinstance(policy["postgresMajor"], int) or not 10 <= policy["postgresMajor"] <= 99):
+        fail("unsupported reviewed control upgrade policy")
+    for key in ("predecessorImages", "targetImages"):
+        images = policy[key]
+        if not isinstance(images, dict) or set(images) not in ACCEPTED_SHAPES or any(not isinstance(v, str) or not IMAGE.fullmatch(v) for v in images.values()):
+            fail("control upgrade policy requires an exact immutable image graph")
+    plan = policy["controlSchema"]
+    if (not isinstance(plan, dict) or set(plan) != {"fromVersion", "toVersion", "writerRole", "migrations"}
+            or plan["fromVersion"] != 7 or plan["toVersion"] != 9 or plan["writerRole"] != "kala_gateway"
+            or not isinstance(plan["migrations"], list) or len(plan["migrations"]) != 9):
+        fail("only the reviewed control-plane 7-to-9 transition is supported")
+    for version, item in enumerate(plan["migrations"], 1):
+        if (not isinstance(item, dict) or set(item) != {"version", "name", "checksum"} or item["version"] != version
+                or not isinstance(item["name"], str) or not re.fullmatch(f"{version:04d}_[a-z0-9_]+\\.sql", item["name"])
+                or not isinstance(item["checksum"], str) or not re.fullmatch(r"[0-9a-f]{64}", item["checksum"])):
+            fail("control upgrade requires the complete reviewed migration identity chain")
+    return policy
+
+
+def control_upgrade_pair(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Path], str]:
+    require_local_docker()
+    paths = {name: private_regular(Path(getattr(args, name)), name) for name in
+             ("current_compose", "current_env", "target_compose", "target_env", "policy", "control_owner_url")}
+    recovery = safe_root(Path(args.recovery_root), "recovery material root")
+    if any(recovery not in path.parents for path in paths.values()):
+        fail("all frozen release inputs and owner credential must be inside the backed-up recovery root")
+    policy = load_control_upgrade_policy(paths["policy"])
+    for image in set(policy["predecessorImages"].values()) | set(policy["targetImages"].values()):
+        run(["docker", "image", "inspect", image], timeout=30)
+    current, target = preflight_pair(paths["current_compose"], paths["current_env"], paths["target_compose"], paths["target_env"], policy)
+    frozen = json.loads(json.dumps(target))
+    for name in ("gateway", "dashboard"):
+        frozen["services"][name]["image"] = current["services"][name]["image"]
+    if not current.get("name") or frozen != current or current["services"]["gateway"]["image"] == target["services"]["gateway"]["image"]:
+        fail("control upgrade requires the same project/configuration and only Gateway/Dashboard image changes")
+    verify_deployed_configuration(paths["current_compose"], paths["current_env"], current)
+    non_dashboard_snapshot(paths["current_compose"], paths["current_env"], current)
+    dashboard = dashboard_container(paths["current_compose"], paths["current_env"])
+    if not dashboard or dashboard["state"] != "running" or dashboard["health"] != "healthy":
+        fail("control upgrade requires a healthy source graph")
+    ids = container_ids(paths["current_compose"], paths["current_env"], ("postgres", "gateway"))
+    networks = []
+    for name in ("postgres", "gateway"):
+        networks.append(json.loads(run(["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", ids[name]], timeout=30).stdout))
+    common = set(networks[0]) & set(networks[1])
+    if len(common) != 1:
+        fail("migration requires one existing project-owned PostgreSQL/Gateway bridge")
+    network = common.pop()
+    metadata = json.loads(run(["docker", "network", "inspect", network], timeout=30).stdout)[0]
+    if metadata.get("Driver") != "bridge" or metadata.get("Scope") != "local" or metadata.get("Labels", {}).get("com.docker.compose.project") != current["name"]:
+        fail("migration network is not the reviewed local Compose project")
+    paths["installation_id"] = bind_source(current, "runtime", "/run/kala-secrets/installation-id")
+    paths["state_key"] = bind_source(current, "runtime", "/run/kala-secrets/runtime-state-master-key")
+    paths["deployment_config"] = bind_source(current, "runtime", "/etc/kala/deployment.json")
+    if any(recovery not in paths[name].parents for name in ("installation_id", "state_key", "deployment_config")):
+        fail("original installation identity must be inside the recovery root")
+    return current, target, policy, paths, network
+
+
+def control_job_arguments(image: str, network: str, paths: dict[str, Path] | None = None) -> list[str]:
+    result = ["--pull=never", "--network", network, "--memory", "256m", "--cpus", "0.5", "--pids-limit", "64",
+              "--read-only", "--cap-drop", "ALL", "--cap-add", "DAC_OVERRIDE", "--security-opt", "no-new-privileges:true",
+              "--user", "0:0", "--log-driver", "json-file", "--log-opt", "max-size=1m", "--log-opt", "max-file=1",
+              "--workdir", "/app/packages/runtime-ingress-gateway", "--entrypoint", "/nodejs/bin/node"]
+    if paths:
+        for name, target in (("policy", "policy.json"), ("control_owner_url", "control-owner-url"), ("installation_id", "installation-id")):
+            result += ["--mount", f"type=bind,src={paths[name]},dst=/run/kala-upgrade/{target},readonly"]
+    return result + [image, "dist/src/bin/control-schema-upgrade.js"]
+
+
+def control_bundle_probe(target: dict[str, Any], policy: dict[str, Any], paths: dict[str, Path], network: str) -> None:
+    image = target["services"]["gateway"]["image"]
+    for action, net, inputs, event in (("--describe", "none", None, "control_schema_bundle"),
+                                       ("--check-source", network, paths, "control_schema_source_verified")):
+        result = run(["docker", "run", "--rm", "--name", "kala-control-probe-" + secrets.token_hex(8)] +
+                     control_job_arguments(image, net, inputs) + [action], timeout=90)
+        try:
+            document = json.loads(result.stdout)
+        except ValueError:
+            fail("migration image did not return a bounded release identity")
+        if not isinstance(document, dict) or document.get("event") != event or document.get("migrations") != policy["controlSchema"]["migrations"]:
+            fail("migration image bundle/source differs from the reviewed control policy")
+
+
+def control_upgrade_preflight(args: argparse.Namespace) -> dict[str, Any]:
+    _, target, policy, paths, network = control_upgrade_pair(args)
+    control_bundle_probe(target, policy, paths, network)
+    return {"event": "control_upgrade_preflight_accepted", "reviewId": policy["reviewId"],
+            "warning": "read-only database check; cold backup and explicit writer/ingress fencing still required"}
+
+
+def control_upgrade(args: argparse.Namespace) -> dict[str, Any]:
+    if not args.acknowledge_maintenance_and_unknown_effects or not args.acknowledge_external_control_writers_fenced:
+        fail("control upgrade requires explicit maintenance/unknown-effects and all-control-writers-fenced acknowledgements")
+    current, target, policy, paths, network = control_upgrade_pair(args)
+    require_external_fence(ingress_mode(current), args)
+    control_bundle_probe(target, policy, paths, network)
+    receipt = Path(args.receipt)
+    if not receipt.is_absolute():
+        fail("control upgrade receipt must be an absolute private path")
+    safe_root(receipt.parent, "control upgrade receipt parent")
+    roots = (*data_roots(current), Path(args.recovery_root).resolve(), require_local_docker())
+    if any(root == receipt or root in receipt.parents for root in roots):
+        fail("control upgrade receipt must be outside archived authority/recovery and Docker roots")
+    if receipt.exists() or receipt.is_symlink():
+        fail("control upgrade receipt already exists; never retry an uncertain operation implicitly")
+    document = {"schemaVersion": 1, "kind": "dedicated-control-schema-upgrade", "operationId": secrets.token_hex(16),
+        "reviewId": policy["reviewId"], "inputs": {name: {"path": str(path), "sha256": sha256_file(path)} for name, path in paths.items()},
+        "artifact": str(Path(args.artifact).absolute()), "migrationResult": "not-started"}
+    job = "kala-control-upgrade-" + document["operationId"]
+    document["migrationContainer"] = job
+    dashboard_receipt(receipt, document, "prepared", initial=True)
+    startup_attempted = False
+    try:
+        dashboard_receipt(receipt, document, "backing_up")
+        backup_args = argparse.Namespace(compose=str(paths["current_compose"]), env=str(paths["current_env"]),
+            recovery_root=args.recovery_root, installation_id_relative=args.installation_id_relative,
+            state_key_relative=args.state_key_relative, artifact=args.artifact, stop_timeout=args.stop_timeout,
+            acknowledge_external_ingress_fenced=getattr(args, "acknowledge_external_ingress_fenced", False))
+        manifest = perform_backup(backup_args)
+        verified, payload = read_artifact(Path(args.artifact).absolute())
+        validate_archive(verified, payload)
+        if manifest != verified or manifest["images"] != policy["predecessorImages"]:
+            fail("completed backup differs from reviewed predecessor")
+        document["backupManifestSha256"] = sha256_file(Path(args.artifact) / "manifest.json")
+        dashboard_receipt(receipt, document, "backup_completed")
+        for item in document["inputs"].values():
+            if sha256_file(Path(item["path"])) != item["sha256"]:
+                fail("frozen control upgrade input changed after backup")
+        run(compose_command(paths["current_compose"], paths["current_env"]) +
+            ["up", "-d", "--no-deps", "--no-build", "--pull", "never", "--wait", "--wait-timeout", str(args.start_timeout), "postgres"], timeout=args.start_timeout + 60)
+        run(["docker", "create", "--name", job, "--label", "kala.control-upgrade=" + document["operationId"]] +
+            control_job_arguments(target["services"]["gateway"]["image"], network, paths) + ["--apply"], timeout=30)
+        document["migrationContainer"] = job
+        document["migrationResult"] = "unknown"
+        dashboard_receipt(receipt, document, "migrating")
+        result = run(["docker", "start", "--attach", job], timeout=args.start_timeout + 60)
+        observed = inspect_continuity(job)
+        document["migrationContainerState"] = observed
+        result_document = json.loads(result.stdout)
+        if (observed["state"] != "exited" or observed["exit"] != 0 or not isinstance(result_document, dict)
+                or result_document.get("event") != "control_schema_upgrade_committed"
+                or result_document.get("fromVersion") != 7 or result_document.get("toVersion") != 9
+                or result_document.get("migrations") != policy["controlSchema"]["migrations"]):
+            fail("migration outcome was not confirmed")
+        document["migrationResult"] = "committed"
+        dashboard_receipt(receipt, document, "migration_committed")
+        run(["docker", "rm", job], timeout=30)
+        cold_stop(paths["current_compose"], paths["current_env"], args.stop_timeout, set(current["services"]))
+        for item in document["inputs"].values():
+            if sha256_file(Path(item["path"])) != item["sha256"]:
+                fail("frozen control upgrade input changed before startup")
+        dashboard_receipt(receipt, document, "starting_target")
+        startup_attempted = True
+        run(compose_command(paths["target_compose"], paths["target_env"]) +
+            ["up", "-d", "--no-build", "--pull", "never", "--wait", "--wait-timeout", str(args.start_timeout)], timeout=args.start_timeout + 60)
+        verify_deployed_configuration(paths["target_compose"], paths["target_env"], target)
+        non_dashboard_snapshot(paths["target_compose"], paths["target_env"], target)
+        dashboard = dashboard_container(paths["target_compose"], paths["target_env"])
+        if not dashboard or dashboard["health"] != "healthy" or dashboard["state"] != "running":
+            fail("target Dashboard is not ready")
+        dashboard_receipt(receipt, document, "completed")
+    except (OperatorError, OSError, ValueError):
+        document["error"] = "control_schema_upgrade_unverified"
+        if document["migrationResult"] == "unknown":
+            try:
+                document["migrationContainerState"] = inspect_continuity(job)
+            except OperatorError:
+                pass
+        if startup_attempted:
+            try:
+                run(compose_command(paths["target_compose"], paths["target_env"]) + ["stop", "--timeout", str(args.stop_timeout)] +
+                    sorted(set(target["services"]) & {"ingress", "gateway", "runtime", "dashboard"}), timeout=args.stop_timeout + 60)
+            except OperatorError:
+                document["failureFence"] = "unverified"
+        dashboard_receipt(receipt, document, "failed")
+        fail("control upgrade not verified; preserve private receipt/backup and migration state; no automatic retry or downgrade")
+    return {"event": "control_upgrade_completed", "receipt": str(receipt), "artifact": document["artifact"],
+            "migrationResult": "committed", "businessEffects": "unknown-not-replayed-not-certified"}
+
+
+def control_upgrade_recover(args: argparse.Namespace) -> dict[str, Any]:
+    source_path = private_regular(Path(args.source_receipt), "original control upgrade receipt")
+    try:
+        source = json.loads(source_path.read_text())
+    except ValueError:
+        fail("invalid control upgrade recovery receipt")
+    expected = {"current_compose", "current_env", "target_compose", "target_env", "policy", "control_owner_url", "installation_id", "state_key", "deployment_config"}
+    if (not isinstance(source, dict) or source.get("schemaVersion") != 1 or source.get("kind") != "dedicated-control-schema-upgrade"
+            or not isinstance(source.get("inputs"), dict) or set(source["inputs"]) != expected
+            or not isinstance(source.get("artifact"), str) or not Path(source["artifact"]).is_absolute()):
+        fail("recovery requires the original frozen control upgrade receipt")
+    inputs = {}
+    for name, item in source["inputs"].items():
+        if (not isinstance(item, dict) or not isinstance(item.get("path"), str) or not Path(item["path"]).is_absolute()
+                or not isinstance(item.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])):
+            fail("invalid frozen recovery input")
+        path = Path(item["path"])
+        if not path.is_file() or path.is_symlink() or sha256_file(path) != item["sha256"]:
+            fail("original control upgrade inputs changed; recovery requires separate operator review")
+        inputs[name] = path
+    original_policy = load_control_upgrade_policy(inputs["policy"])
+    policy = load_policy(Path(args.policy))
+    predecessor = original_policy["predecessorImages"]
+    if (policy["predecessorImages"] != predecessor or policy["targetImages"] != predecessor
+            or policy["postgresMajor"] != original_policy["postgresMajor"]):
+        fail("control recovery must use the exact original predecessor images and PostgreSQL major")
+    artifact = Path(source["artifact"])
+    manifest, payload = read_artifact(artifact)
+    if (sha256_file(artifact / "manifest.json") != source.get("backupManifestSha256")
+            or manifest["images"] != predecessor):
+        fail("control recovery backup is not the receipt-bound original predecessor")
+    validate_archive(manifest, payload)
+    operation = source.get("operationId")
+    if not isinstance(operation, str) or not re.fullmatch(r"[0-9a-f]{32}", operation):
+        fail("invalid original migration operation identity")
+    job = "kala-control-upgrade-" + operation
+    job_ids = run(["docker", "ps", "--all", "-q", "--filter", "name=^/" + job + "$"], timeout=30).stdout.split()
+    if job_ids and inspect_continuity(job_ids[0])["state"] not in ("exited", "dead"):
+        fail("stop and inspect the original migration container before recovery; a Compose fence alone is insufficient")
+    current = compose_config(inputs["current_compose"], inputs["current_env"])
+    target = compose_config(private_regular(Path(args.target_compose), "recovery target Compose"),
+                            private_regular(Path(args.target_env), "recovery target parameters"))
+    old_networks = {value.get("name") for value in current.get("networks", {}).values()}
+    target_networks = target.get("networks", {})
+    if (not target.get("name") or target["name"] == current.get("name")
+            or any(value.get("external") or value.get("name") in old_networks for value in target_networks.values())):
+        fail("control recovery requires a different project and isolated managed networks, never the source migration network")
+    receipt = Path(args.receipt)
+    if not receipt.is_absolute():
+        fail("recovery receipt must be an absolute private path")
+    safe_root(receipt.parent, "control recovery receipt parent")
+    roots = [Path(path) for path in manifest["sourceRoots"].values()] + [artifact, require_local_docker()]
+    roots += [Path(getattr(args, name)).absolute() for name in ("postgres_destination", "silo_destination", "recovery_destination")]
+    if receipt.exists() or receipt.is_symlink() or any(receipt == root or root in receipt.parents for root in roots):
+        fail("recovery receipt must be fresh and outside backup/source/destination authority roots")
+    document = {"schemaVersion": 1, "kind": "dedicated-control-schema-recovery", "operationId": secrets.token_hex(16),
+        "sourceReceiptSha256": sha256_file(source_path), "artifact": str(artifact), "backupManifestSha256": source["backupManifestSha256"]}
+    dashboard_receipt(receipt, document, "prepared", initial=True)
+    restore_args = argparse.Namespace(**vars(args))
+    restore_args.source_compose = str(inputs["current_compose"])
+    restore_args.source_env = str(inputs["current_env"])
+    restore_args.artifact = str(artifact)
+    try:
+        dashboard_receipt(receipt, document, "restoring")
+        result = restore(restore_args)
+        document["result"] = result
+        dashboard_receipt(receipt, document, "completed_stopped")
+    except (OperatorError, OSError, ValueError):
+        document["error"] = "control_recovery_unverified"
+        dashboard_receipt(receipt, document, "failed")
+        fail("control recovery not verified; keep all sources fenced; no automatic cleanup or startup")
+    return {"event": "control_upgrade_recovered_stopped", "receipt": str(receipt), "artifact": str(artifact),
+            "warning": "original predecessor restored to fresh roots; no startup, external-effect settlement or replay performed"}
+
+
 def status(args: argparse.Namespace) -> dict[str, Any]:
     compose = private_regular(Path(args.compose), "Compose file")
     env = private_regular(Path(args.env), "Compose parameter file")
@@ -1287,6 +1552,27 @@ def parser() -> argparse.ArgumentParser:
             compose_args(item, "current-"); compose_args(item, "target-"); item.add_argument("--policy", required=True)
         else:
             item.add_argument("--source-receipt", required=True)
+    for command in ("control-upgrade-preflight", "control-upgrade"):
+        item = sub.add_parser(command)
+        compose_args(item, "current-"); compose_args(item, "target-")
+        item.add_argument("--policy", required=True); item.add_argument("--control-owner-url", required=True)
+        item.add_argument("--recovery-root", required=True)
+        if command == "control-upgrade":
+            item.add_argument("--installation-id-relative", required=True); item.add_argument("--state-key-relative", required=True)
+            item.add_argument("--artifact", required=True); item.add_argument("--receipt", required=True)
+            item.add_argument("--stop-timeout", type=int, default=120, choices=range(10, 901), metavar="10..900")
+            item.add_argument("--start-timeout", type=int, default=300, choices=range(10, 901), metavar="10..900")
+            item.add_argument("--acknowledge-maintenance-and-unknown-effects", action="store_true")
+            item.add_argument("--acknowledge-external-control-writers-fenced", action="store_true")
+            item.add_argument("--acknowledge-external-ingress-fenced", action="store_true")
+    recover = sub.add_parser("control-upgrade-recover")
+    recover.add_argument("--source-receipt", required=True); recover.add_argument("--receipt", required=True)
+    compose_args(recover, "target-"); recover.add_argument("--policy", required=True)
+    recover.add_argument("--postgres-destination", required=True); recover.add_argument("--silo-destination", required=True)
+    recover.add_argument("--recovery-destination", required=True)
+    recover.add_argument("--acknowledge-source-fenced", action="store_true")
+    recover.add_argument("--acknowledge-external-ingress-fenced", action="store_true")
+    recover.add_argument("--create-fresh-caddy-volumes", action="store_true")
     return result
 
 
@@ -1295,7 +1581,9 @@ def main() -> None:
     require_root()
     functions = {"status": status, "backup": backup, "restore": restore,
                  "upgrade-preflight": upgrade_preflight, "upgrade": upgrade,
-                 "dashboard-preflight": dashboard_preflight, "dashboard-upgrade": dashboard_apply, "dashboard-rollback": lambda args: dashboard_apply(args, rollback=True)}
+                 "dashboard-preflight": dashboard_preflight, "dashboard-upgrade": dashboard_apply, "dashboard-rollback": lambda args: dashboard_apply(args, rollback=True),
+                 "control-upgrade-preflight": control_upgrade_preflight, "control-upgrade": control_upgrade,
+                 "control-upgrade-recover": control_upgrade_recover}
     try:
         with host_lock(Path(args.lock_file)):
             output = functions[args.command](args)

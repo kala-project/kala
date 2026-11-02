@@ -79,19 +79,26 @@ export async function readControlPlaneMigrations(directory: string): Promise<rea
   return migrations
 }
 
-export async function migrateControlPlane(database: ControlPlaneDatabase, migrations: readonly ControlPlaneMigration[]): Promise<number> {
-  await database.query(`CREATE TABLE IF NOT EXISTS control_plane_schema_migrations (
-    version integer PRIMARY KEY CHECK (version > 0),
-    name text NOT NULL UNIQUE,
-    checksum text NOT NULL,
-    applied_at timestamptz NOT NULL DEFAULT now()
-  )`)
+export async function migrateControlPlane(database: ControlPlaneDatabase, migrations: readonly ControlPlaneMigration[], options: {
+  beforeApply?: (transaction: SqlExecutor) => Promise<void>
+  afterApply?: (transaction: SqlExecutor) => Promise<void>
+} = {}): Promise<number> {
   const lockKey = advisoryLockKey('agent-runlab-control-plane-migrations')
   return database.transaction(async (transaction) => {
     await transaction.query("SET LOCAL lock_timeout = '5s'")
     await transaction.query("SET LOCAL statement_timeout = '60s'")
     await transaction.query('SELECT pg_advisory_xact_lock($1)', [lockKey])
+    await options.beforeApply?.(transaction)
+    await transaction.query(`CREATE TABLE IF NOT EXISTS control_plane_schema_migrations (
+      version integer PRIMARY KEY CHECK (version > 0),
+      name text NOT NULL UNIQUE,
+      checksum text NOT NULL,
+      applied_at timestamptz NOT NULL DEFAULT now()
+    )`)
     const applied = await transaction.query<{ version: number; checksum: string }>('SELECT version, checksum FROM control_plane_schema_migrations ORDER BY version')
+    if (applied.rows.some((row, index) => row.version !== migrations[index]?.version)) {
+      throw new Error('control-plane migration history is not a known release prefix; refuse partial/ahead schema')
+    }
     const byVersion = new Map(applied.rows.map((row) => [row.version, row.checksum]))
     for (const migration of migrations) {
       const checksum = byVersion.get(migration.version)
@@ -102,6 +109,7 @@ export async function migrateControlPlane(database: ControlPlaneDatabase, migrat
       await transaction.query(migration.sql)
       await transaction.query('INSERT INTO control_plane_schema_migrations(version, name, checksum) VALUES ($1, $2, $3)', [migration.version, migration.name, migration.checksum])
     }
+    await options.afterApply?.(transaction)
     return migrations.at(-1)?.version ?? 0
   })
 }

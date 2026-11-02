@@ -63,10 +63,11 @@ async function main(): Promise<void> {
   const database = createPostgresControlPlaneDatabase({ connectionString: databaseUrl, applicationName: 'agent-runlab-control-plane-init', maxConnections: 1 })
   try {
     const migrations = await readControlPlaneMigrations(resolve(process.env.KALA_INGRESS_MIGRATIONS_DIR ?? 'migrations'))
-    const version = await migrateControlPlane(database, migrations)
-    if (writerRole) await database.transaction((tx) => grantControlWriter(tx, writerRole))
-    if (retentionRole) await database.transaction((tx) => grantRetentionRole(tx, retentionRole))
-    if (workerRole) await database.transaction((tx) => grantWebhookWorker(tx, workerRole))
+    const version = await migrateControlPlane(database, migrations, { afterApply: async (tx) => {
+      if (writerRole) await grantControlWriter(tx, writerRole)
+      if (retentionRole) await grantRetentionRole(tx, retentionRole)
+      if (workerRole) await grantWebhookWorker(tx, workerRole)
+    } })
     process.stdout.write(`${JSON.stringify({ event: 'control_plane_initialized', version })}\n`)
   } finally { await database.close() }
 }
@@ -78,6 +79,7 @@ export async function grantControlWriter(database: { query: (sql: string) => Pro
   await database.query(`GRANT CONNECT ON DATABASE runlab_control TO "${role}"`)
   await database.query(`GRANT USAGE ON SCHEMA public TO "${role}"`)
   await database.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "${role}"`)
+  await database.query(`REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON control_plane_schema_migrations FROM "${role}"`)
   // Business producers may append envelopes, never rewrite delivery progress or event history.
   await database.query(`REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON outbox_events FROM "${role}"`)
   await database.query(`REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON webhook_deliveries FROM "${role}"`)
@@ -91,6 +93,10 @@ export async function grantControlWriter(database: { query: (sql: string) => Pro
   await database.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "${role}"`)
   // The fresh PG/S3 claim lives outside public; only its immutable marker is readable.
   await database.query(`DO $kala$ BEGIN
+    IF has_any_column_privilege('${role}','public.control_plane_schema_migrations','INSERT,UPDATE')
+      OR has_table_privilege('${role}','public.control_plane_schema_migrations','DELETE,TRUNCATE,REFERENCES,TRIGGER') THEN
+      RAISE EXCEPTION 'Gateway writer must not mutate migration history';
+    END IF;
     IF EXISTS (SELECT 1 FROM unnest(ARRAY['public.audit_events','public.usage_ledger']) AS ledger(name)
       WHERE has_any_column_privilege('${role}',ledger.name,'UPDATE') OR has_table_privilege('${role}',ledger.name,'DELETE,TRUNCATE,REFERENCES,TRIGGER'))
       OR has_any_column_privilege('${role}','public.retention_runs','INSERT,UPDATE')

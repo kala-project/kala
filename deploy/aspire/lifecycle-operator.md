@@ -161,3 +161,61 @@ Run from this directory. Inputs and receipts are root-private regular files; cre
 Requires Docker Compose support for `config --hash`, `--no-build`, `--pull never` and `up --wait`. Non-Dashboard containers' `com.docker.compose.config-hash` labels must match the reviewed Compose service hashes, so an edited but unapplied baseline is rejected even when image pins and authority environment remain unchanged. This does not fingerprint mutable contents behind unchanged bind paths. Non-Dashboard services must be healthy at the before/after checks, with identical container IDs, PIDs, image references/IDs, configuration hashes, start times, restart counts, OOM/exit and health state. A completed observability-readiness job may remain exited successfully. These are boundary snapshots, not proof against every transient internal-process or network fault. Failure retains normalized `dashboard_operation_unverified` when journal storage remains writable; no automatic rollback or full-stack restart is allowed. Explicit rollback binds the original frozen config/env/policy paths and SHA-256 values and the predecessor image, tolerates a failed/missing Dashboard, and requires a separate receipt. Do not edit or delete those frozen files while rollback may be needed. After publication, subsequent status/backup/full-upgrade operations must use the actually active target Compose/env; after a successful rollback, use the predecessor inputs.
 
 Controlled Docker protocol acceptance is opt-in: `sudo env KALA_RUN_DASHBOARD_DOCKER=1 python3 -m unittest dashboard_operator_test.DashboardAdmissionTests dashboard_operator_test.DashboardDockerProtocolTests`. It uses only pre-existing local Node-image digests, a random disposable five-service project and a loopback-only random ingress port. Its services are controlled Node recipients, **not** real PG/SILO/Runtime, the production UI, Owner, Agent or Executor. It verifies actual Compose mutations, HTTP generation changes, a retained upgraded bidirectional connection, frozen-input rejection, failed-target recovery including absence, and detection of a non-Dashboard restart. No build/pull/prune or production deployment is performed. This does not certify front/back protocol compatibility, zero interruption of static HTTP, real business continuation, the latest full image set or a signed release.
+
+## Reviewed control-schema 7→9 cold lane
+
+This is separate from both ordinary `upgrade` (still `migrationMode: none`) and the independent Dashboard lane. It allows **only Gateway/Dashboard image changes**, with identical resolved project/configuration, Runtime/data/observability image pins, authority credentials and protected bind paths. It does not migrate Runtime storage, change PostgreSQL major, rotate credentials or accept an arbitrary source version. All images must be locally available. The target Gateway image must contain `dist/src/bin/control-schema-upgrade.js` and the complete reviewed nine-migration chain; an old schema-7 image cannot stand in for it.
+
+The root-private policy is version **2**, with exactly `schemaVersion`, `reviewId`, `predecessorImages`, `targetImages`, `postgresMajor` (integer), `migrationMode: "control-plane-7-to-9"`, and `controlSchema`. The latter contains exactly `fromVersion: 7`, `toVersion: 9`, `writerRole: "kala_gateway"`, and `migrations`: all nine objects `{version, name, checksum}` from the packaged image, in order. Review both complete image maps and SQL changes. To inspect the target bundle without connecting to any database:
+
+```bash
+sudo docker run --rm --pull=never --network=none --memory=256m --cpus=0.5 \
+  --entrypoint /nodejs/bin/node --workdir /app/packages/runtime-ingress-gateway \
+  'YOUR-REVIEWED-GATEWAY@sha256:YOUR-DIGEST' \
+  dist/src/bin/control-schema-upgrade.js --describe
+```
+
+This output is inspection material, not automatic compatibility approval. The operator compares it with the explicit policy and checks the **existing source's full version/name/checksum prefix**. Source version 8, version 9, missing/tampered history, wrong installation/checkpoint, wrong PostgreSQL major, a non-owner or globally privileged migration identity are refused. The existing original `kala_control_owner@postgres:5432/runlab_control` credential is required; the process never creates a database, global role or Owner.
+
+All Compose/env/policy inputs and the original control-owner URL must be under the protected recovery root so the cold backup includes them. Keep those frozen files, the installation ID, state key and descriptor unchanged. Prepare a separate existing root-owned `0700` receipt parent outside PG/SILO, recovery and Docker data roots; prepare a private backup parent outside archived roots. Do not mount the entire initialization-secret directory in the migration job.
+
+```bash
+sudo python3 ./lifecycle_operator.py control-upgrade-preflight \
+  --current-compose /secure/recovery/current.yaml --current-env /secure/recovery/current.env \
+  --target-compose /secure/recovery/target.yaml --target-env /secure/recovery/target.env \
+  --policy /secure/recovery/control-upgrade.json --recovery-root /secure/recovery \
+  --control-owner-url /secure/recovery/init-secrets/control_owner_url
+
+sudo python3 ./lifecycle_operator.py control-upgrade \
+  --current-compose /secure/recovery/current.yaml --current-env /secure/recovery/current.env \
+  --target-compose /secure/recovery/target.yaml --target-env /secure/recovery/target.env \
+  --policy /secure/recovery/control-upgrade.json --recovery-root /secure/recovery \
+  --control-owner-url /secure/recovery/init-secrets/control_owner_url \
+  --installation-id-relative protected/installation_id --state-key-relative protected/runtime_state_master_key \
+  --artifact /offline/backups/before-control-9 --receipt /secure/receipts/control-upgrade.json \
+  --acknowledge-maintenance-and-unknown-effects --acknowledge-external-control-writers-fenced \
+  --acknowledge-external-ingress-fenced
+```
+
+The external-writers acknowledgement covers workers, maintenance processes and other clients **outside the reviewed graph**; the operator itself stops all graph writers and observability before backup. External mode additionally requires admission to remain fenced at its independent proxy. The SQL transaction rejects any other control-database backend still present; close exporters/admin shells too. This is a conservative boundary check, not a replacement for fencing or malicious-root/HA protection.
+
+The journal is durable before fencing and progresses through backup, migration and target startup. A complete mode-specific PG/SILO/recovery (and bundled Caddy) backup is validated before only PostgreSQL restarts. A separate bounded migration container receives exactly three read-only file mounts (policy, owner URL, installation ID), no Runtime/S3/session credentials and no published port. It has a read-only root, 256 MiB/0.5 CPU/64 PID limits, bounded logs, no-new-privileges and only `DAC_OVERRIDE` to read original container-UID-owned protected identity files. SQL changes and Gateway grants share one transaction and migration advisory lock. The running Gateway loses migration-history writes as well as governance/Outbox mutation rights. Legacy unresolved Outbox events become `legacy_review`, never automatic replay; invalid existing attribution is rejected, not silently deleted or rewritten.
+
+Only confirmed commit plus durable `migration_committed` allows target startup. A target startup/check failure triggers a bounded stop of application/ingress containers; a failed stop records `failureFence: unverified` and requires immediate operator fencing. Migration-container/daemon disconnection, process interruption, a missing success result or journal-write failure leaves an **unverified** operation. `migrationResult: unknown` remains unknown even if the retained container exited zero; inspect the original receipt, container and database with the matching release. Never rerun migrations, start a schema-7 binary against schema 9 or assume an interrupted phase succeeded. This lane does not automatically retry, roll back SQL, clear uncertain external effects or replay commands. A receipt-storage failure can prevent final failure recording; preserve the last durable phase and actual container state.
+
+### Explicit original-predecessor recovery
+
+Use `control-upgrade-recover`, not reverse SQL. First fence the actual source and stop its complete graph (including any retained active migrator); keep external ingress fenced. The command binds the original upgrade receipt, its unchanged frozen inputs and verified original backup manifest. Its separate version-1 `migrationMode: none` recovery policy must set **both** image maps to the original predecessor map and retain the original PG major. The command separately rejects a retained running/created migration container; stopping Compose alone does not fence that outside process. The prepared target Compose must name a different project, use managed networks disjoint from the source networks (no external/shared source migration network), and point to three existing private **empty** destinations; bundled mode additionally requires fresh Caddy volume declarations and `--create-fresh-caddy-volumes`. Target identity/config binds must point inside the restored recovery root.
+
+```bash
+sudo python3 ./lifecycle_operator.py control-upgrade-recover \
+  --source-receipt /secure/receipts/control-upgrade.json --receipt /secure/receipts/control-recovery.json \
+  --target-compose /secure/restore-target.yaml --target-env /secure/restore-target.env \
+  --policy /secure/predecessor-recovery.json \
+  --postgres-destination /restore/pg --silo-destination /restore/silo --recovery-destination /restore/recovery \
+  --acknowledge-source-fenced --acknowledge-external-ingress-fenced
+```
+
+Success is `completed_stopped`, never automatic application startup or admission reopening. Validate the restored predecessor's schema/claims/Owner/S3 and reconcile any external effects and post-backup writes before deliberate bounded startup/cutover. No automatic cleanup or in-place overwrite occurs on failure. Original frozen files must still be available at their recorded paths; missing/edited inputs or a lost source host require a separately reviewed generic artifact-recovery ceremony, not a bypass of receipt binding. Preserve remote Executor receipt journals independently.
+
+The opt-in `control_upgrade_test.ControlUpgradeDockerTests` requires `KALA_RUN_CONTROL_UPGRADE_DOCKER=1` and a locally prepared current `KALA_SCHEMA_CANDIDATE_IMAGE` immutable digest. It uses real PG/SILO, existing initialization/claim/Owner CLIs and actual candidate migration code. Application servers are protocol fixtures with schema-aware health, **not real Runtime/Gateway HTTP, Dashboard, model or Executor business acceptance**. It makes no production deployment or signed/cross-platform release claim.
