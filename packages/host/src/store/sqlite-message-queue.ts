@@ -19,7 +19,6 @@ import {
 } from '../message-queue-store.js'
 import { SessionDeletingError } from './session-authority.js'
 
-type ItemRow = { item: string }
 type OperationRow = { item: string; status: 'queued' | 'dequeued' | 'cancelled' }
 type ClaimRow = {
   session_id: string
@@ -449,16 +448,26 @@ export class SqliteMessageQueueStore implements MessageQueueAuthority {
 
   #loadState(database: DatabaseSync, sessionId: string): PersistedMessageQueueState {
     const itemRows = database.prepare(`SELECT item FROM portable_message_queue_items
-      WHERE session_id = ? ORDER BY position ASC, sequence ASC`).all(sessionId) as unknown as ItemRow[]
+      WHERE session_id = ? ORDER BY position ASC, sequence ASC`).all(sessionId)
     const cancellationRows = database.prepare(`SELECT operation_id FROM portable_message_queue_cancellations
-      WHERE session_id = ? ORDER BY sequence ASC`).all(sessionId) as unknown as Array<{ operation_id: string }>
+      WHERE session_id = ? ORDER BY sequence ASC`).all(sessionId)
     if (cancellationRows.length > this.#maxCancelledOperationIds) {
       throw new Error(`message queue cancellation tombstone limit of ${this.#maxCancelledOperationIds} exceeded`)
     }
-    const cancelledOperationIds = cancellationRows.map(({ operation_id }) => operation_id)
+    const cancelledOperationIds = cancellationRows.map((row) => {
+      if (!row || typeof row !== 'object' || !('operation_id' in row) || typeof row.operation_id !== 'string') {
+        throw new Error('Invalid SQLite queue cancellation row')
+      }
+      return row.operation_id
+    })
     const cancelled = new Set(cancelledOperationIds)
     return {
-      items: itemRows.map(({ item }) => parseItem(item)).filter((item) => !cancelled.has(item.operationId)),
+      items: itemRows.map((row) => {
+        if (!row || typeof row !== 'object' || !('item' in row) || typeof row.item !== 'string') {
+          throw new Error('Invalid SQLite queue item row')
+        }
+        return parseItem(row.item)
+      }).filter((item) => !cancelled.has(item.operationId)),
       cancelledOperationIds,
     }
   }

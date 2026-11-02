@@ -388,7 +388,21 @@ export class SqliteSessionAuthority implements SessionAuthority {
     return this.#db().prepare(`
       SELECT sequence, mutation_id, event_type, before_document, document, entry
       FROM portable_session_events WHERE session_id = ? ORDER BY sequence ASC
-    `).all(sessionId) as unknown as EventRow[]
+    `).all(sessionId).map((row) => {
+      if (!row || typeof row !== 'object'
+        || !('sequence' in row) || typeof row.sequence !== 'number'
+        || !('mutation_id' in row) || typeof row.mutation_id !== 'string'
+        || !('event_type' in row) || typeof row.event_type !== 'string'
+        || !('before_document' in row) || (row.before_document !== null && typeof row.before_document !== 'string')
+        || !('document' in row) || (row.document !== null && typeof row.document !== 'string')
+        || !('entry' in row) || (row.entry !== null && typeof row.entry !== 'string')) {
+        throw new Error('Invalid SQLite session event row')
+      }
+      return {
+        sequence: row.sequence, mutation_id: row.mutation_id, event_type: row.event_type,
+        before_document: row.before_document, document: row.document, entry: row.entry,
+      }
+    })
   }
 
   #entries(sessionId: string): Array<EventEntry | RuntimeMetadataEntry> {
