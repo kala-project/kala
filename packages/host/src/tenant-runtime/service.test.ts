@@ -21,6 +21,11 @@ const roots: string[] = []
 const sockets: Socket[] = []
 let host: TenantRuntimeService | undefined
 const llm: LLMAdapter = { name: 'tenant-test', async call() { return { message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } } } }
+const ingressActorHeaders = {
+  'x-agent-runlab-principal': 'fixture-owner',
+  'x-agent-runlab-organization-id': 'org-a',
+  'x-agent-runlab-organization-role': 'owner',
+}
 
 afterEach(async () => {
   for (const socket of sockets.splice(0)) socket.close()
@@ -64,18 +69,18 @@ describe('multi-tenant Host composition', () => {
     })
 
     const origin = `http://127.0.0.1:${host.port}`
-    const a = connect(`${origin}/dashboard`, { transports: ['websocket'], extraHeaders: { 'x-runtime-unit': 'a' }, auth: { sessionId: 'same-session', role: 'dashboard', clientVersion: PROTOCOL_VERSION } })
-    const b = connect(`${origin}/dashboard`, { transports: ['websocket'], extraHeaders: { 'x-runtime-unit': 'b' }, auth: { sessionId: 'same-session', role: 'dashboard', clientVersion: PROTOCOL_VERSION } })
+    const a = connect(`${origin}/dashboard`, { transports: ['websocket'], extraHeaders: { ...ingressActorHeaders, 'x-runtime-unit': 'a' }, auth: { sessionId: 'same-session', role: 'dashboard', clientVersion: PROTOCOL_VERSION } })
+    const b = connect(`${origin}/dashboard`, { transports: ['websocket'], extraHeaders: { ...ingressActorHeaders, 'x-runtime-unit': 'b' }, auth: { sessionId: 'same-session', role: 'dashboard', clientVersion: PROTOCOL_VERSION } })
     sockets.push(a, b)
     await Promise.all([a, b].map((socket) => new Promise<void>((resolve, reject) => { socket.once('connect', resolve); socket.once('connect_error', reject) })))
 
-    await a.timeout(2_000).emitWithAck('client:create_session', { sessionId: 'only-a', workspaceId: 'same-workspace', workspaceName: 'A' })
+    await a.timeout(2_000).emitWithAck('client:create_session', { sessionId: 'same-session', workspaceId: 'same-workspace', workspaceName: 'A' })
     const list = async (socket: Socket): Promise<ServerSessionsPayload> => await new Promise((resolve) => {
       socket.once('server:sessions', resolve)
       socket.emit('client:list_sessions', {})
     })
-    expect((await list(a)).sessions.some((session) => session.sessionId === 'only-a')).toBe(true)
-    expect((await list(b)).sessions.some((session) => session.sessionId === 'only-a')).toBe(false)
+    expect((await list(a)).sessions.some((session) => session.sessionId === 'same-session')).toBe(true)
+    expect((await list(b)).sessions.some((session) => session.sessionId === 'same-session')).toBe(false)
     expect(host.units.list()).toHaveLength(2)
     expect(host.status().state).toBe('ready')
     await host.suspendUnit('a')
@@ -94,9 +99,9 @@ describe('multi-tenant Host composition', () => {
       }),
     })
     const origin = `http://127.0.0.1:${host.port}`
-    const headers = (unit: string): Record<string, string> => ({ 'x-runtime-unit': unit, 'content-type': 'application/json' })
+    const headers = (unit: string): Record<string, string> => ({ ...ingressActorHeaders, 'x-runtime-unit': unit, 'content-type': 'application/json' })
     for (const unit of ['a', 'b']) {
-      const socket = connect(`${origin}/dashboard`, { transports: ['websocket'], extraHeaders: { 'x-runtime-unit': unit }, auth: { sessionId: 'shared', role: 'dashboard', clientVersion: PROTOCOL_VERSION } })
+      const socket = connect(`${origin}/dashboard`, { transports: ['websocket'], extraHeaders: { ...ingressActorHeaders, 'x-runtime-unit': unit }, auth: { sessionId: 'shared', role: 'dashboard', clientVersion: PROTOCOL_VERSION } })
       sockets.push(socket); await new Promise<void>((resolve, reject) => { socket.once('connect', resolve); socket.once('connect_error', reject) })
       await socket.timeout(2_000).emitWithAck('client:create_session', { sessionId: 'shared', workspaceId: 'shared', workspaceName: unit })
     }
@@ -104,8 +109,8 @@ describe('multi-tenant Host composition', () => {
     const registered = await fetch(`${origin}/session-artifacts/register`, { method: 'POST', headers: headers('a'), body: JSON.stringify({ sessionId: 'shared', fileName: 'a.png', data: png }) })
     expect(registered.status).toBe(200)
     const { artifactId } = await registered.json() as { artifactId: string }
-    expect((await fetch(`${origin}/session-artifacts/${artifactId}?sessionId=shared`, { headers: { 'x-runtime-unit': 'a' } })).status).toBe(200)
-    expect((await fetch(`${origin}/session-artifacts/${artifactId}?sessionId=shared`, { headers: { 'x-runtime-unit': 'b' } })).status).toBe(404)
+    expect((await fetch(`${origin}/session-artifacts/${artifactId}?sessionId=shared`, { headers: { ...ingressActorHeaders, 'x-runtime-unit': 'a' } })).status).toBe(200)
+    expect((await fetch(`${origin}/session-artifacts/${artifactId}?sessionId=shared`, { headers: { ...ingressActorHeaders, 'x-runtime-unit': 'b' } })).status).toBe(404)
     expect(host.units.list()).toHaveLength(2)
     // Push/VAPID state is constructed below each Unit root, never globally.
     expect(join(root, 'a', 'push-vapid.json')).not.toBe(join(root, 'b', 'push-vapid.json'))
@@ -133,7 +138,7 @@ describe('multi-tenant Host composition', () => {
     })
     await host.markRoutable('placed-unit', 'org-a')
     const socket = connect(`http://127.0.0.1:${host.port}/dashboard`, {
-      transports: ['websocket'], auth: { sessionId: 'placed-session', role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+      transports: ['websocket'], extraHeaders: ingressActorHeaders, auth: { sessionId: 'placed-session', role: 'dashboard', clientVersion: PROTOCOL_VERSION },
     })
     sockets.push(socket)
     await new Promise<void>((resolve, reject) => { socket.once('connect', resolve); socket.once('connect_error', reject) })
@@ -374,14 +379,14 @@ describe('multi-tenant Host composition', () => {
 
   it('isolates executor registries when tenants reuse workspace ids', async () => {
     const root = await mkdtemp(join(tmpdir(), 'multi-tenant-executors-')); roots.push(root)
-    host = await startTenantRuntimeService({ port: 0, resolveUnitId: (request) => String(request.headers['x-runtime-unit'] ?? ''), factory: async (id) => startLoopbackHostRuntimeUnit(id, { sessionsDir: join(root, id, 'sessions'), llm, defaultConfig: createConfig({ systemPrompt: 'test', tools: [] }), capabilities: AGENT_RUNTIME_CAPABILITIES }) })
+    host = await startTenantRuntimeService({ port: 0, resolveUnitId: (request) => String(request.headers['x-runtime-unit'] ?? ''), factory: async (id) => startLoopbackHostRuntimeUnit(id, { sessionsDir: join(root, id, 'sessions'), llm, defaultConfig: createConfig({ systemPrompt: 'test', tools: [] }), capabilities: AGENT_RUNTIME_CAPABILITIES, auth: { executorTokens: [{ token: `token-${id}`, workspaceId: 'same-workspace' }] } }) })
     const origin = `http://127.0.0.1:${host.port}`
     for (const unit of ['a', 'b']) {
-      const executor = connect(`${origin}/executor`, { transports: ['websocket'], extraHeaders: { 'x-runtime-unit': unit }, auth: { role: 'executor', clientVersion: PROTOCOL_VERSION } })
-      sockets.push(executor); await new Promise<void>((resolve, reject) => { executor.once('connect', resolve); executor.once('connect_error', reject) })
+      const executor = connect(`${origin}/executor`, { transports: ['websocket'], extraHeaders: { 'x-runtime-unit': unit }, auth: { role: 'executor', clientVersion: PROTOCOL_VERSION, token: `token-${unit}` } })
+      sockets.push(executor); await new Promise<void>((resolve, reject) => { executor.once('connect', resolve); executor.once('connect_error', (error: Error) => reject(new Error(`executor ${unit}: ${error.message}`))) })
       executor.emit('executor:announce', { executorId: `executor-${unit}`, workspaceId: 'same-workspace', workspaceName: unit, tools: ['read'], runtime: 'node', runtimeVersion: '22' })
-      const dashboard = connect(`${origin}/dashboard`, { transports: ['websocket'], extraHeaders: { 'x-runtime-unit': unit }, auth: { sessionId: 'same', role: 'dashboard', clientVersion: PROTOCOL_VERSION } })
-      sockets.push(dashboard); await new Promise<void>((resolve, reject) => { dashboard.once('connect', resolve); dashboard.once('connect_error', reject) })
+      const dashboard = connect(`${origin}/dashboard`, { transports: ['websocket'], forceNew: true, extraHeaders: { ...ingressActorHeaders, 'x-runtime-unit': unit }, auth: { sessionId: 'same', role: 'dashboard', clientVersion: PROTOCOL_VERSION } })
+      sockets.push(dashboard); await new Promise<void>((resolve, reject) => { dashboard.once('connect', resolve); dashboard.once('connect_error', (error: Error) => reject(new Error(`dashboard ${unit}: ${error.message}`))) })
       const payload = await new Promise<{ executors: { executorId: string }[] }>((resolve) => { dashboard.once('server:executors', resolve); dashboard.emit('client:list_executors', {}) })
       expect(payload.executors.map((entry) => entry.executorId)).toEqual([`executor-${unit}`])
     }
