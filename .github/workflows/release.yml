@@ -161,6 +161,7 @@ jobs:
       - run: pnpm run build
       - run: pnpm run typecheck
       - run: pnpm run test:extended
+      - run: KALA_RUN_POSTGRES_INTEGRATION=1 pnpm --dir packages/host exec vitest run src/store/postgres-session.integration.test.ts
       - run: pnpm run privacy:history
       - run: pnpm run verify:licenses
       - run: pnpm run verify:public-packages

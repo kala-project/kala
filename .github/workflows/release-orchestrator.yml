@@ -1,0 +1,79 @@
+name: Complete v0.3.0 Release
+
+on:
+  push:
+    tags: ['v0.3.0']
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: complete-v0.3.0-release
+  cancel-in-progress: false
+
+jobs:
+  complete:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: v0.3.0
+      NODE_DIGEST: sha256:9f0dde62d10e7ff7a310ecaebd66225f6b46c17e6cb778449a77b05d3541bea2
+    steps:
+      - uses: actions/checkout@v5
+        with: { ref: 'v0.3.0', fetch-depth: 0 }
+      - name: Require the exact tag and approved official Node image
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/tags/$TAG"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "$TAG^{commit}")"
+          node scripts/release/version-policy.mjs --tag "$TAG"
+          docker buildx imagetools inspect --raw "node:22-bookworm-slim@$NODE_DIGEST" |
+            jq -e '(.manifests | not) and (.config.digest | test("^sha256:[0-9a-f]{64}$"))' >/dev/null
+      - name: Complete only after signed assets, images, and exact-tag acceptance
+        run: |
+          set -euo pipefail
+          revision="$(git rev-parse HEAD)"
+          wait_for_run() {
+            local workflow="$1" event="$2" minimum="$3" run status conclusion
+            for ((attempt=0; attempt<660; attempt++)); do
+              run="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs" \
+                -f branch="$TAG" -f event="$event" -f per_page=30 |
+                jq -c --arg revision "$revision" --arg tag "$TAG" --argjson minimum "$minimum" \
+                  '[.workflow_runs[] | select(.head_sha == $revision and .head_branch == $tag and .id > $minimum)] | max_by(.id) // empty')"
+              if [[ -n "$run" ]]; then
+                status="$(jq -r .status <<< "$run")"
+                conclusion="$(jq -r .conclusion <<< "$run")"
+                if [[ "$status" == completed ]]; then
+                  test "$conclusion" = success || { echo "$workflow failed: $conclusion" >&2; return 1; }
+                  jq -r .id <<< "$run"
+                  return 0
+                fi
+              fi
+              sleep 30
+            done
+            echo "Timed out waiting for $workflow on $TAG at $revision" >&2
+            return 1
+          }
+          wait_for_run release.yml push 0 >/dev/null
+          wait_for_run private-cloud-release.yml push 0 >/dev/null
+          test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true
+          baseline() {
+            gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/$1/runs" \
+              -f branch="$TAG" -f event=workflow_dispatch -f per_page=1 \
+              --jq '[.workflow_runs[].id] | max // 0'
+          }
+          rc_before="$(baseline rc-acceptance.yml)"
+          portable_before="$(baseline portable-image-release.yml)"
+          gh workflow run rc-acceptance.yml --ref "$TAG" -f tag="$TAG"
+          gh workflow run portable-image-release.yml --ref "$TAG" \
+            -f tag="$TAG" -f revision="$revision" \
+            -f node_22_amd64_digest="$NODE_DIGEST" -F require_isolated_vm_acceptance=true
+          acceptance_run_id="$(wait_for_run rc-acceptance.yml workflow_dispatch "$rc_before")"
+          wait_for_run portable-image-release.yml workflow_dispatch "$portable_before" >/dev/null
+          promote_before="$(baseline promote-rc.yml)"
+          gh workflow run promote-rc.yml --ref "$TAG" \
+            -f tag="$TAG" -f acceptance_run_id="$acceptance_run_id"
+          wait_for_run promote-rc.yml workflow_dispatch "$promote_before" >/dev/null
+          test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = false

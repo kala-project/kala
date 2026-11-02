@@ -87,7 +87,17 @@ async function smokeHost({ label, releaseAssetsDir, expectWindows }) {
     if (capabilitiesRes.status !== 200 || capabilities.product !== 'dedicated' || capabilities.deployment?.tenancy !== 'single-tenant') {
       throw new Error(`${label}: release install did not load canonical Dedicated deployment config`)
     }
-    const installCapabilitiesRes = await fetch(`${url}/api/executor-install-capabilities`)
+    const unauthenticatedInstallCapabilities = await fetch(`${url}/api/executor-install-capabilities`)
+    if (unauthenticatedInstallCapabilities.status !== 401) {
+      throw new Error(`${label}: unauthenticated install capabilities returned ${unauthenticatedInstallCapabilities.status}`)
+    }
+    const installCapabilitiesRes = await fetch(`${url}/api/executor-install-capabilities`, {
+      headers: {
+        'x-agent-runlab-principal': 'release-install-smoke',
+        'x-agent-runlab-organization-id': 'release-install-smoke',
+        'x-agent-runlab-organization-role': 'owner',
+      },
+    })
     const installCapabilities = await installCapabilitiesRes.json()
     if (installCapabilitiesRes.status !== 200 || installCapabilities?.platforms?.windows?.available !== expectWindows) {
       throw new Error(`${label}: Windows install capability was ${JSON.stringify(installCapabilities)}`)

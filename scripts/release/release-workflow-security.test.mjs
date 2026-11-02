@@ -13,6 +13,31 @@ const reconcile = join(import.meta.dirname, 'reconcile-github-release-assets.mjs
 const verifyPromotion = join(import.meta.dirname, 'verify-promotion-candidate.mjs')
 const digest = (value) => createHash('sha256').update(value).digest('hex')
 
+test('tag orchestrator promotes only after exact-revision asset, image, and hosted acceptance gates', () => {
+  const workflow = readFileSync(join(import.meta.dirname, '../../.github/workflows/release-orchestrator.yml'), 'utf8')
+  assert.match(workflow, /tags: \['v0\.3\.0'\]/u)
+  assert.match(workflow, /test "\$GITHUB_REF" = "refs\/tags\/\$TAG"/u)
+  assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$\(git rev-parse "\$TAG\^\{commit\}"\)"/u)
+  assert.match(workflow, /jq -c --arg revision "\$revision" --arg tag "\$TAG" --argjson minimum "\$minimum"[\s\S]*\.head_sha == \$revision and \.head_branch == \$tag and \.id > \$minimum/u)
+  const stages = [
+    'wait_for_run release.yml push 0',
+    'wait_for_run private-cloud-release.yml push 0',
+    'gh workflow run rc-acceptance.yml',
+    'gh workflow run portable-image-release.yml',
+    'wait_for_run rc-acceptance.yml workflow_dispatch',
+    'wait_for_run portable-image-release.yml workflow_dispatch',
+    'gh workflow run promote-rc.yml',
+    'wait_for_run promote-rc.yml workflow_dispatch',
+  ]
+  for (let index = 1; index < stages.length; index++) {
+    assert.ok(workflow.indexOf(stages[index - 1]) < workflow.indexOf(stages[index]), `${stages[index]} must follow its gate`)
+  }
+  assert.match(workflow, /test "\$conclusion" = success \|\|/u)
+  assert.match(workflow, /-F require_isolated_vm_acceptance=true/u)
+  assert.match(workflow, /promote_before="\$\(baseline promote-rc\.yml\)"[\s\S]*wait_for_run promote-rc\.yml workflow_dispatch "\$promote_before"/u)
+  assert.match(workflow, /test "\$\(gh release view "\$TAG" --json isDraft --jq \.isDraft\)" = false/u)
+})
+
 test('Windows acceptance builds real workspace dependencies instead of a quoted empty pnpm filter', () => {
   const scripts = JSON.parse(readFileSync(join(import.meta.dirname, '../../package.json'), 'utf8')).scripts
   for (const name of ['build', 'typecheck']) {
@@ -175,6 +200,7 @@ test('Private Cloud release retains image publishing and accepts the exact signe
 test('release workflow publishes archived metadata and verifies the signed Executor-native inventory', () => {
   const workflow = readFileSync(join(import.meta.dirname, '../../.github/workflows/release.yml'), 'utf8')
   assert.equal(workflow.match(/extract-release-metadata\.mjs release\/kala-release-metadata\.tar\.gz/g)?.length, 2)
+  assert.match(workflow, /pnpm run test:extended\n\s+- run: KALA_RUN_POSTGRES_INTEGRATION=1 pnpm --dir packages\/host exec vitest run src\/store\/postgres-session\.integration\.test\.ts/u)
   assert.match(workflow, /test "\$GITHUB_REF" = "refs\/tags\/\$TAG"/u)
   assert.match(workflow, /optional-host-native:[\s\S]*workflow_dispatch[\s\S]*--component host[\s\S]*name: optional-host-qualification-/u)
   assert.match(workflow, /native-assets:[\s\S]*--component executor[\s\S]*name: native-/u)
@@ -200,10 +226,10 @@ test('release workflow publishes archived metadata and verifies the signed Execu
   assert.doesNotMatch(workflow, /release\/sbom\.cdx\.json/u)
 })
 
-test('Portable OCI beta.19 dispatch requires immutable Node and isolated-VM acceptance', () => {
+test('Portable OCI v0.3.0 dispatch requires immutable Node and isolated-VM acceptance', () => {
   const workflow = readFileSync(join(import.meta.dirname, '../../.github/workflows/portable-image-release.yml'), 'utf8')
-  assert.match(workflow, /ACCEPTED_TAG: v0\.3\.0-beta\.19/u)
-  assert.doesNotMatch(workflow, /ACCEPTED_TAG: v0\.3\.0-beta\.18/u)
+  assert.match(workflow, /ACCEPTED_TAG: v0\.3\.0/u)
+  assert.doesNotMatch(workflow, /ACCEPTED_TAG: v0\.3\.0-beta\./u)
   assert.match(workflow, /node_22_amd64_digest:\n\s+description: [^\n]*digest[^\n]*sha256:\.\.\.\)\n\s+required: true\n\s+type: string/u)
   assert.match(workflow, /\[\[ "\$NODE_DIGEST" =~ \^sha256:\[0-9a-f\]\{64\}\$ \]\]/u)
   assert.match(workflow, /NODE_IMAGE=node:22-bookworm-slim@\$\{\{ inputs\.node_22_amd64_digest \}\}/u)
