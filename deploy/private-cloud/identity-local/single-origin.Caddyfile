@@ -1,4 +1,6 @@
 :8080 {
+  # Optional public-origin Console environment override.
+
   @login path /ui/v2/login*
   handle @login {
     reverse_proxy identity-login:3000 {
