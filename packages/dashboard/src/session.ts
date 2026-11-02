@@ -65,6 +65,7 @@ export type DashboardSocket = Socket<
 >
 
 export type SessionView = {
+  scheduledMessageTasks?: Readonly<Record<string, string>>
   status: ConnectionStatus
   agentRuntime: import('@agent-kernel/shared').AgentRuntimeId
   executionMode: import('@agent-kernel/shared').SessionExecutionMode
@@ -398,6 +399,7 @@ export function useSession({
       sessionId: projection.sessionId, status: projection.status, executionMode: projection.executionMode, state: projection.state,
       config: projection.config, contextSnapshot: projection.contextSnapshot, runtimeCompactionPolicy: projection.runtimeCompactionPolicy,
       turnStartedAt: projection.turnStartedAt, turnStartedAtCursor: projection.turnStartedAtCursor,
+      scheduledMessageTasks: projection.scheduledMessageTasks,
       timeline: projection.timeline,
       queuedMessages: projection.queuedMessages, lastError: projection.lastError,
       parentSessionId: projection.parentSessionId, parentCursor: projection.parentCursor,
@@ -1111,7 +1113,7 @@ export function useSession({
 
   const {
     status, agentRuntime, executionMode, state, config, contextSnapshot, runtimeCompactionPolicy, compactStatus: remoteCompactStatus, timeline,
-    queuedMessages, lastError, parentSessionId, parentCursor, selectedModel, turnStartedAt,
+    queuedMessages, lastError, parentSessionId, parentCursor, selectedModel, turnStartedAt, scheduledMessageTasks,
     hydratedSessionId, historyLoadedSessionId, historyAuthoritativeSessionId,
   } = selectedProjection
 
@@ -1172,6 +1174,7 @@ export function useSession({
       runtimeCompactionPolicy,
       turnStartedAt,
       compactStatus: remoteCompactStatus,
+      scheduledMessageTasks,
       timeline,
       humanAttention,
       streamingText: selectionCurrent ? streamingText : '',
@@ -1202,6 +1205,7 @@ export function useSession({
       runtimeCompactionPolicy,
       turnStartedAt,
       remoteCompactStatus,
+      scheduledMessageTasks,
       timeline,
       humanAttention,
       streamingText,

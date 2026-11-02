@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { createConfig, step } from '@agent-kernel/kernel'
-import { loadPersistedMessageQueue, loadPersistedMessageQueueState, MAX_CANCELLED_OPERATION_IDS, persistMessageQueueSnapshot, normalizeQueuedMessage } from './message-queue-store.js'
+import { loadPersistedMessageQueue, loadPersistedMessageQueueState, MAX_CANCELLED_OPERATION_IDS, persistMessageQueueSnapshot, normalizeQueuedMessage, serializeQueuedMessage } from './message-queue-store.js'
 import { appendRuntimeMetadataEntry, readSessionLog } from './store/log.js'
 import { SessionStore } from './store/session.js'
 
@@ -12,6 +12,10 @@ const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 describe('durable message queue metadata', () => {
+  it('retains the server-owned Portable attribution lookup hint across queue persistence', () => {
+    const item = { id: 'scheduled', operationId: 'schedule_operation', text: 'Run', mode: 'queue' as const, createdAt: '2026-11-02T00:00:00.000Z', scheduledOwnerKey: 'principal:token' }
+    expect(normalizeQueuedMessage(serializeQueuedMessage(item))?.scheduledOwnerKey).toBe('principal:token')
+  })
   it('does not run dangling Tool recovery before planned continuation owns the checkpoint', async () => {
     const root = mkdtempSync(join(tmpdir(), 'message-queue-planned-handoff-'))
     roots.push(root)

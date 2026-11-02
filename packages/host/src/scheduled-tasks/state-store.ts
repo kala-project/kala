@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { nextOccurrence, validateSchedule } from './recurrence.js'
+import type { ScheduledInboxScope } from './inbox-changes.js'
 import type {
   CreateScheduledTask,
   ScheduledInbox,
@@ -16,6 +17,8 @@ const MAX_RUNS = 10_000
 
 /** Complete persistence contract consumed by the API and Unit scheduler. */
 export interface ScheduledTaskStorage {
+  /** Post-commit invalidation; undefined requests resync after a notification gap. */
+  onInboxChange(listener: (scope?: ScheduledInboxScope) => void): Promise<() => Promise<void>>
   start(unitId: string): Promise<void>
   close(): Promise<void>
   listTasks(ownerKey: string): Promise<ScheduledTask[]>
@@ -37,6 +40,19 @@ export interface ScheduledTaskStorage {
 }
 
 export abstract class ScheduledTaskStateStore implements ScheduledTaskStorage {
+  private readonly inboxListeners = new Set<(scope?: ScheduledInboxScope) => void>()
+
+  async onInboxChange(listener: (scope?: ScheduledInboxScope) => void): Promise<() => Promise<void>> {
+    this.inboxListeners.add(listener)
+    return async () => { this.inboxListeners.delete(listener) }
+  }
+
+  protected emitInboxChanges(scopes: readonly ScheduledInboxScope[]): void {
+    for (const scope of scopes) for (const listener of this.inboxListeners) {
+      try { listener(scope) } catch { process.emitWarning('scheduled Inbox change listener failed') }
+    }
+  }
+
   constructor(protected readonly now: () => Date = () => new Date()) {}
 
   abstract start(unitId: string): Promise<void>

@@ -42,6 +42,33 @@ function selected(sessionId: string, generation = 1) {
 }
 
 describe('session projection reducer', () => {
+  it('hydrates legacy scheduled badges and merges live attribution without accepting other Sessions', () => {
+    let current = selected('a')
+    current = reduceSessionProjection(current, {
+      kind: 'ready', generation: 1, sessionId: 'a',
+      payload: { ...ready('a'), scheduledMessageTasks: { historical: 'old-task' } },
+    })
+    const live = { ...appended('a', 1, 'Scheduled prompt'), event: { kind: 'user_message' as const, operationId: 'scheduled-new', text: 'Scheduled prompt' }, scheduledTaskId: 'new-task' }
+    current = reduceSessionProjection(current, { kind: 'appended', generation: 1, sessionId: 'a', payload: live })
+    expect(current.scheduledMessageTasks).toEqual({ historical: 'old-task', 'scheduled-new': 'new-task' })
+    current = reduceSessionProjection(current, { kind: 'appended', generation: 1, sessionId: 'a', payload: appended('a', 2, 'Manual prompt') })
+    expect(current.scheduledMessageTasks).toEqual({ historical: 'old-task', 'scheduled-new': 'new-task' })
+    const next = reduceSessionProjection(current, { kind: 'select', generation: 2, sessionId: 'b' })
+    expect(next.scheduledMessageTasks).toEqual({})
+    expect(reduceSessionProjection(next, { kind: 'ready', generation: 1, sessionId: 'a', payload: { ...ready('a'), scheduledMessageTasks: { leaked: 'wrong-task' } } })).toBe(next)
+    expect(reduceSessionProjection(next, { kind: 'appended', generation: 1, sessionId: 'a', payload: live })).toBe(next)
+  })
+
+  it('retains a newer live attribution when an older ready snapshot arrives', () => {
+    let current = selected('a')
+    current = reduceSessionProjection(current, {
+      kind: 'appended', generation: 1, sessionId: 'a',
+      payload: { ...appended('a', 1, 'Run'), event: { kind: 'user_message', operationId: 'live', text: 'Run' }, scheduledTaskId: 'live-task' },
+    })
+    current = reduceSessionProjection(current, { kind: 'ready', generation: 1, sessionId: 'a', payload: { ...ready('a'), scheduledMessageTasks: {} } })
+    expect(current.scheduledMessageTasks).toEqual({ live: 'live-task' })
+  })
+
   it('marks only a real Host history response as authoritative for /clear recovery', () => {
     const sessionId = 'session-clear-reset'
     const current = selected(sessionId)

@@ -1968,16 +1968,26 @@ export class SessionStore {
     }
   }
 
-  async listSummaries(): Promise<SessionSummary[]> {
+  async listSummaries(options: { sessionIds?: readonly string[]; organizationId?: string } = {}): Promise<SessionSummary[]> {
+    let selected = options.sessionIds === undefined ? undefined : new Set(options.sessionIds)
+    if (selected?.size === 0) return []
     if (this.options.authority) {
       await this.authorityReady
-      const records = (await this.options.authority.list()).map((document) => restoreSessionRecord(document, this.pathFor(document.sessionId)))
+      const records = (await this.options.authority.list(options.sessionIds))
+        .filter((document) => !selected || selected.has(document.sessionId))
+        .filter((document) => !Object.hasOwn(options, 'organizationId') || document.organizationId === options.organizationId)
+        .map((document) => restoreSessionRecord(document, this.pathFor(document.sessionId)))
       return records.map(summarizeRecord).sort((a, b) =>
         (b.lastEventAt ?? b.createdAt).localeCompare(a.lastEventAt ?? a.createdAt))
     }
     if (!existsSync(this.sessionsDir)) return []
+    if (Object.hasOwn(options, 'organizationId')) {
+      const scoped = await this.listSessionIdsForOrganization(options.organizationId)
+      selected = new Set(scoped.filter((sessionId) => !selected || selected.has(sessionId)))
+      if (selected.size === 0) return []
+    }
     const files = readdirSync(this.sessionsDir).filter((f) =>
-      f.endsWith('.jsonl'),
+      f.endsWith('.jsonl') && (!selected || [...selected].some((sessionId) => f.endsWith(`_${sessionId}.jsonl`))),
     )
     const out: SessionSummary[] = []
     for (const file of files) {
@@ -1987,7 +1997,7 @@ export class SessionStore {
         const summary = loaded
           ? summarizeRecord(loaded)
           : await this.cachedSummaryFor(path)
-        out.push(summary)
+        if (!selected || selected.has(summary.sessionId)) out.push(summary)
       } catch {
         // Skip malformed files — a first-line-missing-header log means the
         // process crashed before it wrote anything usable. Don't fail the

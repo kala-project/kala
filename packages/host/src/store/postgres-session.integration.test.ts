@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 
 import { createConfig, step } from '@agent-kernel/kernel'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { loadPersistedMessageQueueState, persistMessageQueueSnapshot } from '../message-queue-store.js'
 import { createPostgresHotStateStore, LeaseFencedError, type PostgresHotStateStore } from '../tenant-runtime/postgres-hot-state.js'
@@ -61,6 +61,37 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     const authority = makeAuthority(owner)
     return { store: new SessionStore(root, { authority, deleteRegisteredArtifacts }), root, authority }
   }
+
+  it('batches summary projections, scopes selected IDs, and repairs only missing projections', async () => {
+    const authority = makeAuthority('batch-reader', 'batch-reader-tenant')
+    const other = makeAuthority('batch-other', 'batch-other-tenant')
+    await authority.initialize()
+    for (const sessionId of ['batch-a', 'batch-b', 'batch-deleted', 'batch-deleting']) {
+      await authority.create({ sessionId, state: { cursor: 0 } })
+    }
+    await other.create({ sessionId: 'batch-foreign', state: { cursor: 0 } })
+    await authority.requestDeletion('batch-deleted')
+    await authority.delete('batch-deleted')
+    await authority.requestDeletion('batch-deleting')
+    const reads = vi.spyOn(authority.hotState.database, 'query')
+    try {
+      expect((await authority.list()).map(({ sessionId }) => sessionId)).toEqual(['batch-a', 'batch-b'])
+      expect(reads).toHaveBeenCalledTimes(1)
+      reads.mockClear()
+      expect((await authority.list(['batch-b', 'batch-foreign', 'batch-missing', 'batch-b']))
+        .map(({ sessionId }) => sessionId)).toEqual(['batch-b'])
+      expect(reads).toHaveBeenCalledTimes(1)
+      reads.mockClear()
+      await expect(authority.list([])).resolves.toEqual([])
+      expect(reads).not.toHaveBeenCalled()
+    } finally {
+      reads.mockRestore()
+    }
+    await authority.hotState.database.query(`DELETE FROM tenant_session_latest_projection
+      WHERE tenant_id = $1 AND session_id = $2`, ['batch-reader-tenant', 'batch-a'])
+    expect((await authority.list(['batch-a'])).map(({ sessionId }) => sessionId)).toEqual(['batch-a'])
+    await expect(authority.load('batch-a')).resolves.toMatchObject({ state: { cursor: 0 } })
+  })
 
   it('persists binary native ranges across clients without whole-file text encoding', async () => {
     const writer = makeAuthority('posix-ranges', 'posix-a')

@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { EventEmitter, once } from 'node:events'
 import { promisify } from 'node:util'
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -79,6 +80,60 @@ integrationDescribe('Private Cloud PostgreSQL scheduled task store', () => {
     await database.database.query(`INSERT INTO tenant_runtime_unit_protocol_gates
       (organization_id, unit_id, feature_version, barrier_generation) VALUES ($1, $2, 1, 1)`, [organizationId, unitId])
   }
+
+  it('reconnects LISTEN after terminating only its test backend and resumes committed Inbox notifications', async () => {
+    const applicationName = `inbox-${randomUUID()}`
+    const listenerName = `${applicationName}-notifications`
+    const database = createPostgresHotStateStore({ connectionString, applicationName, maxConnections: 1 })
+    databases.push(database)
+    const store = new PostgresScheduledTaskStore(database.database, `tenant-${randomUUID()}`)
+    const events = new EventEmitter()
+    let resyncs = 0
+    let stop: (() => Promise<void>) | undefined
+    try {
+      await store.start('unit-listen-reconnect')
+      stop = await store.onInboxChange((scope) => {
+        if (scope) events.emit('change', scope)
+        else { resyncs += 1; events.emit('resync') }
+      })
+      expect(resyncs).toBe(1)
+      const listener = await database.database.query<{ pid: number }>(`SELECT pid FROM pg_stat_activity
+        WHERE datname = current_database() AND application_name = $1 AND pid <> pg_backend_pid()`, [listenerName])
+      expect(listener.rows).toHaveLength(1)
+      const pid = listener.rows[0]!.pid
+      expect(Number.isSafeInteger(pid) && pid > 0).toBe(true)
+      const [terminated] = await Promise.all([
+        database.database.query<{ terminated: boolean }>(`SELECT pg_terminate_backend(pid) AS terminated
+          FROM pg_stat_activity WHERE pid = $1 AND datname = current_database() AND application_name = $2`, [pid, listenerName]),
+        once(events, 'resync', { signal: AbortSignal.timeout(5_000) }),
+      ])
+      expect(terminated.rows).toEqual([{ terminated: true }])
+      expect(resyncs).toBe(2)
+      const replacement = await database.database.query<{ pid: number }>(`SELECT pid FROM pg_stat_activity
+        WHERE datname = current_database() AND application_name = $1`, [listenerName])
+      expect(replacement.rows).toHaveLength(1)
+      expect(replacement.rows[0]!.pid).not.toBe(pid)
+
+      const scope = { ownerKey: 'organization:reconnect', principal: 'alice' }
+      const task = await store.create({
+        ownerKey: scope.ownerKey, createdBy: scope.principal, prompt: 'After listener reconnect',
+        target: { kind: 'session', sessionId: 'session-reconnect' },
+        schedule: { kind: 'once', at: new Date(Date.now() + 60_000).toISOString() },
+      })
+      const run = await store.claim(task.id, task.nextRunAt!)
+      const [, notification] = await Promise.all([
+        store.finish(run!.occurrenceId, 'failed', { error: 'Test Executor unavailable' }),
+        once(events, 'change', { signal: AbortSignal.timeout(5_000) }),
+      ])
+      expect(notification).toEqual([scope])
+      expect(await store.inbox(scope.ownerKey, scope.principal)).toMatchObject({
+        unreadCount: 1, items: [{ occurrenceId: run!.occurrenceId, status: 'failed' }],
+      })
+    } finally {
+      await stop?.()
+      await store.close()
+    }
+  }, 15_000)
 
   it('preserves ownership, history, origins and inbox receipts across two clients', async () => {
     let now = new Date('2035-01-01T00:00:00.000Z')
@@ -280,6 +335,8 @@ integrationDescribe('Private Cloud PostgreSQL scheduled task store', () => {
     const second = new PostgresScheduledTaskStore(databaseB.database, organizationId, parallelOptions(ensureB, activeB))
     await first.start(unitId)
     let deliveries = 0
+    const inboxChanges: Array<{ ownerKey: string; principal: string }> = []
+    let stopInbox: (() => Promise<void>) | undefined
     const scheduler = new UnitScheduler(second, {
       async validate() {},
       async receipt() { return 'unknown' },
@@ -288,6 +345,7 @@ integrationDescribe('Private Cloud PostgreSQL scheduled task store', () => {
     }, { unitId, pollMs: 60_000 })
     try {
       await scheduler.start()
+      stopInbox = await second.onInboxChange((change) => { if (change) inboxChanges.push(change) })
       const legacy = new PostgresScheduledTaskStore(makeDatabase('parallel-legacy-conflict').database, organizationId)
       await expect(legacy.start(unitId)).rejects.toBeInstanceOf(ScheduledTaskLeaseHeldError)
 
@@ -308,6 +366,20 @@ integrationDescribe('Private Cloud PostgreSQL scheduled task store', () => {
         first.finish(runA!.occurrenceId, 'enqueued', { sessionId: sessionA }),
         second.finish(runB!.occurrenceId, 'enqueued', { sessionId: sessionB }),
       ])
+      await eventually(async () => {
+        expect(inboxChanges).toHaveLength(2)
+        expect(inboxChanges).toEqual(expect.arrayContaining([
+          { ownerKey: taskA.ownerKey, principal: 'alice' }, { ownerKey: taskB.ownerKey, principal: 'bob' },
+        ]))
+      }, 5_000)
+      await databaseA.database.query('SELECT pg_notify($1, $2)', ['kala_scheduled_inbox', JSON.stringify({
+        namespace: 'different-tenant', unitId, scope: { ownerKey: taskA.ownerKey, principal: 'foreign' },
+      })])
+      await first.markInboxSeen(taskA.ownerKey, 'alice', [runA!.occurrenceId])
+      await eventually(async () => {
+        expect(inboxChanges).toHaveLength(3)
+        expect(inboxChanges.at(-1)).toEqual({ ownerKey: taskA.ownerKey, principal: 'alice' })
+      }, 5_000)
       expect((await second.history(taskA.ownerKey, taskA.id))?.[0]).toMatchObject({ status: 'enqueued' })
 
       const takeoverTask = await first.create({ ownerKey: taskA.ownerKey, createdBy: 'alice', prompt: 'recover safely',
@@ -332,6 +404,7 @@ integrationDescribe('Private Cloud PostgreSQL scheduled task store', () => {
       const legacyWhileShared = new PostgresScheduledTaskStore(makeDatabase('parallel-old-writer').database, organizationId)
       await expect(legacyWhileShared.start(unitId)).rejects.toBeInstanceOf(ScheduledTaskLeaseHeldError)
       await scheduler.stop()
+      await stopInbox()
 
       const probe = new PostgresScheduledTaskStore(databaseA.database, organizationId, parallelOptions(ensureB, activeB))
       await probe.start(unitId)
@@ -342,6 +415,7 @@ integrationDescribe('Private Cloud PostgreSQL scheduled task store', () => {
         .toEqual(expect.arrayContaining([taskA.id, takeoverTask.id]))
       await probe.close()
     } finally {
+      await stopInbox?.()
       await scheduler.stop()
       await first.close()
     }

@@ -9,6 +9,7 @@ import {
 } from '../tenant-runtime/postgres-runtime-resource-ownership.js'
 import { nextOccurrence, validateSchedule } from './recurrence.js'
 import type { ScheduledTaskStorage } from './store.js'
+import { changedInboxes, inboxSignatures, type ScheduledInboxScope } from './inbox-changes.js'
 import type {
   CreateScheduledTask,
   ScheduledInbox,
@@ -27,6 +28,7 @@ type LeaseRow = Record<string, unknown> & { owner_id: string; generation: string
 type StateRow = Record<string, unknown> & { document: unknown }
 
 const MAX_RUNS = 10_000
+const INBOX_CHANNEL = 'kala_scheduled_inbox'
 const PARALLEL_OWNER_PREFIX = 'parallel-v1:'
 const PARALLEL_BARRIER = 'kala-parallel-placement-barrier-v1'
 const PARALLEL_BARRIER_ORIGIN = 'https://parallel-placement-barrier.invalid'
@@ -62,6 +64,18 @@ class ScheduledTaskParallelGateError extends ScheduledTaskFencedError {
  * by this store.
  */
 export class PostgresScheduledTaskStore implements ScheduledTaskStorage {
+  async onInboxChange(listener: (scope?: ScheduledInboxScope) => void): Promise<() => Promise<void>> {
+    if (!this.database.listen) throw new Error('PostgreSQL scheduled Inbox requires notification support')
+    return await this.database.listen(INBOX_CHANNEL, (payload) => {
+      if (payload === undefined) { listener(); return }
+      try {
+        const change = JSON.parse(payload) as { namespace?: string; unitId?: string; scope?: ScheduledInboxScope }
+        if (change.namespace !== this.namespace || change.unitId !== this.#unitId
+          || typeof change.scope?.ownerKey !== 'string' || typeof change.scope.principal !== 'string') return
+        listener(change.scope)
+      } catch { /* Unrelated or malformed database notifications are not Inbox changes. */ }
+    })
+  }
   readonly #leases: string
   readonly #states: string
   readonly #ownerId = randomUUID()
@@ -529,11 +543,15 @@ export class PostgresScheduledTaskStore implements ScheduledTaskStorage {
         FOR UPDATE`, [this.namespace, unitId])
       if (!selected.rows[0]) throw new Error('scheduled task state not found')
       const state = parseState(selected.rows[0].document)
+      const before = inboxSignatures(state)
       const value = await operation(state, transaction)
       state.revision += 1
       const updated = await transaction.query(`UPDATE ${this.#states} SET document = $3::jsonb, updated_at = clock_timestamp()
         WHERE namespace = $1 AND unit_id = $2`, [this.namespace, unitId, JSON.stringify(state)])
       if (updated.rowCount !== 1) throw new ScheduledTaskFencedError()
+      for (const scope of changedInboxes(before, state)) {
+        await transaction.query('SELECT pg_notify($1, $2)', [INBOX_CHANNEL, JSON.stringify({ namespace: this.namespace, unitId, scope })])
+      }
       return value
     }))
   }

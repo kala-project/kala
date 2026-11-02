@@ -12,6 +12,7 @@ const MB = 1024 * 1024
 
 export type CachedSessionView = {
   sessionId: string
+  scheduledMessageTasks?: Readonly<Record<string, string>>
   agentRuntime?: AgentRuntimeId
   executionMode?: SessionExecutionMode
   status: ConnectionStatus
@@ -190,6 +191,7 @@ function estimateCachedSessionViewParts(
       contextSnapshot: input.contextSnapshot,
       turnStartedAt: input.turnStartedAt,
       turnStartedAtCursor: input.turnStartedAtCursor,
+      scheduledMessageTasks: input.scheduledMessageTasks,
       queuedMessages: input.queuedMessages,
       lastError: input.lastError,
       parentSessionId: input.parentSessionId,

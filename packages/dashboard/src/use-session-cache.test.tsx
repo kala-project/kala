@@ -95,6 +95,34 @@ afterEach(() => {
 })
 
 describe('useSession session view cache', () => {
+  it('receives historical and live scheduled attribution without HTTP or idle polling', async () => {
+    const fetcher = vi.spyOn(globalThis, 'fetch')
+    const socket = new MockSocket()
+    const view = renderHook(({ id }) => useSession({ host: 'http://host', sessionId: id, socket: socket as never }), { initialProps: { id: 'a' } })
+    const ready = (sessionId: string) => ({
+      sessionId, agentRuntime: 'kernel', cursor: 0, state: createInitialState({ sessionId }),
+      config: { systemPrompt: 'test', tools: [] }, scheduledMessageTasks: { historical: 'historical-task' },
+    })
+    act(() => socket.serverEmit('session:ready', ready('a')))
+    expect(view.result.current.scheduledMessageTasks).toEqual({ historical: 'historical-task' })
+    act(() => socket.serverEmit('event:appended', {
+      sessionId: 'a', ...timelineEntry(1), event: { kind: 'user_message', text: 'Scheduled', operationId: 'new-scheduled' }, scheduledTaskId: 'new-task',
+    }))
+    await waitFor(() => expect(view.result.current.scheduledMessageTasks?.['new-scheduled']).toBe('new-task'))
+    vi.useFakeTimers()
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); vi.advanceTimersByTime(5 * 60_000) })
+    expect(fetcher).not.toHaveBeenCalled()
+    view.rerender({ id: 'b' })
+    expect(view.result.current.scheduledMessageTasks).toEqual({})
+    act(() => socket.serverEmit('session:ready', ready('a')))
+    expect(view.result.current.scheduledMessageTasks).toEqual({})
+    view.unmount()
+    hidden.mockRestore()
+    fetcher.mockRestore()
+    vi.useRealTimers()
+  })
+
   it('preserves turn timing across rapid A to B to A cache selection and authoritative ready hydration', () => {
     const socket = new MockSocket()
     const cache = createSessionViewCache({ maxBytes: 10 * 1024 * 1024 })

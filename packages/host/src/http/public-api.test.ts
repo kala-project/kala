@@ -85,6 +85,7 @@ describe('versioned product API', () => {
       status: 404,
       code: 'not_found',
     })
+    await expect(new KalaApiClient({ baseUrl, fetch: forbiddenFetch }).listSessions()).resolves.toMatchObject({ items: [] })
 
     const deadline = Date.now() + 2_000
     while (server.loop.hasActiveTurn('api-a') && Date.now() < deadline) {

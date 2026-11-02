@@ -10,6 +10,7 @@
  */
 
 import { z } from 'zod'
+import type { ScheduledInboxChangedEvent } from '../protocol.js'
 
 import type {
   AgentTypeSummary,
@@ -101,6 +102,10 @@ import {
   ToolProgressPayloadSchema,
 } from './executor.js'
 import { ManualModelInputSchema, SessionPreferencesSchema } from './dashboard-inbound.js'
+
+export const ScheduledInboxChangedEventSchema = z.object({
+  reason: z.enum(['changed', 'reconnected']),
+}).strict() satisfies z.ZodType<ScheduledInboxChangedEvent>
 
 // A null reading mode is only an inbound clear command; persisted summaries
 // and control-plane updates expose the resulting preference, never the command.
@@ -263,6 +268,7 @@ const CompactStatusEventSchema = z.discriminatedUnion('kind', [
 
 export const SessionReadyEventSchema = z.object({
   sessionId: z.string(),
+  scheduledMessageTasks: z.record(z.string().min(1), z.string().min(1)).optional(),
   agentRuntime: z.enum(['kernel', 'copilot']),
   executionMode: z.enum(['chat', 'dag']),
   agentRuntimeCapabilities: z.object({
@@ -386,6 +392,7 @@ const EventTimingMetadataSchema = z.object({ turnId: z.string(), turnStartedAt: 
 
 export const EventAppendedEventSchema = z.object({
   sessionId: z.string(),
+  scheduledTaskId: z.string().min(1).optional(),
   seq: z.number().int().nonnegative(),
   ts: z.string(),
   event: AgentEventSchema,

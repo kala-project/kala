@@ -183,6 +183,8 @@ export type HandshakeAuth = {
 
 export type SessionReadyEvent = {
   sessionId: string
+  /** Durable scheduled-run provenance, keyed by accepted user-message operationId. */
+  scheduledMessageTasks?: Readonly<Record<string, string>>
   agentRuntime: AgentRuntimeId
   executionMode: SessionExecutionMode
   agentRuntimeCapabilities: AgentRuntimeCapabilities
@@ -429,6 +431,8 @@ export type { ContextUsageSnapshot }
 
 export type EventAppendedEvent = {
   sessionId: string
+  /** Host-ledger attribution for this user_message; never supplied by a client. */
+  scheduledTaskId?: string
   seq: number
   ts: string
   event: AgentEvent
@@ -2145,7 +2149,10 @@ export type DashboardClientToServerEvents = {
   'client:restore_subscriptions': (payload: ClientSubscribeChannels, ack: (result: ChannelSubscriptionResult) => void) => void
 }
 
+export type ScheduledInboxChangedEvent = { reason: 'changed' | 'reconnected' }
+
 export type DashboardServerToClientEvents = {
+  'server:scheduled_inbox_changed': (payload: ScheduledInboxChangedEvent) => void
   'app_debug:frame': (payload: AppDebugFrame, ack: (result: AppDebugReply) => void) => void
   'app_debug:closed': (payload: AppDebugClosed) => void
   'session:ready': (payload: SessionReadyEvent) => void

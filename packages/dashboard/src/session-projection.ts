@@ -17,6 +17,7 @@ import type { CachedSessionView } from './session-view-cache.js'
 
 export type TimelineEntry = {
   seq: number
+  scheduledTaskId?: string
   ts: string
   event: AgentEvent
   effects: readonly Effect[]
@@ -32,6 +33,7 @@ export type ConnectionStatus = 'idle' | 'connecting' | 'ready' | 'error' | 'disc
 
 export type SessionProjection = {
   generation: number
+  scheduledMessageTasks: Readonly<Record<string, string>>
   sessionId: string | null
   agentRuntime: AgentRuntimeId
   executionMode: SessionExecutionMode
@@ -72,6 +74,7 @@ export type SessionProjectionEvent =
   | ({ kind: 'reset_timeline' } & Scoped)
 
 export const EMPTY_SESSION_PROJECTION: SessionProjection = {
+  scheduledMessageTasks: {},
   generation: 0, sessionId: null, agentRuntime: 'kernel', executionMode: 'chat', status: 'idle', state: null, config: null,
   contextSnapshot: null, runtimeCompactionPolicy: kernelRuntimeCompactionPolicy(), turnStartedAt: null, turnStartedAtCursor: null,
   compactStatus: null, timeline: [], queuedMessages: [],
@@ -110,6 +113,10 @@ export function reduceSessionProjection(
       return {
         ...current, status: 'ready', agentRuntime: p.agentRuntime ?? 'kernel', executionMode: p.executionMode ?? 'chat', state: p.state, config: p.config,
         contextSnapshot: p.contextSnapshot ?? null,
+        scheduledMessageTasks: {
+          ...p.scheduledMessageTasks,
+          ...scheduledOrigins(current.timeline.filter((entry) => entry.seq > p.cursor)),
+        },
         runtimeCompactionPolicy: p.runtimeCompactionPolicy
           ?? (p.agentRuntime === 'copilot'
             ? COPILOT_RUNTIME_COMPACTION_POLICY
@@ -125,6 +132,7 @@ export function reduceSessionProjection(
     case 'history':
       return {
         ...current,
+        scheduledMessageTasks: { ...current.scheduledMessageTasks, ...scheduledOrigins(event.entries) },
         // A reset response is an authoritative server replay, not another live
         // delta. It must replace conflicting cached/live entries at the same seq.
         timeline: event.reset
@@ -157,6 +165,8 @@ export function reduceSessionProjection(
       }
       return {
         ...current, state, contextSnapshot, lastError: null,
+        scheduledMessageTasks: entry.scheduledTaskId
+          ? { ...current.scheduledMessageTasks, ...scheduledOrigins([entry]) } : current.scheduledMessageTasks,
         timeline: mergeBySeq(current.timeline, [entry]),
       }
     }
@@ -181,6 +191,7 @@ function projectionFromCache(cached: CachedSessionView): Partial<SessionProjecti
       cached.config?.hardThreshold,
     ),
     turnStartedAt: cached.turnStartedAt ?? null, turnStartedAtCursor: cached.turnStartedAtCursor ?? null,
+    scheduledMessageTasks: cached.scheduledMessageTasks ?? scheduledOrigins(cached.timeline),
     timeline: cached.timeline, queuedMessages: cached.queuedMessages, lastError: cached.lastError,
     parentSessionId: cached.parentSessionId, parentCursor: cached.parentCursor,
     // Cached content is paint-ready, but it is not an authoritative live
@@ -194,12 +205,18 @@ function projectionFromCache(cached: CachedSessionView): Partial<SessionProjecti
 export function timelineEntry(p: EventAppendedEvent): TimelineEntry {
   return {
     seq: p.seq, ts: p.ts, event: p.event, effects: p.effects,
+    ...(p.scheduledTaskId ? { scheduledTaskId: p.scheduledTaskId } : {}),
     ...(p.hasEffectsArtifact ? { hasEffectsArtifact: true } : {}),
     ...(p.hasLlmTraceArtifact ? { hasLlmTraceArtifact: true } : {}),
     ...(p.llmTrace ? { llmTrace: p.llmTrace } : {}), ...(p.model ? { model: p.model } : {}),
     ...(p.timing ? { timing: p.timing } : {}),
     ...(p.compactionMetadata ? { compactionMetadata: p.compactionMetadata } : {}),
   }
+}
+
+function scheduledOrigins(entries: readonly TimelineEntry[]): Record<string, string> {
+  return Object.fromEntries(entries.flatMap((entry) => entry.event.kind === 'user_message'
+    && entry.event.operationId && entry.scheduledTaskId ? [[entry.event.operationId, entry.scheduledTaskId]] : []))
 }
 
 function authoritativeTimeline(entries: readonly TimelineEntry[]): readonly TimelineEntry[] {

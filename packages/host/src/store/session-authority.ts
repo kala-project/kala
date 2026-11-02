@@ -43,7 +43,7 @@ export interface SessionAuthority {
   delete(sessionId: string, mutationId?: string): Promise<void>
   listDeleting(limit?: number, afterSessionId?: string): Promise<readonly PersistedSessionDocument[]>
   loadDeleting(sessionId: string): Promise<PersistedSessionDocument | undefined>
-  list(): Promise<readonly PersistedSessionDocument[]>
+  list(sessionIds?: readonly string[]): Promise<readonly PersistedSessionDocument[]>
   findOperation(sessionId: string, operationId: string): Promise<SessionOperationMatch | undefined>
   findLatestRuntimeMetadata(sessionId: string, action: string): Promise<RuntimeMetadataEntry | undefined>
   readEventEntries(sessionId: string): Promise<readonly EventEntry[]>

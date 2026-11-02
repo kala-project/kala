@@ -130,6 +130,8 @@ import { resetCompactRuntime } from './extensions/compaction.js'
 import { StorageInventory } from './store/storage-inventory.js'
 import { SafeCleanupEngine } from './store/safe-cleanup.js'
 import { ScheduledTaskStore, type ScheduledTaskStorage } from './scheduled-tasks/store.js'
+import { createDashboardScheduledOrigins, dashboardOriginsOwner } from './scheduled-tasks/dashboard-origins.js'
+import { canReceiveInboxChange } from './scheduled-tasks/dashboard-inbox.js'
 import { BackgroundAuthorizationError, type ScheduledPrincipal, type ScheduledPrincipalAuthorizer } from './scheduled-tasks/authorization.js'
 import { occurrenceSessionId, UnitScheduler } from './scheduled-tasks/scheduler.js'
 import type { ScheduledTask, ScheduledTaskSnapshot } from './scheduled-tasks/types.js'
@@ -388,6 +390,7 @@ export async function startHostServer(
   let storageInventory: StorageInventory | undefined
   let safeCleanup: SafeCleanupEngine | undefined
   let scheduledTaskScheduler: UnitScheduler | undefined
+  let stopScheduledInboxNotifications: (() => Promise<void>) | undefined
   let detachPublicAccessGate: (() => void) | undefined
   let promptSynchronizationTimer: ReturnType<typeof setTimeout> | undefined
   let deletionRecoveryTimer: ReturnType<typeof setInterval> | undefined
@@ -412,6 +415,7 @@ export async function startHostServer(
     streamingDrafts.clear()
     // Stop claims first; shutdown waits for the active scheduler mutation/side effect.
     await scheduledTaskScheduler?.stop()
+    await stopScheduledInboxNotifications?.()
     // Queue persistence and post-turn drains may still be crossing their durable
     // boundary after the last socket closes. Wait before callers remove the
     // Session directory (tests) or replace storage (shutdown/deploy).
@@ -787,6 +791,7 @@ export async function startHostServer(
     mode = 'queue',
     content,
     scheduledBy,
+    scheduledOwnerKey,
   }: {
     sessionId: string
     text: string
@@ -795,6 +800,7 @@ export async function startHostServer(
     mode?: 'queue' | 'steer'
     content?: readonly import('@agent-kernel/kernel').MessageContent[]
     scheduledBy?: ScheduledPrincipal
+    scheduledOwnerKey?: string
   }): Promise<{ accepted?: boolean; committed: boolean; cursor?: number }> => {
     const operationId = requestedOperationId ?? ulid()
     let record = store.get(sessionId)
@@ -845,7 +851,8 @@ export async function startHostServer(
         mode,
         createdAt: new Date().toISOString(),
         ...(content ? { content } : {}),
-      ...(scheduledBy ? { scheduledBy } : {}),
+        ...(scheduledBy ? { scheduledBy } : {}),
+        ...(scheduledOwnerKey ? { scheduledOwnerKey } : {}),
         ...(effectiveModelForSession(sessionId) ? { model: effectiveModelForSession(sessionId) } : {}),
         ...(shell ? { shell: { ...shell, state: 'queued' as const } } : {}),
       }, mode === 'steer' ? 'front' : undefined, atomicAttachments ? 'atomic-attachments' : undefined)
@@ -875,6 +882,7 @@ export async function startHostServer(
       createdAt: new Date().toISOString(),
       ...(content ? { content } : {}),
       ...(scheduledBy ? { scheduledBy } : {}),
+      ...(scheduledOwnerKey ? { scheduledOwnerKey } : {}),
       ...(shell ? { shell: { ...shell, state: 'queued' as const } } : {}),
     }, effectiveMode === 'steer' ? 'front' : undefined, atomicAttachments ? 'atomic-attachments' : undefined)
     if (effectiveMode === 'steer' && !isRestingStatus(record.state.status)) loop.requestStopAtBoundary(sessionId)
@@ -1362,6 +1370,9 @@ export async function startHostServer(
       }
     }
     if (!claimed.shell) {
+      if (claimed.scheduledOwnerKey || claimed.scheduledBy) {
+        await dashboardScheduledOrigins.prepare(record, claimed.operationId, claimed.scheduledOwnerKey).catch(() => {})
+      }
       return { text: claimed.text, operationId: claimed.operationId, ...(claimed.content ? { content: claimed.content } : {}) }
     }
     // PostgreSQL takeover recovery marks an uncertain external effect as
@@ -1861,7 +1872,7 @@ export async function startHostServer(
     const sessionIds = new Set(pendingSessionSummaryIds)
     sessionsBroadcastAll = false
     pendingSessionSummaryIds.clear()
-    void store.listSummaries()
+    void store.listSummaries(broadcastAll ? undefined : { sessionIds: [...sessionIds] })
       .then((sessions) => {
         if (broadcastAll) {
           io.of('/dashboard').emit('server:sessions', { sessions })
@@ -1920,8 +1931,10 @@ export async function startHostServer(
       const room = sessionRoom(sessionId)
       const slimEffects = effects.map(slimEffect)
       const hasEffectsArtifact = effects.some((effect) => effect.kind === 'call_llm')
+      const attributionRecord = store.get(sessionId)
+      const scheduledAttribution = dashboardScheduledOrigins.take(attributionRecord, event)
       scheduleSessionsBroadcast(sessionId)
-      io.of('/dashboard').to(room).emit('event:appended', {
+      const appended = {
         sessionId,
         seq,
         ts: new Date().toISOString(),
@@ -1932,7 +1945,17 @@ export async function startHostServer(
         ...(model ? { model } : {}),
         ...(extras?.timing ? { timing: extras.timing } : {}),
         ...(extras?.compactionMetadata ? { compactionMetadata: extras.compactionMetadata } : {}),
-      })
+      }
+      if (scheduledAttribution && attributionRecord && !attributionRecord.organizationId) {
+        // Portable rooms can be shared across authenticated principals; preserve REST visibility.
+        for (const socket of dashboardNs.sockets.values()) {
+          if (!socket.rooms.has(room)) continue
+          const owner = dashboardOriginsOwner(attributionRecord, socket.data.dashboardActor as DashboardActor)
+          socket.emit('event:appended', { ...appended, ...(owner === scheduledAttribution.ownerKey ? { scheduledTaskId: scheduledAttribution.taskId } : {}) })
+        }
+      } else {
+        io.of('/dashboard').to(room).emit('event:appended', { ...appended, ...(scheduledAttribution ? { scheduledTaskId: scheduledAttribution.taskId } : {}) })
+      }
       const recordForContext = store.get(sessionId)
       io.of('/dashboard').to(room).emit('state:changed', {
         sessionId,
@@ -2253,7 +2276,7 @@ export async function startHostServer(
   const apiSession = async (actor: PublicApiActor, sessionId: string) => {
     const record = await apiRecord(actor, sessionId)
     if (!record) return undefined
-    const summary = (await store.listSummaries()).find((candidate) => candidate.sessionId === sessionId)
+    const summary = (await store.listSummaries({ sessionIds: [sessionId] }))[0]
     return summary ? { summary, state: record.state } : undefined
   }
   const apiAuditActor = (actor: PublicApiActor): import('./audit-log.js').AuditActor =>
@@ -2305,6 +2328,7 @@ export async function startHostServer(
     }
   }
   const scheduledTaskStore = options.scheduledTaskStore ?? new ScheduledTaskStore(join(options.sessionsDir, '.scheduled-tasks'))
+  const dashboardScheduledOrigins = createDashboardScheduledOrigins(scheduledTaskStore)
   scheduledTaskScheduler = new UnitScheduler(scheduledTaskStore, {
     async validate(task) {
       await validateScheduledTarget(await scheduledActor(task), task)
@@ -2329,7 +2353,7 @@ export async function startHostServer(
           sessionId: input.sessionId, pendingMessages: messageQueues.pending(input.sessionId), mode: 'queue',
         })
       }
-      await enqueueUserMessage({ sessionId: input.sessionId, text: input.prompt, intent: 'text', operationId: input.operationId, mode: 'queue', scheduledBy: scheduledAttribution(input.task) })
+      await enqueueUserMessage({ sessionId: input.sessionId, text: input.prompt, intent: 'text', operationId: input.operationId, mode: 'queue', scheduledBy: scheduledAttribution(input.task), scheduledOwnerKey: input.task.ownerKey })
     },
     async createWorkspaceSession({ sessionId, task, operationId }) {
       if (task.target.kind !== 'workspace') throw new Error('invalid workspace occurrence target')
@@ -2370,7 +2394,7 @@ export async function startHostServer(
         await extensions.sessionCreated({ deps: loopDeps, record }).catch(() => undefined)
         scheduleSessionsBroadcast()
       }
-      await enqueueUserMessage({ sessionId, text: task.prompt, intent: 'text', operationId, mode: 'queue', scheduledBy: scheduledAttribution(task) })
+      await enqueueUserMessage({ sessionId, text: task.prompt, intent: 'text', operationId, mode: 'queue', scheduledBy: scheduledAttribution(task), scheduledOwnerKey: task.ownerKey })
     },
   }, { unitId: options.resourceUnitId ?? 'local', catchupLimit: 10 })
   publicApiHandler = createPublicApiHandler({
@@ -2411,15 +2435,9 @@ export async function startHostServer(
       return { ok: true, actor: { principal: result.actor.kind, canWrite: true } }
     },
     async listSessions(actor) {
-      const summaries = await store.listSummaries()
-      if (!actor.organizationId) return summaries.map((summary) => ({ summary }))
-      const visible = []
-      for (const summary of summaries) {
-        const record = await apiRecord(actor, summary.sessionId)
-        if (record) visible.push({ summary })
-      }
-      return visible
+      return (await store.listSummaries({ organizationId: actor.organizationId })).map((summary) => ({ summary }))
     },
+    canAccessSession: async (actor, sessionId) => Boolean(await apiRecord(actor, sessionId)),
     getSession: apiSession,
     async createSession(actor, input) {
       const executionMode = input.executionMode ?? 'chat'
@@ -2595,6 +2613,18 @@ export async function startHostServer(
     },
   })
   await scheduledTaskScheduler.start()
+  try {
+    stopScheduledInboxNotifications = await scheduledTaskStore.onInboxChange((change) => {
+      for (const socket of dashboardNs.sockets.values()) {
+        if (canReceiveInboxChange(socket.data.dashboardActor as DashboardActor | undefined, change)) {
+          socket.emit('server:scheduled_inbox_changed', { reason: change ? 'changed' : 'reconnected' })
+        }
+      }
+    })
+  } catch (error) {
+    await scheduledTaskScheduler.stop()
+    throw error
+  }
   if (product === 'portable') restart = new RestartCoordinator({
     store,
     loop,
@@ -2655,6 +2685,7 @@ export async function startHostServer(
       return streamingDrafts.get(sessionId)
     },
     messageQueues,
+    scheduledMessageOrigins: (record, actor) => dashboardScheduledOrigins.snapshot(record, actor),
     agentRuntimes,
     askUserChoice,
     dagStore,

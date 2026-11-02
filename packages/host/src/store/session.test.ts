@@ -1542,6 +1542,17 @@ describe('SessionStore.listSummaries', () => {
   })
   afterEach(() => rmSync(dir, { recursive: true, force: true }))
 
+  it('reads only selected summary files and does not expand an empty selection', async () => {
+    const store = new SessionStore(dir)
+    await store.ensure({ sessionId: 'summary-selected', defaultConfig: config })
+    await store.ensure({ sessionId: 'summary-unrelated', defaultConfig: config })
+    await store.ensure({ sessionId: 'prefix_summary-selected', defaultConfig: config })
+    const reader = new SessionStore(dir)
+    expect((await reader.listSummaries({ sessionIds: ['summary-selected', 'summary-missing'] }))
+      .map(({ sessionId }) => sessionId)).toEqual(['summary-selected'])
+    await expect(reader.listSummaries({ sessionIds: [] })).resolves.toEqual([])
+  })
+
   it('uses loaded records for summaries and preserves current state fields', async () => {
     const store = new SessionStore(dir)
     const { record } = await store.ensure({

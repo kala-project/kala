@@ -125,6 +125,7 @@ export function normalizeQueuedMessage(raw: unknown): QueuedUserMessage | undefi
     ...(typeof record.model === 'string' && record.model.trim().length > 0 ? { model: record.model } : {}),
     ...(shell ? { shell } : {}),
     ...(scheduledBy ? { scheduledBy } : {}),
+    ...(typeof record.scheduledOwnerKey === 'string' ? { scheduledOwnerKey: record.scheduledOwnerKey } : {}),
   }
 }
 
@@ -139,6 +140,7 @@ export function serializeQueuedMessage(item: QueuedUserMessage): Record<string, 
     ...(item.model ? { model: item.model } : {}),
     ...(item.shell ? { shell: item.shell } : {}),
     ...(item.scheduledBy ? { scheduledBy: item.scheduledBy } : {}),
+    ...(item.scheduledOwnerKey ? { scheduledOwnerKey: item.scheduledOwnerKey } : {}),
   }
 }
 

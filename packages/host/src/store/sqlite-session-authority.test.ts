@@ -37,6 +37,20 @@ describe('SqliteSessionAuthority', () => {
     return value
   }
 
+  it('restricts summary reads to selected authoritative projections', async () => {
+    const { databasePath, sessionsDir } = fixture()
+    const durable = authority(databasePath)
+    const writer = new SessionStore(sessionsDir, { authority: durable })
+    await writer.create({ sessionId: 'summary-a', config, organizationId: 'org-a' })
+    await writer.create({ sessionId: 'summary-b', config })
+    const reader = new SessionStore(sessionsDir, { authority: authority(databasePath) })
+    expect((await reader.listSummaries({ sessionIds: ['summary-b', 'summary-missing', 'summary-b'] }))
+      .map(({ sessionId }) => sessionId)).toEqual(['summary-b'])
+    await expect(reader.listSummaries({ sessionIds: [] })).resolves.toEqual([])
+    expect((await reader.listSummaries({ organizationId: 'org-a' })).map(({ sessionId }) => sessionId)).toEqual(['summary-a'])
+    expect((await reader.listSummaries({ organizationId: undefined })).map(({ sessionId }) => sessionId)).toEqual(['summary-b'])
+  })
+
   it('reloads a read-only projection before a new owner activation can write it', async () => {
     const { root, databasePath, sessionsDir } = fixture()
     const writer = new SessionStore(sessionsDir, { authority: authority(databasePath) })

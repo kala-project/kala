@@ -536,12 +536,29 @@ export class PostgresSessionAuthority implements SessionAuthority {
     return document && sessionDeletion(document) ? document : undefined
   }
 
-  async list(): Promise<readonly PersistedSessionDocument[]> {
-    const scopes = await this.hotState.database.query<{ scope_id: string }>(`SELECT DISTINCT scope_id
-      FROM ${this.#eventsTable}
-      WHERE tenant_id = $1 AND scope_type = 'session'
-      ORDER BY scope_id`, [this.tenantId])
-    const documents = await Promise.all(scopes.rows.map(async ({ scope_id }) => await this.load(scope_id)))
+  async list(sessionIds?: readonly string[]): Promise<readonly PersistedSessionDocument[]> {
+    const selected = sessionIds === undefined ? undefined : [...new Set(sessionIds)]
+    if (selected?.length === 0) return []
+    selected?.forEach(validateSessionId)
+    const projections = await this.hotState.database.query<{
+      scope_id: string
+      projection_session_id: string | null
+      document: PersistedSessionDocument | null
+    }>(`SELECT scopes.scope_id, projection.session_id AS projection_session_id, projection.document
+      FROM (
+        SELECT DISTINCT scope_id FROM ${this.#eventsTable}
+        WHERE tenant_id = $1 AND scope_type = 'session'
+          ${selected ? 'AND scope_id = ANY($2::text[])' : ''}
+      ) AS scopes
+      LEFT JOIN ${this.#projectionTable} AS projection
+        ON projection.tenant_id = $1 AND projection.session_id = scopes.scope_id
+      ORDER BY scopes.scope_id`, selected ? [this.tenantId, selected] : [this.tenantId])
+    const documents = await Promise.all(projections.rows.map(async (row) => {
+      // Only legacy/missing projections require audit replay and repair.
+      if (row.projection_session_id === null) return await this.load(row.scope_id)
+      const document = decodePostgresJson(row.document)
+      return document && !sessionDeletion(document) ? document : undefined
+    }))
     return documents.filter((document): document is PersistedSessionDocument => document !== undefined)
   }
 

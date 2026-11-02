@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import { createPortal } from 'react-dom'
 import { Bell, ChevronRight, CircleAlert, LoaderCircle, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import type { DashboardSocket } from '../../session.js'
 
 import {
   createScheduledTasksClient,
@@ -10,12 +11,12 @@ import {
   type ScheduledTaskInboxItem,
 } from '../../scheduled-tasks-client.js'
 
-const POLL_INTERVAL_MS = 30_000
 const MAX_VISIBLE_ITEMS = 5
 const POPOVER_WIDTH = 320
 const VIEWPORT_MARGIN = 8
 
 export type ScheduledTaskInboxProps = {
+  socket?: DashboardSocket | null
   host: string
   token?: string
   onOpenTask: (taskId: string) => void
@@ -53,7 +54,7 @@ function formatScheduledTime(value: string) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
 }
 
-export function ScheduledTaskInbox({ host, token, onOpenTask, onOpenSession, sessionNames }: ScheduledTaskInboxProps) {
+export function ScheduledTaskInbox({ host, token, socket, onOpenTask, onOpenSession, sessionNames }: ScheduledTaskInboxProps) {
   const { t } = useTranslation()
   const identity = `${host}\u0000${token ?? ''}`
   const client = useMemo(() => createScheduledTasksClient({ host, token }), [host, token])
@@ -87,28 +88,31 @@ export function ScheduledTaskInbox({ host, token, onOpenTask, onOpenSession, ses
       requestController = controller
       try {
         const result = await client.inbox({ signal: controller.signal })
-        if (disposed || generationRef.current !== generation) return
+        if (disposed || controller.signal.aborted || generationRef.current !== generation) return
         setState({ identity, ...result, loading: false, error: null })
       } catch (error) {
-        if (disposed || generationRef.current !== generation || isAbortError(error)) return
+        if (disposed || controller.signal.aborted || generationRef.current !== generation || isAbortError(error)) return
         setState((previous) => previous.identity === identity
           ? { ...previous, loading: false, error: error instanceof Error ? error.message : t('scheduledTaskInbox.loadError') }
           : previous)
       }
     }
 
-    void load()
-    const interval = window.setInterval(() => { void load() }, POLL_INTERVAL_MS)
+    if (!socket || socket.connected) void load()
+    const refresh = () => { void load() }
+    socket?.on('connect', refresh)
+    socket?.on('server:scheduled_inbox_changed', refresh)
 
     return () => {
       disposed = true
-      window.clearInterval(interval)
+      socket?.off('connect', refresh)
+      socket?.off('server:scheduled_inbox_changed', refresh)
       requestController?.abort()
       for (const controller of acknowledgementControllersRef.current) controller.abort()
       acknowledgementControllersRef.current.clear()
       pendingSeenRef.current.clear()
     }
-  }, [client, identity])
+  }, [client, identity, socket])
 
   const updatePosition = useCallback(() => {
     const trigger = triggerRef.current
@@ -167,11 +171,11 @@ export function ScheduledTaskInbox({ host, token, onOpenTask, onOpenSession, ses
     void client.markInboxSeen(newIds, { signal: controller.signal }).then((result) => {
       if (generationRef.current !== generation) return
       const acknowledged = new Set(result.acknowledged)
-      setState((previous) => previous.identity === identity ? {
-        ...previous,
-        unreadCount: result.unreadCount,
-        items: previous.items.map((item) => acknowledged.has(item.occurrenceId) ? { ...item, seen: true } : item),
-      } : previous)
+      setState((previous) => {
+        if (previous.identity !== identity) return previous
+        const items = previous.items.map((item) => acknowledged.has(item.occurrenceId) ? { ...item, seen: true } : item)
+        return { ...previous, items, unreadCount: items.filter((item) => !item.seen).length }
+      })
     }).catch((error: unknown) => {
       if (!isAbortError(error) && generationRef.current === generation) {
         setState((previous) => previous.identity === identity

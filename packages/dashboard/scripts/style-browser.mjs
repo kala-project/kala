@@ -18,6 +18,7 @@ const browser = await puppeteer.launch({
 const page = await browser.newPage()
 page.setDefaultTimeout(45_000)
 let observations = 0
+let originsRequests = 0
 let failObservations = true
 let owner = true
 const errors = []
@@ -25,6 +26,7 @@ page.on('pageerror', (error) => errors.push(error.message))
 await page.setRequestInterception(true)
 page.on('request', (request) => {
   const url = new URL(request.url())
+  if (/\/scheduled-tasks\/origins$/.test(url.pathname)) originsRequests++
   const json = (body, status = 200) => request.respond({ status, contentType: 'application/json', body: JSON.stringify(body) })
   if (['data:', 'blob:'].includes(url.protocol)) return void request.continue()
   if (url.origin !== base.origin) return void request.abort()
@@ -143,6 +145,8 @@ try {
   await page.waitForSelector('[data-testid="desktop-sidebar-footer"] [data-testid="account-menu-trigger"]')
   await page.waitForFunction(() => document.documentElement.classList.contains('dark'))
   await page.waitForFunction(() => document.documentElement.dataset.akInterfaceDensity === 'compact')
+  await wait(30_500)
+  assert.equal(originsRequests, 0, 'idle Session provenance must use socket hydration, not HTTP polling')
   await checkFooter('[data-testid="desktop-sidebar-footer"]', 'desktop-footer-dark')
   await checkTypography('[data-testid="desktop-sidebar-footer"]')
   await checkTypography('[data-testid="chat-panel"]')
@@ -200,6 +204,7 @@ try {
   await page.waitForSelector('[data-testid="chat-panel"]')
   assert.equal(await page.$('[data-testid="desktop-rail-management"], [data-testid="product-switcher-management"]'), null, 'non-owner must not receive management')
   assert.deepEqual(errors, [], 'browser runtime errors')
+  assert.equal(originsRequests, 0, 'Session provenance must never issue an origins HTTP request')
   console.log('PASS desktop/mobile footer, collapsed rail, account and long-alert scrolling, minimum typography, Owner navigation, portal/focus/Escape, explicit 503 recovery and manual-only refresh')
 } catch (error) {
   console.error('Browser errors:', errors)

@@ -327,6 +327,7 @@ integrationDescribe('PostgresRuntimeResourceOwnershipStore isolated PostgreSQL i
       const queued = { id: 'first', operationId: 'first', text: 'one', mode: 'queue' as const, createdAt: new Date().toISOString() }
       await old.messageQueue.enqueue(sessionA, queued, 'back')
       await expect(live.load(sessionA)).resolves.toMatchObject({ sessionId: sessionA })
+      await expect(live.list([sessionA])).resolves.toEqual([expect.objectContaining({ sessionId: sessionA })])
       expect(ownershipB.activeLease(sessionA)).toBeUndefined()
       await expect(live.messageQueue.load(sessionA)).rejects.toBeInstanceOf(RuntimeResourceOwnershipHeldError)
       await eventually(async () => { await live.messageQueue.load(sessionA) }, 5_000)

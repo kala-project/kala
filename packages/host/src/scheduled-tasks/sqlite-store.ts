@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { validateSchedule } from './recurrence.js'
 import { ScheduledTaskStateStore, type ScheduledTaskState } from './state-store.js'
 import type { ScheduleSpec } from './types.js'
+import { changedInboxes, inboxSignatures } from './inbox-changes.js'
 
 const TABLE = 'portable_scheduled_state'
 const SCHEMA_VERSION = 1
@@ -84,6 +85,7 @@ export class SqliteScheduledTaskStore extends ScheduledTaskStateStore {
       try {
         const rows = database.prepare(`SELECT singleton, schema_version, revision, state_json FROM ${TABLE}`).all() as SnapshotRow[]
         const state = parseSnapshotRows(rows)
+        const before = inboxSignatures(state)
         const value = operation(state)
         state.revision += 1
         const changed = database.prepare(`
@@ -93,6 +95,7 @@ export class SqliteScheduledTaskStore extends ScheduledTaskStateStore {
         `).run(SCHEMA_VERSION, state.revision, JSON.stringify(state), SCHEMA_VERSION, state.revision - 1)
         if (changed.changes !== 1) throw new Error('scheduled task snapshot changed during transaction')
         database.exec('COMMIT')
+        this.emitInboxChanges(changedInboxes(before, state))
         return value
       } catch (error) {
         rollback(database)

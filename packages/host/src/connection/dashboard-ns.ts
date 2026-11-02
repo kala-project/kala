@@ -159,6 +159,8 @@ export type QueuedUserMessage = {
   model?: string
   /** Server-owned scheduled delegation; never accepted from client payloads. */
   scheduledBy?: import('../scheduled-tasks/authorization.js').ScheduledPrincipal
+  /** Server-owned lookup hint; attribution still requires the durable run ledger. */
+  scheduledOwnerKey?: string
   /** Host-owned shell escape. State and result are persisted before Agent dispatch. */
   shell?: {
     command: string
@@ -256,6 +258,7 @@ export type DashboardDeps = {
   normalizeModelRef?(model: string): string | undefined
   dashboardNs: DashboardNs
   messageQueues: MessageQueueManager
+  scheduledMessageOrigins?(record: SessionRecord, actor: DashboardActor): Promise<Readonly<Record<string, string>>>
   streamingDraftSnapshot?(sessionId: string): { text: string; afterSeq: number; messageCount: number } | undefined
   agentRuntimes: AgentRuntimeRegistry
   askUserChoice?: AskUserChoiceBroker
@@ -940,9 +943,10 @@ export function configureDashboardNamespace(
 
     const channelTails = new Map<DashboardChannel, Promise<void>>()
     const channelGenerations = new Map<DashboardChannel, number>()
-    const emitSessionReady = (payload: SessionReadyEvent): void => {
+    const emitSessionReady = async (payload: SessionReadyEvent, record?: SessionRecord): Promise<void> => {
+      const scheduledMessageTasks = record ? await deps.scheduledMessageOrigins?.(record, socket.data.dashboardActor as DashboardActor).catch(() => undefined) : undefined
       const streamingDraft = payload.state.status === 'thinking' ? deps.streamingDraftSnapshot?.(payload.sessionId) : undefined
-      socket.emit('session:ready', streamingDraft ? { ...payload, streamingDraft } : payload)
+      socket.emit('session:ready', { ...payload, ...(scheduledMessageTasks ? { scheduledMessageTasks } : {}), ...(streamingDraft ? { streamingDraft } : {}) })
     }
     const serializeChannel = async <T>(channel: DashboardChannel, operation: () => Promise<T>): Promise<T> => {
       const previous = channelTails.get(channel) ?? Promise.resolve()
@@ -967,7 +971,7 @@ export function configureDashboardNamespace(
       const payload: SessionReadyEvent = target
         ? readyEventFor(target, effectiveModelForRecord(deps, target), 'load', contextWindowForSession(deps, target), runtimeCompactionPolicyFor(deps, target), runtimeCompactStatusFor(deps, target))
         : ephemeralReadyEventFor(targetSessionId, getDefaultConfig(), defaultModel, contextWindowForModelRef(deps, defaultModel))
-      emitSessionReady(payload)
+      await emitSessionReady(payload, target)
       socket.emit('server:message_queue', deps.messageQueues.snapshot(targetSessionId))
       // Candidate sockets may inspect the authoritative state during private
       // verification, but only the RestartCoordinator owns continuation before
@@ -1066,7 +1070,7 @@ export function configureDashboardNamespace(
           defaultModel,
           contextWindowForModelRef(deps, defaultModel),
         )
-    emitSessionReady(ready)
+    await emitSessionReady(ready, record)
     socket.emit('server:message_queue', deps.messageQueues.snapshot(sessionId))
     // A service-manager restart has no persisted RestartCoordinator marker for
     // the active turn. Resume any dangling LLM/tool state on first hydration;
@@ -1105,7 +1109,7 @@ export function configureDashboardNamespace(
             defaultModel,
             contextWindowForModelRef(deps, defaultModel),
           )
-      emitSessionReady(payload)
+      await emitSessionReady(payload, target)
       socket.emit('server:message_queue', deps.messageQueues.snapshot(sessionId))
       if (mutableRuntimeReady()) {
         if (target?.agentRuntime === 'kernel' && !isRestingStatus(target.state.status)) void deps.loop.resumeSession(sessionId)
@@ -2009,7 +2013,7 @@ export function configureDashboardNamespace(
           try {
             await refreshSessionSkillsIfNeeded(deps, record)
             await socket.join(sessionRoom(record.sessionId))
-            emitSessionReady(readyEventFor(record, effectiveModelForRecord(deps, record), created ? 'created' : 'load', contextWindowForSession(deps, record), runtimeCompactionPolicyFor(deps, record), runtimeCompactStatusFor(deps, record)))
+            await emitSessionReady(readyEventFor(record, effectiveModelForRecord(deps, record), created ? 'created' : 'load', contextWindowForSession(deps, record), runtimeCompactionPolicyFor(deps, record), runtimeCompactStatusFor(deps, record)), record)
             if (!created) return
             deps.audit?.log({ action: 'dashboard.session_create', actor: auditActor(socket), target: { sessionId: record.sessionId, workspaceId: record.workspaceId }, outcome: 'ok', metadata: { cwd: record.state.cwd } })
             await broadcastSessionList(deps)

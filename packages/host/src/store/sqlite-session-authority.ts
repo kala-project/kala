@@ -298,8 +298,13 @@ export class SqliteSessionAuthority implements SessionAuthority {
     return document && sessionDeletion(document) ? document : undefined
   }
 
-  async list(): Promise<readonly PersistedSessionDocument[]> {
-    const rows = this.#db().prepare('SELECT document FROM portable_sessions ORDER BY session_id').all() as Array<{ document: string }>
+  async list(sessionIds?: readonly string[]): Promise<readonly PersistedSessionDocument[]> {
+    const selected = sessionIds === undefined ? undefined : [...new Set(sessionIds)]
+    if (selected?.length === 0) return []
+    selected?.forEach(validateSessionId)
+    const rows = this.#db().prepare(`SELECT document FROM portable_sessions
+      ${selected ? `WHERE session_id IN (${selected.map(() => '?').join(',')})` : ''}
+      ORDER BY session_id`).all(...(selected ?? [])) as Array<{ document: string }>
     return rows.map(({ document }) => parseDocument(document))
       .filter((document): document is PersistedSessionDocument => Boolean(document && !sessionDeletion(document)))
   }

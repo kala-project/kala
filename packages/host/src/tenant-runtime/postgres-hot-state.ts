@@ -9,6 +9,7 @@ import {
 } from './postgres-runtime-unit-placement-store.js'
 import { assertResourceOwner, type RuntimeResourceOwnership } from './postgres-runtime-resource-ownership.js'
 import { decodePostgresJson, stringifyPostgresJson } from './postgres-json.js'
+import { listenPostgresNotifications, type PostgresNotificationClient } from './postgres-notifications.js'
 
 type QueryResultRow = Record<string, unknown>
 export type SqlQueryResult<Row extends QueryResultRow = QueryResultRow> = {
@@ -20,6 +21,7 @@ type PgPool = HotStateSqlExecutor & { connect(): Promise<PgClient>; end(): Promi
 const { Pool } = createRequire(import.meta.url)('pg') as {
   Pool: new (config: Record<string, unknown>) => PgPool
 }
+const { Client } = createRequire(import.meta.url)('pg') as { Client: new (config: Record<string, unknown>) => PostgresNotificationClient }
 
 export type HotStateScope = {
   tenantId: string
@@ -58,6 +60,7 @@ export interface HotStateSqlExecutor {
 }
 
 export interface HotStateDatabase extends HotStateSqlExecutor {
+  listen?(channel: string, listener: (payload?: string) => void): Promise<() => Promise<void>>
   transaction<T>(operation: (transaction: HotStateSqlExecutor) => Promise<T>): Promise<T>
   close?(): Promise<void>
 }
@@ -368,10 +371,26 @@ export function createPostgresHotStateStore(options: {
       client.release()
     }
   }
+  const notificationListeners = new Set<() => Promise<void>>()
   const database: HotStateDatabase = {
     query: (text, values) => inTransaction(async (transaction) => await transaction.query(text, values)),
     transaction: inTransaction,
-    close: () => pool.end(),
+    async listen(channel, listener) {
+      const stop = await listenPostgresNotifications(() => new Client({
+        connectionString: options.connectionString,
+        application_name: `${options.applicationName ?? 'kala-tenant-runtime-hot-state'}-notifications`,
+        connectionTimeoutMillis: 5_000,
+        statement_timeout: options.statementTimeoutMs ?? 15_000,
+        ...(options.ssl !== undefined ? { ssl: options.ssl } : {}),
+      }), channel, listener)
+      notificationListeners.add(stop)
+      return async () => { notificationListeners.delete(stop); await stop() }
+    },
+    async close() {
+      await Promise.all([...notificationListeners].map((stop) => stop()))
+      notificationListeners.clear()
+      await pool.end()
+    },
   }
   return new PostgresHotStateStore(database, { schema: options.schema, placementLease: options.placementLease })
 }

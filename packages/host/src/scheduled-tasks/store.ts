@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite'
 
 import { writeJsonFile } from '../tenant-runtime/atomic-json-file.js'
 import { ScheduledTaskStateStore, type ScheduledTaskState } from './state-store.js'
+import { changedInboxes, inboxSignatures } from './inbox-changes.js'
 
 export type { ScheduledTaskStorage } from './state-store.js'
 
@@ -55,9 +56,11 @@ export class ScheduledTaskStore extends ScheduledTaskStateStore {
     if (this.closing) throw new Error('scheduled task store is closing')
     const result = this.mutation.then(async () => {
       const state = await this.readState()
+      const before = inboxSignatures(state)
       const value = operation(state)
       state.revision += 1
       await writeJsonFile(this.statePath, state)
+      this.emitInboxChanges(changedInboxes(before, state))
       return value
     })
     this.mutation = result.then(() => undefined, () => undefined)

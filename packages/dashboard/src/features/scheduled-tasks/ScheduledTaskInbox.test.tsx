@@ -2,6 +2,21 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { ScheduledTaskInbox } from './ScheduledTaskInbox.js'
+import type { DashboardSocket } from '../../session.js'
+
+function inboxSocket(connected = true) {
+  const listeners = new Map<string, Set<() => void>>()
+  return {
+    connected,
+    on(event: string, callback: () => void) {
+      if (!listeners.has(event)) listeners.set(event, new Set())
+      listeners.get(event)!.add(callback)
+    },
+    off(event: string, callback: () => void) { listeners.get(event)?.delete(callback) },
+    receive(event: string) { for (const listener of listeners.get(event) ?? []) listener() },
+    asSocket() { return this as unknown as DashboardSocket },
+  }
+}
 
 const makeItem = (index: number, seen = false) => ({
   occurrenceId: `occ-${index}`,
@@ -91,25 +106,84 @@ describe('ScheduledTaskInbox', () => {
     expect(onOpenSession).toHaveBeenCalledWith('session-1')
   })
 
-  it('polls every 30 seconds and aborts overlapping and unmounted requests without leaving timers', () => {
+  it('never polls a closed or hidden bell and refreshes only on Inbox invalidation, cancelling older requests', () => {
     vi.useFakeTimers()
     const fetchMock = vi.fn<typeof fetch>().mockImplementation(() => new Promise<Response>(() => {}))
     vi.stubGlobal('fetch', fetchMock)
 
-    const view = render(<ScheduledTaskInbox host="https://runlab.example" onOpenTask={() => {}} />)
+    const socket = inboxSocket()
+    const view = render(<ScheduledTaskInbox host="https://runlab.example" socket={socket.asSocket()} onOpenTask={() => {}} />)
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const firstSignal = fetchMock.mock.calls[0]![1]?.signal
 
-    act(() => { vi.advanceTimersByTime(30_000) })
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+    act(() => { document.dispatchEvent(new Event('visibilitychange')); vi.advanceTimersByTime(5 * 60_000); socket.receive('event:appended') })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+    act(() => { socket.receive('server:scheduled_inbox_changed') })
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(firstSignal?.aborted).toBe(true)
     const secondSignal = fetchMock.mock.calls[1]![1]?.signal
 
     view.unmount()
     expect(secondSignal?.aborted).toBe(true)
-    act(() => { vi.advanceTimersByTime(60_000) })
+    act(() => { vi.advanceTimersByTime(60_000); socket.receive('server:scheduled_inbox_changed') })
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('updates unread items while closed and rehydrates on reconnect without waiting for the popover', async () => {
+    const socket = inboxSocket(false)
+    let items: ReturnType<typeof makeItem>[] = []
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => new Response(JSON.stringify({ items, unreadCount: items.length }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ScheduledTaskInbox host="https://runlab.example" socket={socket.asSocket()} onOpenTask={() => {}} />)
+    expect(fetchMock).not.toHaveBeenCalled()
+    act(() => { socket.connected = true; socket.receive('connect') })
+    await screen.findByRole('button', { name: 'Scheduled run inbox, 0 unread' })
+    items = [makeItem(1)]
+    act(() => { socket.receive('server:scheduled_inbox_changed') })
+    await screen.findByRole('button', { name: 'Scheduled run inbox, 1 unread' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    items = [makeItem(1), makeItem(2)]
+    act(() => { socket.receive('connect') })
+    await screen.findByRole('button', { name: 'Scheduled run inbox, 2 unread' })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('rejects a superseded same-identity HTTP snapshot after an actual Inbox change', async () => {
+    const socket = inboxSocket()
+    let resolveOld!: (response: Response) => void
+    const old = new Promise<Response>((resolve) => { resolveOld = resolve })
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockImplementationOnce(() => old)
+      .mockResolvedValue(new Response(JSON.stringify({ items: [makeItem(2)], unreadCount: 1 }), { status: 200 })))
+    render(<ScheduledTaskInbox host="https://runlab.example" socket={socket.asSocket()} onOpenTask={() => {}} />)
+    act(() => { socket.receive('server:scheduled_inbox_changed') })
+    await screen.findByRole('button', { name: 'Scheduled run inbox, 1 unread' })
+    await act(async () => { resolveOld(new Response(JSON.stringify({ items: [], unreadCount: 0 }), { status: 200 })); await old })
+    expect(screen.getByRole('button', { name: 'Scheduled run inbox, 1 unread' })).toBeTruthy()
+  })
+
+  it('does not let an older acknowledgement erase unread items received since that acknowledgement', async () => {
+    const socket = inboxSocket()
+    let items = [makeItem(1)]
+    let resolveSeen!: (response: Response) => void
+    const seen = new Promise<Response>((resolve) => { resolveSeen = resolve })
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+      if (init?.method === 'POST') return await seen
+      return new Response(JSON.stringify({ items, unreadCount: items.filter((item) => !item.seen).length }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ScheduledTaskInbox host="https://runlab.example" socket={socket.asSocket()} onOpenTask={() => {}} />)
+    const trigger = await screen.findByRole('button', { name: 'Scheduled run inbox, 1 unread' })
+    fireEvent.click(trigger)
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    fireEvent.click(trigger)
+    items = [makeItem(2), makeItem(1, true)]
+    act(() => { socket.receive('server:scheduled_inbox_changed') })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    await act(async () => { resolveSeen(new Response(JSON.stringify({ acknowledged: ['occ-1'], unreadCount: 0 }), { status: 200 })); await seen })
+    expect(screen.getByRole('button', { name: 'Scheduled run inbox, 1 unread' })).toBeTruthy()
   })
 
   it('discards a stale response when the authenticated host changes', async () => {

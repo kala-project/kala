@@ -35,6 +35,7 @@ export type PublicApiActor = {
 export type PublicApiDependencies = {
   authorize(request: IncomingMessage): { ok: true; actor: PublicApiActor } | { ok: false; status: 401 | 403; code: 'authentication_required' | 'forbidden' }
   listSessions(actor: PublicApiActor): Promise<readonly ApiSession[]>
+  canAccessSession(actor: PublicApiActor, sessionId: string): Promise<boolean>
   getSession(actor: PublicApiActor, sessionId: string): Promise<ApiSession | undefined>
   createSession(actor: PublicApiActor, input: ApiCreateSessionRequest): Promise<{ session: ApiSession; created: boolean }>
   deleteSession(actor: PublicApiActor, sessionId: string, operationId: string): Promise<void>
@@ -89,7 +90,7 @@ export function createPublicApiHandler(deps: PublicApiDependencies) {
       if (url.pathname === '/api/v1/scheduled-tasks/origins' && request.method === 'GET') {
         requireScheduledTasks(deps)
         const sessionId = requiredIdentifier(url.searchParams.get('sessionId'), 'sessionId')
-        if (!await deps.getSession(actor, sessionId)) throw new ApiHttpError(404, 'not_found', 'session not found')
+        if (!await deps.canAccessSession(actor, sessionId)) throw new ApiHttpError(404, 'not_found', 'session not found')
         sendJson(response, 200, { origins: await deps.scheduledTasks.origins(actor, sessionId) })
         return true
       }
