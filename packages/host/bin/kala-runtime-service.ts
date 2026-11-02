@@ -316,6 +316,8 @@ async function main(): Promise<void> {
         return settings
           ? resolveBuiltinAgentModule({
               systemPrompt: settings.slots.find((slot) => slot.id === settings.selectedSlotId)!.prompt,
+              desktopManualAuthorizationRequired: settings.desktopManualAuthorizationRequired ?? false,
+              computerUseEnabled: settings.computerUseEnabled ?? false,
             })
           : agentModule
       }
@@ -343,6 +345,8 @@ async function main(): Promise<void> {
           versions: { host: packageJson.version, protocol: PROTOCOL_VERSION },
           agentModule: currentAgentModule().metadata,
           ...(prompt && agentSettings ? { agentPrompt: { ...prompt, configPath: agentSettings.configPath } } : {}),
+          ...(prompt && agentSettings ? { desktopAccess: { manualAuthorizationRequired: prompt.desktopManualAuthorizationRequired ?? false,
+            computerUseEnabled: prompt.computerUseEnabled ?? false, desktopPreviewEnabled: prompt.desktopPreviewEnabled ?? false } } : {}),
           ...(actor.kind === 'ingress' ? {
             auth: {
               dashboardAuthRequired: true,
@@ -413,13 +417,31 @@ async function main(): Promise<void> {
         llm: modelSettings?.llm ?? unitProvider.llm,
         defaultConfig: () => currentAgentModule().config,
         ...(agentSettings ? {
+          desktopFeaturePolicy: (actor?: DashboardActor) => {
+            assertActorOrganization(actor)
+            return { computerUseEnabled: currentAgentSettings?.computerUseEnabled ?? false, desktopPreviewEnabled: currentAgentSettings?.desktopPreviewEnabled ?? false }
+          },
+          desktopManualAuthorizationRequired: (actor?: DashboardActor) => {
+            assertActorOrganization(actor)
+            return currentAgentSettings?.desktopManualAuthorizationRequired ?? false
+          },
           resolveSystemPrompt: async (actor?: DashboardActor) => {
             await refreshAgentSettings(actor)
             return currentAgentModule().systemPrompt
           },
           updateAgentPrompt: async (input: Parameters<typeof agentSettings.save>[0], actor: DashboardActor) => {
             assertActorOrganization(actor)
-            await agentSettings.save(input)
+            const current = await agentSettings.load()
+            await agentSettings.save({ ...current, ...input, desktopManualAuthorizationRequired: current.desktopManualAuthorizationRequired ?? false,
+              computerUseEnabled: current.computerUseEnabled ?? false, desktopPreviewEnabled: current.desktopPreviewEnabled ?? false })
+            return makeSettings(actor)
+          },
+          updateDesktopAccess: async (input: { manualAuthorizationRequired: boolean; computerUseEnabled?: boolean; desktopPreviewEnabled?: boolean }, actor: DashboardActor) => {
+            assertActorOrganization(actor)
+            const current = await agentSettings.load()
+            await agentSettings.save({ ...current, desktopManualAuthorizationRequired: input.manualAuthorizationRequired,
+              computerUseEnabled: input.computerUseEnabled ?? current.computerUseEnabled ?? false,
+              desktopPreviewEnabled: input.desktopPreviewEnabled ?? current.desktopPreviewEnabled ?? false })
             return makeSettings(actor)
           },
         } : {}),

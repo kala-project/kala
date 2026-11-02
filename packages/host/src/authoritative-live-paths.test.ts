@@ -35,6 +35,21 @@ function metadata(names: string[]): RuntimeMetadataEntry {
 }
 
 describe('authoritative live paths', () => {
+  it('retains available discovery activations across catalog revisions without retaining removed tools', async () => {
+    const previous = metadata(['write_file', 'removed_tool'])
+    previous.payload.catalogRevision = 'previous catalog'
+    const store = {
+      findLatestRuntimeMetadata: vi.fn(async () => previous),
+      appendRuntimeMetadata: vi.fn(async () => metadata(['write_file', 'websearch'])),
+    }
+    await expect(activeToolsFor(record(), store)).resolves.toEqual(new Set(['write_file']))
+    expect((await runToolCatalogTool(record(), 'tool_describe', { names: ['websearch'] }, store)).ok).toBe(true)
+    expect(store.appendRuntimeMetadata).toHaveBeenCalledWith('pg-session', {
+      action: 'tools_activated',
+      payload: { catalogRevision: toolCatalogRevision(tools), names: ['write_file', 'websearch'] },
+    })
+  })
+
   it('reads and writes progressive Tool activation through the supplied store', async () => {
     const appendRuntimeMetadata = vi.fn(async () => metadata(['write_file', 'websearch']))
     const store = {

@@ -46,6 +46,10 @@ import { UnitResourceGovernor } from './tenant-runtime/resource-governor.js'
 import { bangShellResultOperationId } from './bang-shell.js'
 import { SessionArtifactRegistry } from './session-artifact-registry.js'
 import { MessageAttachmentStore } from './message-attachment-store.js'
+import { defaultAgentRuntimeSettings, loadAgentRuntimeSettings, writeAgentRuntimeSettings } from './runtime-config.js'
+import { resolveBuiltinAgentModule } from './builtin-tools.js'
+import { deriveSessionConfig } from './connection/dashboard-ns.js'
+import { buildAnthropicRequestBody, buildOpenAIRequestBody } from './llm/provider-request-builder.js'
 
 type HostCopilotTool = {
   name: string
@@ -2850,6 +2854,78 @@ describe('wire protocol', () => {
     }
   })
 
+  it('persists desktop authorization and applies it to an old Session after restart and administrator updates', async () => {
+    const localSessionsDir = mkdtempSync(join(tmpdir(), 'agent-kernel-desktop-policy-'))
+    const path = join(localSessionsDir, 'agent.json')
+    const headers = {
+      'content-type': 'application/json', 'x-agent-runlab-principal': 'admin@example.test',
+      'x-agent-runlab-organization-id': 'org_desktop', 'x-agent-runlab-organization-role': 'admin',
+    }
+    const prompt = () => resolveBuiltinAgentModule({
+      desktopManualAuthorizationRequired: loadAgentRuntimeSettings(path).desktopManualAuthorizationRequired ?? false,
+    }).systemPrompt
+    const settings = (): ServerSettingsPayload => ({
+      providers: [], defaultModel: '', hooks: [],
+      desktopAccess: { manualAuthorizationRequired: loadAgentRuntimeSettings(path).desktopManualAuthorizationRequired ?? false },
+      paths: { claudeSettings: '', codexConfig: '', manualModels: '', hooksConfig: '', sessionsDir: '' },
+      mcp: { supported: false, note: '' },
+    })
+    const first = await startHostServer({
+      port: 0, sessionsDir: localSessionsDir, deployment: PRIVATE_CLOUD_DEPLOYMENT,
+      llm: {
+        name: 'desktop-policy-history',
+        async call() { return { message: { role: 'assistant', content: [{ type: 'text', text: 'Keep this existing reply' }] } } },
+      },
+      defaultConfig: createConfig({ tools: [], systemPrompt: 'The user must first enable local desktop sharing and authorize this Session.' }),
+    })
+    await first.store.create({
+      sessionId: 'old-desktop-session', organizationId: 'org_desktop',
+      config: createConfig({ tools: [], systemPrompt: 'The user must first enable local desktop sharing and authorize this Session.' }),
+    })
+    const sent = await fetch(`http://localhost:${first.port}/api/v1/sessions/old-desktop-session/messages`, {
+      method: 'POST', headers,
+      body: JSON.stringify({ operationId: 'desktop-before-restart', text: 'Preserve this existing conversation' }),
+    })
+    expect(sent.status).toBe(202)
+    await vi.waitFor(() => expect(first.store.get('old-desktop-session')?.state.messages.some((message) => message.role === 'assistant')).toBe(true))
+    await first.close()
+    const second = await startHostServer({
+      port: 0, sessionsDir: localSessionsDir, llm: scriptedLlm(), deployment: PRIVATE_CLOUD_DEPLOYMENT,
+      defaultConfig: () => createConfig({ tools: [], systemPrompt: prompt() }),
+      resolveSystemPrompt: prompt, settings,
+      promptSynchronizationRetryMs: 10,
+      updateDesktopAccess: (input) => {
+        writeAgentRuntimeSettings(path, { ...loadAgentRuntimeSettings(path), desktopManualAuthorizationRequired: input.manualAuthorizationRequired })
+        return settings()
+      },
+    })
+    try {
+      await vi.waitFor(() => expect(second.store.get('old-desktop-session')?.config.systemPrompt).toContain('Additional manual desktop authorization is not required'))
+      const oldMessages = structuredClone(second.store.get('old-desktop-session')!.state.messages.filter((message) => message.role !== 'system'))
+      const denied = await fetch(`http://localhost:${second.port}/settings/desktop-access`, {
+        method: 'POST', headers: { ...headers, 'x-agent-runlab-organization-role': 'member' },
+        body: JSON.stringify({ manualAuthorizationRequired: true }),
+      })
+      expect(denied.status).toBe(403)
+      for (const required of [true, false]) {
+        const response = await fetch(`http://localhost:${second.port}/settings/desktop-access`, {
+          method: 'POST', headers, body: JSON.stringify({ manualAuthorizationRequired: required }),
+        })
+        expect(response.status).toBe(200)
+        expect((await response.json() as ServerSettingsPayload).desktopAccess?.manualAuthorizationRequired).toBe(required)
+        expect(loadAgentRuntimeSettings(path).desktopManualAuthorizationRequired).toBe(required)
+        expect(loadAgentRuntimeSettings(path).slots).toEqual(defaultAgentRuntimeSettings().slots)
+        expect(second.store.get('old-desktop-session')?.config.systemPrompt).toContain(
+          `Additional manual desktop authorization is ${required ? '' : 'not '}required`,
+        )
+        expect(second.store.get('old-desktop-session')?.state.messages.filter((message) => message.role !== 'system')).toEqual(oldMessages)
+      }
+    } finally {
+      await second.close()
+      rmSync(localSessionsDir, { recursive: true, force: true })
+    }
+  })
+
   it('reconciles persisted Session prompts after restart without waiting for a model call', async () => {
     const localSessionsDir = mkdtempSync(join(tmpdir(), 'agent-kernel-agent-prompt-startup-'))
     const first = await startHostServer({
@@ -2877,6 +2953,62 @@ describe('wire protocol', () => {
       await second.close()
       rmSync(localSessionsDir, { recursive: true, force: true })
     }
+  })
+
+  it('preserves root MCP, allowlists, child instructions and DAG selections during desktop policy refresh and restart', async () => {
+    await server.close()
+    let enabled = false
+    const snapshots: string[][] = []
+    const base = () => createConfig({ ...resolveBuiltinAgentModule({ computerUseEnabled: enabled, desktopManualAuthorizationRequired: enabled }), contextLimit: enabled ? 99_999 : 80_000 })
+    const llm: LLMAdapter = {
+      name: 'stable-policy-refresh',
+      async call(params) {
+        const openai = await buildOpenAIRequestBody(params, 'test', undefined)
+        const anthropic = await buildAnthropicRequestBody(params, 'test', undefined, true)
+        snapshots.push([JSON.stringify(openai.body.tools), JSON.stringify(anthropic.body.tools), JSON.stringify((openai.body.messages as Array<{ role: string }>).filter((message) => message.role === 'system')), JSON.stringify(anthropic.body.system)])
+        return { message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } }
+      },
+    }
+    const options = {
+      port: 0, sessionsDir: dir, llm, defaultConfig: base,
+      desktopFeaturePolicy: () => ({ computerUseEnabled: enabled, desktopPreviewEnabled: enabled }),
+      promptSynchronizationRetryMs: 10,
+    }
+    server = await startHostServer(options)
+    const shell = base().tools.find((tool) => tool.name === 'shell')!
+    const mcp = { ...shell, name: 'workspace__lookup', description: 'workspace MCP', schemaHash: 'workspace-hash' }
+    const selected = { ...base(), tools: [mcp, shell] }
+    await server.store.create({ sessionId: 'stable-policy-root', config: selected })
+    await server.store.create({ sessionId: 'stable-policy-allowlist', config: { ...base(), tools: [shell] } })
+    await server.store.create({ sessionId: 'stable-policy-child', parentSessionId: 'stable-policy-root', config: { ...base(), tools: [shell], systemPrompt: 'delegated instructions' } })
+    const dagConfig = deriveSessionConfig(base(), undefined, 'dag')
+    await server.store.create({ sessionId: 'stable-policy-dag', executionMode: 'dag', config: dagConfig })
+    const send = async () => {
+      const before = snapshots.length
+      const response = await fetch(`http://localhost:${server.port}/api/v1/sessions/stable-policy-root/messages`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ operationId: `stable-policy-${before}`, text: 'Inspect workspace' }),
+      })
+      expect(response.status).toBe(202)
+      await vi.waitFor(() => expect(snapshots.length).toBe(before + 1))
+      await vi.waitFor(() => expect(server.store.get('stable-policy-root')?.state.status).toBe('done'))
+    }
+    await send()
+    enabled = true
+    await send()
+    expect(server.store.get('stable-policy-root')?.config.contextLimit).toBe(99_999)
+    await server.close()
+    server = await startHostServer(options)
+    url = `http://localhost:${server.port}`
+    await vi.waitFor(() => expect(server.store.get('stable-policy-dag')).toBeTruthy())
+    expect(server.store.get('stable-policy-root')?.config.tools).toEqual(selected.tools)
+    expect(server.store.get('stable-policy-allowlist')?.config.tools).toEqual([shell])
+    expect(server.store.get('stable-policy-child')?.config.systemPrompt).toBe('delegated instructions')
+    expect(server.store.get('stable-policy-child')?.config.tools).toEqual([shell])
+    expect(server.store.get('stable-policy-dag')?.config.tools).toEqual(dagConfig.tools)
+    expect(server.store.get('stable-policy-dag')?.config.systemPrompt).toBe(dagConfig.systemPrompt)
+    await send()
+    for (const snapshot of snapshots) expect(snapshot).toEqual(snapshots[0])
   })
 
   it('does not recover or append to a dangling Copilot Session when startup finds no prompt change', async () => {

@@ -37,6 +37,28 @@ describe('SqliteSessionAuthority', () => {
     return value
   }
 
+  it('preserves authoritative root selections and MCP descriptors when refreshing runtime config after restart', async () => {
+    const { databasePath, sessionsDir } = fixture()
+    const shell = { name: 'shell', description: 'shell', inputSchema: { type: 'object' }, requiresApproval: false }
+    const mcp = { ...shell, name: 'workspace__lookup', description: 'workspace MCP', executionKind: 'executor' as const, schemaHash: 'mcp' }
+    const selected = createConfig({ tools: [mcp, shell], systemPrompt: 'selected prompt' })
+    const runtimeConfig = createConfig({ tools: [{ ...shell, description: 'current shell' }, { ...shell, name: 'write_file' }], systemPrompt: 'default prompt', contextLimit: 99_999 })
+    const firstAuthority = authority(databasePath)
+    const first = new SessionStore(sessionsDir, { authority: firstAuthority })
+    const record = await first.create({ sessionId: 'runtime-refresh-root', config: selected })
+    await first.create({ sessionId: 'runtime-refresh-child', parentSessionId: record.sessionId, config: { ...selected, tools: [mcp] } })
+    await first.load(record.sessionId, { runtimeConfig })
+    expect(record.config.tools.map((tool) => tool.name)).toEqual(['workspace__lookup', 'shell'])
+    await firstAuthority.close()
+    const reader = new SessionStore(sessionsDir, { authority: authority(databasePath), runtimeConfig })
+    const restored = await reader.load(record.sessionId)
+    expect(restored.config.tools).toEqual([mcp, runtimeConfig.tools[0]])
+    expect(restored.config.systemPrompt).toBe('selected prompt')
+    expect(restored.config.contextLimit).toBe(99_999)
+    expect((await reader.load('runtime-refresh-child')).config.tools).toEqual([mcp])
+    expect(existsSync(sessionsDir)).toBe(false)
+  })
+
   it('restricts summary reads to selected authoritative projections', async () => {
     const { databasePath, sessionsDir } = fixture()
     const durable = authority(databasePath)

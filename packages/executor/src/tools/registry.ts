@@ -11,6 +11,9 @@ import type { NetworkAuditEvent, NetworkPolicy } from '@agent-kernel/shared'
 
 export type ToolContext = {
   readonly origin?: 'host'
+  readonly desktopManualAuthorizationRequired?: boolean
+  readonly desktopComputerUseEnabled?: boolean
+  readonly desktopPreviewEnabled?: boolean
   readonly sessionId: string
   readonly callId: string
   readonly sandbox: Sandbox

@@ -425,6 +425,9 @@ describe('agent prompt slots', () => {
 
   it('uses three named copies of the Kala template for a new installation', () => {
     expect(loadAgentRuntimeSettings(path)).toEqual({
+      desktopManualAuthorizationRequired: false,
+      computerUseEnabled: false,
+      desktopPreviewEnabled: false,
       selectedSlotId: 'slot-1',
       slots: [
         { id: 'slot-1', name: '默认', prompt: DEFAULT_KALA_SYSTEM_PROMPT },
@@ -452,6 +455,9 @@ describe('agent prompt slots', () => {
   it('persists and reloads custom names, prompts, and selection atomically', () => {
     const settings = {
       selectedSlotId: 'slot-2' as const,
+      desktopManualAuthorizationRequired: true,
+      computerUseEnabled: true,
+      desktopPreviewEnabled: false,
       slots: [
         { id: 'slot-1' as const, name: 'Build', prompt: 'Implement carefully.' },
         { id: 'slot-2' as const, name: 'Plan', prompt: 'Discuss the design.' },
@@ -478,6 +484,22 @@ describe('agent prompt slots', () => {
     const beforeFailure = readFileSync(path, 'utf8')
     expect(() => writeAgentRuntimeSettings(path, invalid)).toThrow('invalid agent prompt settings')
     expect(readFileSync(path, 'utf8')).toBe(beforeFailure)
+  })
+
+  it('defaults existing prompt settings to no extra desktop authorization without altering their slots', () => {
+    const { desktopManualAuthorizationRequired: _policy, ...legacy } = defaultAgentRuntimeSettings()
+    writeFileSync(path, JSON.stringify(legacy))
+    expect(loadAgentRuntimeSettings(path)).toEqual({ ...legacy, desktopManualAuthorizationRequired: false })
+    writeFileSync(path, JSON.stringify({ ...legacy, desktopManualAuthorizationRequired: 'false' }))
+    expect(() => loadAgentRuntimeSettings(path)).toThrow('invalid agent prompt settings file')
+  })
+
+  it('migrates missing desktop feature options to off without changing old prompts', () => {
+    const { computerUseEnabled: _computer, desktopPreviewEnabled: _preview, ...legacy } = defaultAgentRuntimeSettings()
+    writeFileSync(path, JSON.stringify(legacy))
+    expect(loadAgentRuntimeSettings(path)).toEqual({ ...legacy, computerUseEnabled: false, desktopPreviewEnabled: false })
+    writeFileSync(path, JSON.stringify({ ...legacy, desktopPreviewEnabled: 'false' }))
+    expect(() => loadAgentRuntimeSettings(path)).toThrow('invalid agent prompt settings file')
   })
 
   it('reports malformed JSON without silently selecting defaults', () => {

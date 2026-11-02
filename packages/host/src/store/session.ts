@@ -1281,7 +1281,7 @@ export class SessionStore {
 
   private applyRuntimeConfig(record: SessionRecord, runtimeConfig: AgentConfig | undefined): void {
     if (!runtimeConfig) return
-    const applicableConfig = runtimeConfigForSession(runtimeConfig, record, record.toolLock)
+    const applicableConfig = runtimeConfigForSession(runtimeConfig, record, record.toolLock, record.config)
     ;(record as { config: AgentConfig }).config = configWithPersistedSystemPrompt(applicableConfig, record.state)
   }
 
@@ -2433,6 +2433,7 @@ export class SessionStore {
             ?? parsed.header.config,
           parsed.header,
           toolLockFor(parsed.header.config),
+          parsed.header.config,
         ),
         finalState,
       ),
@@ -2716,12 +2717,19 @@ function runtimeConfigForSession(
   runtimeConfig: AgentConfig,
   authority: DelegationAuthority,
   toolLock: SessionRecord['toolLock'],
+  sessionConfig: AgentConfig,
 ): AgentConfig {
-  if (effectiveDelegationDepth(authority) === 0) return runtimeConfig
   const allowedToolNames = new Set(Object.keys(toolLock))
+  const runtimeTools = new Map(runtimeConfig.tools.map((tool) => [tool.name, tool]))
+  const selectedTools = effectiveDelegationDepth(authority) === 0
+    ? sessionConfig.tools
+    : sessionConfig.tools.filter((tool) => allowedToolNames.has(tool.name))
   return {
     ...runtimeConfig,
-    tools: runtimeConfig.tools.filter((tool) => allowedToolNames.has(tool.name)),
+    systemPrompt: sessionConfig.systemPrompt,
+    // Refresh static definitions in place, retaining the durable selection and
+    // workspace MCP descriptors absent from the Host's default catalog.
+    tools: selectedTools.map((tool) => runtimeTools.get(tool.name) ?? tool),
   }
 }
 

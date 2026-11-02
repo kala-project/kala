@@ -299,6 +299,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
   type AnnounceWithMcp = ExecutorAnnounce & { mcpTools?: McpToolDescriptor[] }
   const createAnnouncement = (): AnnounceWithMcp => ({
     appDebugVersion: 1,
+    ...(options.tools === undefined && tools.has('computer_use') ? { computerUsePolicyVersion: 1 as const, computerUseFeaturePolicyVersion: 1 as const } : {}),
     executorId,
     ...(options.installId ? { installId: options.installId } : {}),
     executorVersion: executorReleaseVersion(),
@@ -778,6 +779,10 @@ async function runOne(
   }
   try {
     const content = await tool.run(payload.input, {
+      ...(typeof payload.desktopComputerUseEnabled === 'boolean' ? { desktopComputerUseEnabled: payload.desktopComputerUseEnabled } : {}),
+      ...(typeof payload.desktopPreviewEnabled === 'boolean' ? { desktopPreviewEnabled: payload.desktopPreviewEnabled } : {}),
+      ...(typeof payload.desktopManualAuthorizationRequired === 'boolean'
+        ? { desktopManualAuthorizationRequired: payload.desktopManualAuthorizationRequired } : {}),
       ...(payload.origin === 'host' ? { origin: 'host' as const } : {}),
       sessionId: payload.sessionId,
       callId: payload.callId,

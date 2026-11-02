@@ -213,7 +213,7 @@ export function SettingsDialog({ open, cacheNamespace = 'default', autoHideOffli
               ) : section === 'speech' ? (
                 <SpeechSection />
               ) : section === 'security' ? (
-                <SecuritySection payload={payload} />
+                <SecuritySection payload={payload} onPayloadChange={applyPayload} />
               ) : section === 'socketAdmin' ? (
                 <SocketAdminSection payload={payload} onPayloadChange={applyPayload} socket={storageSocket} />
               ) : section === 'executorAccess' ? (

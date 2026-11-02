@@ -883,6 +883,8 @@ export type ExecutorMcpConfigStatusAck = {
 }
 
 export type ExecutorAnnounce = {
+  computerUsePolicyVersion?: 1
+  computerUseFeaturePolicyVersion?: 1
   appDebugVersion?: 1
   executorId: string
   installId?: string
@@ -1455,6 +1457,10 @@ export type ConsolidateMemoryResult = {
 // ============================================================================
 
 export type ToolCallMessage = {
+  /** Trusted Host policy, never copied from model tool arguments. */
+  desktopManualAuthorizationRequired?: boolean
+  desktopComputerUseEnabled?: boolean
+  desktopPreviewEnabled?: boolean
   /** Host-owned internal RPC marker; never copied from model tool arguments. */
   origin?: 'host'
   sessionId: string
@@ -1990,6 +1996,7 @@ export type ServerSettingsPayload = {
   socketConnections?: SocketConnectionAuditSnapshot
   agentModule?: AgentModuleMetadata
   agentPrompt?: SettingsAgentPrompt
+  desktopAccess?: { manualAuthorizationRequired: boolean; computerUseEnabled?: boolean; desktopPreviewEnabled?: boolean }
   auth?: {
     dashboardAuthRequired: boolean
     githubOAuth: {

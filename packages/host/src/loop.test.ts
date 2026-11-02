@@ -23,6 +23,8 @@ import { contextSnapshot } from './context/manager.js'
 import { shouldCompactContext } from '@agent-kernel/shared/context-policy'
 import { estimateStringTokens } from '@agent-kernel/shared/token-estimation'
 import { SUMMARY_PREFIX } from './extensions/compaction.js'
+import { activeToolsFor, runToolCatalogTool } from './extensions/tool-catalog.js'
+import { buildAnthropicRequestBody, buildOpenAIRequestBody } from './llm/provider-request-builder.js'
 
 /**
  * Well-formed summary body that clears validateCompactionSummary + the quality
@@ -407,18 +409,49 @@ describe('host loop', () => {
     expect(store.get(sessionId)!.state.status).toBe('done')
   })
 
-  it('discloses websearch on the first LLM call for explicit network research', async () => {
-    const seenTools: string[][] = []
-    const websearch = { name: 'websearch', description: 'Search the web', inputSchema: { type: 'object' }, requiresApproval: false, executionKind: 'host' as const, executionHandler: 'websearch' }
-    const progressive = createConfig({ tools: [websearch], systemPrompt: 'sys', toolDisclosureMode: 'progressive' })
-    store.get(sessionId)!.config = progressive
+  it('keeps actual provider tools and prompts stable through discovery, follow-ups, full activation and catalog revisions', async () => {
+    const snapshots: { tools: string[]; prompts: unknown[] }[] = []
+    const catalog = ['tool_search', 'tool_describe', 'read_file', 'shell', 'websearch', 'skill'].map((name) => ({
+      name, description: `${name} capability`, inputSchema: { type: 'object', properties: { query: { type: 'string' } } }, requiresApproval: false,
+    }))
+    const record = store.get(sessionId)!
+    record.config = createConfig({ tools: catalog, systemPrompt: 'sys', toolDisclosureMode: 'progressive' })
     const loop = runHostLoop({
       store,
-      llm: { name: 'network-disclosure', async call(params) { seenTools.push(params.tools.map((tool) => tool.name)); return { message: { role: 'assistant', content: [{ type: 'text', text: 'ready to search' }] } } } },
+      llm: { name: 'stable-disclosure', async call(params) {
+        const openai = await buildOpenAIRequestBody(params, 'test', undefined)
+        const anthropic = await buildAnthropicRequestBody(params, 'test', undefined, true)
+        snapshots.push({
+          tools: [JSON.stringify(openai.body.tools), JSON.stringify(anthropic.body.tools)],
+          prompts: [(openai.body.messages as Array<{ role: string }>).filter((message) => message.role === 'system'), anthropic.body.system],
+        })
+        return { message: { role: 'assistant', content: [{ type: 'text', text: 'ready' }] } }
+      } },
       tools: nullTools(), broadcast: silentBroadcast(),
     })
+    await loop.dispatch(sessionId, { kind: 'user_message', text: 'Inspect my workspace' })
+    expect((await runToolCatalogTool(record, 'tool_search', { query: 'websearch' }, store)).ok).toBe(true)
     await loop.dispatch(sessionId, { kind: 'user_message', text: '请联网检索最新资料并给出可点击来源链接' })
-    expect(seenTools).toEqual([['websearch']])
+    expect((await runToolCatalogTool(record, 'tool_describe', { names: ['shell'] }, store)).ok).toBe(true)
+    await loop.dispatch(sessionId, { kind: 'user_message', text: 'Summarize the results without searching again' })
+    expect((await runToolCatalogTool(record, 'tool_describe', { names: catalog.map((tool) => tool.name) }, store)).ok).toBe(true)
+    await loop.dispatch(sessionId, { kind: 'user_message', text: 'Everything is activated' })
+    record.config = { ...record.config, tools: catalog.map((tool) => ({ ...tool, version: '2' })) }
+    expect([...(await activeToolsFor(record, store))].sort()).toEqual(catalog.map((tool) => tool.name).sort())
+    record.config = { ...record.config, toolDisclosureMode: 'legacy_full', contextLimit: 99_999 }
+    await loop.dispatch(sessionId, { kind: 'user_message', text: 'Catalog identity and non-tool settings changed' })
+    for (const snapshot of snapshots) expect(snapshot).toEqual(snapshots[0])
+    expect(snapshots[0]?.prompts[0]).toEqual([{ role: 'system', content: expect.stringContaining('include the required _intent argument') }])
+    expect(snapshots[0]?.prompts[1]).toEqual([{ type: 'text', text: expect.stringContaining('include the required _intent argument'), cache_control: { type: 'ephemeral' } }])
+    await store.applySystemPrompt(sessionId, 'explicit user prompt')
+    await loop.dispatch(sessionId, { kind: 'user_message', text: 'Use my new prompt' })
+    await loop.dispatch(sessionId, { kind: 'user_message', text: 'Keep using it' })
+    expect(snapshots[5]?.tools).toEqual(snapshots[0]?.tools)
+    expect(snapshots[5]?.prompts).not.toEqual(snapshots[0]?.prompts)
+    expect(snapshots[6]).toEqual(snapshots[5])
+    record.config = { ...record.config, tools: catalog.filter((tool) => tool.name !== 'websearch') }
+    await loop.dispatch(sessionId, { kind: 'user_message', text: 'Explicit tool selection changed' })
+    expect(snapshots[7]?.tools).not.toEqual(snapshots[0]?.tools)
   })
 
   it('does not resume terminal replies without durable graph work', async () => {
@@ -979,10 +1012,18 @@ describe('host loop', () => {
       initialCwd: workspace,
     })
     const skillSchemas: string[] = []
+    const providerPrefixes: string[][] = []
     const llm: LLMAdapter = {
       name: 'capture-tools',
       async call(params) {
         skillSchemas.push(JSON.stringify(params.tools.find((tool) => tool.name === 'skill')))
+        const openai = await buildOpenAIRequestBody(params, 'test', undefined)
+        const anthropic = await buildAnthropicRequestBody(params, 'test', undefined, true)
+        providerPrefixes.push([
+          JSON.stringify(openai.body.tools), JSON.stringify(anthropic.body.tools),
+          JSON.stringify((openai.body.messages as Array<{ role: string }>).filter((message) => message.role === 'system')),
+          JSON.stringify(anthropic.body.system),
+        ])
         if (skillSchemas.length === 1) {
           return {
             message: {
@@ -1046,6 +1087,7 @@ describe('host loop', () => {
 
     expect(skillSchemas).toHaveLength(3)
     expect(new Set(skillSchemas).size).toBe(1)
+    for (const prefix of providerPrefixes) expect(prefix).toEqual(providerPrefixes[0])
     expect(skillSchemas[0]).not.toContain('fresh-skill')
     const skillResult = store
       .get(record.sessionId)!

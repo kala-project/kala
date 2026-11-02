@@ -4,6 +4,7 @@ import type { Message, ToolSchema } from '@agent-kernel/kernel'
 import { COMPUTER_SCREENSHOT_KIND } from '@agent-kernel/shared'
 
 import { buildAnthropicRequestBody, buildOpenAIRequestBody } from './provider-request-builder.js'
+import { resolveBuiltinAgentModule } from '../builtin-tools.js'
 
 const READ_TOOL: ToolSchema = {
   name: 'read',
@@ -20,6 +21,33 @@ const EDIT_TOOL: ToolSchema = {
 }
 
 describe('provider request builder', () => {
+  it.each(['current prompt', ''])('uses explicit prompt precedence consistently without duplicate system messages: %j', async (systemPrompt) => {
+    const messages: Message[] = [
+      { role: 'system', content: [{ type: 'text', text: 'stale prompt' }] },
+      { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+    ]
+    const openai = await buildOpenAIRequestBody({ messages, tools: [], systemPrompt }, 'test', undefined)
+    const anthropic = await buildAnthropicRequestBody({ messages, tools: [], systemPrompt }, 'test', undefined, false)
+    expect(openai.body.messages).toEqual([
+      ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+      { role: 'user', content: 'hello' },
+    ])
+    expect(anthropic.body.system).toBe(systemPrompt || undefined)
+    const fallback = await buildOpenAIRequestBody({ messages, tools: [] }, 'test', undefined)
+    expect(fallback.body.messages[0]).toEqual({ role: 'system', content: 'stale prompt' })
+    expect((await buildAnthropicRequestBody({ messages, tools: [] }, 'test', undefined, false)).body.system).toBe('stale prompt')
+  })
+  it('keeps serialized OpenAI and Anthropic tools identical across desktop settings', async () => {
+    const snapshots = await Promise.all([false, true].flatMap((computerUseEnabled) =>
+      [false, true].map(async (desktopManualAuthorizationRequired) => {
+        const module = resolveBuiltinAgentModule({ computerUseEnabled, desktopManualAuthorizationRequired })
+        const params = { messages: [], tools: module.tools, systemPrompt: module.systemPrompt }
+        const openai = await buildOpenAIRequestBody(params, 'test', undefined)
+        const anthropic = await buildAnthropicRequestBody(params, 'test', undefined, false)
+        return [JSON.stringify(openai.body.tools), JSON.stringify(anthropic.body.tools), module.systemPrompt]
+      })))
+    for (const snapshot of snapshots) expect(snapshot).toEqual(snapshots[0])
+  })
   it('converts desktop observations to actual images after all parallel OpenAI tool results', async () => {
     const screenshot = { mimeType: 'image/png', base64: 'AA==', width: 1280, height: 800, originX: -1280, originY: 0 }
     const content = JSON.stringify({ kind: COMPUTER_SCREENSHOT_KIND, screenshot })

@@ -30,7 +30,99 @@ async function start(manager: ComputerUseManager, allowAgent = false) {
 }
 
 describe('computer desktop authorization', () => {
+  it('rejects dedicated computer operations when disabled without acquiring or capturing a desktop', async () => {
+    const { manager, driver } = fixture()
+    manager.setFeaturePolicy({ computerUseEnabled: false, desktopPreviewEnabled: true })
+    await expect(manager.agent({ operation: 'screenshot' }, 'session', signal(), false)).rejects.toThrow(/disabled/i)
+    expect((await manager.request(request({ operation: 'start', consent: true, allowAgent: true }), 'owner', signal(), false)).error?.code).toBe('denied')
+    expect(driver.acquire).not.toHaveBeenCalled()
+    expect(driver.screenshot).not.toHaveBeenCalled()
+    await manager.close()
+  })
+
+  it('revokes preview independently while retaining automatic Agent access and legacy status compatibility', async () => {
+    const { manager, driver } = fixture()
+    await start(manager, true)
+    manager.setFeaturePolicy({ computerUseEnabled: true, desktopPreviewEnabled: false })
+    expect((await manager.request(request({ operation: 'start', consent: true, allowAgent: true }), 'owner', signal(), false)).error?.code).toBe('denied')
+    await manager.agent({ operation: 'screenshot' }, 'session', signal(), false)
+    const current = await manager.request(request({ operation: 'status', policyStatusVersion: 2 }), 'owner', signal(), false)
+    expect(current.status).toMatchObject({ available: false, computerUseEnabled: true, desktopPreviewEnabled: false, automatic: true })
+    expect((await manager.status(false)).active).toBe(true)
+    const legacy = await manager.request(request({ operation: 'status', policyStatusVersion: 1 }), 'owner', signal(), false)
+    expect(legacy.status?.computerUseEnabled).toBeUndefined()
+    expect(driver.releaseClaim).toHaveBeenCalled()
+    manager.setFeaturePolicy({ computerUseEnabled: false, desktopPreviewEnabled: false })
+    await expect(manager.agent({ operation: 'screenshot' }, 'session', signal(), false)).rejects.toThrow(/disabled/i)
+    expect((await manager.status(false)).active).toBe(false)
+    await manager.close()
+  })
   afterEach(() => vi.useRealTimers())
+
+  it('automatically acquires a session-bound desktop only under trusted Host policy', async () => {
+    const { manager, driver } = fixture(false)
+    await expect(manager.agent({ operation: 'screenshot', desktopManualAuthorizationRequired: false }, 'session', signal())).rejects.toThrow(/authorization/i)
+    expect(driver.acquire).not.toHaveBeenCalled()
+    const result = JSON.parse(await manager.agent({ operation: 'screenshot' }, 'session', signal(), false))
+    expect(result.kind).toBe(COMPUTER_SCREENSHOT_KIND)
+    expect(driver.acquire).toHaveBeenCalledOnce()
+    await expect(manager.agent({ operation: 'screenshot' }, 'other-session', signal(), false)).rejects.toThrow(/another session/i)
+    expect(driver.acquire).toHaveBeenCalledOnce()
+    await expect(manager.agent({ operation: 'screenshot' }, 'session', signal(), true)).rejects.toThrow(/authorization/i)
+    await manager.close()
+  })
+
+  it('reports automatic ownership only to policy-aware clients without breaking older strict response schemas', async () => {
+    const { manager } = fixture(false)
+    await manager.agent({ operation: 'screenshot' }, 'session', signal(), false)
+    const legacy = await manager.request(request({ operation: 'status' }), 'owner', signal(), false)
+    expect(legacy.status?.automatic).toBeUndefined()
+    const current = await manager.request(request({ operation: 'status', policyStatusVersion: 1 }), 'owner', signal(), false)
+    expect(current.status).toMatchObject({ automatic: true, manualAuthorizationRequired: false, sessionId: 'session' })
+    await manager.close()
+  })
+
+  it('lets the user take over an automatic lease and preserves pause after stop and expiry', async () => {
+    let now = 0
+    const { manager, driver } = fixture(false, () => now)
+    await manager.agent({ operation: 'screenshot' }, 'session', signal(), false)
+    const takeover = await manager.request(request({ operation: 'start', consent: true, allowAgent: false }), 'owner', signal(), false)
+    expect(takeover.error).toBeUndefined()
+    expect(driver.acquire).toHaveBeenCalledOnce()
+    await expect(manager.agent({ operation: 'screenshot' }, 'session', signal(), false)).rejects.toThrow(/paused/i)
+    await manager.request(request({ operation: 'stop', leaseId: takeover.leaseId }), 'owner', signal(), false)
+    now += COMPUTER_LEASE_MS + 1
+    await expect(manager.agent({ operation: 'screenshot' }, 'session', signal(), false)).rejects.toThrow(/paused|stopped/i)
+    const resumed = await manager.request(request({ operation: 'start', consent: true, allowAgent: true }), 'owner', signal(), false)
+    expect(resumed.error).toBeUndefined()
+    await expect(manager.agent({ operation: 'screenshot' }, 'session', signal(), false)).resolves.toContain(COMPUTER_SCREENSHOT_KIND)
+    await manager.close()
+  })
+
+  it('keeps automatic authorization alive during native I/O without requiring Dashboard heartbeats', async () => {
+    vi.useFakeTimers()
+    const { manager, driver } = fixture(false)
+    let finish!: () => void
+    driver.screenshot.mockImplementation(() => new Promise((resolve) => { finish = () => resolve(screenshot) }))
+    const operation = manager.agent({ operation: 'screenshot' }, 'session', signal(), false)
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(COMPUTER_LEASE_MS * 2)
+    expect(await manager.status(false)).toMatchObject({ active: true, sessionId: 'session' })
+    finish()
+    await operation
+    await vi.advanceTimersByTimeAsync(COMPUTER_LEASE_MS + 2)
+    expect(await manager.status(false)).toMatchObject({ active: false })
+    await manager.close()
+  })
+
+  it('never acquires a desktop for an already cancelled automatic call', async () => {
+    const { manager, driver } = fixture(false)
+    const cancelled = new AbortController()
+    cancelled.abort()
+    await expect(manager.agent({ operation: 'screenshot' }, 'session', cancelled.signal, false)).rejects.toThrow(/cancelled/i)
+    expect(driver.acquire).not.toHaveBeenCalled()
+    await manager.close()
+  })
 
   it('defaults to denying use until the machine locally opts in', async () => {
     const { manager, driver } = fixture(false)

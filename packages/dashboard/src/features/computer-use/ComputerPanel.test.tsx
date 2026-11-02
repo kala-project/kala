@@ -14,6 +14,17 @@ const props = { socket, workspaceId: 'workspace', sessionId: 'session', visible:
 const image = { mimeType: 'image/png' as const, base64: 'AA==', width: 1280, height: 800, originX: -1280, originY: 0 }
 
 describe('ComputerPanel', () => {
+  it('does not offer preview consent or capture when the administrator has disabled desktop preview', async () => {
+    mocked.mockImplementation(async (_socket, request) => ({
+      requestId: request.requestId, status: { available: false, platform: 'linux', reason: 'Desktop preview is disabled in administrator Settings.',
+        active: false, allowAgent: false, manualAuthorizationRequired: false, computerUseEnabled: true, desktopPreviewEnabled: false },
+    }))
+    render(<ComputerPanel {...props} />)
+    await screen.findByText(/Desktop preview is disabled/)
+    expect(screen.queryByTestId('computer-consent')).toBeNull()
+    expect(screen.getByTestId('computer-start').hasAttribute('disabled')).toBe(true)
+    expect(mocked.mock.calls.every(([, request]) => request.operation === 'status')).toBe(true)
+  })
   beforeEach(() => {
     let active = false
     let allowAgent = false
@@ -41,6 +52,32 @@ describe('ComputerPanel', () => {
     await waitFor(() => expect(operations()).toHaveLength(1))
     expect(operations()[0]?.operation).toBe('status')
     expect(screen.getByRole('button', { name: 'Share desktop' }).hasAttribute('disabled')).toBe(true)
+    expect(operations().some((request) => request.operation === 'start')).toBe(false)
+  })
+
+  it.each([false, true])('allows an explicit Share click under automatic policy, including its own Agent lease (%s)', async (active) => {
+    mocked.mockImplementation(async (_socket, request) => request.operation === 'capture'
+      ? { requestId: request.requestId, screenshot: image }
+      : {
+        requestId: request.requestId,
+        status: { available: true, platform: 'linux', active, allowAgent: true, manualAuthorizationRequired: false, automatic: active, sessionId: 'session' },
+        ...(request.operation === 'start' ? { leaseId } : {}),
+      })
+    render(<ComputerPanel {...props} />)
+    await waitFor(() => expect(screen.getByTestId('computer-start').hasAttribute('disabled')).toBe(false))
+    expect(screen.queryByTestId('computer-consent')).toBeNull()
+    await begin()
+    expect(operations()).toContainEqual(expect.objectContaining({ operation: 'start', consent: true, allowAgent: true }))
+  })
+
+  it('keeps another Session desktop protected even under automatic policy', async () => {
+    mocked.mockImplementation(async (_socket, request) => ({
+      requestId: request.requestId,
+      status: { available: true, platform: 'linux', active: true, allowAgent: true, automatic: true, manualAuthorizationRequired: false, sessionId: 'another-session' },
+    }))
+    render(<ComputerPanel {...props} />)
+    await waitFor(() => expect(screen.queryByTestId('computer-consent')).toBeNull())
+    expect(screen.getByTestId('computer-start').hasAttribute('disabled')).toBe(true)
     expect(operations().some((request) => request.operation === 'start')).toBe(false)
   })
 

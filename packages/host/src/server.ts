@@ -41,7 +41,7 @@ import type { HookConfig, HookRunner } from './extensions/hooks.js'
 import { createBuiltinExtensionRegistry } from './extensions/builtin-registry.js'
 import type { HostExtension } from './extensions/registry.js'
 import { createSkillManager, defaultSkillRoots, discoverSkills, type SkillManager, type SkillRegistry } from './extensions/skills.js'
-import { SessionNotFoundError, SessionStore, type SessionRecord } from './store/session.js'
+import { effectiveDelegationDepth, SessionNotFoundError, SessionStore, type SessionRecord } from './store/session.js'
 import { slimEffect, type SessionOperationMatch } from './store/log.js'
 import type { SessionAuthority } from './store/session-authority.js'
 import type { PostgresSessionAuthority } from './store/postgres-session-authority.js'
@@ -264,6 +264,9 @@ export type HostServerOptions = {
   deleteManualProvider?: Parameters<typeof attachJsonRoutes>[1]['deleteManualProvider']
   setDefaultModel?: Parameters<typeof attachJsonRoutes>[1]['setDefaultModel']
   updateAgentPrompt?: Parameters<typeof attachJsonRoutes>[1]['updateAgentPrompt']
+  updateDesktopAccess?: Parameters<typeof attachJsonRoutes>[1]['updateDesktopAccess']
+  desktopManualAuthorizationRequired?: (actor?: DashboardActor) => boolean
+  desktopFeaturePolicy?: (actor?: DashboardActor) => { computerUseEnabled: boolean; desktopPreviewEnabled: boolean }
   initializeSocketAdmin?: (input: { password: string; mode?: 'development' | 'production'; activate: (config: SocketAdminConfig) => void }) => ServerSettingsPayload
   updateSocketAdminMode?: Parameters<typeof attachJsonRoutes>[1]['updateSocketAdminMode']
   routerHealth?: () => unknown
@@ -641,6 +644,18 @@ export async function startHostServer(
     io,
     {
       workspaceIdFor: (sid) => store.get(sid)?.workspaceId,
+      ...(options.desktopFeaturePolicy ? { desktopFeaturePolicy: (sid: string) => {
+        const record = store.get(sid)
+        if (!record) throw new SessionNotFoundError(sid)
+        return options.desktopFeaturePolicy!(actorForRecord(record))
+      } } : {}),
+      ...(options.desktopManualAuthorizationRequired ? {
+        desktopManualAuthorizationRequired: (sid: string) => {
+          const record = store.get(sid)
+          if (!record) throw new SessionNotFoundError(sid)
+          return options.desktopManualAuthorizationRequired!(actorForRecord(record))
+        },
+      } : {}),
       ...(options.assertSessionEffectOwner ? { assertSessionEffectOwner: options.assertSessionEffectOwner } : {}),
       mcpSchemaHashFor: (sid, name) => store.get(sid)?.config.tools.find((tool) => tool.name === name && tool.name.includes('__') && !tool.name.startsWith('__') && tool.schemaHash && tool.version === tool.schemaHash)?.schemaHash,
     },
@@ -702,10 +717,35 @@ export async function startHostServer(
     : { kind: 'anonymous' }
   const pendingPromptSynchronizations = new Set<string>()
   const promptSettingUpdateTails = new Map<string, Promise<ServerSettingsPayload>>()
+  const serializePromptSettingsUpdate = (
+    actor: DashboardActor,
+    save: () => ServerSettingsPayload | Promise<ServerSettingsPayload>,
+  ): Promise<ServerSettingsPayload> => {
+    const organizationId = organizationIdForActor(actor)
+    const key = organizationId === undefined ? 'portable' : `org:${organizationId}`
+    const previous = promptSettingUpdateTails.get(key)
+    const update = (previous ? previous.catch(() => undefined) : Promise.resolve()).then(async () => {
+      if (options.mutableReady?.() === false) {
+        throw Object.assign(new Error('Host is not ready to update agent settings'), { status: 503 })
+      }
+      const result = await save()
+      await synchronizeOrganizationPrompt(actor)
+      return result
+    })
+    promptSettingUpdateTails.set(key, update)
+    void update.finally(() => {
+      if (promptSettingUpdateTails.get(key) === update) promptSettingUpdateTails.delete(key)
+    }).catch(() => undefined)
+    return update
+  }
   let startupPromptDiscoveryPending = true
   let promptSynchronizationRunning = false
   const ensureEffectiveSystemPrompt = async (record: SessionRecord): Promise<boolean> => {
-    const prompt = (await getEffectiveDefaultConfig(actorForRecord(record))).systemPrompt ?? ''
+    const config = deriveSessionConfig(await getEffectiveDefaultConfig(actorForRecord(record)), undefined, record.executionMode)
+    if (options.desktopFeaturePolicy) await store.load(record.sessionId, { recoverDangling: false, runtimeConfig: config })
+    // A child owns its delegated instructions, not the organization's root prompt.
+    if (effectiveDelegationDepth(record) > 0) return false
+    const prompt = config.systemPrompt ?? ''
     const current = record.state.systemPromptOverride?.prompt
       ?? (record.state.messages[0]?.role === 'system'
         ? record.state.messages[0].content.filter((item) => item.type === 'text').map((item) => item.text).join('')
@@ -745,6 +785,7 @@ export async function startHostServer(
       try {
         const record = store.get(sessionId) ?? await store.load(sessionId, { recoverDangling: false, runtimeConfig: getDefaultConfig(actor) })
         await ensureEffectiveSystemPrompt(record)
+        await executors.updateDesktopFeaturePolicy?.(sessionId)
         pendingPromptSynchronizations.delete(sessionId)
       } catch (error) {
         pendingPromptSynchronizations.add(sessionId)
@@ -792,6 +833,7 @@ export async function startHostServer(
         try {
           const record = store.get(sessionId) ?? await store.load(sessionId, { recoverDangling: false })
           await ensureEffectiveSystemPrompt(record)
+          await executors.updateDesktopFeaturePolicy?.(sessionId)
           pendingPromptSynchronizations.delete(sessionId)
         } catch {
           // Settings or Session storage may be temporarily unreadable. Retain it.
@@ -959,24 +1001,10 @@ export async function startHostServer(
       (typeof options.models === 'function' ? options.models() : options.models ?? []).filter(model => model.providerId === input.providerId)) } : {}),
     ...(options.setDefaultModel ? { setDefaultModel: withModelCatalogUpdate(options.setDefaultModel) } : {}),
     ...(options.updateAgentPrompt ? {
-      updateAgentPrompt: (input, actor) => {
-        const organizationId = organizationIdForActor(actor)
-        const key = organizationId === undefined ? 'portable' : `org:${organizationId}`
-        const previous = promptSettingUpdateTails.get(key)
-        const update = (previous ? previous.catch(() => undefined) : Promise.resolve()).then(async () => {
-          if (options.mutableReady?.() === false) {
-            throw Object.assign(new Error('Host is not ready to update agent prompt settings'), { status: 503 })
-          }
-          const result = await options.updateAgentPrompt!(input, actor)
-          await synchronizeOrganizationPrompt(actor)
-          return result
-        })
-        promptSettingUpdateTails.set(key, update)
-        void update.finally(() => {
-          if (promptSettingUpdateTails.get(key) === update) promptSettingUpdateTails.delete(key)
-        }).catch(() => undefined)
-        return update
-      },
+      updateAgentPrompt: (input, actor) => serializePromptSettingsUpdate(actor, () => options.updateAgentPrompt!(input, actor)),
+    } : {}),
+    ...(options.updateDesktopAccess ? {
+      updateDesktopAccess: (input, actor) => serializePromptSettingsUpdate(actor, () => options.updateDesktopAccess!(input, actor)),
     } : {}),
     ...(options.initializeSocketAdmin ? { initializeSocketAdmin: (input: { password: string; mode?: 'development' | 'production' }) => options.initializeSocketAdmin!({ ...input, activate: activateSocketAdmin }) } : {}),
     ...(options.updateSocketAdminMode ? { updateSocketAdminMode: options.updateSocketAdminMode } : {}),

@@ -85,6 +85,7 @@ export async function buildOpenAIRequestBody(
   if (systemPrompt) openaiMessages.push({ role: 'system', content: systemPrompt })
   let desktopObservations: OpenAIUserContentBlock[] = []
   for (const msg of messages) {
+    if (msg.role === 'system' && systemPrompt !== undefined) continue
     if (msg.role !== 'tool' && desktopObservations.length > 0) {
       openaiMessages.push({ role: 'user', content: desktopObservations })
       desktopObservations = []

@@ -108,6 +108,8 @@ export const McpToolDescriptorSchema = z.object({
 }).strict() satisfies z.ZodType<McpToolDescriptor>
 
 export const ExecutorAnnounceSchema = z.object({
+  computerUsePolicyVersion: z.literal(1).optional(),
+  computerUseFeaturePolicyVersion: z.literal(1).optional(),
   appDebugVersion: z.literal(1).optional(),
   executorId: WireIdSchema,
   installId: WireIdSchema.optional(),
@@ -197,6 +199,9 @@ export const ServerTerminalExitSchema = z.object({
 // ============================================================================
 
 export const ToolCallMessageSchema = z.object({
+  desktopManualAuthorizationRequired: z.boolean().optional(),
+  desktopComputerUseEnabled: z.boolean().optional(),
+  desktopPreviewEnabled: z.boolean().optional(),
   origin: z.literal('host').optional(),
   sessionId: SessionIdSchema,
   callId: WireIdSchema,

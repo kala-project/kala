@@ -5,14 +5,14 @@ import { activateTools, searchToolCatalog, toolCatalogRevision } from '../tool-d
 type ToolCatalogStore = Pick<SessionStore, 'appendRuntimeMetadata' | 'findLatestRuntimeMetadata'>
 
 export async function activeToolsFor(record: SessionRecord, store?: ToolCatalogStore): Promise<Set<string>> {
-  const revision = toolCatalogRevision(record.config.tools)
+  const available = new Set(record.config.tools.map((tool) => tool.name))
   const active = new Set<string>()
   const entries = store
     ? [await store.findLatestRuntimeMetadata(record.sessionId, 'tools_activated')].filter((entry) => entry !== undefined)
     : (await readSessionLog(record.logPath)).runtimeMetadata
   for (const entry of entries) {
-    if (entry.action !== 'tools_activated' || entry.payload.catalogRevision !== revision || !Array.isArray(entry.payload.names)) continue
-    for (const name of entry.payload.names) if (typeof name === 'string') active.add(name)
+    if (entry.action !== 'tools_activated' || !Array.isArray(entry.payload.names)) continue
+    for (const name of entry.payload.names) if (typeof name === 'string' && available.has(name)) active.add(name)
   }
   return active
 }

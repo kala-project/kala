@@ -7,24 +7,15 @@ export type ToolDisclosureSnapshot = { catalogRevision: string; active: readonly
 const WEB_SEARCH_INTENT = /(?:联网|上网|网络搜索|搜索(?:网页|网络|互联网)|网页检索|检索(?:资料|来源|新闻)|最新(?:信息|消息|资料)|来源链接|可点击(?:的)?链接|web\s*search|search\s+the\s+web|online\s+(?:search|research)|browse\s+the\s+web|current\s+(?:news|information))/iu
 
 const DISCOVERY = new Set(['tool_search', 'tool_describe'])
-const DEFAULT_CORE = new Set(['read_file', 'read_files', 'ls', 'glob', 'multi_grep', 'shell', 'todo_graph', 'agent'])
 
 export function toolCatalogRevision(tools: readonly ToolSchema[]): string {
-  return `sha256:${createHash('sha256').update(JSON.stringify(tools.map(stableTool))).digest('hex')}`
+  const serialized = JSON.parse(JSON.stringify(tools.map(stableTool)))
+  return `sha256:${createHash('sha256').update(canonicalJson(serialized)).digest('hex')}`
 }
 
-export function visibleTools(tools: readonly ToolSchema[], mode: ToolDisclosureMode, active: ReadonlySet<string>): readonly ToolSchema[] {
-  const hasHiddenTools = tools.some((tool) =>
-    !DISCOVERY.has(tool.name)
-    && !DEFAULT_CORE.has(tool.name)
-    && !active.has(tool.name))
-  const visible = mode === 'legacy_full'
-    ? tools
-    : tools.filter((tool) =>
-        DEFAULT_CORE.has(tool.name)
-        || active.has(tool.name)
-        || (hasHiddenTools && DISCOVERY.has(tool.name)))
-  return visible.map(withRequiredToolIntent)
+export function visibleTools(tools: readonly ToolSchema[], _mode: ToolDisclosureMode, _active: ReadonlySet<string>): readonly ToolSchema[] {
+  // Discovery changes its results, never the provider's cacheable tool prefix.
+  return tools.map(withRequiredToolIntent)
 }
 
 export function withRequiredToolIntent(tool: ToolSchema): ToolSchema {
@@ -90,8 +81,20 @@ function scoreTool(tool: ToolSchema, terms: readonly string[]): number {
 
 function stableTool(tool: ToolSchema): unknown {
   return {
+    description: tool.description, inputSchema: withRequiredToolIntent(tool).inputSchema,
     name: tool.name, version: tool.version ?? null, schemaHash: tool.schemaHash ?? null,
     toolsetId: tool.toolsetId ?? null, toolsetVersion: tool.toolsetVersion ?? null,
     executionKind: tool.executionKind ?? null, executionHandler: tool.executionHandler ?? null,
   }
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value)
 }

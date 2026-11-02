@@ -31,8 +31,7 @@ import { step } from '@agent-kernel/kernel'
 
 import { TOOL_INTENTION_SYSTEM_INSTRUCTION } from './builtin-tools.js'
 import { formatToolFailureForAgent } from './tool-feedback.js'
-import { activeToolsFor } from './extensions/tool-catalog.js'
-import { intentActivatedTools, toolCatalogRevision, visibleTools } from './tool-disclosure.js'
+import { toolCatalogRevision, visibleTools } from './tool-disclosure.js'
 import { TurnTimingTracker, timedSpan } from './turn-timing.js'
 import type { LLMAdapter } from './llm/adapter.js'
 import { parseComputerScreenshotResult, redactLlmTrace, type LLMTrace } from '@agent-kernel/shared'
@@ -750,9 +749,7 @@ async function performCallLlm(
     : undefined
   try {
     const messages = await resolveKernelMessageAttachments(deps.messageAttachments, sessionId, persistedMessages)
-    const activeTools = config.toolDisclosureMode === 'progressive' ? await activeToolsFor(live, deps.store) : new Set<string>()
-    for (const name of intentActivatedTools(effect.tools, messages)) activeTools.add(name)
-    const disclosedTools = visibleTools(effect.tools, config.toolDisclosureMode ?? 'legacy_full', activeTools)
+    const disclosedTools = visibleTools(effect.tools, config.toolDisclosureMode ?? 'legacy_full', new Set())
     await maybeRecordToolDisclosure(deps, live, effect.tools, disclosedTools)
     const callInput = {
       deps,
@@ -1011,11 +1008,14 @@ function callLlmOnce(input: {
   model?: string
   onTextDelta?: (delta: string) => void
 }, messages: readonly Message[]) {
+  const explicitSystem = input.config.systemPrompt === undefined ? undefined : withCurrentToolIntentionInstruction([
+    { role: 'system', content: [{ type: 'text', text: input.config.systemPrompt }] },
+  ])[0]!.content.flatMap((content) => content.type === 'text' ? [content.text] : []).join('')
   return input.deps.llm.call({
     messages,
     tools: input.tools,
     signal: input.signal,
-    ...(input.config.systemPrompt ? { systemPrompt: input.config.systemPrompt } : {}),
+    ...(explicitSystem !== undefined ? { systemPrompt: explicitSystem } : {}),
     ...(input.model ? { model: input.model } : {}),
     ...(input.config.thinkingBudget !== undefined
       ? { thinkingBudget: input.config.thinkingBudget }

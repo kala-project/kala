@@ -21,8 +21,8 @@ These capabilities must preserve replay, compaction, fork, approval, cancellatio
 | Concern | Authoritative source | Derived state |
 |---|---|---|
 | Session transcript | Session JSONL ordered by `seq` | browser search index and snippets |
-| Full Tool catalog | Session header `AgentConfig.tools` plus its catalog identity | per-request visible Tool set |
-| Activated on-demand Tools | durable Session event/state tied to catalog revision | in-memory search index |
+| Full Tool catalog | Session header `AgentConfig.tools` plus its catalog identity | stable provider Tool array |
+| Discovered Tools | durable Session metadata, intersected with the selected catalog | discovery results |
 | Network policy | validated versioned policy snapshot | normalized target decision |
 | Network audit | persisted Host audit entry accepted from a trusted execution location | Dashboard aggregation |
 | Child Agent task identity and state | child Session JSONL, parent/call lineage and current Agent state | `AgentTaskSummary` |
@@ -78,12 +78,12 @@ The UI exposes query, category filters, `current / total`, no-result state and a
 Each LLM request receives:
 
 $$
-T_{visible}=T_{core}\cup\{tool\_search,tool\_describe\}\cup T_{active}
+T_{visible}=T_{selected}
 $$
 
-Filtering occurs in the Host immediately before provider dispatch. Provider adapters continue receiving ordinary `ToolSchema[]`.
+Provider adapters receive the entire selected catalog in its original order, including discovery and skill Tools. Discovery, latest-message network intent, activation, and non-tool settings never change provider Tool membership, descriptions or schemas. The required `_intent` schema augmentation is deterministic and idempotent.
 
-Core Tools are a conservative bootstrap set needed to inspect the workspace and discover capabilities. Core status is explicit Tool metadata, not inferred from names. The initial core set includes catalog discovery plus focused read/search and task-planning primitives. Shell and mutation Tools may remain core only while compatibility evidence requires it; policy can shrink the set later.
+Runtime refresh updates matching static definitions in place without expanding a Session's explicit selection or dropping its workspace MCP descriptors. Persisted selections and prompts survive restart; delegated Tool locks remain restrictive, and DAG Sessions retain their planner selection.
 
 ### 4.2 Catalog operations
 
@@ -93,11 +93,11 @@ Core Tools are a conservative bootstrap set needed to inspect the workspace and 
 
 Activation is durable and catalog-bound. Before the next LLM effect begins, the Session JSONL records a `runtime_metadata` entry with `action: 'tools_activated'` and payload `{ catalogRevision, names }`. This is Host policy state, not model conversation state, so it does not become a Kernel event or enter model-visible messages.
 
-Session-log replay restores the active set. Names outside the locked catalog are rejected. An LLM response may invoke only Tools visible in that exact request; remembering a hidden historical name does not bypass disclosure.
+Session-log replay restores available activated names even when catalog identity changes; removed names are excluded. Names outside the locked catalog are rejected. Activation changes discovery results, not subsequent provider Tools. An LLM response may invoke only Tools in that exact request.
 
 ### 4.3 Compatibility
 
-Existing Session logs without disclosure state use `legacy_full`. New Sessions use the configured mode. A catalog revision mismatch never silently substitutes schemas:
+Existing Session logs without disclosure state use `legacy_full`. Both configured modes now send the stable selected catalog; the mode and activation metadata remain compatible with existing logs. Catalog revisions hash canonical actual descriptions and augmented input schemas, including their order, in addition to declared identity fields. A catalog revision mismatch never silently substitutes schemas:
 
 - historical schema remains the validation authority;
 - current implementation must satisfy compatible version and execution identity;
@@ -105,6 +105,8 @@ Existing Session logs without disclosure state use `legacy_full`. New Sessions u
 - the failure is observable and actionable.
 
 Executor announce must report actual implementation version instead of a universal synthetic version. Runtime compatibility checks are introduced without changing historical logs.
+
+OpenAI and Anthropic both give an explicit system prompt precedence over transcript system messages. Ordinary requests use the same prompt with one idempotent `_intent` instruction augmentation, not duplicate or provider-dependent instructions. Explicit user prompt settings updates remain durable and synchronized; delegated instructions are not overwritten with root defaults. Skill discovery may return newly authored skills without changing this prompt or the provider Tool array.
 
 ### 4.4 Observability
 

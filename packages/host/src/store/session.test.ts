@@ -90,10 +90,10 @@ describe('SessionStore.ensure', () => {
     const loaded = await reader.load('dag-runtime-config')
 
     expect(loaded.executionMode).toBe('dag')
-    expect(loaded.config.systemPrompt).toBe('mode:dag')
-    expect(loaded.config.tools.map((tool) => tool.name)).toEqual(['dag_plan'])
+    expect(loaded.config.systemPrompt).toBe('sys')
+    expect(loaded.config.tools).toEqual([])
     await reader.load('dag-runtime-config')
-    expect(loaded.config.systemPrompt).toBe('mode:dag')
+    expect(loaded.config.systemPrompt).toBe('sys')
   })
 
   it('durably replays system prompt updates without rewriting the legacy header or other config', async () => {
@@ -1112,7 +1112,7 @@ describe('SessionStore.ensure', () => {
     expect(readdirSync(dir).length).toBe(1)
   })
 
-  it('uses the current runtime tool catalog when loading an old session log', async () => {
+  it('does not replace a persisted root tool selection with renamed runtime tools', async () => {
     const sessionId = 'sess-runtime-tools'
     const oldRead = { name: 'read', description: 'old read', inputSchema: { type: 'object' }, requiresApproval: false }
     const newReadFile = { name: 'read_file', description: 'new read', inputSchema: { type: 'object' }, requiresApproval: false }
@@ -1125,18 +1125,47 @@ describe('SessionStore.ensure', () => {
     expect(persisted.header.config.tools.map((tool) => tool.name)).toEqual(['read'])
 
     const cached = await writer.load(sessionId, { runtimeConfig: newConfig })
-    expect(cached.config.tools.map((tool) => tool.name)).toEqual(['read_file'])
+    expect(cached.config.tools.map((tool) => tool.name)).toEqual(['read'])
 
     const reader = new SessionStore(dir, { runtimeConfig: newConfig })
     const loaded = await reader.load(sessionId)
-    expect(loaded.config.tools.map((tool) => tool.name)).toEqual(['read_file'])
+    expect(loaded.config.tools.map((tool) => tool.name)).toEqual(['read'])
 
     const { effects } = step(loaded.state, { kind: 'user_message', text: 'what tools are available?' }, loaded.config)
     expect(effects).toHaveLength(1)
     expect(effects[0]).toMatchObject({ kind: 'call_llm' })
     if (effects[0]?.kind === 'call_llm') {
-      expect(effects[0].tools.map((tool) => tool.name)).toEqual(['read_file'])
+      expect(effects[0].tools.map((tool) => tool.name)).toEqual(['read'])
     }
+  })
+
+  it.each(['chat', 'dag'] as const)('refreshes root runtime definitions without expanding selections or losing MCP descriptors: %s', async (executionMode) => {
+    const selectedName = executionMode === 'dag' ? 'dag_plan' : 'shell'
+    const selected = { name: selectedName, description: 'old static', inputSchema: { type: 'object' }, requiresApproval: false }
+    const mcp = { name: 'workspace__lookup', description: 'workspace MCP', inputSchema: { type: 'object', properties: { query: { type: 'string' } } }, requiresApproval: true, executionKind: 'executor' as const, schemaHash: 'mcp-hash' }
+    const refreshed = { ...selected, description: 'current static' }
+    const runtimeConfig = createConfig({
+      tools: [{ ...selected, name: 'write_file' }, refreshed],
+      systemPrompt: 'unrelated runtime prompt', contextLimit: 99_999,
+    })
+    const writer = new SessionStore(dir)
+    const record = await writer.create({
+      sessionId: `root-selection-${executionMode}`, executionMode,
+      config: createConfig({ tools: [mcp, selected], systemPrompt: 'selected prompt', contextLimit: 12_345 }),
+    })
+    const originalLock = record.toolLock
+    for (const store of [writer, new SessionStore(dir, { runtimeConfig })]) {
+      const loaded = await store.load(record.sessionId, { recoverDangling: false, runtimeConfig })
+      expect(loaded.config.tools).toEqual([mcp, refreshed])
+      expect(loaded.config.systemPrompt).toBe('selected prompt')
+      expect(loaded.config.contextLimit).toBe(99_999)
+      expect(loaded.toolLock).toEqual(originalLock)
+      const { effects } = step(loaded.state, { kind: 'user_message', text: 'continue' }, loaded.config)
+      expect(effects[0]).toMatchObject({ kind: 'call_llm', tools: [mcp, refreshed] })
+    }
+    const empty = await writer.create({ sessionId: `empty-root-${executionMode}`, executionMode, config: createConfig({ tools: [] }) })
+    expect((await writer.load(empty.sessionId, { runtimeConfig })).config.tools).toEqual([])
+    expect((await new SessionStore(dir, { runtimeConfig }).load(empty.sessionId)).config.tools).toEqual([])
   })
 
   it('does not expand child tools when applying runtime config from cache or disk', async () => {
@@ -1201,7 +1230,7 @@ describe('SessionStore.ensure', () => {
     const restoredEmptyFork = await reader.load(emptyFork.sessionId)
     expect(reader.get(child.sessionId)).toBeUndefined()
     expect(reader.get(childFork.sessionId)).toBeUndefined()
-    expect(restoredRootFork.config.tools.map((tool) => tool.name)).toEqual(['read_file', 'shell'])
+    expect(restoredRootFork.config.tools.map((tool) => tool.name)).toEqual(['read_file'])
     expect(restoredRepeatedFork.delegationDepth).toBe(1)
     expect(restoredRepeatedFork.config.tools.map((tool) => tool.name)).toEqual(['read_file'])
     expect(restoredEmptyFork.config.tools).toEqual([])

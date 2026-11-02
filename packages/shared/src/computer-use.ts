@@ -53,6 +53,7 @@ export const ComputerObservationSchema = z.object({
 export type ComputerObservation = z.infer<typeof ComputerObservationSchema>
 
 const identity = {
+  policyStatusVersion: z.union([z.literal(1), z.literal(2)]).optional(),
   requestId: z.string().min(1).max(128),
   workspaceId: z.string().min(1).max(128),
   sessionId: z.string().min(1).max(128),
@@ -79,6 +80,10 @@ export const ComputerScreenshotSchema = z.object({
 export type ComputerScreenshot = z.infer<typeof ComputerScreenshotSchema>
 
 export type ComputerStatus = {
+  computerUseEnabled?: boolean
+  desktopPreviewEnabled?: boolean
+  manualAuthorizationRequired?: boolean
+  automatic?: boolean
   available: boolean
   platform: string
   reason?: string
@@ -101,6 +106,10 @@ export const ComputerResponseSchema: z.ZodType<ComputerResponse> = z.object({
     available: z.boolean(), platform: z.string(), reason: z.string().optional(),
     active: z.boolean(), sessionId: z.string().optional(), allowAgent: z.boolean(),
     expiresAt: z.number().optional(),
+    manualAuthorizationRequired: z.boolean().optional(),
+    automatic: z.boolean().optional(),
+    computerUseEnabled: z.boolean().optional(),
+    desktopPreviewEnabled: z.boolean().optional(),
   }).strict().optional(),
   leaseId: lease.optional(),
   screenshot: ComputerScreenshotSchema.optional(),

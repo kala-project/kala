@@ -63,6 +63,9 @@ export type AgentPromptSlot = {
 export type AgentRuntimeSettings = {
   selectedSlotId: AgentPromptSlotId
   slots: readonly AgentPromptSlot[]
+  desktopManualAuthorizationRequired?: boolean
+  computerUseEnabled?: boolean
+  desktopPreviewEnabled?: boolean
 }
 
 export class InvalidAgentRuntimeSettingsError extends Error {
@@ -435,6 +438,9 @@ export function organizationAgentSettingsPath(globalPath: string, organizationId
 
 export function defaultAgentRuntimeSettings(): AgentRuntimeSettings {
   return {
+    desktopManualAuthorizationRequired: false,
+    computerUseEnabled: false,
+    desktopPreviewEnabled: false,
     selectedSlotId: 'slot-1',
     slots: [
       { id: 'slot-1', name: '默认', prompt: DEFAULT_KALA_SYSTEM_PROMPT },
@@ -479,7 +485,10 @@ export function writeAgentRuntimeSettings(path: string, settings: AgentRuntimeSe
 
 export function parseAgentRuntimeSettings(value: unknown): AgentRuntimeSettings | undefined {
   if (!value || typeof value !== 'object') return undefined
-  const candidate = value as { selectedSlotId?: unknown; slots?: unknown }
+  const candidate = value as { selectedSlotId?: unknown; slots?: unknown; desktopManualAuthorizationRequired?: unknown; computerUseEnabled?: unknown; desktopPreviewEnabled?: unknown }
+  if (candidate.desktopManualAuthorizationRequired !== undefined && typeof candidate.desktopManualAuthorizationRequired !== 'boolean') return undefined
+  if (candidate.computerUseEnabled !== undefined && typeof candidate.computerUseEnabled !== 'boolean') return undefined
+  if (candidate.desktopPreviewEnabled !== undefined && typeof candidate.desktopPreviewEnabled !== 'boolean') return undefined
   const selectedSlotId = candidate.selectedSlotId
   if (!isAgentPromptSlotId(selectedSlotId) || !Array.isArray(candidate.slots) || candidate.slots.length !== 3) return undefined
   const ids = ['slot-1', 'slot-2', 'slot-3'] as const
@@ -494,7 +503,8 @@ export function parseAgentRuntimeSettings(value: unknown): AgentRuntimeSettings 
     if (entry.id !== id || !name || name.length > 80 || !prompt.trim() || prompt.length > 100_000) return undefined
     slots.push({ id, name, prompt })
   }
-  return { selectedSlotId, slots }
+  return { selectedSlotId, slots, desktopManualAuthorizationRequired: candidate.desktopManualAuthorizationRequired ?? false,
+    computerUseEnabled: candidate.computerUseEnabled ?? false, desktopPreviewEnabled: candidate.desktopPreviewEnabled ?? false }
 }
 
 function isAgentPromptSlotId(value: unknown): value is AgentPromptSlotId {

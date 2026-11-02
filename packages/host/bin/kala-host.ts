@@ -248,6 +248,8 @@ async function main(): Promise<void> {
     return resolveBuiltinAgentModule({
       skills: skills.skills,
       systemPrompt: settings.slots.find((slot) => slot.id === settings.selectedSlotId)!.prompt,
+      desktopManualAuthorizationRequired: settings.desktopManualAuthorizationRequired ?? false,
+      computerUseEnabled: settings.computerUseEnabled ?? false,
       ...(resolveModelContextWindow(registry.defaultModel, registry.models)
         ? { contextLimit: resolveModelContextWindow(registry.defaultModel, registry.models) }
         : {}),
@@ -307,6 +309,8 @@ async function main(): Promise<void> {
       build: buildInfo,
     },
     agentModule: actorAgentModule.metadata,
+    desktopAccess: { manualAuthorizationRequired: actorSettings.desktopManualAuthorizationRequired ?? false,
+      computerUseEnabled: actorSettings.computerUseEnabled ?? false, desktopPreviewEnabled: actorSettings.desktopPreviewEnabled ?? false },
     agentPrompt: {
       selectedSlotId: actorSettings.selectedSlotId,
       slots: actorSettings.slots,
@@ -407,7 +411,20 @@ async function main(): Promise<void> {
     updateAgentPrompt: (input, actor) => {
       // Publish nothing in memory until the atomic rename succeeds. A failed
       // save therefore leaves both GET and the next model call on the old file.
-      writeAgentRuntimeSettings(settingsPathForActor(actor), input)
+      writeAgentRuntimeSettings(settingsPathForActor(actor), { ...agentSettingsForActor(actor), ...input,
+        desktopManualAuthorizationRequired: agentSettingsForActor(actor).desktopManualAuthorizationRequired ?? false })
+      return makeSettings(actor)
+    },
+    desktopManualAuthorizationRequired: (actor) => agentSettingsForActor(actor).desktopManualAuthorizationRequired ?? false,
+    desktopFeaturePolicy: (actor) => {
+      const settings = agentSettingsForActor(actor)
+      return { computerUseEnabled: settings.computerUseEnabled ?? false, desktopPreviewEnabled: settings.desktopPreviewEnabled ?? false }
+    },
+    updateDesktopAccess: (input, actor) => {
+      const current = agentSettingsForActor(actor)
+      writeAgentRuntimeSettings(settingsPathForActor(actor), { ...current, desktopManualAuthorizationRequired: input.manualAuthorizationRequired,
+        computerUseEnabled: input.computerUseEnabled ?? current.computerUseEnabled ?? false,
+        desktopPreviewEnabled: input.desktopPreviewEnabled ?? current.desktopPreviewEnabled ?? false })
       return makeSettings(actor)
     },
     initializeSocketAdmin: (input) => {

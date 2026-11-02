@@ -4,6 +4,15 @@ import { createBuiltinAgentModule, DEFAULT_KALA_SYSTEM_PROMPT, resolveBuiltinAge
 const context = { mode: 'coding' as const, skills: [] }
 
 describe('built-in assistant identity', () => {
+  it('keeps LLM tools and prompts stable across desktop feature settings', () => {
+    const enabled = resolveBuiltinAgentModule({ systemPrompt: 'My instructions.', computerUseEnabled: true })
+    const disabled = resolveBuiltinAgentModule({ systemPrompt: 'My instructions.', computerUseEnabled: false })
+    expect(disabled.systemPrompt).toBe('My instructions.')
+    expect(disabled.tools).toEqual(enabled.tools)
+    expect(disabled.systemPrompt).toBe(enabled.systemPrompt)
+    expect(disabled.tools.some((tool) => tool.name === 'computer_use')).toBe(true)
+    expect(disabled.tools.some((tool) => tool.name === 'shell')).toBe(true)
+  })
   it('uses brand-neutral Kala metadata and identity', () => {
     const module = createBuiltinAgentModule()
     const prompt = module.systemPrompt.render(context)
@@ -30,8 +39,20 @@ describe('built-in assistant identity', () => {
     const selected = resolveBuiltinAgentModule({ systemPrompt: 'My own instructions.' })
     const defaults = resolveBuiltinAgentModule()
 
+    expect(selected.systemPrompt).toContain('My own instructions.')
     expect(selected.systemPrompt).toBe('My own instructions.')
     expect(selected.tools).toEqual(defaults.tools)
+  })
+
+  it('keeps authorization enforcement out of the prompt while retaining fixed tool boundaries', () => {
+    const automatic = resolveBuiltinAgentModule()
+    const manual = resolveBuiltinAgentModule({ desktopManualAuthorizationRequired: true })
+    expect(manual.systemPrompt).toBe(automatic.systemPrompt)
+    expect(manual.tools).toEqual(automatic.tools)
+    expect(automatic.systemPrompt).not.toContain('The user must first enable local desktop sharing')
+    const desktop = automatic.tools.find((tool) => tool.name === 'computer_use')
+    expect(JSON.stringify(desktop)).toContain('a user pause')
+    expect(JSON.stringify(desktop)).toContain('not blanket approval for external side effects')
   })
 
   it('distinguishes discussion from implementation and includes language guidance', () => {

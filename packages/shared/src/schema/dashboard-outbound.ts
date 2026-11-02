@@ -1036,6 +1036,7 @@ export const ServerSettingsPayloadSchema = z.object({
   }).optional(),
   agentModule: AgentModuleMetadataSchema.optional(),
   agentPrompt: SettingsAgentPromptSchema.optional(),
+  desktopAccess: z.object({ manualAuthorizationRequired: z.boolean(), computerUseEnabled: z.boolean().optional(), desktopPreviewEnabled: z.boolean().optional() }).optional(),
   auth: z
     .object({
       dashboardAuthRequired: z.boolean(),

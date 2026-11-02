@@ -18,17 +18,27 @@ describe('progressive Tool disclosure', () => {
     expect(toolCatalogRevision(tools)).not.toBe(toolCatalogRevision(tools.map((tool) => tool.name === 'write_file' ? { ...tool, version: '2.0.0' } : tool)))
   })
 
-  it('keeps core and discovery visible and adds activated Tools in catalog order', () => {
-    expect(visibleTools(tools, 'progressive', new Set()).map((tool) => tool.name)).toEqual(['tool_search', 'tool_describe', 'read_file', 'todo_graph'])
-    expect(visibleTools(tools, 'progressive', new Set(['webfetch'])).map((tool) => tool.name)).toEqual(['tool_search', 'tool_describe', 'read_file', 'todo_graph', 'webfetch'])
+  it('keeps every configured Tool visible in catalog order regardless of activation', () => {
+    expect(visibleTools(tools, 'progressive', new Set()).map((tool) => tool.name)).toEqual(tools.map((tool) => tool.name))
+    expect(visibleTools(tools, 'progressive', new Set(['webfetch']))).toEqual(visibleTools(tools, 'progressive', new Set()))
     expect(visibleTools(tools, 'legacy_full', new Set()).map((tool) => tool.name)).toEqual(tools.map((tool) => tool.name))
   })
 
-  it('hides discovery when the locked catalog has no undisclosed Tools', () => {
+  it('retains discovery when the entire locked catalog is activated', () => {
     const coreOnly = tools.filter((tool) => ['tool_search', 'tool_describe', 'read_file', 'todo_graph'].includes(tool.name))
-    expect(visibleTools(coreOnly, 'progressive', new Set()).map((tool) => tool.name)).toEqual(['read_file', 'todo_graph'])
+    expect(visibleTools(coreOnly, 'progressive', new Set()).map((tool) => tool.name)).toEqual(coreOnly.map((tool) => tool.name))
     expect(visibleTools(tools, 'progressive', new Set(['write_file', 'webfetch', 'websearch'])).map((tool) => tool.name))
-      .toEqual(['read_file', 'todo_graph', 'write_file', 'webfetch', 'websearch'])
+      .toEqual(tools.map((tool) => tool.name))
+  })
+
+  it('fingerprints actual descriptions and schemas even with unchanged declared hashes', () => {
+    const revision = toolCatalogRevision(tools)
+    expect(toolCatalogRevision(tools.map((tool) => ({ ...tool, description: `${tool.description}!` })))).not.toBe(revision)
+    expect(toolCatalogRevision(tools.map((tool) => ({ ...tool, inputSchema: { properties: { query: { type: 'string' } } } })))).not.toBe(revision)
+    const schema = { type: 'object', properties: { path: { type: 'string', description: 'path' } } }
+    const reordered = { properties: { path: { description: 'path', type: 'string' } }, type: 'object' }
+    expect(toolCatalogRevision([{ ...tools[0]!, inputSchema: schema }])).toBe(toolCatalogRevision([{ ...tools[0]!, inputSchema: reordered }]))
+    expect(toolCatalogRevision(tools)).not.toBe(toolCatalogRevision([...tools].reverse()))
   })
 
   it('discloses websearch for explicit Chinese and English network research intent', () => {

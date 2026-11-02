@@ -586,3 +586,9 @@ export const ClientUpdateAgentPromptSettingsSchema = z.object({
     z.object({ id: z.literal('slot-3'), name: z.string().trim().min(1).max(80), prompt: z.string().min(1).max(100_000).refine((prompt) => prompt.trim().length > 0) }),
   ]),
 }) satisfies z.ZodType<ClientUpdateAgentPromptSettings>
+
+export const ClientUpdateDesktopAccessSettingsSchema = z.object({
+  manualAuthorizationRequired: z.boolean(),
+  computerUseEnabled: z.boolean().optional(),
+  desktopPreviewEnabled: z.boolean().optional(),
+}).strict()

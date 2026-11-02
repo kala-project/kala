@@ -225,6 +225,7 @@ export function attachJsonRoutes(
     deleteManualProvider?: (input: ClientDeleteManualProvider, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
     setDefaultModel?: (input: ClientSetDefaultModel, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
     updateAgentPrompt?: (input: ClientUpdateAgentPromptSettings, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
+    updateDesktopAccess?: (input: { manualAuthorizationRequired: boolean; computerUseEnabled?: boolean; desktopPreviewEnabled?: boolean }, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
     initializeSocketAdmin?: (input: { password: string; mode?: 'development' | 'production' }) => ServerSettingsPayload
     updateSocketAdminMode?: (input: { mode: 'development' | 'production' }) => ServerSettingsPayload
     artifactRootDir?: string | false
@@ -1133,6 +1134,25 @@ export function attachJsonRoutes(
         .catch((err: unknown) => sendSettingsError(res, err))
       return
     }
+    if (path === '/settings/desktop-access' && req.method === 'POST' && payloads.updateDesktopAccess) {
+      claimRoute(req)
+      const auth = authorizeSensitiveManagement(req, effectiveTenancy(payloads.deployment ?? PORTABLE_DEPLOYMENT), payloads.auth)
+      if (!auth.ok) { sendError(res, auth.status, auth.error); return }
+      void readJson(req).then(async (body) => {
+        const input = parseWire(schema.ClientUpdateDesktopAccessSettingsSchema, body, { channel: 'POST /settings/desktop-access' })
+        if (!input) { sendError(res, 400, 'invalid desktop access settings input'); return }
+        const result = await payloads.updateDesktopAccess!(input, auth.actor)
+        payloads.audit?.log({ action: 'settings.desktop_access_update', actor: auth.actor, target: input, outcome: 'ok' })
+        sendJson(req, res, result)
+      }).catch((err: unknown) => {
+        if (err instanceof Error && 'settingsSaved' in err && err.settingsSaved === true) {
+          sendJsonStatus(req, res, 503, { error: err.message, settingsSaved: true })
+        } else {
+          sendSettingsError(res, err)
+        }
+      })
+      return
+    }
     if (path === '/settings/agent-prompt' && req.method === 'POST' && payloads.updateAgentPrompt) {
       claimRoute(req)
       const auth = authorizeSensitiveManagement(req, effectiveTenancy(payloads.deployment ?? PORTABLE_DEPLOYMENT), payloads.auth)
@@ -1456,6 +1476,7 @@ function isProtectedJsonRoute(path: string): boolean {
     path === '/runtime/speech/token' ||
     path === '/runtime/speech/transcribe' ||
     path === '/settings/agent-prompt' ||
+    path === '/settings/desktop-access' ||
     path === '/settings/socket-admin/init' ||
     path === '/settings/socket-admin/mode' ||
     path === '/auth/executor-invites' ||

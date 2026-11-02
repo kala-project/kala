@@ -119,6 +119,68 @@ function callEffect(
 }
 
 describe('ExecutorRegistry', () => {
+  it('blocks dedicated desktop calls and preview while leaving shell dispatch available', async () => {
+    const reg = createExecutorRegistry(fakeIo() as never, { ...makeResolver({ old: 'ws-default' }),
+      desktopFeaturePolicy: () => ({ computerUseEnabled: false, desktopPreviewEnabled: false }) })
+    const socket = makeFakeSocket('desktop-options')
+    reg.attach(socket as never, { ...announceOf('desktop-options'), computerUseFeaturePolicyVersion: 1, tools: ['bash', '__computer_use', 'computer_use'] })
+    expect((await reg.callTool('old', callEffect('desktop', 'computer_use'))).failure?.code).toBe('computer_use_disabled')
+    const preview = await reg.computerRequest({ operation: 'status', requestId: 'status', sessionId: 'old', workspaceId: 'ws-default', policyStatusVersion: 2 }, 'owner')
+    expect(preview.status).toMatchObject({ available: false, computerUseEnabled: false, desktopPreviewEnabled: false })
+    expect((await reg.computerRequest({ operation: 'start', consent: true, allowAgent: true, requestId: 'start', sessionId: 'old', workspaceId: 'ws-default' }, 'owner')).error?.code).toBe('denied')
+    const shell = reg.callTool('old', callEffect('shell'))
+    await vi.waitFor(() => expect(socket.emitted.some((entry) => entry.event === 'tool:call')).toBe(true))
+    const call = socket.emitted.find((entry) => entry.event === 'tool:call')!
+    expect(call.payload).not.toHaveProperty('desktopComputerUseEnabled')
+    call.ack?.({ callId: 'shell', ok: true, content: 'ok' })
+    expect((await shell).ok).toBe(true)
+  })
+
+  it('discards a desktop result if its option was disabled while the call was in flight', async () => {
+    let enabled = true
+    const reg = createExecutorRegistry(fakeIo() as never, { ...makeResolver({ old: 'ws-default' }),
+      desktopFeaturePolicy: () => ({ computerUseEnabled: enabled, desktopPreviewEnabled: false }) })
+    const socket = makeFakeSocket('desktop-options')
+    reg.attach(socket as never, { ...announceOf('desktop-options'), computerUseFeaturePolicyVersion: 1, tools: ['computer_use'] })
+    const result = reg.callTool('old', callEffect('desktop', 'computer_use'))
+    await vi.waitFor(() => expect(socket.emitted.some((entry) => entry.event === 'tool:call')).toBe(true))
+    enabled = false
+    socket.emitted.find((entry) => entry.event === 'tool:call')!.ack?.({ callId: 'desktop', ok: true, content: 'private desktop image' })
+    expect(await result).toMatchObject({ ok: false, failure: { code: 'computer_use_disabled', outcome: 'indeterminate' } })
+    expect((await result).content).not.toContain('private desktop image')
+  })
+  it('uses current trusted desktop policy for an existing Session and reconnect, not model arguments', async () => {
+    let manual = false
+    const reg = createExecutorRegistry(fakeIo() as never, {
+      ...makeResolver({ old: 'ws-default' }),
+      desktopManualAuthorizationRequired: () => manual,
+    }, 5_000)
+    const first = makeFakeSocket('desktop-original')
+    reg.attach(first as never, { ...announceOf('desktop'), tools: ['computer_use'], computerUsePolicyVersion: 1 })
+    const operation = reg.callTool('old', callEffect('desktop-call', 'computer_use', undefined, {
+      operation: 'screenshot', desktopManualAuthorizationRequired: true,
+    }))
+    expect(first.emitted[0]?.payload).toMatchObject({ desktopManualAuthorizationRequired: false })
+    manual = true
+    const replacement = makeFakeSocket('desktop-reconnected')
+    reg.attach(replacement as never, { ...announceOf('desktop'), tools: ['computer_use'], computerUsePolicyVersion: 1 })
+    expect(replacement.emitted[0]?.payload).toMatchObject({ desktopManualAuthorizationRequired: true })
+    replacement.emitted[0]!.ack!({ callId: 'desktop-call', ok: true, content: 'done' })
+    await expect(operation).resolves.toMatchObject({ ok: true })
+  })
+
+  it('explicitly requires an in-place update rather than pretending an old Executor supports automatic desktop authorization', async () => {
+    const reg = createExecutorRegistry(fakeIo() as never, {
+      ...makeResolver({ old: 'ws-default' }), desktopManualAuthorizationRequired: () => false,
+    }, 5_000)
+    const socket = makeFakeSocket('old-desktop')
+    reg.attach(socket as never, { ...announceOf('old-desktop'), tools: ['computer_use'] })
+    await expect(reg.callTool('old', callEffect('blocked', 'computer_use'))).resolves.toMatchObject({
+      ok: false, failure: { code: 'executor_update_required', outcome: 'blocked' },
+    })
+    expect(socket.emitted).toHaveLength(0)
+  })
+
   it.each([false, true])('keeps same-callId results scoped to their Sessions (reconnect: %s)', async (reconnect) => {
     const reg = createExecutorRegistry(fakeIo() as never, makeResolver({ x: 'ws-default', y: 'ws-default' }), 5_000)
     const first = makeFakeSocket('shared-original')

@@ -105,6 +105,8 @@ export type ExecutorChangeListener = (change: ServerExecutorChangedPayload) => v
  */
 export type WorkspaceResolver = {
   workspaceIdFor(sessionId: string): string | undefined
+  desktopManualAuthorizationRequired?(sessionId: string): boolean
+  desktopFeaturePolicy?(sessionId: string): { computerUseEnabled: boolean; desktopPreviewEnabled: boolean }
   assertSessionEffectOwner?(sessionId: string): Promise<void | { ownerGeneration: string }>
   /** Session-snapshotted MCP input schema; never substitute a new same-name tool. */
   mcpSchemaHashFor?(sessionId: string, toolName: string): string | undefined
@@ -114,6 +116,7 @@ type PublishLocalImageRequest = { requestId: string; path: string; cwd?: string 
 type PublishLocalImageResponse = { requestId: string; path: string; base64?: string; mediaType?: string; size?: number; error?: string }
 
 export type ExecutorLookup = {
+  updateDesktopFeaturePolicy?(sessionId: string): Promise<void>
   computerRequest(payload: ComputerRequest, owner: string): Promise<ComputerResponse>
   executorForSession(sessionId: string): AttachedExecutor | undefined
   listDirs(workspaceId: string, path: string | undefined, requestId: string): Promise<DirListResult>
@@ -345,12 +348,19 @@ export function createExecutorRegistry(
       const emit = (authorized: boolean): void => {
         const pending = newBind.pending.get(key)
         if (!pending) return
-        if (!authorized) {
+        const desktopManualAuthorizationRequired = p.name === 'computer_use'
+          ? resolver.desktopManualAuthorizationRequired?.(p.sessionId) ?? true : undefined
+        const features = p.name === 'computer_use' ? resolver.desktopFeaturePolicy?.(p.sessionId) : undefined
+        const desktopUpdateRequired = (desktopManualAuthorizationRequired === false && newBind.announcement.computerUsePolicyVersion !== 1) ||
+          (features !== undefined && newBind.announcement.computerUseFeaturePolicyVersion !== 1)
+        if (!authorized || desktopUpdateRequired || features?.computerUseEnabled === false) {
           clearTimeout(pending.timer)
           newBind.pending.delete(key)
           pending.resolve({
             ok: false,
-            content: 'executor unavailable before reconnect dispatch; previous outcome unknown',
+            content: desktopUpdateRequired
+              ? 'Update this Executor for automatic desktop authorization before continuing; previous desktop operation outcome is unknown'
+              : 'executor unavailable before reconnect dispatch; previous outcome unknown',
             failure: { code: 'executor_reconnect_unavailable', category: 'infrastructure', outcome: 'indeterminate', retryable: false, responsibility: 'system' },
           })
           return
@@ -358,6 +368,9 @@ export function createExecutorRegistry(
         newBind.socket.emit(
           'tool:call',
           {
+            ...(features && newBind.announcement.computerUseFeaturePolicyVersion === 1
+              ? { desktopComputerUseEnabled: features.computerUseEnabled, desktopPreviewEnabled: features.desktopPreviewEnabled } : {}),
+            ...(desktopManualAuthorizationRequired !== undefined ? { desktopManualAuthorizationRequired } : {}),
             sessionId: p.sessionId,
             callId: p.callId,
             name: p.name,
@@ -763,6 +776,23 @@ export function createExecutorRegistry(
       const ackTimeoutMs = ackTimeoutMsFor(eff.name, eff.input, toolAckTimeoutMs)
       const owner = resolver.assertSessionEffectOwner ? await resolver.assertSessionEffectOwner(sessionId) : undefined
       if (!isCurrent(bind)) return { ok: false, content: 'executor unavailable before dispatch' }
+      const desktopManualAuthorizationRequired = eff.name === 'computer_use'
+        ? resolver.desktopManualAuthorizationRequired?.(sessionId) ?? true : undefined
+      const features = eff.name === 'computer_use' ? resolver.desktopFeaturePolicy?.(sessionId) : undefined
+      if (features?.computerUseEnabled === false) {
+        return { ok: false, content: 'Computer Use is disabled in administrator Settings.',
+          failure: { code: 'computer_use_disabled', category: 'precondition', outcome: 'blocked', retryable: false, responsibility: 'user' } }
+      }
+      if (features && bind.announcement.computerUseFeaturePolicyVersion !== 1) {
+        return { ok: false, content: 'Update this Executor to use configured Computer Use options.',
+          failure: { code: 'executor_update_required', category: 'precondition', outcome: 'blocked', retryable: true, responsibility: 'workspace' } }
+      }
+      if (desktopManualAuthorizationRequired === false && bind.announcement.computerUsePolicyVersion !== 1) {
+        return {
+          ok: false, content: 'Update this Executor in place to use desktop operations without extra Computer-panel authorization. Keep its existing workspace and credentials.',
+          failure: { code: 'executor_update_required', category: 'precondition', outcome: 'blocked', retryable: true, responsibility: 'workspace' },
+        }
+      }
       const key = JSON.stringify([sessionId, eff.callId])
       audit?.log({ action: 'tool.dispatch', actor: { kind: 'system' }, target: { sessionId, workspaceId: bind.announcement.workspaceId, callId: eff.callId, toolName: eff.name }, outcome: 'ok', metadata: { cwd: eff.cwd } })
       return await new Promise<{ ok: boolean; content: string; failure?: import('@agent-kernel/kernel').ToolFailure; durationMs?: number }>((resolve) => {
@@ -790,6 +820,8 @@ export function createExecutorRegistry(
         bind.socket.emit(
           'tool:call',
           {
+            ...(features ? { desktopComputerUseEnabled: features.computerUseEnabled, desktopPreviewEnabled: features.desktopPreviewEnabled } : {}),
+            ...(desktopManualAuthorizationRequired !== undefined ? { desktopManualAuthorizationRequired } : {}),
             sessionId,
             callId: eff.callId,
             name: eff.name,
@@ -805,6 +837,11 @@ export function createExecutorRegistry(
             if (!pending) return
             clearTimeout(pending.timer)
             bind.pending.delete(key)
+            if (eff.name === 'computer_use' && resolver.desktopFeaturePolicy?.(sessionId).computerUseEnabled === false) {
+              pending.resolve({ ok: false, content: 'Computer Use was disabled; desktop results are not forwarded.',
+                failure: { code: 'computer_use_disabled', category: 'precondition', outcome: 'indeterminate', retryable: false, responsibility: 'user' } })
+              return
+            }
             audit?.log({ action: 'tool.result', actor: { kind: 'executor', executorId: bind.announcement.executorId, workspaceId: bind.announcement.workspaceId }, target: { sessionId, callId: ack.callId, toolName: eff.name }, outcome: ack.ok ? 'ok' : 'error', metadata: { contentBytes: Buffer.byteLength(ack.content, 'utf8') }, ...(ack.ok ? {} : { error: ack.content.slice(0, 200) }) })
             pending.resolve({ ok: ack.ok, content: ack.content, ...(ack.failure ? { failure: ack.failure } : {}), ...(ack.durationMs !== undefined ? { durationMs: ack.durationMs } : {}) })
           },
@@ -1136,12 +1173,55 @@ export function createExecutorRegistry(
       const bind = findBindByWorkspace(payload.workspaceId)
       if (bind) ignoreAsync(runTerminalOperation(bind, () => undefined, () => { bind.socket.emit('terminal:close_session', payload) }))
     },
+    async updateDesktopFeaturePolicy(sessionId) {
+      const policy = resolver.desktopFeaturePolicy?.(sessionId)
+      if (!policy) return
+      for (const bind of allPendingBinds()) {
+        for (const [key, pending] of bind.pending) {
+          if (pending.sessionId !== sessionId || pending.name !== 'computer_use' || policy.computerUseEnabled) continue
+          bind.socket.emit('tool:cancel', { sessionId, callId: pending.callId })
+          clearTimeout(pending.timer)
+          bind.pending.delete(key)
+          pending.resolve({ ok: false, content: 'Computer Use was disabled; any already-delivered input cannot be undone.',
+            failure: { code: 'computer_use_disabled', category: 'precondition', outcome: 'indeterminate', retryable: false, responsibility: 'user' } })
+        }
+      }
+      const bind = pickBindFor(sessionId)
+      if (!bind.ok || bind.bind.announcement.computerUseFeaturePolicyVersion !== 1) return
+      const fail = (message: string): ComputerResponse => ({ requestId: 'desktop-policy-refresh', error: { code: 'unavailable', message } })
+      const response = await callInternalTool<ComputerResponse>(bind.bind, bind.bind.announcement.workspaceId, '__computer_use', {
+        owner: 'host-policy', request: { operation: 'status', requestId: 'desktop-policy-refresh', workspaceId: bind.bind.announcement.workspaceId, sessionId, policyStatusVersion: 2 },
+        desktopManualAuthorizationRequired: resolver.desktopManualAuthorizationRequired?.(sessionId) ?? true,
+        desktopComputerUseEnabled: policy.computerUseEnabled, desktopPreviewEnabled: policy.desktopPreviewEnabled,
+      }, fail)
+      if (response.error) throw new Error(response.error.message)
+    },
     async computerRequest(payload, owner) {
       const fail = (message: string): ComputerResponse => ({ requestId: payload.requestId, error: { code: 'unavailable', message } })
       const bind = findBindByWorkspace(payload.workspaceId)
       if (!bind) return fail('Workspace is offline')
       if (!bind.announcement.tools.includes('__computer_use')) return fail('This Executor needs an update before it can share its desktop')
-      return await callInternalTool<ComputerResponse>(bind, payload.workspaceId, '__computer_use', { request: payload, owner }, fail)
+      const features = resolver.desktopFeaturePolicy?.(payload.sessionId)
+      const disabled = features && (!features.computerUseEnabled || !features.desktopPreviewEnabled)
+      if (disabled && payload.operation !== 'stop') {
+        const reason = !features.computerUseEnabled ? 'Computer Use is disabled in administrator Settings.' : 'Desktop preview is disabled in administrator Settings.'
+        return payload.operation === 'status' ? { requestId: payload.requestId, status: { available: false, platform: 'executor', reason, active: false, allowAgent: false,
+          ...(payload.policyStatusVersion ? { manualAuthorizationRequired: resolver.desktopManualAuthorizationRequired?.(payload.sessionId) ?? true, automatic: false } : {}),
+          ...(payload.policyStatusVersion === 2 ? features : {}) } }
+          : { requestId: payload.requestId, error: { code: 'denied', message: reason } }
+      }
+      if (features && bind.announcement.computerUseFeaturePolicyVersion !== 1 && payload.operation !== 'stop') return fail('Update this Executor to use configured desktop preview options')
+      const request = { ...payload }
+      if (bind.announcement.computerUsePolicyVersion !== 1 ||
+        (request.policyStatusVersion === 2 && bind.announcement.computerUseFeaturePolicyVersion !== 1)) delete request.policyStatusVersion
+      const response = await callInternalTool<ComputerResponse>(bind, payload.workspaceId, '__computer_use', {
+        request, owner,
+        desktopManualAuthorizationRequired: resolver.desktopManualAuthorizationRequired?.(payload.sessionId) ?? true,
+        ...(features ? { desktopComputerUseEnabled: features.computerUseEnabled, desktopPreviewEnabled: features.desktopPreviewEnabled } : {}),
+      }, fail)
+      const current = resolver.desktopFeaturePolicy?.(payload.sessionId)
+      if (payload.operation !== 'stop' && current && (!current.computerUseEnabled || !current.desktopPreviewEnabled)) return { requestId: payload.requestId, error: { code: 'denied', message: 'Desktop preview was disabled in administrator Settings.' } }
+      return response
     },
     appDebugTarget(workspaceId) {
       const bind = findBindByWorkspace(workspaceId)

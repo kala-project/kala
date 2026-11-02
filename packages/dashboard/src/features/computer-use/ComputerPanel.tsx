@@ -35,7 +35,7 @@ export function ComputerPanel({ socket, workspaceId, sessionId, visible }: Props
 
   const request = useCallback(async (operation: Operation) => {
     if (!socket || !workspaceId || !sessionId) throw new Error(t('computer.workspaceRequired'))
-    const result = await requestComputer(socket, { ...operation, requestId: randomId(), workspaceId, sessionId })
+    const result = await requestComputer(socket, { ...operation, policyStatusVersion: 2, requestId: randomId(), workspaceId, sessionId })
     if (result.error) throw new Error(result.error.message)
     return result
   }, [socket, workspaceId, sessionId, t])
@@ -53,7 +53,10 @@ export function ComputerPanel({ socket, workspaceId, sessionId, visible }: Props
     if (!id) return
     try {
       const result = await request({ operation: 'stop', leaseId: id })
-      if (generation.current === ownGeneration && result.status) setStatus(result.status)
+      if (generation.current === ownGeneration && result.status) {
+        setStatus(result.status)
+        setAllowAgent(result.status.allowAgent || result.status.manualAuthorizationRequired === false)
+      }
     } catch (error) {
       if (generation.current === ownGeneration) setError(error instanceof Error ? error.message : String(error))
     }
@@ -71,7 +74,10 @@ export function ComputerPanel({ socket, workspaceId, sessionId, visible }: Props
     setTyping(false)
     if (visible && socket && workspaceId && sessionId) {
       void request({ operation: 'status' }).then((result) => {
-        if (generation.current === ownGeneration && result.status) setStatus(result.status)
+        if (generation.current === ownGeneration && result.status) {
+          setStatus(result.status)
+          setAllowAgent(result.status.allowAgent || result.status.manualAuthorizationRequired === false)
+        }
       }).catch((error: unknown) => {
         if (generation.current === ownGeneration) setError(error instanceof Error ? error.message : String(error))
       })
@@ -112,7 +118,7 @@ export function ComputerPanel({ socket, workspaceId, sessionId, visible }: Props
   }, [request, stop])
 
   const start = async () => {
-    if (!consent || busy) return
+    if ((status?.manualAuthorizationRequired !== false && !consent) || busy) return
     setBusy(true)
     setError(null)
     const ownGeneration = generation.current
@@ -184,7 +190,13 @@ export function ComputerPanel({ socket, workspaceId, sessionId, visible }: Props
         <Button size="icon" variant="ghost" aria-label={t('computer.refresh')} onClick={() => {
           const ownGeneration = generation.current
           void request({ operation: 'status' }).then((result) => {
-            if (generation.current === ownGeneration) { if (result.status) setStatus(result.status); setError(null) }
+            if (generation.current === ownGeneration) {
+              if (result.status) {
+                setStatus(result.status)
+                if (!lease.current) setAllowAgent(result.status.allowAgent || result.status.manualAuthorizationRequired === false)
+              }
+              setError(null)
+            }
           }).catch((error: unknown) => { if (generation.current === ownGeneration) setError(error instanceof Error ? error.message : String(error)) })
         }} disabled={!socket || !sessionId}><RefreshCw className="size-4" /></Button>
         <Button size="icon" variant="ghost" aria-label={t('computer.expand')} disabled={!screenshot} onClick={() => setExpanded(!expanded)}><ZoomIn className="size-4" /></Button>
@@ -194,10 +206,10 @@ export function ComputerPanel({ socket, workspaceId, sessionId, visible }: Props
       {!lease.current ? <ScrollArea className="text-xs" contentClassName="space-y-3 p-3 min-h-full">
         <p>{t('computer.description')}</p>
         {!workspaceId || !sessionId ? <p>{t('computer.workspaceRequired')}</p> : !status?.available ? <p className="break-words text-muted-foreground">{status?.reason ?? t('computer.checking')}</p> : null}
-        {status?.active ? <p className="text-amber-600">{t('computer.occupied')}</p> : null}
-        <label className="flex items-start gap-2"><input data-testid="computer-consent" type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />{t('computer.consent')}</label>
-        <label className="flex items-start gap-2"><input type="checkbox" checked={allowAgent} onChange={(event) => setAllowAgent(event.target.checked)} />{t('computer.allowAgent')}</label>
-        <Button data-testid="computer-start" disabled={!consent || !status?.available || status.active || busy} onClick={() => { void start() }}>{busy ? t('computer.starting') : t('computer.start')}</Button>
+        {status?.active && !(status.automatic && status.sessionId === sessionId) ? <p className="text-amber-600">{t('computer.occupied')}</p> : null}
+        {status?.computerUseEnabled !== false && status?.desktopPreviewEnabled !== false && status?.manualAuthorizationRequired !== false ? <label className="flex items-start gap-2"><input data-testid="computer-consent" type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />{t('computer.consent')}</label> : null}
+        {status?.computerUseEnabled !== false && status?.desktopPreviewEnabled !== false ? <label className="flex items-start gap-2"><input type="checkbox" checked={allowAgent} onChange={(event) => setAllowAgent(event.target.checked)} />{t('computer.allowAgent')}</label> : null}
+        <Button data-testid="computer-start" disabled={(status?.manualAuthorizationRequired !== false && !consent) || !status?.available || (status.active && !(status.automatic && status.sessionId === sessionId)) || busy} onClick={() => { void start() }}>{busy ? t('computer.starting') : t('computer.start')}</Button>
       </ScrollArea> : <>
         <div className="flex items-center justify-between gap-2 border-b border-border/50 px-3 py-2 text-xs">
           <span className="text-emerald-600">{t('computer.sharing')}</span>
