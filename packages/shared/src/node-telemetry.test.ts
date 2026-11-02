@@ -103,12 +103,11 @@ describe('OnlineTelemetry', () => {
       void 'postgres://user:credential@db.example.invalid/private'
       return queryResult
     })).resolves.toBe(queryResult)
-    request.end(200)
-
     const clientError = new Error('raw S3 failure for bucket-sensitive/key-sensitive')
     await expect(telemetry.traceClientCall({ provider: 's3', operation: 'put' }, async () => {
       throw clientError
     })).rejects.toBe(clientError)
+    request.end(200)
     await telemetry.flush()
     await telemetry.close()
 
@@ -119,14 +118,71 @@ describe('OnlineTelemetry', () => {
     const requestSpan = spans.find((span: { name: string }) => span.name === 'http runtime.command')
     expect(pg).toMatchObject({ traceId: requestSpan.traceId, parentSpanId: requestSpan.spanId, kind: 3, status: { code: 1 } })
     expect(s3).toMatchObject({ kind: 3, status: { code: 2 } })
-    expect(s3).not.toHaveProperty('parentSpanId')
-    expect(s3.traceId).not.toBe(requestSpan.traceId)
+    expect(s3.parentSpanId).toBe(requestSpan.spanId)
+    expect(s3.traceId).toBe(requestSpan.traceId)
     expect(s3.attributes).toEqual(expect.arrayContaining([
       { key: 'provider', value: { stringValue: 's3' } },
       { key: 'operation', value: { stringValue: 'put' } },
       { key: 'error.type', value: { stringValue: 'client_error' } },
     ]))
     expect(body).not.toMatch(/SELECT secret|private_table|password|credential|db\.internal|bucket-sensitive|key-sensitive|raw S3 failure/u)
+  })
+
+  it('aggregates idle calls and failures without creating root traces or per-call metric signals', async () => {
+    const requests: Array<{ url: string; body: string }> = []
+    const send = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), body: String(init?.body) })
+      return new Response('', { status: 200 })
+    }) as typeof fetch
+    const telemetry = new OnlineTelemetry({ serviceName: 'kala-test', endpoint: 'http://localhost:4318',
+      authToken: TOKEN, fetch: send, flushIntervalMs: 60_000, queueCapacity: 16, batchSize: 16 })
+    const ended = telemetry.startHttpSpan('GET', 'ended.request')
+    ended.activate()
+    ended.end(200)
+    await telemetry.flush()
+    requests.length = 0
+    vi.mocked(send).mockClear()
+    for (let i = 0; i < 2_000; i += 1) await tracePostgresQuery(telemetry, async () => i)
+    const failure = new Error('private SQL and credentials must not escape')
+    await expect(tracePostgresQuery(telemetry, async () => { throw failure })).rejects.toBe(failure)
+    await telemetry.flush(false)
+    expect(send).not.toHaveBeenCalled()
+    await telemetry.close()
+    expect(requests).toHaveLength(1)
+    expect(requests[0]!.url).toMatch(/\/metrics$/u)
+    const metrics = JSON.parse(requests[0]!.body).resourceMetrics[0].scopeMetrics[0].metrics
+    expect(metrics).toHaveLength(2)
+    const counts = metrics.find((m: { name: string }) => m.name === 'kala_client_calls_total').sum.dataPoints
+    expect(counts.map((p: { asDouble: number }) => p.asDouble).sort((a: number, b: number) => a - b)).toEqual([1, 2000])
+    expect(JSON.stringify(metrics)).toContain('background')
+    expect(JSON.stringify(metrics)).toContain('error')
+    expect(requests[0]!.body).not.toContain(failure.message)
+    expect(metrics[1].histogram.dataPoints.reduce((n: number, p: { count: string }) => n + Number(p.count), 0)).toBe(2001)
+  })
+
+  it('keeps readiness health metrics and failures without adding business traces', async () => {
+    const requests: Array<{ url: string; body: string }> = []
+    const telemetry = new OnlineTelemetry({ serviceName: 'kala-test', endpoint: 'http://localhost:4318',
+      authToken: TOKEN, flushIntervalMs: 60_000, fetch: (async (url, init) => {
+        requests.push({ url: String(url), body: String(init?.body) })
+        return new Response('', { status: 200 })
+      }) as typeof fetch })
+    for (const [route, status] of [['gateway.health', 200], ['runtime.health', 503]] as const) {
+      const health = telemetry.startHttpSpan('GET', route)
+      health.activate()
+      await tracePostgresQuery(telemetry, async () => undefined)
+      health.end(status)
+    }
+    await telemetry.close()
+    expect(requests.some((r) => r.url.endsWith('/traces'))).toBe(false)
+    const metrics = requests.find((r) => r.url.endsWith('/metrics'))!.body
+    expect(metrics).toContain('gateway.health')
+    expect(metrics).toContain('runtime.health')
+    expect(metrics).toContain('5xx')
+    const logs = JSON.parse(requests.find((r) => r.url.endsWith('/logs'))!.body)
+    const failure = logs.resourceLogs[0].scopeLogs[0].logRecords[0]
+    expect(failure.severityText).toBe('ERROR')
+    expect(failure).not.toHaveProperty('traceId')
   })
 
   it('rejects malformed explicit observations without throwing or enqueueing', async () => {

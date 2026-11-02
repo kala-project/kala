@@ -56,7 +56,9 @@ export class UnitScheduler {
       .catch((error) => this.reportError(error))
       .finally(() => {
         this.tickPromise = undefined
-        if (!this.stopped) this.timer = setTimeout(() => { void this.tick() }, this.options.pollMs ?? 1000)
+        // Calendar schedules tolerate a bounded 30-second discovery delay. Do
+        // not scan shared durable state every second when there is no work.
+        if (!this.stopped) this.timer = setTimeout(() => { void this.tick() }, this.options.pollMs ?? 30_000)
       })
     await this.tickPromise
   }

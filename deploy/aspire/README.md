@@ -140,3 +140,11 @@ The [online-client and ingress follow-up](telemetry/native-client-ingress-accept
 ## Dedicated API handoff follow-up
 
 [Current-image API acceptance](dedicated-api-acceptance.md) closes the earlier authenticated Session-list401 and memo/tab404. New Gateway-managed Platform composition requires the verified ingress actor in either tenancy mode; legacy direct Dedicated Token authentication remains and still rejects forged ingress headers. User state now uses the complete permission-checked Unit/service/Organization/role/principal handoff with same-origin cookie writes. The final image pair is frozen from source346b92fc; three actual Owner read routes returned200 and each had four production Runtime PG CLIENT children under Gateway→Runtime HTTP spans. This is not a real model/Executor run or successful live memo-write test.
+
+### Idle PostgreSQL load repair
+
+The later [idle-load acceptance](./dedicated-idle-pg-acceptance.md) supersedes the earlier Runtime image: source `00685518` removes read-triggered lease writes and per-second calendar polling; actual scheduled-state scans fall 97.8% and scheduler-lease writes 93.7%. Necessary fenced heartbeat remains; default discovery delay is now up to 30 seconds plus processing time. Old Aspire history was cleared, not business data.
+
+### Quiet-idle trace correction
+
+The later [quiet-idle acceptance](./dedicated-client-trace-acceptance.md) supersedes the earlier idle-load repair for tracing: final source `2d04bcea` preserves real request CLIENT children, aggregates unparented clients and reports readiness via metrics/error logs. The final real 65-second idle window had **zero total trace spans**, with all three leases renewing and all six resources receiving metrics.

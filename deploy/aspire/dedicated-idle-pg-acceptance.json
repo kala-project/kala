@@ -1,0 +1,172 @@
+{
+  "sourceRevision": "0068551807a4c1984ed047ea56ae1db1ae9d66c1",
+  "runtimeImage": "kala-dedicated-idle-runtime@sha256:194b002a6b60105e592086694a4026e6268192cb6b846097062cd4844655b9a2",
+  "runtimeImageId": "sha256:194b002a6b60105e592086694a4026e6268192cb6b846097062cd4844655b9a2",
+  "gatewaySourceRevision": "346b92fc7875eb26deb8ed8999f591329a99736c",
+  "measurement": {
+    "measuredAt": "2026-10-29T18:43:16.353731+00:00",
+    "seconds": 60.06089461618103,
+    "databaseDelta": {
+      "xact_commit": 75,
+      "xact_rollback": 0,
+      "tup_returned": 15287,
+      "tup_fetched": 1363
+    },
+    "tableDeltas": {
+      "scheduled_task_states": {
+        "seq_scan": 0,
+        "idx_scan": 4,
+        "n_tup_ins": 0,
+        "n_tup_upd": 0,
+        "n_tup_del": 0
+      },
+      "scheduled_task_writer_leases": {
+        "seq_scan": 16,
+        "idx_scan": 0,
+        "n_tup_ins": 0,
+        "n_tup_upd": 12,
+        "n_tup_del": 0
+      },
+      "tenant_object_orphan_intents": {
+        "seq_scan": 0,
+        "idx_scan": 1,
+        "n_tup_ins": 0,
+        "n_tup_upd": 0,
+        "n_tup_del": 0
+      },
+      "tenant_runtime_unit_materializations": {
+        "seq_scan": 0,
+        "idx_scan": 12,
+        "n_tup_ins": 0,
+        "n_tup_upd": 0,
+        "n_tup_del": 0
+      },
+      "tenant_runtime_unit_placement_leases": {
+        "seq_scan": 38,
+        "idx_scan": 0,
+        "n_tup_ins": 0,
+        "n_tup_upd": 12,
+        "n_tup_del": 0
+      },
+      "tenant_runtime_unit_protocol_gates": {
+        "seq_scan": 0,
+        "idx_scan": 1,
+        "n_tup_ins": 0,
+        "n_tup_upd": 0,
+        "n_tup_del": 0
+      },
+      "tenant_runtime_unit_replica_memberships": {
+        "seq_scan": 12,
+        "idx_scan": 0,
+        "n_tup_ins": 0,
+        "n_tup_upd": 12,
+        "n_tup_del": 0
+      },
+      "tenant_session_latest_projection": {
+        "seq_scan": 0,
+        "idx_scan": 1,
+        "n_tup_ins": 0,
+        "n_tup_upd": 0,
+        "n_tup_del": 0
+      }
+    },
+    "baseline": {
+      "seconds": 15.15,
+      "xactCommit": 61,
+      "scheduledStateIndexScans": 45,
+      "schedulerLeaseUpdates": 48
+    },
+    "noLoadGenerator": true,
+    "scheduledReadReductionPercent": 97.75783115574195,
+    "schedulerLeaseWriteReductionPercent": 93.69390012552425,
+    "passed": true
+  },
+  "upgrade": {
+    "coldBackupSchemaVersion": 3,
+    "coldBackupEntries": 1999,
+    "coldBackupRoots": [
+      "caddy-config",
+      "caddy-data",
+      "postgres",
+      "recovery",
+      "silo"
+    ],
+    "coldRestoreTested": false,
+    "caSha256": "f0a68e2d6cfa3aa69d2d82d4aa9e807f58603b287b11bec72a72a50efcf8ee43",
+    "liveRuntimeImageMatchesRecord": true,
+    "runtimeHealthy": true
+  },
+  "apiReads": [
+    {
+      "path": "/api/v1/sessions?limit=1",
+      "status": 200,
+      "browserAuthorityOverwritten": true
+    },
+    {
+      "path": "/memo",
+      "status": 200,
+      "browserAuthorityOverwritten": true
+    },
+    {
+      "path": "/user/session-tabs",
+      "status": 200,
+      "browserAuthorityOverwritten": true
+    }
+  ],
+  "apiSecurityCases": [
+    {
+      "path": "/api/v1/sessions?limit=1",
+      "case": "anonymousForgedAuthority",
+      "status": 401
+    },
+    {
+      "path": "/memo",
+      "case": "anonymousForgedAuthority",
+      "status": 401
+    },
+    {
+      "path": "/memo",
+      "case": "missingOrigin",
+      "status": 403
+    },
+    {
+      "path": "/memo",
+      "case": "crossOrigin",
+      "status": 403
+    },
+    {
+      "path": "/user/session-tabs",
+      "case": "anonymousForgedAuthority",
+      "status": 401
+    },
+    {
+      "path": "/user/session-tabs",
+      "case": "missingOrigin",
+      "status": 403
+    },
+    {
+      "path": "/user/session-tabs",
+      "case": "crossOrigin",
+      "status": 403
+    }
+  ],
+  "runtimeServiceBoundary": {
+    "passed": true,
+    "outerMissingOrWrongSecretRejected": true,
+    "innerMissingIdentityRejected": true
+  },
+  "productionPgParentsStillVerified": true,
+  "focusedTestsPassed": 53,
+  "hostTypecheckPassed": true,
+  "oldAspireHistoryCleared": true,
+  "businessDataDeleted": false,
+  "telemetrySuppressed": false,
+  "defaultCalendarPollMs": 30000,
+  "modelConfigured": false,
+  "scope": "Same retained Dedicated LXD only; no real model/Executor or cold-restore claim.",
+  "sourceSha256": {
+    "packages/host/src/scheduled-tasks/postgres-store.ts": "b69142c893532e9492e3e5820d7b32ddbaf09d29f2eb399bc3e118a259968b47",
+    "packages/host/src/scheduled-tasks/scheduler.ts": "1bac86f0e44be77044358c42131e3f382dfd97629c69b4e7795e2bc373ee6a60",
+    "docs/architecture/deployment-mode-contract.md": "cf8feb800c00a946ccddde787a7da493f80768d82cf22909b2002e6bb962ae3c"
+  }
+}

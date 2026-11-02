@@ -114,6 +114,38 @@ integrationDescribe('Private Cloud PostgreSQL scheduled task store', () => {
     await second.close()
   })
 
+  it('does not renew the writer lease for repeated read-only polls', async () => {
+    const namespace = `tenant-${randomUUID()}`
+    const database = makeDatabase('read-without-renewal')
+    const store = new PostgresScheduledTaskStore(database.database, namespace, { leaseTtlMs: 120_000, heartbeatMs: 60_000 })
+    await store.start('unit-read')
+    try {
+      const lease = async () => (await database.database.query(`SELECT expires_at::text, updated_at::text
+        FROM scheduled_task_writer_leases WHERE namespace = $1 AND unit_id = $2`, [namespace, 'unit-read'])).rows
+      const before = await lease()
+      for (let i = 0; i < 10; i += 1) {
+        expect(await store.due(10)).toEqual([])
+        expect(await store.claimedRuns()).toEqual([])
+      }
+      expect(await lease()).toEqual(before)
+    } finally { await store.close() }
+  })
+
+  it.each(['expiry', 'owner', 'generation'] as const)('rejects read-only polls after lease %s changes', async (change) => {
+    const namespace = `tenant-${randomUUID()}`
+    const database = makeDatabase(`read-fenced-${change}`)
+    const store = new PostgresScheduledTaskStore(database.database, namespace, { leaseTtlMs: 120_000, heartbeatMs: 60_000 })
+    await store.start('unit-read-fenced')
+    try {
+      const patch = change === 'expiry' ? "expires_at = clock_timestamp() - interval '1 second'"
+        : change === 'owner' ? "owner_id = 'other-test-writer'" : 'generation = generation + 1'
+      await database.database.query(`UPDATE scheduled_task_writer_leases SET ${patch}
+        WHERE namespace = $1 AND unit_id = $2`, [namespace, 'unit-read-fenced'])
+      await expect(store.due(10)).rejects.toBeInstanceOf(ScheduledTaskFencedError)
+      await expect(store.claimedRuns()).rejects.toBeInstanceOf(ScheduledTaskFencedError)
+    } finally { await store.close() }
+  })
+
   it('fences an old writer after a newer generation takes over', async () => {
     const namespace = `tenant-${randomUUID()}`
     const firstDb = makeDatabase('fence-a')

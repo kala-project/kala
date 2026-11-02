@@ -1,0 +1,230 @@
+{
+  "sourceRevision": "2d04bcea53921c1c736faf7e15899b3199abfdcf",
+  "images": {
+    "runtime": "kala-dedicated-parented-runtime@sha256:f608d94689aeb5a97e0803ef0f9976569d954835f383144af31f699ec3d6f3dd",
+    "gateway": "kala-dedicated-parented-gateway@sha256:53b3352e4f673365cb6615a4171ec829a8c2759090af37a8e25bf4d7aade3ec5"
+  },
+  "beforeRepair": {
+    "totalSpanCountSinceLastViewerReset": 905,
+    "returnedSpanCount": 100,
+    "parsedSpanCount": 100,
+    "rootPgSpansInReturnedSample": 93,
+    "runtimeSourceRevision": "00685518",
+    "gatewaySourceRevision": "346b92fc",
+    "note": "Before the second fix; these counters expose the remaining standalone SQL trace problem, not an actual-query rate."
+  },
+  "intermediateSqlOnlyFix": {
+    "passed": true,
+    "observedSeconds": 65.06078429403715,
+    "unparentedClientTraceCount": 0,
+    "clientSpansAfterFinalClear": 0,
+    "allSpansAfterFinalClear": 14,
+    "maintenanceLeaseUpdateDeltas": {
+      "tenant_runtime_unit_placement_leases": 13,
+      "scheduled_task_writer_leases": 13,
+      "tenant_runtime_unit_replica_memberships": 13
+    },
+    "oldViewerHistoryCleared": true,
+    "noSyntheticBusinessRequestsDuringWindow": true,
+    "measuredAt": "2026-10-29T18:53:59.215850+00:00",
+    "resourceMetricFlags": [
+      {
+        "resourceName": "dashboard",
+        "hasMetrics": true
+      },
+      {
+        "resourceName": "ingress",
+        "hasMetrics": true
+      },
+      {
+        "resourceName": "kala-gateway",
+        "hasMetrics": true
+      },
+      {
+        "resourceName": "kala-runtime",
+        "hasMetrics": true
+      },
+      {
+        "resourceName": "postgres",
+        "hasMetrics": true
+      },
+      {
+        "resourceName": "silo",
+        "hasMetrics": true
+      }
+    ]
+  },
+  "finalIdleWindow": {
+    "passed": true,
+    "observedSeconds": 65.06542558781803,
+    "unparentedClientTraceCount": 0,
+    "clientSpansAfterFinalClear": 0,
+    "allSpansAfterFinalClear": 0,
+    "remainingSpanNames": [],
+    "maintenanceLeaseUpdateDeltas": {
+      "tenant_runtime_unit_placement_leases": 13,
+      "scheduled_task_writer_leases": 13,
+      "tenant_runtime_unit_replica_memberships": 13
+    },
+    "oldViewerHistoryCleared": true,
+    "noSyntheticBusinessRequestsDuringWindow": true,
+    "measuredAt": "2026-10-29T18:58:50.243482+00:00",
+    "resourceMetricFlags": [
+      {
+        "resourceName": "dashboard",
+        "hasMetrics": true
+      },
+      {
+        "resourceName": "ingress",
+        "hasMetrics": true
+      },
+      {
+        "resourceName": "kala-gateway",
+        "hasMetrics": true
+      },
+      {
+        "resourceName": "kala-runtime",
+        "hasMetrics": true
+      },
+      {
+        "resourceName": "postgres",
+        "hasMetrics": true
+      },
+      {
+        "resourceName": "silo",
+        "hasMetrics": true
+      }
+    ]
+  },
+  "compiledPolicyCheck": {
+    "passed": true,
+    "productionCompiledModuleVerified": true,
+    "syntheticCallbacksOnly": true,
+    "databaseQueriesIssued": 0,
+    "liveExporterTrafficIssued": 0,
+    "callbackCount": 1001,
+    "tracePosts": 0,
+    "aggregateMetricPosts": 1,
+    "aggregateMetricMessages": 2,
+    "successCount": 1000,
+    "failureCount": 1
+  },
+  "coldBackupVerification": {
+    "coldBackupSchemaVersion": 3,
+    "coldBackupEntries": 2011,
+    "coldBackupRoots": [
+      "caddy-config",
+      "caddy-data",
+      "postgres",
+      "recovery",
+      "silo"
+    ],
+    "coldRestoreTested": false,
+    "caSha256": "f0a68e2d6cfa3aa69d2d82d4aa9e807f58603b287b11bec72a72a50efcf8ee43",
+    "liveImagesMatch": true
+  },
+  "realApiVerification": {
+    "passed": true,
+    "ownerPositiveReads": [
+      {
+        "path": "/api/v1/sessions?limit=1",
+        "status": 200,
+        "browserAuthorityOverwritten": true
+      },
+      {
+        "path": "/memo",
+        "status": 200,
+        "browserAuthorityOverwritten": true
+      },
+      {
+        "path": "/user/session-tabs",
+        "status": 200,
+        "browserAuthorityOverwritten": true
+      }
+    ],
+    "negativeCases": [
+      {
+        "path": "/api/v1/sessions?limit=1",
+        "case": "anonymousForgedAuthority",
+        "status": 401
+      },
+      {
+        "path": "/memo",
+        "case": "anonymousForgedAuthority",
+        "status": 401
+      },
+      {
+        "path": "/memo",
+        "case": "missingOrigin",
+        "status": 403
+      },
+      {
+        "path": "/memo",
+        "case": "crossOrigin",
+        "status": 403
+      },
+      {
+        "path": "/user/session-tabs",
+        "case": "anonymousForgedAuthority",
+        "status": 401
+      },
+      {
+        "path": "/user/session-tabs",
+        "case": "missingOrigin",
+        "status": 403
+      },
+      {
+        "path": "/user/session-tabs",
+        "case": "crossOrigin",
+        "status": 403
+      }
+    ],
+    "productionTraces": [
+      {
+        "path": "/api/v1/sessions?limit=1",
+        "traceId": "3729618118fbbef498f8eee5832e9389",
+        "runtimePgClientSpans": 4,
+        "gatewayRuntimePgParentsVerified": true
+      },
+      {
+        "path": "/memo",
+        "traceId": "eda2da2de44078e581ff23670676c95b",
+        "runtimePgClientSpans": 4,
+        "gatewayRuntimePgParentsVerified": true
+      },
+      {
+        "path": "/user/session-tabs",
+        "traceId": "bd8cea188776d362dff6ba878d9856e1",
+        "runtimePgClientSpans": 4,
+        "gatewayRuntimePgParentsVerified": true
+      }
+    ],
+    "runtimeServiceBoundary": {
+      "passed": true,
+      "outerMissingOrWrongSecretRejected": true,
+      "innerMissingIdentityRejected": true
+    },
+    "noSessionOrMemoWrites": true,
+    "noModelOrExecutorRequest": true,
+    "modelConfigured": false,
+    "probeLoginExplicitlyLoggedOut": true,
+    "traceCorrelationUsesIncomingW3CNotApiRequestId": true,
+    "images": {
+      "runtime": "kala-dedicated-parented-runtime@sha256:f608d94689aeb5a97e0803ef0f9976569d954835f383144af31f699ec3d6f3dd",
+      "gateway": "kala-dedicated-parented-gateway@sha256:53b3352e4f673365cb6615a4171ec829a8c2759090af37a8e25bf4d7aade3ec5"
+    }
+  },
+  "focusedTestsPassed": 56,
+  "sharedHostGatewayTypechecksPassed": true,
+  "clientMetricAggregationSeconds": 30,
+  "maximumClientMetricSeries": 16,
+  "readinessSuccessUsesMetricsOnly": true,
+  "readinessFailureLogVerifiedInUnitTest": true,
+  "businessDataDeleted": false,
+  "modelConfigured": false,
+  "scope": "Quiet idle dependency tracing and metrics. No model/SDK/Executor/cold-restore acceptance.",
+  "sourceSha256": {
+    "packages/shared/src/node-telemetry.ts": "0aaee132792083806137db9d59e4b8dabf5d120f1d3eee46bd97a092355fbdbc",
+    "docs/architecture/deployment-mode-contract.md": "4d518720a91f749d47a61b41c19f3d67187fc5bab06d15b839cad73571b9a5cb"
+  }
+}

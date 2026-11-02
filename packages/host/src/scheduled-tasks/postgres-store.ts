@@ -389,6 +389,9 @@ export class PostgresScheduledTaskStore implements ScheduledTaskStorage {
   async claimedRuns(): Promise<ScheduledRun[]> {
     const candidates = (await this.readState()).runs.filter((run) => run.status === 'claimed')
     if (this.#writerMode === 'parallel-v1') await this.tryBecomeParallelLeader()
+    // The authoritative read already proved there is nothing to recover. Do
+    // not enter the writable recovery transaction for an empty idle poll.
+    if (candidates.length === 0) return []
     const runnable = this.#writerMode === 'parallel-v1'
       ? (await Promise.all(candidates.map(async (run) => await this.canRunOccurrence(run.task, run.occurrenceId) ? run : undefined)))
           .filter((run): run is ScheduledRun => Boolean(run))
@@ -493,6 +496,22 @@ export class PostgresScheduledTaskStore implements ScheduledTaskStorage {
   }
 
   private async readState(): Promise<State> {
+    if (this.#writerMode === 'exclusive') {
+      // A read must check current DB authority, not renew it. The heartbeat and
+      // fenced mutations own renewal; polling must not create persistent writes.
+      return await this.serialized(async () => {
+        const token = this.requireToken()
+        const result = await this.database.query<StateRow>(`SELECT state.document
+          FROM ${this.#states} AS state JOIN ${this.#leases} AS lease
+            ON lease.namespace = state.namespace AND lease.unit_id = state.unit_id
+          WHERE state.namespace = $1 AND state.unit_id = $2
+            AND lease.owner_id = $3 AND lease.generation = $4
+            AND lease.expires_at > clock_timestamp()`,
+        [this.namespace, token.unitId, token.ownerId, token.generation.toString()])
+        if (!result.rows[0]) throw new ScheduledTaskFencedError()
+        return parseState(result.rows[0].document)
+      })
+    }
     return await this.serialized(async () => await this.database.transaction(async (transaction) => {
       const unitId = await this.assertWritable(transaction)
       const result = await transaction.query<StateRow>(`SELECT document FROM ${this.#states}

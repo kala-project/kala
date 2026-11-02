@@ -2,6 +2,7 @@ import { BackgroundAuthorizationError } from './authorization.js'
 import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -71,6 +72,25 @@ describe('scheduled task recurrence', () => {
 })
 
 describe('Unit scheduler durability and isolation', () => {
+  it('checks idle durable state every thirty seconds by default instead of every second', async () => {
+    const store = new ScheduledTaskStore(await directory())
+    const due = vi.spyOn(store, 'due')
+    const scheduler = new UnitScheduler(store, executor(), { unitId: 'idle-unit' })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      await scheduler.start()
+      expect(due).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(29_999)
+      expect(due).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      await scheduler.tick()
+      expect(due).toHaveBeenCalledTimes(2)
+    } finally {
+      await scheduler.stop()
+      vi.useRealTimers()
+    }
+  })
+
   it('isolates owner reads, requires pause before delete, and fences a second writer', async () => {
     const path = await directory()
     const store = new ScheduledTaskStore(path, () => new Date('2026-10-02T09:00:00.000Z'))
@@ -216,7 +236,7 @@ describe('Unit scheduler durability and isolation', () => {
   it('releases the writer lease when its process is force-killed', async () => {
     const path = await directory()
     const child = spawn(process.execPath, [
-      '--import', 'tsx', '--input-type=module', '--eval',
+      '--import', createRequire(import.meta.url).resolve('tsx'), '--input-type=module', '--eval',
       `import { ScheduledTaskStore } from ${JSON.stringify(new URL('./store.ts', import.meta.url).href)};
        const store = new ScheduledTaskStore(${JSON.stringify(path)});
        await store.start('u');

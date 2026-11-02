@@ -103,6 +103,7 @@ const EXPLICIT_SPAN_NAMES = new Set(['agent.turn', 'agent.llm', 'agent.tool', 'a
 const EXPLICIT_SPAN_STATUSES = new Set(['ok', 'error', 'unset'])
 const HISTOGRAM_BOUNDS_MS = [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000, 60_000, 300_000]
 const HISTOGRAM_BOUNDS_COUNT = [0, 1, 2, 5, 10, 25, 50, 100]
+type ClientAggregate = { attributes: Partial<SafeTelemetryAttributes>; count: number; sum: number; min: number; max: number; buckets: number[] }
 type ActiveRequestTrace = { traceId: string; spanId: string; active: boolean }
 const activeRequestTrace = new AsyncLocalStorage<ActiveRequestTrace>()
 
@@ -122,6 +123,8 @@ export class OnlineTelemetry {
   private readonly send: typeof fetch
   private readonly queue: Signal[] = []
   private readonly timer: ReturnType<typeof setInterval>
+  private readonly clientAggregates = new Map<string, ClientAggregate>()
+  private clientMetricsFlushedAt = process.hrtime.bigint()
   private flushing = false
   private stopped = false
 
@@ -144,7 +147,7 @@ export class OnlineTelemetry {
     this.timeoutMs = boundedInteger(options.timeoutMs ?? 2_000, 100, 10_000, 'timeout')
     this.send = options.fetch ?? fetch
     const interval = boundedInteger(options.flushIntervalMs ?? 2_000, 100, 60_000, 'flush interval')
-    this.timer = setInterval(() => { void this.flush() }, interval)
+    this.timer = setInterval(() => { void this.flush(false) }, interval)
     this.timer.unref()
   }
 
@@ -159,9 +162,10 @@ export class OnlineTelemetry {
     const startedAt = nowNano()
     const startedMono = process.hrtime.bigint()
     let ended = false
-    const context: ActiveRequestTrace = { traceId, spanId, active: true }
+    const metricsOnly = normalizedRoute === 'gateway.health' || normalizedRoute === 'runtime.health'
+    const context: ActiveRequestTrace = { traceId, spanId, active: !metricsOnly }
     return {
-      traceparent: `00-${traceId}-${spanId}-01`,
+      traceparent: `00-${traceId}-${spanId}-${metricsOnly ? '00' : '01'}`,
       correlationId: traceId,
       activate: () => activeRequestTrace.enterWith(context),
       end: (statusCode) => {
@@ -177,7 +181,7 @@ export class OnlineTelemetry {
           'status.class': statusClass,
           outcome: safeStatus >= 500 ? 'error' : safeStatus >= 400 ? 'rejected' : 'ok',
         })
-        this.enqueue({ kind: 'span', value: {
+        if (!metricsOnly) this.enqueue({ kind: 'span', value: {
           traceId, spanId, ...(parentSpanId ? { parentSpanId } : {}), name: `http ${normalizedRoute}`, kind: 2,
           startTimeUnixNano: startedAt,
           endTimeUnixNano: (BigInt(startedAt) + (process.hrtime.bigint() - startedMono)).toString(),
@@ -192,7 +196,7 @@ export class OnlineTelemetry {
         })
         if (safeStatus >= 500) this.log('error', 'HTTP request failed', {
           'http.request.method': normalizedMethod, 'http.route': normalizedRoute, 'status.class': statusClass,
-        }, traceId, spanId)
+        }, metricsOnly ? undefined : traceId, metricsOnly ? undefined : spanId)
       },
     }
   }
@@ -203,10 +207,11 @@ export class OnlineTelemetry {
    * never inputs to the telemetry path.
    */
   async traceClientCall<T>(client: ClientTelemetryOperation, call: () => Promise<T>): Promise<T> {
+    if (!((client.provider === 'postgresql' && client.operation === 'query')
+      || (client.provider === 's3' && ['put', 'get', 'delete'].includes(client.operation)))) return await call()
     const parent = activeRequestTrace.getStore()
-    const traceId = parent?.active ? parent.traceId : randomHex(16)
+    const traceId = parent?.active ? parent.traceId : undefined
     const parentSpanId = parent?.active ? parent.spanId : undefined
-    const spanId = randomHex(8)
     const startedAt = nowNano()
     const startedMono = process.hrtime.bigint()
     let status = 1
@@ -216,21 +221,44 @@ export class OnlineTelemetry {
       status = 2
       throw error
     } finally {
-      this.enqueue({ kind: 'span', value: {
+      const durationNs = process.hrtime.bigint() - startedMono
+      const attributes: Partial<SafeTelemetryAttributes> = {
+        component: client.provider === 'postgresql' ? 'database' : 'object-store',
+        provider: client.provider,
+        operation: client.operation,
+        outcome: status === 1 ? 'ok' : 'error',
+        'measurement.source': parentSpanId ? 'request' : 'background',
+        ...(status === 2 ? { 'error.type': 'client_error' } : {}),
+      }
+      if (!this.stopped) {
+        // Four fixed operations x two outcomes x two sources: at most 16 series,
+        // independent of SQL volume. Errors remain visible in aggregate metrics.
+        const key = `${client.provider}:${client.operation}:${status}:${parentSpanId ? 'request' : 'background'}`
+        const durationMs = Number(durationNs) / 1_000_000
+        let aggregate = this.clientAggregates.get(key)
+        if (!aggregate) {
+          aggregate = { attributes, count: 0, sum: 0, min: durationMs, max: durationMs,
+            buckets: Array(HISTOGRAM_BOUNDS_MS.length + 1).fill(0) }
+          this.clientAggregates.set(key, aggregate)
+        }
+        aggregate.count += 1
+        aggregate.sum += durationMs
+        aggregate.min = Math.min(aggregate.min, durationMs)
+        aggregate.max = Math.max(aggregate.max, durationMs)
+        const bucket = HISTOGRAM_BOUNDS_MS.findIndex((bound) => durationMs <= bound)
+        aggregate.buckets[bucket < 0 ? HISTOGRAM_BOUNDS_MS.length : bucket]! += 1
+      }
+      // A low-level dependency call is not a business root. In particular,
+      // idle heartbeat BEGIN/query/COMMIT must not become separate traces.
+      if (traceId && parentSpanId) this.enqueue({ kind: 'span', value: {
         traceId,
-        spanId,
-        ...(parentSpanId ? { parentSpanId } : {}),
+        spanId: randomHex(8),
+        parentSpanId,
         name: client.provider === 'postgresql' ? 'postgresql.query' : `s3.${client.operation}`,
         kind: 3,
         startTimeUnixNano: startedAt,
-        endTimeUnixNano: (BigInt(startedAt) + (process.hrtime.bigint() - startedMono)).toString(),
-        attributes: safeAttributes({
-          component: client.provider === 'postgresql' ? 'database' : 'object-store',
-          provider: client.provider,
-          operation: client.operation,
-          outcome: status === 1 ? 'ok' : 'error',
-          ...(status === 2 ? { 'error.type': 'client_error' } : {}),
-        }),
+        endTimeUnixNano: (BigInt(startedAt) + durationNs).toString(),
+        attributes: safeAttributes(attributes),
         status: { code: status },
       } })
     }
@@ -310,10 +338,27 @@ export class OnlineTelemetry {
     } })
   }
 
-  async flush(): Promise<void> {
-    if (this.flushing || this.queue.length === 0) return
+  async flush(forceClientMetrics = true): Promise<void> {
+    if (this.flushing) return
+    const metricsDue = forceClientMetrics || process.hrtime.bigint() - this.clientMetricsFlushedAt >= 30_000_000_000n
+    if (this.queue.length === 0 && !(metricsDue && this.clientAggregates.size)) return
     this.flushing = true
     const batch = this.queue.splice(0, this.batchSize)
+    if (metricsDue && this.clientAggregates.size) {
+      const timeUnixNano = nowNano()
+      const aggregates = [...this.clientAggregates.values()]
+      this.clientAggregates.clear()
+      this.clientMetricsFlushedAt = process.hrtime.bigint()
+      // Two bounded metric messages per window, not one signal per SQL call.
+      batch.push({ kind: 'metric', value: { name: 'kala_client_calls_total', unit: '1',
+        sum: { aggregationTemporality: 1, isMonotonic: true,
+          dataPoints: aggregates.map((a) => ({ timeUnixNano, asDouble: a.count, attributes: safeAttributes(a.attributes) })) } } })
+      batch.push({ kind: 'metric', value: { name: 'kala_client_duration_ms', unit: 'ms',
+        histogram: { aggregationTemporality: 1, dataPoints: aggregates.map((a) => ({
+          timeUnixNano, count: String(a.count), sum: a.sum, min: a.min, max: a.max,
+          explicitBounds: HISTOGRAM_BOUNDS_MS, bucketCounts: a.buckets.map(String), attributes: safeAttributes(a.attributes),
+        })) } } })
+    }
     try {
       for (const kind of ['span', 'log', 'metric'] as const) {
         const values = batch.filter((signal) => signal.kind === kind).map((signal) => signal.value)
