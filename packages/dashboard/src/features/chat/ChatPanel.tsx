@@ -858,7 +858,7 @@ function TranscriptSearchBar({
   const active = current >= 0 ? matches[current] : undefined
   const categories: readonly TranscriptSearchCategory[] = ['all', 'user', 'assistant', 'thinking', 'tools']
   return (
-    <div className="z-20 flex flex-none flex-col gap-2 border-b bg-background/95 px-3 py-2 shadow-sm backdrop-blur" data-testid="transcript-search" role="search">
+    <div className="z-20 flex flex-none flex-col gap-2 bg-card/95 px-3 py-2 backdrop-blur" data-testid="transcript-search" role="search">
       <div className="flex min-w-0 items-center gap-2">
         <Search className="h-4 w-4 flex-none text-muted-foreground" aria-hidden="true" />
         <input
@@ -869,7 +869,7 @@ function TranscriptSearchBar({
             if (event.key === 'Enter') { event.preventDefault(); onNavigate(event.shiftKey ? -1 : 1) }
             if (event.key === 'Escape') { event.preventDefault(); onClose() }
           }}
-          className="h-8 min-w-0 flex-1 rounded-md border bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="h-8 min-w-0 flex-1 rounded-md border border-border/50 bg-background px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
           placeholder={t('chat.transcript.searchPlaceholder')}
           aria-label={t('chat.transcript.searchLabel')}
           data-testid="transcript-search-input"
@@ -881,14 +881,14 @@ function TranscriptSearchBar({
         <Button type="button" size="icon" variant="ghost" className="h-8 w-8" onClick={() => onNavigate(1)} disabled={matches.length === 0} aria-label={t('chat.transcript.searchNext')}>↓</Button>
         <Button type="button" size="icon" variant="ghost" className="h-8 w-8" onClick={onClose} aria-label={t('common.close')}><X className="h-4 w-4" /></Button>
       </div>
-      <div className="flex min-w-0 items-center gap-1 overflow-x-auto">
+      <ScrollArea className="min-w-0" contentClassName="flex items-center gap-1 min-w-full w-max">
         {categories.map((value) => (
-          <button key={value} type="button" onClick={() => onCategoryChange(value)} aria-pressed={category === value} className={cn('rounded-full border px-2 py-0.5 text-meta', category === value ? 'border-primary bg-primary/10 text-foreground' : 'border-border text-muted-foreground hover:text-foreground')}>
+          <button key={value} type="button" onClick={() => onCategoryChange(value)} aria-pressed={category === value} className={cn('rounded-full border border-border/50 px-2 py-0.5 text-meta', category === value ? 'border-primary bg-primary/10 text-foreground' : 'border-border/50 text-muted-foreground hover:text-foreground')}>
             {t(`chat.transcript.searchCategories.${value}`)}
           </button>
         ))}
         {active ? <span className="ml-2 min-w-0 truncate text-meta text-muted-foreground" title={active.text}>{searchMatchSnippet(active)}</span> : null}
-      </div>
+      </ScrollArea>
     </div>
   )
 }
@@ -1112,7 +1112,7 @@ function PendingUserMessageRow({
             />
           ))}
           {shellState ? (
-            <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide opacity-80" data-testid={`shell-command-status-${item.id}`}>
+            <div className="flex items-center gap-1.5 text-caption font-semibold uppercase tracking-wide opacity-80" data-testid={`shell-command-status-${item.id}`}>
               {shellState === 'running' ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> : <Terminal className="h-3 w-3" aria-hidden="true" />}
               {shellState === 'nonzero' ? 'nonzero exit' : shellState}
             </div>
@@ -1147,10 +1147,10 @@ function ShellResultMessage({ text, ts }: { text: string; ts?: string }): JSX.El
   const label = result.state === 'nonzero' ? 'Completed with nonzero exit' : result.state === 'failed' ? 'Failed' : 'Completed'
   return (
     <div className="flex min-w-0 max-w-full justify-end" data-testid="shell-result-message" data-operation-id={result.operationId} data-status={result.state}>
-      <div className="relative min-w-0 max-w-[92%] overflow-hidden rounded-xl border border-border bg-muted/40 shadow-sm sm:max-w-[85%]">
-        <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-2">
+      <div className="relative min-w-0 max-w-[92%] overflow-hidden rounded-xl border border-border/50 bg-muted/40 shadow-sm sm:max-w-[85%]">
+        <div className="flex items-center justify-between gap-3 border-b border-border/50 px-3 py-2">
           <div className="flex items-center gap-2 text-xs font-semibold"><Terminal className="h-3.5 w-3.5" aria-hidden="true" />Shell command</div>
-          <span className={cn('text-[11px] font-semibold uppercase tracking-wide', result.state === 'completed' ? 'text-emerald-600 dark:text-emerald-400' : result.state === 'nonzero' ? 'text-amber-600 dark:text-amber-400' : 'text-destructive')}>
+          <span className={cn('text-caption font-semibold uppercase tracking-wide', result.state === 'completed' ? 'text-emerald-600 dark:text-emerald-400' : result.state === 'nonzero' ? 'text-amber-600 dark:text-amber-400' : 'text-destructive')}>
             {label}
           </span>
         </div>
@@ -2167,7 +2167,7 @@ function MessageRow({
         {scheduledTaskId ? (
           <button
             type="button"
-            className="inline-flex h-6 items-center gap-1 rounded px-1.5 text-[11px] font-medium text-inherit transition-colors hover:bg-primary-foreground/15 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="inline-flex h-6 items-center gap-1 rounded px-1.5 text-caption font-medium text-inherit transition-colors hover:bg-primary-foreground/15 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             aria-label="Open scheduled task details"
             title="Open scheduled task details"
             data-testid="scheduled-message-badge"
@@ -2435,7 +2435,7 @@ function TurnTimingFooter({ summary, userMessage = false, cancelledUserMessage =
             cancelledUserMessage
               ? 'order-first max-w-full flex-wrap justify-end whitespace-normal'
               : userMessage
-                ? 'absolute bottom-full right-0 z-20 mb-1 w-max max-w-[min(18rem,calc(100vw-2rem))] flex-wrap rounded-lg border border-border bg-popover px-2 py-1.5 shadow-md'
+                ? 'absolute bottom-full right-0 z-20 mb-1 w-max max-w-[min(18rem,calc(100vw-2rem))] flex-wrap rounded-lg border border-border/50 bg-popover px-2 py-1.5 shadow-md'
                 : 'h-7 flex-none whitespace-nowrap',
           )}
           data-testid={detailsId}
@@ -2849,7 +2849,7 @@ function ThinkingBlock({
                 : t(active ? 'chat.transcript.thinkingInProgress' : 'chat.transcript.thinking')}
             </span>
             {title ? (
-              <span className="hidden min-w-0 truncate text-foreground/80 sm:block" data-testid="thinking-title">
+              <span className="ak-chat-text hidden min-w-0 truncate text-foreground/80 sm:block" data-testid="thinking-title">
                 <span className="mr-1.5 text-muted-foreground/70" aria-hidden="true">·</span>
                 {title}
               </span>
@@ -3074,7 +3074,7 @@ const MarkdownBody = memo(function MarkdownBody({ text, streaming = false, trail
               <a
                 href={href}
                 {...rest}
-                className="not-prose inline-flex max-w-full items-center gap-1 rounded border border-border/70 bg-muted/50 px-1.5 py-0.5 align-baseline font-mono text-[0.85em] leading-snug text-foreground no-underline shadow-sm transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="not-prose inline-flex max-w-full items-center gap-1 rounded border border-border/70 bg-muted/50 px-1.5 py-0.5 align-baseline font-mono text-inherit leading-snug text-foreground no-underline shadow-sm transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 title={title}
                 aria-label={title}
                 data-testid="workspace-file-link"
@@ -4412,7 +4412,7 @@ function ToolCallGroupBlock({
                       ) : null}
                     </span>
                   </div>
-                  <div className="grid min-h-0 min-w-0 flex-1 touch-pan-y gap-2 overflow-y-auto overscroll-contain pr-1" data-testid={`tool-card-preview-scroll-${previewCallId}`}>
+                  <ScrollArea className="min-h-0 min-w-0 flex-1 touch-pan-y overscroll-contain" data-testid={`tool-card-preview-scroll-${previewCallId}`} contentClassName="grid gap-2 pr-1 min-h-full">
                     <ToolCallInlineDetail
                       call={previewCall}
                       approval={approvalByCallId.get(previewCallId) ?? null}
@@ -4421,7 +4421,7 @@ function ToolCallGroupBlock({
                     {previewResult ? <ToolResultInlineDetail result={previewResult} compactNarrative /> : (
                       <GroupSummaryPreview row={previewRow} status={previewStatus === 'partial' ? 'failed' : previewStatus} />
                     )}
-                  </div>
+                  </ScrollArea>
                 </div>,
                 document.body,
               )

@@ -1,3 +1,4 @@
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 import { Children, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type RefCallback } from 'react'
 import useMeasure from 'react-use-measure'
 import { NodeApi, Tree } from 'react-arborist'
@@ -201,7 +202,7 @@ export function DocsPage(): JSX.Element {
   )
 
   const contentView = (
-    <main className="h-full min-h-0 overflow-auto" data-testid="docs-content">
+    <ScrollArea className="h-full min-h-0" data-testid="docs-content" contentClassName="min-h-full" role="main">
       {error ? (
         <div className="m-4 rounded border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300" role="alert">
           {t('docs.page.error', { message: error })}
@@ -219,7 +220,7 @@ export function DocsPage(): JSX.Element {
           <DocsMarkdown body={content.body} />
         </article>
       ) : null}
-    </main>
+    </ScrollArea>
   )
 
   return (

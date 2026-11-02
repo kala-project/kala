@@ -1,4 +1,5 @@
-import { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { ScrollArea } from './components/ui/scroll-area.js'
+import { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Archive, Boxes, ChevronDown, ChevronRight, ChevronUp, Clock3, Eraser, FolderOpen, GitBranch, Info, ListChecks, Loader2, Menu, Moon, PanelLeftClose, PanelLeftOpen, PanelRight, PanelRightClose, Plus, Settings, ShieldCheck, Sparkles, Square, SquareTerminal, Sun, Workflow, X } from 'lucide-react'
 import { HelpHint } from './components/ui/help-hint.js'
@@ -121,7 +122,7 @@ const SourceControlPanel = lazy(() => loadDashboardExport(import('./features/sou
 
 export function workspaceTerminalDialogSizeClass(expanded: boolean): string {
   return cn(
-    '!left-0 !top-[var(--ak-viewport-offset-top,0px)] flex h-[var(--ak-viewport-h,100dvh)] max-h-[var(--ak-viewport-h,100dvh)] w-screen max-w-none !translate-x-0 !translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 p-0 pb-[env(safe-area-inset-bottom)] sm:!left-[50%] sm:!top-[calc(var(--ak-viewport-offset-top,0px)+var(--ak-viewport-h,100dvh)/2)] sm:!translate-x-[-50%] sm:!translate-y-[-50%] sm:rounded-xl sm:border sm:pb-0 [&_[data-testid=terminal-toolbar]]:pr-24',
+    '!left-0 !top-[var(--ak-viewport-offset-top,0px)] flex h-[var(--ak-viewport-h,100dvh)] max-h-[var(--ak-viewport-h,100dvh)] w-screen max-w-none !translate-x-0 !translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 p-0 pb-[env(safe-area-inset-bottom)] sm:!left-[50%] sm:!top-[calc(var(--ak-viewport-offset-top,0px)+var(--ak-viewport-h,100dvh)/2)] sm:!translate-x-[-50%] sm:!translate-y-[-50%] sm:rounded-xl sm:border border-border/50 sm:pb-0 [&_[data-testid=terminal-toolbar]]:pr-24',
     expanded
       ? 'sm:h-[calc(var(--ak-viewport-h,100dvh)-2rem)] sm:max-h-[calc(var(--ak-viewport-h,100dvh)-2rem)] sm:w-[calc(100vw-2rem)]'
       : 'sm:h-[min(calc(var(--ak-viewport-h,100dvh)-2rem),720px)] sm:max-h-[calc(var(--ak-viewport-h,100dvh)-2rem)] sm:w-[min(calc(100vw-2rem),1100px)]',
@@ -170,7 +171,7 @@ import { modelKey, resolveModelKey } from './app-logic/model-key.js'
 import { useModels } from './app-logic/use-models.js'
 import { useIsMobile, useMinWidth } from './app-logic/use-viewport.js'
 import { useInterfaceScale } from './lib/interface-scale.js'
-import { CHAT_FONT_SIZE_PX, SESSION_EXPLORER_FONT_SIZE_PX, FILE_EXPLORER_FONT_SIZE_PX } from './lib/display-sizes.js'
+import { CHAT_FONT_SIZE_PX, SESSION_EXPLORER_FONT_SIZE_PX, FILE_EXPLORER_FONT_SIZE_PX, readableFontSize } from './lib/display-sizes.js'
 import { deleteSessionScrollState, useSessionPinnedState } from './features/chat/session-scroll-state.js'
 import type { PendingUserTranscriptMessage } from './transcript.js'
 import type { DashboardSocket, TimelineEntry } from './session.js'
@@ -358,7 +359,7 @@ export function App(): JSX.Element {
   )
   const interfaceScale = useInterfaceScale()
   const [chatFontSize] = useNumberPref(PREF_CHAT_FONT_SIZE, DEFAULT_CHAT_FONT_SIZE, { min: 0, max: CHAT_FONT_SIZE_PX.length - 1 })
-  const [codeBlockFontSize] = useNumberPref(PREF_CODE_BLOCK_FONT_SIZE, DEFAULT_CODE_BLOCK_FONT_SIZE, { min: 10, max: 48 })
+  const [codeBlockFontSize] = useNumberPref(PREF_CODE_BLOCK_FONT_SIZE, DEFAULT_CODE_BLOCK_FONT_SIZE, { min: 12, max: 48 })
   const [sessionExplorerFontSize] = useNumberPref(PREF_SESSION_EXPLORER_FONT_SIZE, DEFAULT_SESSION_EXPLORER_FONT_SIZE, { min: 0, max: SESSION_EXPLORER_FONT_SIZE_PX.length - 1 })
   const [fileExplorerFontSize] = useNumberPref(PREF_FILE_EXPLORER_FONT_SIZE, DEFAULT_FILE_EXPLORER_FONT_SIZE, { min: 0, max: FILE_EXPLORER_FONT_SIZE_PX.length - 1 })
   const [chatContentWidth] = useNumberPref(PREF_CHAT_CONTENT_WIDTH, DEFAULT_CHAT_CONTENT_WIDTH, { min: 0, max: 2 })
@@ -383,8 +384,8 @@ export function App(): JSX.Element {
   const [appBadgeEnabled] = useBooleanPref(PREF_APP_BADGE_ENABLED, true)
   const [keepScreenAwake] = useBooleanPref(PREF_KEEP_SCREEN_AWAKE, false)
   const [showPinnedMessage] = useBooleanPref(PREF_SHOW_PINNED_MESSAGE, true)
-  const sessionExplorerFontSizePx = Math.round((SESSION_EXPLORER_FONT_SIZE_PX[sessionExplorerFontSize] ?? 13) * interfaceScale)
-  const fileExplorerFontSizePx = Math.round((FILE_EXPLORER_FONT_SIZE_PX[fileExplorerFontSize] ?? 11) * interfaceScale)
+  const sessionExplorerFontSizePx = Math.round(readableFontSize(SESSION_EXPLORER_FONT_SIZE_PX[sessionExplorerFontSize] ?? 13, interfaceScale))
+  const fileExplorerFontSizePx = Math.round(readableFontSize(FILE_EXPLORER_FONT_SIZE_PX[fileExplorerFontSize] ?? 12, interfaceScale))
   const cachedSessionIdsRef = useRef<ReadonlySet<string>>(new Set())
   const [hostEndpoint, setHostEndpoint] = useState<ResolvedHostEndpoint>(() => resolveHostEndpoint())
   const identityCacheNamespace = platformMode
@@ -1744,9 +1745,10 @@ export function App(): JSX.Element {
     setSection(next)
     // Operations, Artifacts, Pipeline, and Docs are real pages rendered inline below.
   }, [])
+  const openDeployment = useMemo(() => deploymentServices ? () => { setExplorerDrawerOpen(false); setDeploymentCenterOpen(true) } : undefined, [deploymentServices])
   const explorerHeaderLeading = useMemo(
-    () => <ProductSwitcher section={section} onSelect={handleSectionSelect} adaptive />,
-    [handleSectionSelect, section],
+    () => <ProductSwitcher section={section} onSelect={handleSectionSelect} adaptive onOpenManagement={openDeployment} />,
+    [handleSectionSelect, section, openDeployment],
   )
 
   const commandPaletteCommands = useMemo<readonly CommandPaletteItem[]>(() => {
@@ -2100,7 +2102,7 @@ export function App(): JSX.Element {
     const detail = runtimeDeployment.error ?? authSession.error ?? t('app.accessErrorDefault')
     return (
       <main className="fixed inset-0 grid place-items-center bg-background p-4 text-foreground" data-testid="product-access-error">
-        <section className="w-full max-w-md rounded-2xl border bg-card p-6 shadow-xl" role="alert">
+        <section className="w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-xl" role="alert">
           <h1 className="text-xl font-semibold">{t('app.accessErrorTitle')}</h1>
           <p className="mt-2 text-sm text-muted-foreground">{detail}</p>
           <div className="mt-5 flex flex-wrap gap-2">
@@ -2114,7 +2116,6 @@ export function App(): JSX.Element {
 
   const openAccount = platformMode ? () => setAccountCenterOpen(true) : undefined
   const openAdmin = authSession.session?.authenticated && (authSession.session.organization?.role === 'owner' || authSession.session.organization?.role === 'admin') ? () => setAdminCenterOpen(true) : undefined
-  const openDeployment = deploymentServices ? () => { setExplorerDrawerOpen(false); setDeploymentCenterOpen(true) } : undefined
   const announceSignOut = platformMode ? () => {
     authSession.announceLogout()
     void sessionViewCache.clearDurable()
@@ -2127,13 +2128,14 @@ export function App(): JSX.Element {
     <div className="ak-app-shell ak-workspace-canvas flex flex-row text-foreground">
       {wideLayout && (section !== 'agent' || !explorerOpen) ? (
         <DesktopSessionRail
+          onOpenManagement={openDeployment}
           section={section}
           onSelectSection={handleSectionSelect}
           connectionStatus={hasSelectedSession ? <ConnectionStatusEntry appearance="brand" triggerId="desktop-rail" /> : undefined}
           onExpand={section === 'agent' ? () => setExplorerOpen(true) : undefined}
           onNewSession={newSession}
           onConnectWorkspace={runtimeCapabilities.workspace ? openConnectWorkspaceDialog : undefined}
-          globalActions={<SidebarGlobalActions orientation="vertical" onOpenSettings={() => setSettingsOpen(true)} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onOpenDeployment={openDeployment} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />}
+          globalActions={<SidebarGlobalActions orientation="vertical" onOpenSettings={() => setSettingsOpen(true)} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />}
         />
       ) : null}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -2200,8 +2202,8 @@ export function App(): JSX.Element {
                       <div className="min-h-0 flex-1 overflow-hidden">
                         <Explorer executors={control.executors} sessions={control.sessions} loading={sessionDirectoryLoadingOwner === 'explorer'} autoHideOfflineWorkspacesByDefault={!platformMode} selectedSessionId={explorerSelectedSessionId} sessionStatuses={sessionStatuses} onSelect={selectSession} onClearSelection={clearSessionSelection} onNewSession={newSession} onConnectWorkspace={runtimeCapabilities.workspace ? openConnectWorkspaceDialog : undefined} onDelete={deleteSessionAt} onRename={renameSessionAt} onRenameWorkspace={renameWorkspaceAt} embeddedHeader headerLeading={explorerHeaderLeading} fontSizePx={sessionExplorerFontSizePx} previewStore={previewStore} onOpenSessionInfo={openSessionInfoDialog} onWorkspaceInfo={setWorkspaceInfoId} onOpenWorkspaceTerminal={openWorkspaceTerminal} />
                       </div>
-                      <div className="flex flex-none justify-end border-t border-border/35 px-3 py-2" data-testid="desktop-sidebar-footer">
-                        <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => setSettingsOpen(true)} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onOpenDeployment={openDeployment} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />
+                      <div className="flex flex-none justify-end bg-card px-3 py-2" data-testid="desktop-sidebar-footer">
+                        <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => setSettingsOpen(true)} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />
                       </div>
                     </div>
                   </div>
@@ -2469,7 +2471,7 @@ export function App(): JSX.Element {
                           <BannerSlot>
                             <div
                               className={cn(
-                                'px-3 py-2 text-xs border-t',
+                                'px-3 py-2 text-xs border-t border-border/50',
                                 consolidateBanner.kind === 'success' &&
                                   'text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-900',
                                 consolidateBanner.kind === 'error' &&
@@ -2782,15 +2784,15 @@ export function App(): JSX.Element {
                   <PanelLeftClose className="h-5 w-5" />
                 </Button>
               </div>
-              <ProductSwitcher section={section} onSelect={(next) => { handleSectionSelect(next); setExplorerDrawerOpen(false) }} />
+              <ProductSwitcher section={section} onSelect={(next) => { handleSectionSelect(next); setExplorerDrawerOpen(false) }} onOpenManagement={openDeployment} />
             </div>
             {section === 'agent' ? (
               <div className="min-h-0 flex-1 overflow-hidden">
                 <Explorer executors={control.executors} sessions={control.sessions} loading={sessionDirectoryLoadingOwner === 'explorer'} autoHideOfflineWorkspacesByDefault={!platformMode} selectedSessionId={explorerSelectedSessionId} sessionStatuses={sessionStatuses} onSelect={selectSessionFromExplorerDrawer} onClearSelection={clearSessionSelectionFromExplorerDrawer} onNewSession={newSessionFromExplorerDrawer} onConnectWorkspace={runtimeCapabilities.workspace ? connectWorkspaceFromExplorerDrawer : undefined} onDelete={deleteSessionAt} onRename={renameSessionAt} onRenameWorkspace={renameWorkspaceAt} embeddedHeader fontSizePx={sessionExplorerFontSizePx} previewStore={previewStore} onOpenSessionInfo={openExplorerDrawerSessionInfo} onWorkspaceInfo={openExplorerDrawerWorkspaceInfo} onOpenWorkspaceTerminal={openWorkspaceTerminalFromExplorerDrawer} />
               </div>
             ) : <div className="min-h-0 flex-1" />}
-            <div className="flex min-h-14 flex-none items-center justify-end border-t border-border/35 px-3 py-2" data-testid="narrow-drawer-footer">
-              <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => { setExplorerDrawerOpen(false); setSettingsOpen(true) }} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onOpenDeployment={openDeployment} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />
+            <div className="flex min-h-14 flex-none items-center justify-end bg-card px-3 py-2" data-testid="narrow-drawer-footer">
+              <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => { setExplorerDrawerOpen(false); setSettingsOpen(true) }} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />
             </div>
           </div>
         </DialogContent>
@@ -3316,10 +3318,10 @@ export function NoSessionArea({
     ...sessions.map((session) => session.workspaceId).filter(Boolean),
   ]).size
   return (
-    <div
-      className="ak-workspace-canvas min-h-0 flex-1 overflow-auto bg-background"
+    <ScrollArea
+      className="ak-workspace-canvas min-h-0 flex-1 bg-background"
       data-testid="no-session-placeholder"
-    >
+     contentClassName="min-h-full">
       <div className="ak-motion-scale-in mx-auto flex min-h-full w-full max-w-6xl flex-col justify-center gap-5 px-4 py-8 sm:px-6 lg:px-8">
         <section className="ak-hero-surface overflow-hidden rounded-3xl border border-border/35 bg-card/60 p-5 sm:p-7" data-testid="session-cockpit-hero">
           <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
@@ -3408,7 +3410,7 @@ export function NoSessionArea({
           </section>
         </div>
       </div>
-    </div>
+    </ScrollArea>
   )
 }
 
@@ -3889,7 +3891,7 @@ export function ConnectionStatusProvider({ socket, status, transport, cursor, wo
           {brand || compact ? null : <span className="hidden font-mono text-caption tabular-nums text-muted-foreground md:inline" data-testid="connection-headline-latency">{headlineText}</span>}
         </button>
         {open && typeof document !== 'undefined' ? createPortal(
-          <div className={cn('fixed left-[max(0.5rem,env(safe-area-inset-left))] right-[max(0.5rem,env(safe-area-inset-right))] top-[max(3.5rem,calc(env(safe-area-inset-top)+3rem))] z-[100] mx-auto max-h-[calc(var(--ak-viewport-h,100dvh)-max(4rem,calc(env(safe-area-inset-top)+3.5rem))-max(0.5rem,env(safe-area-inset-bottom)))] max-w-md overflow-y-auto rounded-2xl bg-popover p-4 text-xs shadow-2xl ring-1 ring-border/30 sm:mt-2 sm:max-h-[min(42rem,calc(100vh-5rem))] sm:w-[28rem]', brand ? cn('sm:left-3 sm:right-auto sm:top-12 sm:mx-0', triggerId === 'mobile-drawer' && 'sm:w-[22.5rem]') : 'sm:left-auto sm:right-3 sm:top-12 sm:mx-0')} data-testid="connection-status-popover">
+          <ScrollArea className={cn('fixed left-[max(0.5rem,env(safe-area-inset-left))] right-[max(0.5rem,env(safe-area-inset-right))] top-[max(3.5rem,calc(env(safe-area-inset-top)+3rem))] z-[100] mx-auto max-h-[calc(var(--ak-viewport-h,100dvh)-max(4rem,calc(env(safe-area-inset-top)+3.5rem))-max(0.5rem,env(safe-area-inset-bottom)))] max-w-md rounded-2xl bg-popover text-xs shadow-2xl ring-1 ring-border/30 sm:mt-2 sm:max-h-[min(42rem,calc(100vh-5rem))] sm:w-[28rem]', brand ? cn('sm:left-3 sm:right-auto sm:top-12 sm:mx-0', triggerId === 'mobile-drawer' && 'sm:w-[22.5rem]') : 'sm:left-auto sm:right-3 sm:top-12 sm:mx-0')} contentClassName="p-4" data-testid="connection-status-popover">
           <div className="flex items-start justify-between gap-3 pb-3">
             <div className="flex items-center gap-1.5">
               <h3 className="text-sm font-semibold">{t('connectionHealth.title')}</h3>
@@ -3914,7 +3916,7 @@ export function ConnectionStatusProvider({ socket, status, transport, cursor, wo
             <span className="min-w-0 truncate">{t('connectionHealth.transport')} · {transport ?? t('connectionHealth.unknown')}</span>
             <Button size="sm" variant="ghost" className="h-7 flex-none" onClick={copy} title={t('connectionHealth.diagnostics')}>{t(copied ? 'common.copied' : 'common.copy')}</Button>
           </div>
-          </div>,
+          </ScrollArea>,
           // Radix disables pointer events outside the modal drawer. Keep this
           // portal inside its content so the health controls receive touches.
           triggerId === 'mobile-drawer'
@@ -3966,9 +3968,22 @@ function compactSegmentState(state: string): string {
 
 function ConnectionHealthCurve({ samples, executorRequired, now, t }: { samples: readonly ConnectionHealthSample[]; executorRequired: boolean; now: number; t: ReturnType<typeof useTranslation>['t'] }): JSX.Element {
   const [hovered, setHovered] = useState<{ sample: ConnectionHealthSample; index: number; x: number } | null>(null)
-  const width = 320
-  const height = 112
-  const plot = { left: 34, right: 8, top: 8, bottom: 86 }
+  const chartRef = useRef<SVGSVGElement | null>(null)
+  const [width, setWidth] = useState(320)
+  useLayoutEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    const measure = (): void => {
+      const pixels = chart.getBoundingClientRect().width
+      if (pixels > 0) setWidth(pixels)
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(chart)
+    return () => observer.disconnect()
+  }, [])
+  const height = 128
+  const plot = { left: 42, right: 8, top: 20, bottom: 98 }
   const plotWidth = width - plot.left - plot.right
   const plotHeight = plot.bottom - plot.top
   const windowStart = now - CONNECTION_HEALTH_WINDOW_MS
@@ -3994,16 +4009,16 @@ function ConnectionHealthCurve({ samples, executorRequired, now, t }: { samples:
           {executorRequired ? <span className="inline-flex items-center gap-1.5"><span className="relative h-2 w-3.5" aria-hidden><span className="absolute left-0 right-0 top-1/2 h-0.5 -translate-y-1/2 rounded-full bg-sky-400" /><span className="absolute left-1/2 top-1/2 h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-sky-400 ring-2 ring-background" /></span>{t('connectionHealth.executorLegend')}</span> : null}
         </div>
       </div>
-      <svg viewBox={`0 0 ${width} ${height}`} role="group" aria-label={t('connectionHealth.historyAria')} className="h-[7rem] w-full overflow-visible" data-testid="connection-health-chart">
+      <svg ref={chartRef} viewBox={`0 0 ${width} ${height}`} role="group" aria-label={t('connectionHealth.historyAria')} className="h-32 w-full overflow-visible" data-testid="connection-health-chart">
         {[0, 0.5, 1].map((ratio) => {
           const y = plot.top + ratio * plotHeight
           const value = Math.round(latencyCeiling * (1 - ratio))
-          return <g key={ratio} aria-hidden><line x1={plot.left} y1={y} x2={width - plot.right} y2={y} className="stroke-border/60" strokeWidth="1" strokeDasharray={ratio === 1 ? undefined : '2 3'} /><text x={plot.left - 5} y={y + 3} textAnchor="end" className="fill-muted-foreground text-[8px] tabular-nums">{value}</text></g>
+          return <g key={ratio} aria-hidden><line x1={plot.left} y1={y} x2={width - plot.right} y2={y} className="stroke-border/60" strokeWidth="1" strokeDasharray={ratio === 1 ? undefined : '2 3'} /><text x={plot.left - 5} y={y + 3} textAnchor="end" className="fill-muted-foreground text-caption tabular-nums">{value}</text></g>
         })}
-        <text x="2" y="7" className="fill-muted-foreground text-[7px] font-medium" aria-hidden>ms</text>
-        <text x={plot.left} y="104" textAnchor="start" className="fill-muted-foreground text-[8px] tabular-nums" aria-hidden>{startLabel}</text>
-        <text x={width - plot.right} y="104" textAnchor="end" className="fill-muted-foreground text-[8px] tabular-nums" aria-hidden>{endLabel}</text>
-        {recent.length === 0 ? <text x={(plot.left + width - plot.right) / 2} y={(plot.top + plot.bottom) / 2} textAnchor="middle" className="fill-muted-foreground text-[10px]" data-testid="connection-health-empty">{t('connectionHealth.historyEmpty')}</text> : null}
+        <text x="2" y="10" className="fill-muted-foreground text-caption font-medium" aria-hidden>ms</text>
+        <text x={plot.left} y="122" textAnchor="start" className="fill-muted-foreground text-caption tabular-nums" aria-hidden>{startLabel}</text>
+        <text x={width - plot.right} y="122" textAnchor="end" className="fill-muted-foreground text-caption tabular-nums" aria-hidden>{endLabel}</text>
+        {recent.length === 0 ? <text x={(plot.left + width - plot.right) / 2} y={(plot.top + plot.bottom) / 2} textAnchor="middle" className="fill-muted-foreground text-caption" data-testid="connection-health-empty">{t('connectionHealth.historyEmpty')}</text> : null}
         {hostPoints ? <polyline points={hostPoints} fill="none" className="stroke-primary" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" data-testid="connection-health-host-line" /> : null}
         {executorRequired && executorPoints ? <polyline points={executorPoints} fill="none" className="stroke-sky-400" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" data-testid="connection-health-executor-line" /> : null}
         {recent.flatMap((sample, index) => {

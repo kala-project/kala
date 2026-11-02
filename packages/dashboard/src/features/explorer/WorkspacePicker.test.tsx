@@ -102,7 +102,7 @@ describe('NewSessionDialog', () => {
     render(<NewSessionDialog open workspaces={[wsA]} socket={harness.socket as never} onCreate={() => {}} onCreateSimpleChat={() => {}} onCancel={() => {}} />)
 
     const options = screen.getByTestId('new-session-options')
-    expect(options.className).toContain('grid-cols-1')
+    expect(options.querySelector('.grid-cols-1')).toBeTruthy()
     expect(screen.getByTestId('new-session-runtime-kernel').className).toContain('min-h-11')
     expect(screen.getByTestId('new-session-mode-chat').className).toContain('min-h-[3.25rem]')
 
@@ -130,10 +130,10 @@ describe('NewSessionDialog', () => {
     expect(scrollers).toHaveLength(2)
     expect(screen.getAllByTestId('finder-column-header').map((header) => header.textContent)).toEqual(['root', 'project'])
     expect(screen.getAllByTestId('finder-column-header')[1]?.getAttribute('title')).toBe('/tmp/root/project')
-    expect(finder.className).toContain('overflow-x-auto')
+    expect(finder.querySelector('[data-radix-scroll-area-viewport]')).toBeTruthy()
     expect(finder.className).toContain('overflow-y-hidden')
     expect(columns.every((column) => column.className.includes('h-full') && column.className.includes('overflow-hidden'))).toBe(true)
-    expect(scrollers.every((scroller) => scroller.className.includes('overflow-y-auto'))).toBe(true)
+    expect(scrollers.every((scroller) => scroller.querySelector('[data-radix-scroll-area-viewport]'))).toBe(true)
     expect(screen.getByText('README.md')).toBeTruthy()
   })
 
@@ -147,8 +147,8 @@ describe('NewSessionDialog', () => {
     expect(dialog.className).toContain('--ak-viewport-h')
     expect(dialog.className).toContain('grid-rows-[auto_auto_minmax(0,1fr)_auto]')
     expect(dialog.className).toContain('sm:max-w-4xl')
-    expect(screen.getByTestId('new-session-options').className).toContain('overflow-y-auto')
-    expect(screen.getByTestId('new-session-options').className).toContain('grid-cols-1')
+    expect(screen.getByTestId('new-session-options').querySelector('[data-radix-scroll-area-viewport]')).toBeTruthy()
+    expect(screen.getByTestId('new-session-options').querySelector('.grid-cols-1')).toBeTruthy()
     expect(screen.getByTestId('new-session-mode-chat').className).not.toContain('truncate')
     expect(screen.getByTestId('new-session-mode-dag').className).toContain('min-h-[3.25rem]')
     expect(screen.getByTestId('new-session-mode-chat').textContent).toContain('Standard Chat')

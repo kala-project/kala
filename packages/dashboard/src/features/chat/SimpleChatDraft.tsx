@@ -1,3 +1,4 @@
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 import { useEffect, useRef, useState } from 'react'
 import { Check, Info } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -114,7 +115,7 @@ export function SimpleChatDraft({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="simple-chat-draft">
-      <div className="flex min-h-0 flex-1 flex-col items-center justify-center overflow-auto px-6 py-8 text-center">
+      <ScrollArea className="min-h-0 flex-1 text-center" contentClassName="flex flex-col items-center justify-center px-6 py-8 min-h-full">
         <h1 className="flex items-center justify-center gap-1 text-2xl font-semibold tracking-tight sm:text-3xl">{t('chat.transcript.emptyTitle')}<HelpHint label={t('chat.transcript.emptyTitle')}>{t('chat.draft.description')}</HelpHint></h1>
         <div className="mt-6 flex max-w-full flex-wrap justify-center gap-2" role="radiogroup" aria-label={t('dialogs.chooseAgentRuntime')}>
           {agentRuntimes.map((item) => {
@@ -151,9 +152,9 @@ export function SimpleChatDraft({
             </Button>
           })}
         </div>
-      </div>
+      </ScrollArea>
       {error ? (
-        <div role="alert" className="mx-4 mb-2 rounded-lg border border-border bg-muted/50 p-3 text-sm" data-testid="draft-send-error">
+        <div role="alert" className="mx-4 mb-2 rounded-lg border border-border/50 bg-muted/50 p-3 text-sm" data-testid="draft-send-error">
           <p>{error}</p>
         </div>
       ) : null}

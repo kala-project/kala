@@ -95,7 +95,7 @@ export default function ChapterReader({
         <option value="chapters">{t('chat.transcript.chapterPaged')}</option>
         <option value="continuous">{t('chat.transcript.chapterContinuous')}</option>
       </select>
-      {open ? <div role="menu" aria-label={t('chat.transcript.chapterToc')} data-testid="chapter-toc" className="absolute right-0 top-8 z-30 w-[min(300px,calc(100vw-32px))] rounded-xl border border-border bg-popover p-1 shadow-xl">
+      {open ? <div role="menu" aria-label={t('chat.transcript.chapterToc')} data-testid="chapter-toc" className="absolute right-0 top-8 z-30 w-[min(300px,calc(100vw-32px))] rounded-xl border border-border/50 bg-popover p-1 shadow-xl">
         {chapters.map((chapter, position) => <button type="button" role="menuitem" key={position} data-testid={`chapter-select-${position}`} onClick={() => select(position)} className={`flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-xs hover:bg-muted ${!continuous && position === index ? 'bg-muted font-medium text-foreground' : 'text-muted-foreground'}`}><span className="w-5 shrink-0 text-center tabular-nums">{position + 1}</span><span className="min-w-0 flex-1 truncate">{chapterTitle(chapter)}</span>{!continuous && position === index ? <Check className="size-3.5 shrink-0" /> : null}</button>)}
       </div> : null}
     </div>

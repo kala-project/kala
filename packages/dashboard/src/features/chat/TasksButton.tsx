@@ -1,3 +1,4 @@
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 /**
  * TasksButton — a compact footer control mirroring [[BackgroundShellsButton]].
  *
@@ -100,16 +101,16 @@ export function TasksButton({ todos }: Props): JSX.Element | null {
               {t('tasks.done', { done, total })}
             </span>
           </div>
-          <div
-            className="max-h-[calc(min(60dvh,28rem)-2.25rem)] min-h-0 overflow-y-auto overscroll-contain touch-pan-y [scrollbar-gutter:stable] sm:max-h-[calc(min(60vh,28rem)-2.25rem)]"
+          <ScrollArea
+            className="max-h-[calc(min(60dvh,28rem)-2.25rem)] min-h-0 overscroll-contain touch-pan-y [scrollbar-gutter:stable] sm:max-h-[calc(min(60vh,28rem)-2.25rem)]"
             data-testid="tasks-popover-scroll"
-          >
+           contentClassName="min-h-full">
             <ul ref={listRef} className="flex flex-col gap-0.5 px-2 py-2" data-testid="tasks-popover-list">
               {todos.map((todo, i) => (
                 <TaskRow key={i} todo={todo} />
               ))}
             </ul>
-          </div>
+          </ScrollArea>
         </div>,
         document.body,
       ) : null}

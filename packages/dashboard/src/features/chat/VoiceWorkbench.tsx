@@ -1,3 +1,4 @@
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 import { useEffect, useRef, useState } from 'react'
 import { ArrowDown, Mic, Minimize2, Send, Square, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -125,27 +126,27 @@ export function VoiceWorkbench({ voice, draft, onCompact, onStopAndSend }: {
         <DialogDescription className="sr-only">{t('composer.voice.workbenchDescription')}</DialogDescription>
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden px-5 py-5 sm:gap-5 sm:px-7">
           {draft.text.trim() ? (
-            <div ref={draftRef} className="max-h-24 shrink-0 overflow-y-auto rounded-xl ring-1 ring-border/50 bg-muted/40 px-4 py-3" data-testid="voice-workbench-draft" aria-live="off">
+            <ScrollArea viewportRef={draftRef} className="max-h-24 shrink-0 rounded-xl ring-1 ring-border/50 bg-muted/40" data-testid="voice-workbench-draft" aria-live="off" contentClassName="px-4 py-3 min-h-full">
               <p className="mb-1 text-xs font-medium text-muted-foreground">{t(midDraft ? 'composer.voice.draftAroundCaret' : 'composer.voice.draftContext')}</p>
               <p className="whitespace-pre-wrap break-words text-sm text-foreground sm:text-base">{draftContext}</p>
-            </div>
+            </ScrollArea>
           ) : null}
           <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl ring-1 ring-border/50 bg-card shadow-sm">
-            <div
-              ref={transcriptRef}
-              className="min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap break-words px-4 py-5 text-[17px] leading-[1.9] sm:px-6 sm:py-6 sm:text-[22px]"
-              onScroll={(event) => {
+            <ScrollArea
+              viewportRef={transcriptRef}
+              className="min-h-0 flex-1 whitespace-pre-wrap break-words text-[17px] leading-[1.9] sm:text-[22px]"
+              viewportProps={{ onScroll: (event) => {
                 const element = event.currentTarget
                 followLatest.current = element.scrollHeight - element.scrollTop - element.clientHeight < 12
                 setShowReturn(element.scrollHeight > element.clientHeight + 2 && !followLatest.current)
-              }}
+              } }}
               data-testid="voice-workbench-transcript"
               aria-live="off"
-            >
+             contentClassName="px-4 py-5 sm:px-6 sm:py-6 min-h-full">
               {listening && liveMode && transcript ? <><span className="text-foreground">{voice.finalTranscript}</span><span className="text-muted-foreground">{interim}</span></> : (
                 <p className={cn('text-base', voice.phase === 'error' ? 'text-destructive' : 'text-muted-foreground')}>{voice.phase === 'error' ? status : listening && !liveMode ? t('composer.voice.afterRecordingHint') : voice.phase === 'requesting' || voice.phase === 'processing' ? status : t('composer.voice.waitingForSpeech')}</p>
               )}
-            </div>
+            </ScrollArea>
             {showReturn ? <button type="button" className="absolute bottom-3 right-4 inline-flex items-center gap-1 rounded-full ring-1 ring-border/50 bg-background px-3 py-1.5 text-xs font-medium text-primary shadow-md" onClick={() => { followLatest.current = true; transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: 'smooth' }); setShowReturn(false) }} data-testid="voice-workbench-return-latest"><ArrowDown className="size-3.5" aria-hidden="true" />{t('composer.voice.returnToLatest')}</button> : null}
           </div>
         </div>

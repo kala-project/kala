@@ -1,3 +1,4 @@
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 import { useEffect, useState, type FormEvent } from 'react'
 import { CalendarClock, Pencil, ShieldCheck, ShieldOff } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -139,7 +140,7 @@ export function WorkspaceMetadataDialog({
         <DialogHeader className="border-b border-border/50 px-5 py-4">
           <DialogTitle className="flex items-center gap-1">{displayName || t('workspaceMetadata.workspace')}<HelpHint label={t('workspaceMetadata.workspace')}>{t('workspaceMetadata.description')}</HelpHint></DialogTitle>
           <DialogDescription className="sr-only">{t('common.contextualHelp')}</DialogDescription>
-          <div className="mt-3 flex max-w-full gap-1 overflow-x-auto" role="tablist" aria-label={t('workspaceMetadata.tabs.label')} data-testid="workspace-metadata-tabs">
+          <ScrollArea className="mt-3 max-w-full" role="tablist" aria-label={t('workspaceMetadata.tabs.label')} data-testid="workspace-metadata-tabs" contentClassName="flex gap-1 min-w-full w-max">
             {(['overview', 'sessions', 'runtime'] as const).map((tab) => (
               <button
                 key={tab}
@@ -153,9 +154,9 @@ export function WorkspaceMetadataDialog({
                 {t(`workspaceMetadata.tabs.${tab}`)}
               </button>
             ))}
-          </div>
+          </ScrollArea>
         </DialogHeader>
-        <DialogBody className="min-w-0 space-y-4 px-3 py-3 sm:px-5 sm:py-4" data-testid="workspace-metadata-body">
+        <DialogBody className="min-w-0" contentClassName="space-y-4 px-3 py-3 sm:px-5 sm:py-4" data-testid="workspace-metadata-body">
           {activeTab === 'overview' ? (
           <>
           <section className="grid gap-3 sm:grid-cols-3" data-testid="workspace-home-summary">
@@ -184,7 +185,7 @@ export function WorkspaceMetadataDialog({
                 id="workspace-display-name"
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
-                className="min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary"
+                className="min-w-0 flex-1 rounded-md border border-border/50 bg-background px-3 py-2 text-sm outline-none focus:border-primary"
                 data-testid="workspace-metadata-name-input"
               />
               <Button type="submit" size="sm" className="sm:flex-none" disabled={draft.trim().length === 0 || draft.trim() === displayName} data-testid="workspace-metadata-rename-button">

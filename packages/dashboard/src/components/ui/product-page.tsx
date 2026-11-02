@@ -1,9 +1,10 @@
 import type { ReactNode } from 'react'
 
 import { cn } from '../../lib/utils.js'
+import { ScrollArea } from './scroll-area.js'
 
 export function ProductPage({ children, className, testId }: { children: ReactNode; className?: string; testId?: string }): JSX.Element {
-  return <main className={cn('ak-workspace-canvas flex h-full min-h-0 flex-col overflow-auto', className)} data-testid={testId}>{children}</main>
+  return <main className={cn('ak-workspace-canvas flex h-full min-h-0 flex-col overflow-hidden', className)} data-testid={testId}><ScrollArea className="min-h-0 flex-1" contentClassName="flex min-h-full flex-col">{children}</ScrollArea></main>
 }
 
 export function ProductPageHeader({ eyebrow = 'Kala', title, description, actions, titleTestId }: { eyebrow?: ReactNode; title: ReactNode; description?: ReactNode; actions?: ReactNode; titleTestId?: string }): JSX.Element {
@@ -29,7 +30,7 @@ export function ProductPanel({ children, active = true, testId, className }: { c
 
 export function ProductPanelHeader({ title, description, actions }: { title: ReactNode; description?: ReactNode; actions?: ReactNode }): JSX.Element {
   return (
-    <div className="flex flex-none items-start justify-between gap-4 border-b border-border/25 px-5 py-4 sm:px-6">
+    <div className="flex flex-none items-start justify-between gap-4 bg-card px-5 py-4 sm:px-6">
       <div className="min-w-0"><h2 className="text-base font-semibold tracking-[-0.01em]">{title}</h2>{description ? <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{description}</p> : null}</div>
       {actions}
     </div>

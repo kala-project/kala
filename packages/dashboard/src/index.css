@@ -1141,6 +1141,7 @@ body {
 }
 
 :root {
+  --ak-content-font: 'Inter Variable', 'Noto Sans SC Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --ak-sans-font: 'Inter Variable', 'Noto Sans SC Variable', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --ak-mono-font: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
 }
@@ -1166,6 +1167,12 @@ textarea,
 [contenteditable='true'],
 .ak-markdown-body {
   font-family: var(--ak-sans-font);
+}
+
+/* Session content is not UI chrome: keep its glyphs independent of UI locale.
+ * CJK text still uses the Noto fallback; never rewrite source punctuation. */
+.ak-chat-text {
+  font-family: var(--ak-content-font);
 }
 
 /**
@@ -1309,7 +1316,7 @@ textarea,
   padding: 0.1em 0.3em;
   color: hsl(var(--foreground));
   font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
-  font-size: 0.9em;
+  font-size: max(var(--ak-type-caption-size), 0.9em);
   overflow-wrap: anywhere;
 }
 .ak-markdown-body hr {

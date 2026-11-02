@@ -216,12 +216,12 @@ function AskUserChoiceRequestCard({
               <label
                 key={choice.value}
                 className={cn(
-                  'group flex min-w-0 cursor-pointer items-start gap-2 rounded-md border px-2 py-1.5 text-left transition-colors',
+                  'group flex min-w-0 cursor-pointer items-start gap-2 rounded-md border border-border/50 px-2 py-1.5 text-left transition-colors',
                   'focus-within:border-primary/55 focus-within:ring-2 focus-within:ring-primary/25',
                   disabled && 'cursor-not-allowed opacity-60',
                   active
                     ? 'border-primary/45 bg-primary/[0.07] ring-1 ring-primary/15'
-                    : 'border-border/65 bg-background/35 hover:border-border hover:bg-muted/45',
+                    : 'border-border/65 bg-background/35 hover:border-border/50 hover:bg-muted/45',
                 )}
                 data-testid={`ask-user-choice-row-${choice.value}`}
                 data-selected={active ? 'true' : 'false'}
@@ -238,7 +238,7 @@ function AskUserChoiceRequestCard({
                     data-testid={`ask-user-choice-option-${choice.value}`}
                     onChange={() => { selectChoice(choice.value) }}
                     className={cn(
-                      'peer h-4 w-4 cursor-pointer appearance-none border border-border bg-background outline-none transition',
+                      'peer h-4 w-4 cursor-pointer appearance-none border border-border/50 bg-background outline-none transition',
                       'focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2',
                       request.multiple ? 'rounded' : 'rounded-full',
                       active && 'border-primary bg-primary',

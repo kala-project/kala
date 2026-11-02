@@ -55,7 +55,7 @@ function NativeNotificationsSettings(): JSX.Element {
   const [details, setDetails] = useBooleanPref(DASHBOARD_PREFERENCES.desktopNotificationDetails.key, false)
   const available = Boolean(native.bridge && native.info && native.info.notificationsAvailable !== false && !native.error)
   return (
-    <li className="space-y-4 rounded-lg border border-border bg-card/60 p-4" data-testid="settings-native-notifications">
+    <li className="space-y-4 rounded-lg border border-border/50 bg-card/60 p-4" data-testid="settings-native-notifications">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-1 font-medium">{t('settings.notifications.system')}<HelpHint label={t('settings.notifications.system')}>{t('desktopNative.notificationHelp')}</HelpHint></div>
         <Toggle checked={enabled && available} onChange={setEnabled} ariaLabel={t('settings.notifications.enable')} testId="settings-toggle-desktop-notifications" disabled={!available} />
@@ -154,7 +154,7 @@ function SystemNotificationsSettings(): JSX.Element {
   const unavailable = permission === 'denied' || permission === 'unsupported'
   const active = enabled && permission === 'granted'
   return (
-    <li className="rounded-lg border border-border bg-card/60 p-4" data-testid="settings-push-section">
+    <li className="rounded-lg border border-border/50 bg-card/60 p-4" data-testid="settings-push-section">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-1 font-medium">{t('settings.notifications.system')}<HelpHint label={t('settings.notifications.system')}>{t('settings.notifications.systemDescription')}</HelpHint></div>
@@ -200,7 +200,7 @@ function SystemNotificationsSettings(): JSX.Element {
         <div className="mb-2 flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t('settings.notifications.devices')}<HelpHint label={t('settings.notifications.devices')}>{t('settings.notifications.devicesDescription')}</HelpHint></div>
         <div className="grid gap-2" data-testid="settings-notification-devices">
           {devices.length === 0 ? (
-            <div className="rounded-md border border-dashed border-border px-3 py-4 text-xs text-muted-foreground">{t('settings.notifications.noDevices')}</div>
+            <div className="rounded-md border border-dashed border-border/50 px-3 py-4 text-xs text-muted-foreground">{t('settings.notifications.noDevices')}</div>
           ) : devices.map((device) => (
             <NotificationDeviceRow key={device.deviceId} device={device} busy={busy} onRefresh={refreshDevices} onTestResult={setTestResult} />
           ))}
@@ -222,7 +222,7 @@ function SystemNotificationsSettings(): JSX.Element {
               data-testid="settings-push-test"
               onClick={() => { void sendTest() }}
               disabled={busy}
-              className="rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium hover:bg-muted disabled:opacity-50"
+              className="rounded-md border border-border/50 bg-background px-3 py-1.5 text-xs font-medium hover:bg-muted disabled:opacity-50"
             >
               {t('settings.notifications.sendTest')}
             </button>
@@ -279,8 +279,8 @@ function NotificationDeviceRow({ device, busy, onRefresh, onTestResult }: {
         <Toggle checked={device.enabled} onChange={(next) => { void update(next) }} ariaLabel={t('settings.notifications.deviceAria', { name: device.name })} disabled={busy} />
       </div>
       <div className="mt-2 flex flex-wrap gap-2">
-        <button type="button" onClick={() => { void test() }} disabled={busy || !device.enabled} className="rounded border border-border px-2 py-1 text-caption hover:bg-muted disabled:opacity-50">{t('settings.notifications.sendTestShort')}</button>
-        {!device.current ? <button type="button" onClick={() => { void remove() }} disabled={busy} className="rounded border border-border px-2 py-1 text-caption text-muted-foreground hover:bg-muted disabled:opacity-50">{t('settings.notifications.remove')}</button> : null}
+        <button type="button" onClick={() => { void test() }} disabled={busy || !device.enabled} className="rounded border border-border/50 px-2 py-1 text-caption hover:bg-muted disabled:opacity-50">{t('settings.notifications.sendTestShort')}</button>
+        {!device.current ? <button type="button" onClick={() => { void remove() }} disabled={busy} className="rounded border border-border/50 px-2 py-1 text-caption text-muted-foreground hover:bg-muted disabled:opacity-50">{t('settings.notifications.remove')}</button> : null}
       </div>
     </div>
   )

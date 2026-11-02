@@ -1,3 +1,4 @@
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 import { useEffect, useMemo, useRef, useState, type Ref } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertTriangle, CheckCircle2, CircleDot, Layers3, Loader2, MessageSquareText, Wrench, XCircle } from 'lucide-react'
@@ -88,7 +89,7 @@ export function SessionHoverPreview({ anchor, previewRef, previewStore, getCache
           <span className="max-w-32 truncate" title={cached.selectedModel ?? undefined}>{shortModel(cached.selectedModel)}</span>
         </div>
       </div>
-      <div className="min-h-0 overflow-y-auto overscroll-contain p-3" data-testid="session-hover-preview-summary">
+      <ScrollArea className="min-h-0 overscroll-contain" data-testid="session-hover-preview-summary" contentClassName="p-3 min-h-full">
         <ActivitySummary activity={summary.activity} />
         <div className="mt-3 grid gap-3">
           {summary.goal ? <SummarySection icon={<MessageSquareText className="h-3.5 w-3.5" />} label="Current request" text={summary.goal} testId="session-preview-goal" /> : null}
@@ -96,7 +97,7 @@ export function SessionHoverPreview({ anchor, previewRef, previewStore, getCache
           {!summary.goal && !summary.response ? <div className="rounded-xl bg-muted/30 px-3 py-4 text-center text-xs text-muted-foreground">No conversation summary is available yet.</div> : null}
         </div>
         <ActivityStats stats={summary.stats} />
-      </div>
+      </ScrollArea>
     </div>,
     document.body,
   )
@@ -106,7 +107,7 @@ function ActivitySummary({ activity }: { activity: SessionPreviewSummary['activi
   const Icon = activity.tone === 'attention' ? AlertTriangle : activity.tone === 'active' ? Loader2 : activity.tone === 'success' ? CheckCircle2 : activity.tone === 'danger' ? XCircle : CircleDot
   return (
     <div className={cn(
-      'flex min-w-0 items-start gap-2.5 rounded-xl border px-3 py-2.5',
+      'flex min-w-0 items-start gap-2.5 rounded-xl border border-border/50 px-3 py-2.5',
       activity.tone === 'attention' && 'border-amber-500/30 bg-amber-500/10',
       activity.tone === 'active' && 'border-sky-500/25 bg-sky-500/8',
       activity.tone === 'success' && 'border-emerald-500/25 bg-emerald-500/8',

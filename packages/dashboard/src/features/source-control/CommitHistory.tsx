@@ -1,3 +1,4 @@
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ChevronRight, GitCommitHorizontal, Loader2, RefreshCw } from 'lucide-react'
@@ -55,8 +56,8 @@ export function CommitHistory({ socket, workspaceId, cwd }: Props): JSX.Element 
   return (
     <section className="space-y-3" aria-label={t('sourceControl.history')}>
       <div className="flex items-center justify-between gap-2 px-1 py-1">
-        <h2 className="text-[11px] font-medium text-muted-foreground">{t('sourceControl.history')}</h2>
-        <button type="button" className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50" disabled={!online || loading} onClick={() => void load(true)}>{loading ? <Loader2 className="size-3 animate-spin" aria-hidden="true" /> : <RefreshCw className="size-3" aria-hidden="true" />}{t('sourceControl.refreshHistory')}</button>
+        <h2 className="text-caption font-medium text-muted-foreground">{t('sourceControl.history')}</h2>
+        <button type="button" className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-caption text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50" disabled={!online || loading} onClick={() => void load(true)}>{loading ? <Loader2 className="size-3 animate-spin" aria-hidden="true" /> : <RefreshCw className="size-3" aria-hidden="true" />}{t('sourceControl.refreshHistory')}</button>
       </div>
       {!online ? <p className="p-3 text-xs text-muted-foreground">{t('sourceControl.offline')}</p> : null}
       {error ? <p role="alert" className="break-words p-2 text-xs text-destructive">{error}</p> : null}
@@ -68,12 +69,12 @@ export function CommitHistory({ socket, workspaceId, cwd }: Props): JSX.Element 
               <span className="z-10 flex size-6 items-center justify-center rounded-full border border-sidebar-border/60 bg-sidebar text-primary/80"><GitCommitHorizontal className="size-3.5" aria-hidden="true" /></span>
               {index < page.commits.length - 1 ? <span className="-mb-5 mt-1 w-px flex-1 bg-sidebar-border/70" aria-hidden="true" /> : null}
             </div>
-            <button type="button" className="group min-w-0 flex-1 rounded-xl border border-sidebar-border/50 bg-background/30 px-3 py-2.5 text-left transition-colors hover:border-sidebar-border hover:bg-sidebar-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => setSelected(commit)}>
+            <button type="button" className="group min-w-0 flex-1 rounded-xl border border-sidebar-border/50 bg-background/30 px-3 py-2.5 text-left transition-colors hover:border-sidebar-border/60 hover:bg-sidebar-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => setSelected(commit)}>
               <span className="flex min-w-0 items-center gap-2">
                 <span className="min-w-0 flex-1 truncate text-xs font-medium leading-relaxed" title={commit.message.split('\n')[0]}>{commit.message.split('\n')[0] || t('sourceControl.emptyMessage')}</span>
                 <ChevronRight className="size-3.5 flex-none text-muted-foreground/40 transition-colors group-hover:text-foreground" aria-hidden="true" />
               </span>
-              <span className="mt-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted-foreground">
+              <span className="mt-2 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-caption text-muted-foreground">
                 <code className="flex-none rounded bg-muted/70 px-1.5 py-0.5 font-mono text-primary/80">{commit.hash.slice(0, 8)}</code>
                 <span className="min-w-0 flex-1 truncate">{commit.authorName}</span>
                 <time className="max-w-full flex-none break-words tabular-nums" dateTime={commit.committedAt}>{formatTime(commit.committedAt)}</time>
@@ -137,7 +138,7 @@ function CommitDetailsDialog({ socket, workspaceId, cwd, commit, onClose }: Prop
           <DialogTitle>{t('sourceControl.commitDetails')}</DialogTitle>
           <DialogDescription>{t('sourceControl.readOnlyHistory')}</DialogDescription>
         </DialogHeader>
-        <div className="min-h-0 overflow-auto">
+        <ScrollArea className="min-h-0" contentClassName="min-h-full">
           {metadata ? (
             <div className="space-y-1 break-words text-xs">
               <p className="font-mono">{metadata.hash}</p>
@@ -155,9 +156,9 @@ function CommitDetailsDialog({ socket, workspaceId, cwd, commit, onClose }: Prop
               {details.filesTruncated ? <p className="text-xs text-amber-600">{t('sourceControl.truncatedFiles', { count: details.files.length })}</p> : null}
               {details.files.length === 0 ? <p className="text-xs text-muted-foreground">{t('sourceControl.emptyCommit')}</p> : (
                 <>
-                  <div className="max-h-40 overflow-auto rounded border border-border">
+                  <ScrollArea className="max-h-40 rounded border border-border/50" contentClassName="min-h-full">
                     {details.files.map((entry) => <button key={entry.path} type="button" aria-pressed={file?.path === entry.path} className="block w-full break-all px-2 py-1 text-left font-mono text-xs hover:bg-accent aria-pressed:bg-accent" onClick={() => setFile(entry)}>{entry.status} {entry.oldPath ? `${entry.oldPath} → ` : ''}{entry.path}</button>)}
-                  </div>
+                  </ScrollArea>
                   {patchLoading ? <p role="status" className="text-xs">{t('sourceControl.loadingDiff')}</p> : null}
                   {patchError ? <p role="alert" className="text-xs text-destructive">{patchError}</p> : null}
                   {patch?.truncated ? <p className="text-xs text-amber-600">{t('sourceControl.patchTooLarge')}</p> : null}
@@ -168,7 +169,7 @@ function CommitDetailsDialog({ socket, workspaceId, cwd, commit, onClose }: Prop
               )}
             </div>
           )}
-        </div>
+        </ScrollArea>
       </DialogContent>
     </Dialog>
   )

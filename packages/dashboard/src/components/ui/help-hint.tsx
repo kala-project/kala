@@ -2,6 +2,7 @@ import { Slot } from '@radix-ui/react-slot'
 import { Info } from 'lucide-react'
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
+import { ScrollArea } from './scroll-area.js'
 
 let dismissActive: (() => void) | undefined
 let keyboardFocus = false
@@ -138,15 +139,12 @@ export function HelpHint({ label, children, trigger, testId }: {
       {open ? (
         <span
           ref={popup}
-          id={id}
-          role="tooltip"
-          tabIndex={0}
           onMouseEnter={clearTimers}
           onMouseLeave={leave}
           onFocus={clearTimers}
           onBlur={leave}
-          className="fixed z-[100] m-0 block max-w-[calc(100vw-24px)] overflow-y-auto overscroll-contain rounded-lg border border-border bg-popover p-3 text-left text-xs font-normal normal-case leading-5 tracking-normal text-popover-foreground shadow-lg [overflow-wrap:anywhere] select-text"
-        >{children}</span>
+          className="fixed z-[100] m-0 block max-w-[calc(100vw-24px)] overflow-hidden rounded-lg border border-border/50 bg-popover text-left text-xs font-normal normal-case leading-5 tracking-normal text-popover-foreground shadow-lg [overflow-wrap:anywhere] select-text"
+        ><ScrollArea className="max-h-[inherit]" viewportClassName="overscroll-contain" viewportProps={{ id, role: 'tooltip', tabIndex: 0 }} contentClassName="p-3">{children}</ScrollArea></span>
       ) : null}
     </>
   )

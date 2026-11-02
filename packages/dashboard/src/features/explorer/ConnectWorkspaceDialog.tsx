@@ -1,3 +1,4 @@
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 import { useEffect, useRef, useState } from 'react'
 import { Check, CheckCircle2, Clipboard, Clock3, LoaderCircle, ShieldCheck, Terminal, XCircle } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -282,7 +283,7 @@ export function ConnectWorkspaceDialog({ open, onOpenChange, host, privateCloud 
           <DialogTitle className="text-xl font-semibold tracking-tight sm:text-2xl">{t('explorer.connectDialog.title')}</DialogTitle>
           <DialogDescription className="max-w-2xl text-sm leading-5">{t('explorer.connectDialog.description')}</DialogDescription>
         </DialogHeader>
-        <div className="min-h-0 min-w-0 overflow-x-hidden overflow-y-auto p-5 sm:p-7">
+        <ScrollArea className="min-h-0 min-w-0 overflow-x-hidden" contentClassName="p-5 sm:p-7 min-w-full">
           {privateCloud ? (
             <section className="mx-auto max-w-2xl space-y-4" data-testid="private-cloud-executor-invite">
               <div className="rounded-2xl bg-primary/10 px-4 py-3 text-sm leading-6 text-muted-foreground">
@@ -357,7 +358,7 @@ export function ConnectWorkspaceDialog({ open, onOpenChange, host, privateCloud 
             </section>
           </div>
           )}
-        </div>
+        </ScrollArea>
       </DialogContent>
     </Dialog>
   )
@@ -380,7 +381,7 @@ function PlatformGroup({ label, selected, windowsAvailable, labelFor, onChange }
       <div className="grid grid-cols-3 gap-2">{PLATFORMS.map((value) => (
         <button key={value} type="button" disabled={value === 'windows' && !windowsAvailable} aria-pressed={selected === value} data-testid={`connect-workspace-${value}`} onClick={() => onChange(value)} className={`flex min-h-16 min-w-0 flex-col items-center justify-center gap-1.5 rounded-2xl px-2 text-xs font-medium transition-[background-color,color,box-shadow,transform] active:scale-[0.98] ${selected === value ? 'bg-accent text-foreground shadow-[inset_0_0_0_1px_hsl(var(--border)/0.5)]' : 'bg-muted/20 text-muted-foreground hover:bg-accent/55 hover:text-foreground'} ${value === 'windows' && !windowsAvailable ? 'cursor-not-allowed opacity-60' : ''}`}>
           {icons[value]}<span className="text-center">{labelFor(value)}</span>
-          {value === 'windows' && !windowsAvailable ? <span className="text-center text-[0.625rem]">{t('explorer.connectDialog.windowsUnavailableShort')}</span> : null}
+          {value === 'windows' && !windowsAvailable ? <span className="text-center text-caption">{t('explorer.connectDialog.windowsUnavailableShort')}</span> : null}
         </button>
       ))}</div>
       {!windowsAvailable ? <p className="mt-2 text-xs text-muted-foreground" data-testid="connect-workspace-windows-notice">{t('explorer.connectDialog.windowsUnavailable')}</p> : null}
@@ -390,7 +391,7 @@ function PlatformGroup({ label, selected, windowsAvailable, labelFor, onChange }
 
 function ChoiceGroup<T extends string>({ label, values, selected, recommended, labelFor, onChange }: { label: string; values: readonly T[]; selected: T; recommended?: T; labelFor(value: T): string; onChange(value: T): void }): JSX.Element {
   const { t } = useTranslation()
-  return <fieldset className="min-w-0 space-y-2.5"><legend className="text-xs font-medium text-muted-foreground">{label}</legend><div className="grid min-w-0 grid-cols-2 rounded-xl bg-muted/30 p-1">{values.map((value) => <button key={value} type="button" aria-pressed={selected === value} data-testid={`connect-workspace-${value}`} onClick={() => onChange(value)} className={`flex min-h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-lg px-2 py-2 text-center text-xs font-medium transition-colors ${selected === value ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}><span className="min-w-0 break-words">{labelFor(value)}</span>{value === recommended ? <span className="max-w-full rounded-full bg-emerald-500/12 px-1.5 py-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-300">{t('dialogs.runtime.recommended')}</span> : null}</button>)}</div></fieldset>
+  return <fieldset className="min-w-0 space-y-2.5"><legend className="text-xs font-medium text-muted-foreground">{label}</legend><div className="grid min-w-0 grid-cols-2 rounded-xl bg-muted/30 p-1">{values.map((value) => <button key={value} type="button" aria-pressed={selected === value} data-testid={`connect-workspace-${value}`} onClick={() => onChange(value)} className={`flex min-h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-lg px-2 py-2 text-center text-xs font-medium transition-colors ${selected === value ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}><span className="min-w-0 break-words">{labelFor(value)}</span>{value === recommended ? <span className="max-w-full rounded-full bg-emerald-500/12 px-1.5 py-0.5 text-caption font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-300">{t('dialogs.runtime.recommended')}</span> : null}</button>)}</div></fieldset>
 }
 
 function TerminalCommand({ command, copied, mode, modeLabel, transitioning, onCopy }: { command: string; copied: boolean; mode: ExecutorInstallMode; modeLabel: string; transitioning: boolean; onCopy(): void }): JSX.Element {

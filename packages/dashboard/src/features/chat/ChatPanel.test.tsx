@@ -1101,8 +1101,9 @@ describe('ChatPanel', () => {
     expect(pinnedCard.className).toContain('pointer-events-auto')
     expect(screen.getByTestId('tool-card-preview-close')).toBeTruthy()
     const previewScroll = screen.getByTestId('tool-card-preview-scroll-dot-2')
-    expect(previewScroll.className).toContain('overflow-y-auto')
-    fireEvent.wheel(previewScroll, { deltaY: 120 })
+    const previewViewport = previewScroll.querySelector('[data-radix-scroll-area-viewport]')!
+    expect(previewViewport).toBeTruthy()
+    fireEvent.wheel(previewViewport, { deltaY: 120 })
     expect(screen.getByTestId('tool-card-preview-layer-dot-2')).toBeTruthy()
     expect(screen.queryByTestId('tool-call-group-details-dot-1')).toBeNull()
 

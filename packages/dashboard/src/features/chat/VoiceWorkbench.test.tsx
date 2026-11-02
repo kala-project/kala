@@ -100,7 +100,7 @@ describe('VoiceWorkbench', () => {
 
   it('shows the latest shortcut only after the user scrolls away from overflowing text', () => {
     show(voice())
-    const transcript = screen.getByTestId('voice-workbench-transcript')
+    const transcript = screen.getByTestId('voice-workbench-transcript').querySelector('[data-radix-scroll-area-viewport]') as HTMLDivElement
     Object.defineProperties(transcript, { scrollHeight: { configurable: true, value: 1000 }, clientHeight: { configurable: true, value: 200 } })
     transcript.scrollTop = 0
     fireEvent.scroll(transcript)

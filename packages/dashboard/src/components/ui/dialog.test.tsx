@@ -35,7 +35,7 @@ describe('Dialog motion classes', () => {
 
   it('provides a dedicated internally scrolling body region', () => {
     render(<DialogBody data-testid="dialog-body">Body</DialogBody>)
-    expect(screen.getByTestId('dialog-body').className).toContain('overflow-y-auto')
+    expect(screen.getByTestId('dialog-body').querySelector('[data-radix-scroll-area-viewport]')).toBeTruthy()
     expect(screen.getByTestId('dialog-body').className).toContain('min-h-0')
   })
 })

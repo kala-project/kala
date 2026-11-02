@@ -937,7 +937,7 @@ export function Composer({
   }
 
   const shellModeIndicator = shellMode ? (
-    <div className="flex min-w-0 items-center gap-1.5 px-3 pt-1.5 text-[11px] text-amber-700 dark:text-amber-300" data-testid="composer-shell-mode">
+    <div className="flex min-w-0 items-center gap-1.5 px-3 pt-1.5 text-caption text-amber-700 dark:text-amber-300" data-testid="composer-shell-mode">
       <span className="font-medium">Shell · workspace</span>
       <span className="truncate text-muted-foreground">Runs in this Session workspace</span>
       <button
@@ -1216,7 +1216,7 @@ export function Composer({
                 className="absolute inset-x-2 bottom-2 z-10 max-h-[min(16rem,40vh)] overflow-hidden rounded-lg border border-border/60 bg-popover shadow-lg"
                 data-testid="mention-menu"
               >
-                <div className="flex items-center gap-2 border-b px-3 py-1.5 text-caption uppercase tracking-wider text-muted-foreground">
+                <div className="flex items-center gap-2 border-b border-border/50 px-3 py-1.5 text-caption uppercase tracking-wider text-muted-foreground">
                   <AtSign className="h-3 w-3" aria-hidden="true" />
                   <span>{t('composer.files')}</span>
                   {mentionState.query ? (
@@ -1256,10 +1256,10 @@ export function Composer({
             className="flex min-h-10 min-w-0 flex-col items-stretch gap-0.5 border-t border-border/25 px-2 py-1 sm:flex-row sm:flex-nowrap sm:items-center sm:overflow-hidden"
             data-testid="composer-footer"
           >
-            <div
-              className="flex min-w-0 flex-1 flex-wrap items-center gap-1 pr-1 sm:flex-nowrap sm:overflow-x-auto sm:overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            <ScrollArea
+              className="min-w-0 flex-1 sm:overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
               data-testid="composer-footer-rail"
-            >
+             contentClassName="flex flex-wrap items-center gap-1 pr-1 sm:flex-nowrap min-w-full">
               <ComposerModeToggle mode={mode} onToggle={toggleMode} />
               {allowAttachments ? <AttachmentButton disabled={disabled || shellMode} onClick={() => fileInputRef.current?.click()} /> : null}
               <ComposerConfigButton
@@ -1351,7 +1351,7 @@ export function Composer({
               </Select> : null}
               </div>
               {footerExtras}
-            </div>
+            </ScrollArea>
             <div className="flex flex-none items-center justify-end gap-0.5" data-testid="composer-footer-actions">
               <HumanAttentionIndicator timeline={humanAttention} />
               <VoiceInputButton disabled={Boolean(disabled || submitting)} secureContext={voice.secureContext} onPrepare={voice.prepare} onClick={beginVoiceInput} />
@@ -1446,7 +1446,7 @@ function VoiceInputButton({
       </button>
       {secureContextHelp && !secureContext && typeof document !== 'undefined' ? createPortal((
         <div
-          className="fixed z-[100] w-64 rounded-lg border border-border bg-popover p-3 text-left shadow-lg"
+          className="fixed z-[100] w-64 rounded-lg border border-border/50 bg-popover p-3 text-left shadow-lg"
           style={secureContextHelp}
           role="alert"
           data-testid="composer-voice-https-help"
@@ -1538,23 +1538,24 @@ function VoiceRecorderSurface({
         </span>
         <div className="min-w-0 flex-1">
           {draftText.trim() ? (
-            <div ref={draftRef} className={cn('mb-1 max-h-16 overflow-y-auto whitespace-pre-wrap break-words border-b border-border/50 pb-1 text-sm text-foreground [scrollbar-width:thin]', compact && 'max-h-10')} data-testid="composer-voice-draft" aria-live="off">
+            <ScrollArea viewportRef={draftRef} className={cn('mb-1 max-h-16 whitespace-pre-wrap break-words bg-muted/40 pb-1 text-sm text-foreground', compact && 'max-h-10')} data-testid="composer-voice-draft" aria-live="off">
               <span className="mr-2 text-xs text-muted-foreground">{t('composer.voice.existingDraft')}</span>{draftText}
-            </div>
+            </ScrollArea>
           ) : null}
           {listening && liveMode && transcript ? (
-            <div
-              ref={transcriptRef}
-              className={cn('whitespace-pre-wrap break-words overflow-y-auto overscroll-contain text-sm leading-5 [scrollbar-width:thin]', compact ? 'max-h-10' : 'max-h-20')}
-              onScroll={(event) => {
+            <ScrollArea
+              viewportRef={transcriptRef}
+              className={cn('whitespace-pre-wrap break-words text-sm leading-5', compact ? 'max-h-10' : 'max-h-20')}
+              viewportClassName="overscroll-contain"
+              viewportProps={{ onScroll: (event) => {
                 const element = event.currentTarget
                 followTranscriptRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 12
-              }}
+              } }}
               data-testid="composer-voice-transcript"
             >
               <span className="text-foreground">{voice.finalTranscript}</span>
               <span className="text-muted-foreground">{interimDisplay}</span>
-            </div>
+            </ScrollArea>
           ) : (
             <div className={cn('text-sm font-medium', voice.phase === 'error' ? 'text-destructive' : 'text-foreground')} data-testid="composer-voice-status">
               {status}
@@ -2098,9 +2099,9 @@ function SendButton({
         )}
       </button> : null}
       {menuOpen ? (
-        <div
+        <ScrollArea
           ref={menuRef}
-          className="fixed z-50 m-0 max-w-[calc(100vw-1rem)] overflow-y-auto overflow-x-hidden rounded-lg border border-border/60 bg-popover text-xs shadow-lg"
+          className="fixed z-50 m-0 max-w-[calc(100vw-1rem)] rounded-lg border border-border/60 bg-popover text-xs shadow-lg"
           style={{ inset: 'auto', margin: 0 }}
           role="listbox"
           data-testid="send-mode-menu"
@@ -2152,7 +2153,7 @@ function SendButton({
               </button>
             )
           })}
-        </div>
+        </ScrollArea>
       ) : null}
     </div>
   )

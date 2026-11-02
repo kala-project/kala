@@ -129,7 +129,7 @@ export function ApprovalCard({ approvals, onDecision }: Props): JSX.Element | nu
   return (
     <div
       className={cn(
-        'flex min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-sm',
+        'flex min-w-0 flex-col overflow-hidden rounded-xl border border-border/50 bg-card text-card-foreground shadow-sm',
       )}
       data-testid="approval-card"
       role="dialog"

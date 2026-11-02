@@ -453,13 +453,13 @@ function EnhancementActionPanel({ title, actions, onComplete }: { title: string;
   }
 
   return (
-    <div className="mb-3 rounded-md border border-border bg-background/70" data-testid={`enhancement-action-panel-${title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`}>
+    <div className="mb-3 rounded-md border border-border/50 bg-background/70" data-testid={`enhancement-action-panel-${title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`}>
       <button type="button" className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-xs hover:bg-muted/30" onClick={() => setOpen((value) => !value)} data-testid={`${testIdPrefix}-toggle`}>
         <span className="font-medium">{title}</span>
         <span className="font-mono text-caption text-muted-foreground">{open ? t('artifacts.actionPanel.hide') : t('artifacts.actionPanel.show')}</span>
       </button>
       {open ? (
-        <form onSubmit={(event) => void submit(event)} className="grid gap-3 border-t border-border p-3 text-xs" data-testid={`${testIdPrefix}-form`}>
+        <form onSubmit={(event) => void submit(event)} className="grid gap-3 border-t border-border/50 p-3 text-xs" data-testid={`${testIdPrefix}-form`}>
           <label className="grid gap-1">
             <span className="text-caption font-medium text-muted-foreground">{t('artifacts.actionPanel.action')}</span>
             <select className="h-8 rounded border border-input bg-background px-2 text-sm" value={selectedAction} onChange={(event) => setSelectedAction(event.currentTarget.value)} data-testid={`${testIdPrefix}-select`}>
@@ -532,7 +532,7 @@ function UploadFieldControl({ field, value, onChange, testId }: { field: UploadE
   const { t } = useTranslation()
   const label = enhancementFieldLabel(t, field)
   return (
-    <div className="grid gap-1 rounded border border-border bg-background/50 p-2" data-testid={testId}>
+    <div className="grid gap-1 rounded border border-border/50 bg-background/50 p-2" data-testid={testId}>
       <div className="flex items-center justify-between gap-2">
         <span className="text-caption font-medium text-muted-foreground">{label}{field.required ? ' *' : ''}</span>
         <div className="flex gap-1">

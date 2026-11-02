@@ -31,7 +31,7 @@ function TablePreview({ model, fontSize }: { model: Extract<PreviewModel, { kind
     {model.omittedColumns > 0 || model.omittedRows > 0 ? <Notice>{`${model.omittedRows} rows and ${model.omittedColumns} columns omitted by preview limits.`}</Notice> : null}
     <div className="min-h-0 flex-1 overflow-x-auto">
       <div className="flex h-full min-w-max flex-col" style={{ width: `${Math.max(1, model.headers.length) * 12}rem`, fontSize }}>
-        <div className="grid flex-none border-b border-border bg-muted/80 font-semibold" style={{ gridTemplateColumns: grid }}>{model.headers.map((header, index) => <div key={`${index}:${header}`} className="truncate border-r border-border px-2 py-1.5" title={header}>{header}</div>)}</div>
+        <div className="grid flex-none border-b border-border/50 bg-muted/80 font-semibold" style={{ gridTemplateColumns: grid }}>{model.headers.map((header, index) => <div key={`${index}:${header}`} className="truncate border-r border-border/50 px-2 py-1.5" title={header}>{header}</div>)}</div>
         <VirtualRows count={model.rows.length} testId="session-file-table-rows" itemContent={(index) => <div className="grid border-b border-border/50" style={{ gridTemplateColumns: grid }}>{model.rows[index]!.map((cell, column) => <div key={column} className="min-h-7 whitespace-pre-wrap break-words border-r border-border/40 px-2 py-1" title={cell}>{cell}</div>)}</div>} />
       </div>
     </div>
@@ -57,7 +57,7 @@ function LogPreview({ model, fontSize }: { model: Extract<PreviewModel, { kind: 
   const [enabled, setEnabled] = useState<Set<LogLevel>>(() => new Set(LOG_LEVELS))
   const rows = useMemo(() => model.rows.filter((row) => enabled.has(row.level)), [enabled, model.rows])
   return <div className="flex h-full min-h-0 flex-col bg-[#0b0f14] text-slate-200" data-testid="session-file-log-preview">
-    <div className="flex flex-wrap gap-1 border-b border-slate-700 p-2">{LOG_LEVELS.map((level) => <button key={level} type="button" onClick={() => setEnabled((current) => { const next = new Set(current); if (next.has(level)) next.delete(level); else next.add(level); return next })} className={cn('rounded border px-2 py-1 text-caption uppercase', enabled.has(level) ? 'border-slate-500 bg-slate-700' : 'border-slate-800 text-slate-500')} aria-pressed={enabled.has(level)}>{level}</button>)}</div>
+    <div className="flex flex-wrap gap-1 border-b border-slate-700 p-2">{LOG_LEVELS.map((level) => <button key={level} type="button" onClick={() => setEnabled((current) => { const next = new Set(current); if (next.has(level)) next.delete(level); else next.add(level); return next })} className={cn('rounded border border-border/50 px-2 py-1 text-caption uppercase', enabled.has(level) ? 'border-slate-500 bg-slate-700' : 'border-slate-800 text-slate-500')} aria-pressed={enabled.has(level)}>{level}</button>)}</div>
     {model.omittedRows ? <Notice>{`Showing the newest ${model.rows.length} lines; ${model.omittedRows} older lines omitted.`}</Notice> : null}
     <VirtualRows count={rows.length} testId="session-file-log-rows" itemContent={(index) => { const row = rows[index]!; return <div className={cn('min-h-6 whitespace-pre-wrap break-all border-b border-slate-800/70 px-2 py-1 font-mono', row.level === 'error' && 'text-red-300', row.level === 'warn' && 'text-amber-300', row.level === 'debug' && 'text-slate-400')} style={{ fontSize }}>{row.text}</div> }} />
   </div>

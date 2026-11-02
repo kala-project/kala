@@ -79,7 +79,7 @@ Cards inside cards use half-opacity muted (`bg-muted/40`, `bg-muted/60`) to nest
 
 Never expose native browser scrollbars as raw UI chrome. Scrollable dashboard surfaces should use `components/ui/scroll-area.tsx` so the scrollbar is part of the design system and works consistently in dark and light themes.
 
-Allowed exceptions are content-level overflow inside rendered markdown/code (`pre`, long inline traces) and the document root; those are covered by the global thin scrollbar skin in `src/index.css`. If you add `overflow-auto`, `overflow-y-auto`, or `overflow-x-auto`, either replace it with `ScrollArea` or confirm it is a content-level fallback that will inherit the global skin. Do not leave a large panel, popover, dialog body, list, or terminal output on native scrollbar defaults.
+Allowed exceptions are content-level overflow inside rendered markdown/code (`pre`, long inline traces), table/diagram previews, editable text, and the document root; those are covered by the global thin scrollbar skin in `src/index.css`. These exceptions concern the content itself, not its surrounding panel. If you add `overflow-auto`, `overflow-y-auto`, or `overflow-x-auto`, either replace it with `ScrollArea` or confirm it is a content-level fallback that will inherit the global skin. Do not leave a large panel, popover, dialog body, list, or terminal output on native scrollbar defaults.
 
 For scroll containers that need imperative control, such as auto-following terminal output, use `ScrollArea`'s `viewportRef` rather than putting `overflow-auto` on the content element.
 
@@ -111,4 +111,14 @@ rg -n "\bborder-[tblr]\b" packages/dashboard/src
 rg -n "overflow-(auto|scroll|x-auto|y-auto|x-scroll|y-scroll)" packages/dashboard/src
 ```
 
-CI runs these as a ratchet via `pnpm --filter @agent-kernel/dashboard lint:style` (script in `scripts/lint-style.mjs`, baseline in `scripts/lint-style.baseline.json`). Counts may not increase; ratchet the baseline down as you clean up hits with `pnpm --filter @agent-kernel/dashboard lint:style -- --write`.
+These searches are inspection aids, not exact violation counts. CI uses the token-aware `scripts/style-rules.mjs` helper through `pnpm --filter @agent-kernel/dashboard lint:style` (baseline in `scripts/lint-style.baseline.json`). Explicit soft rims, semantic alert colors, transparent scrollbar gutters and `focus-within:border-border` honor §§2–4; comments are not rendered UI. A directional color cannot excuse an uncolored outline on the other edges. No production or prototype directory is excluded.
+
+Counts may only decrease. Ratchet the baseline down as you clean up hits with `pnpm --filter @agent-kernel/dashboard lint:style -- --write`; the command refuses increases. Focused auditor examples run with `node --test packages/dashboard/scripts/style-rules.test.mjs`.
+
+## 12. Minimum readable typography
+
+Use `text-caption` for the smallest metadata, badges, graph axes and hints, or a larger semantic role for primary content. The caption floor is **12px**, with its semantic line-height; comfortable density and Chinese typography may use larger roles. Do not introduce smaller arbitrary pixel/rem sizes, inline numeric sizes or CSS declarations. Relative font reductions must also respect the caption floor.
+
+Saved font-size indices remain compatible, but historical values below the floor are clamped when displayed. Compact density must not shrink a 12px terminal, file tree or reader below the floor. Keep the 16px root metric, larger touch targets, user-selected larger sizes and sensible line-height.
+
+The typography contract scans production **and prototypes**, CSS and inline numeric font sizes. Browser geometry checks (`scripts/style-browser.mjs`, against the local prototype server with `CHROMIUM_PATH` set to an existing browser) also check rendered text, scrollbar bounds, single-row account actions, portal focus and manual observation refresh.

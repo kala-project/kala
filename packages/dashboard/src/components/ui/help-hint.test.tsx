@@ -6,6 +6,20 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from './dialog.
 afterEach(() => { vi.useRealTimers() })
 
 describe('HelpHint', () => {
+  it('describes only the help content and permits scrolling its own focusable viewport', () => {
+    render(<HelpHint label="Details">Readable long explanation</HelpHint>)
+    const trigger = screen.getByRole('button', { name: 'About Details' })
+    fireEvent.click(trigger)
+    const tooltip = screen.getByRole('tooltip')
+    expect(tooltip.hasAttribute('data-radix-scroll-area-viewport')).toBe(true)
+    expect(tooltip.textContent).toBe('Readable long explanation')
+    expect(trigger.getAttribute('aria-describedby')).toBe(tooltip.id)
+    act(() => tooltip.focus())
+    fireEvent.scroll(tooltip)
+    expect(screen.getByRole('tooltip')).toBe(tooltip)
+    expect(document.activeElement).toBe(tooltip)
+  })
+
   it('hides by default, delays preview and safely crosses the trigger/popup gap', () => {
     vi.useFakeTimers()
     render(<HelpHint label="Language">Full original explanation</HelpHint>)

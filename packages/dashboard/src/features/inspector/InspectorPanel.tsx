@@ -738,7 +738,7 @@ function ReducerTraceRow({
       ref={rowRef}
       className={cn(
         traceListItemClass,
-        selected ? 'border-primary/50 bg-card ring-1 ring-primary/20' : 'hover:border-border hover:bg-card/80',
+        selected ? 'border-primary/50 bg-card ring-1 ring-primary/20' : 'hover:border-border/50 hover:bg-card/80',
       )}
       data-testid="timeline-row"
       data-selected={selected ? 'true' : 'false'}
@@ -824,7 +824,7 @@ function LlmCallsView({
               key={call.id}
               type="button"
               onClick={() => onSelect({ kind: 'llm', call })}
-              className={cn(traceListItemClass, 'w-full max-w-full text-left', isSelected ? 'border-primary/50 bg-card ring-1 ring-primary/20' : 'hover:border-border hover:bg-card/80')}
+              className={cn(traceListItemClass, 'w-full max-w-full text-left', isSelected ? 'border-primary/50 bg-card ring-1 ring-primary/20' : 'hover:border-border/50 hover:bg-card/80')}
               data-testid="llm-call-row"
             >
               {isSelected ? <div className="absolute left-0 top-1 bottom-1 w-0.5 rounded bg-primary" /> : null}
@@ -868,7 +868,7 @@ function ToolCallsView({
               key={call.callId}
               type="button"
               onClick={() => onSelect({ kind: 'tool', call })}
-              className={cn(traceListItemClass, 'w-full max-w-full text-left', isSelected ? 'border-primary/50 bg-card ring-1 ring-primary/20' : 'hover:border-border hover:bg-card/80')}
+              className={cn(traceListItemClass, 'w-full max-w-full text-left', isSelected ? 'border-primary/50 bg-card ring-1 ring-primary/20' : 'hover:border-border/50 hover:bg-card/80')}
               data-testid="tool-call-row"
             >
               {isSelected ? <div className="absolute left-0 top-1 bottom-1 w-0.5 rounded bg-primary" /> : null}
@@ -948,7 +948,7 @@ function ProtocolFlowView({
                 event.preventDefault()
                 onReplaySeqChange(entry.seq)
               }}
-              className={cn(traceListItemClass, 'w-full text-left', selectedRow ? 'border-primary/50 bg-card ring-1 ring-primary/20' : 'hover:border-border hover:bg-card/80')}
+              className={cn(traceListItemClass, 'w-full text-left', selectedRow ? 'border-primary/50 bg-card ring-1 ring-primary/20' : 'hover:border-border/50 hover:bg-card/80')}
               data-testid="protocol-flow-row"
             >
               <div className="grid grid-cols-[2.25rem_minmax(0,0.9fr)_minmax(0,0.9fr)_minmax(0,1.1fr)] items-center gap-1.5">

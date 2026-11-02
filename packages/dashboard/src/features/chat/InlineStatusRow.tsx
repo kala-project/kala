@@ -157,7 +157,7 @@ export function CompactFeedbackRow({
       : 'border-emerald-200 bg-emerald-50/70 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-200'
   return (
     <div
-      className={cn('flex items-center gap-2 rounded-md border px-3 py-2 text-xs', palette)}
+      className={cn('flex items-center gap-2 rounded-md border border-border/50 px-3 py-2 text-xs', palette)}
       data-testid={`inline-compact-${kind}`}
       role="status"
     >

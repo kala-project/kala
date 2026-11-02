@@ -19,7 +19,7 @@ type TerminalStatus = 'idle' | 'starting' | 'running' | 'exited' | 'error'
 type TerminalPreferenceScope = 'session' | 'workspace'
 
 const DEFAULT_TERMINAL_FONT_SIZE = 12
-const MIN_TERMINAL_FONT_SIZE = 10
+const MIN_TERMINAL_FONT_SIZE = 12
 const MAX_TERMINAL_FONT_SIZE = 24
 
 export function SessionTerminalPanel({
@@ -140,7 +140,7 @@ export function SessionTerminalPanel({
   }, [])
 
   useEffect(() => {
-    if (terminalRef.current) terminalRef.current.options.fontSize = Math.round(fontSize * interfaceScale)
+    if (terminalRef.current) terminalRef.current.options.fontSize = Math.max(12, Math.round(fontSize * interfaceScale))
     scheduleFitAndResize()
   }, [fontSize, interfaceScale, scheduleFitAndResize])
 
@@ -302,7 +302,7 @@ export function SessionTerminalPanel({
         <span className="inline-flex min-w-0 flex-1 items-center gap-2 truncate text-xs text-muted-foreground" data-testid="terminal-status"><span className={`h-1.5 w-1.5 flex-none rounded-full ${!online || status === 'error' ? 'bg-rose-500' : status === 'running' ? 'bg-emerald-500' : status === 'starting' ? 'animate-pulse bg-amber-500' : 'bg-muted-foreground/50'}`} />{statusLabel}</span>
         <div className="flex flex-none items-center rounded-lg border border-border/45 bg-background/35" data-testid="terminal-font-controls">
           <Button type="button" size="icon" variant="ghost" className="h-8 w-8 rounded-r-none" disabled={fontSize <= MIN_TERMINAL_FONT_SIZE} onClick={() => setFontSize(fontSize - 1)} title={t('terminal.decreaseFont')} aria-label={t('terminal.decreaseFont')} data-testid="terminal-font-decrease"><Minus className="h-3.5 w-3.5" /></Button>
-          <Button type="button" variant="ghost" className="h-8 min-w-8 rounded-none px-1 font-mono text-[11px] tabular-nums" onClick={() => setFontSize(DEFAULT_TERMINAL_FONT_SIZE)} title={t('terminal.resetFont')} aria-label={t('terminal.resetFont')} data-testid="terminal-font-size">{fontSize}</Button>
+          <Button type="button" variant="ghost" className="h-8 min-w-8 rounded-none px-1 font-mono text-caption tabular-nums" onClick={() => setFontSize(DEFAULT_TERMINAL_FONT_SIZE)} title={t('terminal.resetFont')} aria-label={t('terminal.resetFont')} data-testid="terminal-font-size">{fontSize}</Button>
           <Button type="button" size="icon" variant="ghost" className="h-8 w-8 rounded-l-none" disabled={fontSize >= MAX_TERMINAL_FONT_SIZE} onClick={() => setFontSize(fontSize + 1)} title={t('terminal.increaseFont')} aria-label={t('terminal.increaseFont')} data-testid="terminal-font-increase"><Plus className="h-3.5 w-3.5" /></Button>
         </div>
         <Button

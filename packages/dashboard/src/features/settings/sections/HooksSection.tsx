@@ -36,7 +36,7 @@ export function HooksSection({
           ))}
         </SettingsRecordList>
       )}
-      {!platform ? <details className="mt-4 rounded-md border border-border bg-muted/30 p-3 text-xs">
+      {!platform ? <details className="mt-4 rounded-md border border-border/50 bg-muted/30 p-3 text-xs">
         <summary className="cursor-pointer text-muted-foreground">{t('settings.hooks.example')}</summary>
         <pre className="mt-2 whitespace-pre-wrap font-mono text-caption text-foreground">
 {`[[hooks]]

@@ -163,6 +163,7 @@ describe('SubAgentCard', () => {
     expect(screen.getByTestId('sub-agent-status-badge').textContent).toContain('Running')
     expect(screen.getByTestId('sub-agent-role-c1').classList.contains('ak-thinking-text')).toBe(true)
     expect(runningRow.querySelector('.animate-spin')).toBeNull()
+    expect(screen.getByTestId('sub-agent-running-icon').classList.contains('motion-safe:animate-spin')).toBe(true)
     expect(runningRow.textContent).not.toContain('Child session is starting')
     expect(socket.emit.mock.calls.some(([event]) => event === 'client:subscribe_channels')).toBe(false)
 
@@ -183,6 +184,7 @@ describe('SubAgentCard', () => {
       })
     })
     await waitFor(() => expect(screen.getByTestId('sub-agent-row-c1').getAttribute('data-sub-agent-status')).toBe('completed'))
+    expect(screen.queryByTestId('sub-agent-running-icon')).toBeNull()
   })
 
   it('renders the completed state from a parsed envelope', () => {
@@ -434,6 +436,7 @@ describe('SubAgentCard', () => {
     expect(nestedMarkdown).toHaveLength(2)
     expect(nestedMarkdown.some((entry) => entry.querySelector('.katex'))).toBe(true)
     expect(screen.getByTestId('sub-agent-transcript-frame-c1').getAttribute('data-layout')).toBe('content')
+    expect(screen.getByTestId('sub-agent-transcript-frame-c1').querySelector('[data-radix-scroll-area-viewport]')).toBeTruthy()
     expect(screen.getByTestId('nested-transcript').getAttribute('data-virtualized')).toBe('false')
   })
 

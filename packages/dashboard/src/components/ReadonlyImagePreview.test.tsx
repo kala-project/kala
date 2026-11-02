@@ -21,7 +21,7 @@ function loadImage(image: HTMLImageElement, width: number, height: number): void
 describe('ReadonlyImagePreview', () => {
   it('uses real scroll geometry when zooming a fitted image', () => {
     render(<ReadonlyImageCanvas src="data:image/png;base64,test" alt="Test image" imageTestId="preview-image" />)
-    const stage = screen.getByTestId('readonly-image-preview-stage')
+    const stage = screen.getByTestId('readonly-image-preview-stage').querySelector('[data-radix-scroll-area-viewport]') as HTMLDivElement
     setElementSize(stage, 390, 640)
     window.dispatchEvent(new Event('resize'))
 

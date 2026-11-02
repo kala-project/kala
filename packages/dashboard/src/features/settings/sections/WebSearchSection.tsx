@@ -102,7 +102,7 @@ export function WebSearchSection(): JSX.Element {
         <div className="text-sm text-muted-foreground" role="status">{t('common.loading')}</div>
       ) : (
         <div className="space-y-4">
-          <div className="rounded-md border border-border bg-card/60 px-4 py-3 text-sm">
+          <div className="rounded-md border border-border/50 bg-card/60 px-4 py-3 text-sm">
             <div className="font-medium">{t('settings.webSearch.status')}</div>
             <p className="mt-1 text-xs text-muted-foreground" data-testid="settings-web-search-status">
               {settings?.configured ? t('settings.webSearch.configured') : t('settings.webSearch.notConfigured')}
@@ -112,11 +112,11 @@ export function WebSearchSection(): JSX.Element {
             </p>
           </div>
 
-          <form className="space-y-4 rounded-md border border-border bg-card/60 p-4" onSubmit={(event) => { void save(event) }}>
+          <form className="space-y-4 rounded-md border border-border/50 bg-card/60 p-4" onSubmit={(event) => { void save(event) }}>
             <label className="block text-sm font-medium" htmlFor="settings-web-search-provider">
               {t('settings.webSearch.provider')}
             </label>
-            <select id="settings-web-search-provider" className="h-9 w-full rounded-md border px-3 text-sm" value="serper" disabled>
+            <select id="settings-web-search-provider" className="h-9 w-full rounded-md border border-border/50 px-3 text-sm" value="serper" disabled>
               <option value="serper">Serper</option>
             </select>
 
@@ -128,7 +128,7 @@ export function WebSearchSection(): JSX.Element {
               data-testid="settings-web-search-api-key"
               type="password"
               autoComplete="new-password"
-              className="h-9 w-full rounded-md border px-3 text-sm"
+              className="h-9 w-full rounded-md border border-border/50 px-3 text-sm"
               value={apiKey}
               onChange={(event) => setApiKey(event.target.value)}
               placeholder={settings?.configured ? t('settings.webSearch.apiKeyConfiguredPlaceholder') : t('settings.webSearch.apiKeyPlaceholder')}

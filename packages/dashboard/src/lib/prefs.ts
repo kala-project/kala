@@ -55,7 +55,7 @@ export const DASHBOARD_PREFERENCES = definePreferenceRegistry({
   autoHideOfflineWorkspaces: { key: 'ak-auto-hide-offline-workspaces', type: 'boolean', defaultValue: true },
   hideSubAgentSessions: { key: 'ak-hide-sub-agent-sessions', type: 'boolean', defaultValue: true },
   chatFontSize: { key: 'ak-chat-font-size', type: 'number', defaultValue: 3, min: 0, max: CHAT_FONT_SIZE_PX.length - 1 },
-  codeBlockFontSize: { key: 'ak-code-block-font-size', type: 'number', defaultValue: 15, min: 10, max: 48 },
+  codeBlockFontSize: { key: 'ak-code-block-font-size', type: 'number', defaultValue: 15, min: 12, max: 48 },
   sessionExplorerFontSize: { key: 'ak-session-explorer-font-size', type: 'number', defaultValue: 2, min: 0, max: SESSION_EXPLORER_FONT_SIZE_PX.length - 1 },
   fileExplorerFontSize: { key: 'ak-file-explorer-font-size', type: 'number', defaultValue: 1, min: 0, max: FILE_EXPLORER_FONT_SIZE_PX.length - 1 },
   fileViewFontSize: { key: 'ak-file-view-font-size', type: 'number', defaultValue: 2, min: 0, max: FILE_VIEW_FONT_SIZE_PX.length - 1 },

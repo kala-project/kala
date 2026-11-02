@@ -160,7 +160,7 @@ export function SpeechSection(): JSX.Element {
             <label className="block text-sm font-medium" htmlFor="settings-speech-provider">
               {t('settings.speech.provider')}
             </label>
-            <select id="settings-speech-provider" className="h-9 w-full rounded-md border px-3 text-sm" value="azure" disabled>
+            <select id="settings-speech-provider" className="h-9 w-full rounded-md border border-border/50 px-3 text-sm" value="azure" disabled>
               <option value="azure">Azure Speech</option>
             </select>
 
@@ -171,7 +171,7 @@ export function SpeechSection(): JSX.Element {
             <select
               id="settings-speech-mode"
               data-testid="settings-speech-mode"
-              className="h-9 w-full rounded-md border px-3 text-sm"
+              className="h-9 w-full rounded-md border border-border/50 px-3 text-sm"
               value={mode}
               onChange={(event) => setMode(event.target.value as SpeechTranscriptionMode)}
             >
@@ -189,7 +189,7 @@ export function SpeechSection(): JSX.Element {
                     {t(`settings.speech.${key}`)}
                   </label>
                   <input id={`settings-speech-${key}`} data-testid={`settings-speech-${key}`} type="number" min="1" max={MAX_SPEECH_MAX_MINUTES} step="1" required
-                    className="mt-1 h-9 w-full rounded-md border px-3 text-sm" value={value}
+                    className="mt-1 h-9 w-full rounded-md border border-border/50 px-3 text-sm" value={value}
                     onChange={(event) => setValue(event.target.value === '' ? 0 : Number(event.target.value))} />
                 </div>
               ))}
@@ -205,7 +205,7 @@ export function SpeechSection(): JSX.Element {
               data-testid="settings-speech-endpoint"
               type="url"
               spellCheck={false}
-              className="h-9 w-full rounded-md border px-3 font-mono text-sm"
+              className="h-9 w-full rounded-md border border-border/50 px-3 font-mono text-sm"
               value={endpoint}
               onChange={(event) => setEndpoint(event.target.value)}
             />
@@ -219,7 +219,7 @@ export function SpeechSection(): JSX.Element {
               data-testid="settings-speech-api-key"
               type="password"
               autoComplete="new-password"
-              className="h-9 w-full rounded-md border px-3 text-sm"
+              className="h-9 w-full rounded-md border border-border/50 px-3 text-sm"
               value={apiKey}
               onChange={(event) => setApiKey(event.target.value)}
               placeholder={settings?.configured ? t('settings.speech.apiKeyConfiguredPlaceholder') : t('settings.speech.apiKeyPlaceholder')}

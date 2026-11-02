@@ -1,3 +1,4 @@
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 import { randomId } from '../../lib/random-id.js'
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { DiffEditor } from '../../lib/monaco.js'
@@ -67,7 +68,7 @@ const GIT_STATUS_LABEL: Record<GitFileChange['status'], string> = {
 function SourceControlPanelImpl({ socket, workspaceId, sessionId, cwd, fontSizePx = 12 }: SourceControlPanelProps): JSX.Element {
   const { t } = useTranslation()
   const tabsId = useId()
-  const resourceKey = `${workspaceId ?? 'offline'}\0${cwd ?? ''}`
+  const resourceKey = `${sessionId ?? 'unscoped'}\0${workspaceId ?? 'offline'}\0${cwd ?? ''}`
   const [status, setStatus] = useState<GitStatusResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [tab, setTab] = useState<'changes' | 'history'>('changes')
@@ -138,7 +139,7 @@ function SourceControlPanelImpl({ socket, workspaceId, sessionId, cwd, fontSizeP
         <div className="flex min-w-0 items-center gap-2.5 rounded-xl border border-sidebar-border/60 bg-background/40 p-2.5 shadow-sm" data-testid="source-control-toolbar">
           <span className="flex size-9 flex-none items-center justify-center rounded-lg bg-primary/10 text-primary"><GitBranch className="size-4" aria-hidden="true" /></span>
           <div className="min-w-0 flex-1">
-            <div className="mb-0.5 text-[10px] font-medium tracking-wide text-sidebar-foreground/50">{t('sourceControl.repository')}</div>
+            <div className="mb-0.5 text-caption font-medium tracking-wide text-sidebar-foreground/50">{t('sourceControl.repository')}</div>
             <div className="truncate font-mono text-xs font-semibold text-sidebar-foreground" title={status?.repo?.branch ?? status?.repo?.head}>
               {status?.repo?.branch ?? status?.repo?.head ?? '—'}
             </div>
@@ -166,14 +167,14 @@ function SourceControlPanelImpl({ socket, workspaceId, sessionId, cwd, fontSizeP
         <div className="grid grid-cols-2 gap-1 rounded-xl bg-muted/60 p-1" role="tablist" aria-label={t('sourceControl.repository')}>
           <button type="button" id={`${tabsId}-changes`} role="tab" aria-selected={tab === 'changes'} aria-controls={`${tabsId}-panel`} onClick={() => setTab('changes')} className={cn('flex min-w-0 items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring', tab === 'changes' ? 'bg-background text-sidebar-foreground shadow-sm ring-1 ring-sidebar-border/50 dark:bg-sidebar-accent' : 'text-sidebar-foreground/55 hover:bg-sidebar-accent/40 hover:text-sidebar-foreground')}>
             <FileCode2 className="size-3.5 flex-none" aria-hidden="true" /><span className="truncate">{t('sourceControl.workingChanges')}</span>
-            {fileCount > 0 ? <span className={cn('flex h-4 min-w-4 flex-none items-center justify-center rounded px-1 text-[10px] font-semibold tabular-nums', tab === 'changes' ? 'bg-primary/10 text-primary' : 'bg-sidebar-accent text-sidebar-foreground/60')}>{fileCount}</span> : null}
+            {fileCount > 0 ? <span className={cn('flex h-4 min-w-4 flex-none items-center justify-center rounded px-1 text-caption font-semibold tabular-nums', tab === 'changes' ? 'bg-primary/10 text-primary' : 'bg-sidebar-accent text-sidebar-foreground/60')}>{fileCount}</span> : null}
           </button>
           <button type="button" id={`${tabsId}-history`} role="tab" aria-selected={tab === 'history'} aria-controls={`${tabsId}-panel`} onClick={() => setTab('history')} className={cn('flex min-w-0 items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring', tab === 'history' ? 'bg-background text-sidebar-foreground shadow-sm ring-1 ring-sidebar-border/50 dark:bg-sidebar-accent' : 'text-sidebar-foreground/55 hover:bg-sidebar-accent/40 hover:text-sidebar-foreground')}>
             <History className="size-3.5 flex-none" aria-hidden="true" /><span className="truncate">{t('sourceControl.history')}</span>
           </button>
         </div>
       </div>
-      <div id={`${tabsId}-panel`} role="tabpanel" aria-labelledby={`${tabsId}-${tab}`} className="min-h-0 flex-1 overflow-auto p-2.5" style={{ fontSize: `${fontSizePx / 16}rem` }}>
+      <ScrollArea id={`${tabsId}-panel`} role="tabpanel" aria-labelledby={`${tabsId}-${tab}`} className="min-h-0 flex-1" style={{ fontSize: `${fontSizePx / 16}rem` }} contentClassName="p-2.5 min-h-full">
         {tab === 'history' ? <CommitHistory socket={socket} workspaceId={workspaceId} cwd={cwd} /> : !online ? (
           <EmptyState message={t('sourceControl.offline')} />
         ) : loading && !status ? (
@@ -187,7 +188,7 @@ function SourceControlPanelImpl({ socket, workspaceId, sessionId, cwd, fontSizeP
             {status?.truncated ? <div className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-caption text-amber-700 dark:text-amber-200">{t('sourceControl.truncatedFiles', { count: status.truncated.limit })}</div> : null}
             {groups.map((group) => (
               <div key={group.id}>
-                <div className="mb-1 flex items-center justify-between gap-2 px-2 py-1.5 text-caption font-medium text-sidebar-foreground/60"><span>{group.label}</span><span className="rounded-md bg-muted/60 px-1.5 py-0.5 text-[10px] tabular-nums text-sidebar-foreground/50">{group.files.length}</span></div>
+                <div className="mb-1 flex items-center justify-between gap-2 px-2 py-1.5 text-caption font-medium text-sidebar-foreground/60"><span>{group.label}</span><span className="rounded-md bg-muted/60 px-1.5 py-0.5 text-caption tabular-nums text-sidebar-foreground/50">{group.files.length}</span></div>
                 <div className="space-y-0.5">
                   {viewMode === 'tree' ? (
                     <GitFileTree
@@ -214,7 +215,7 @@ function SourceControlPanelImpl({ socket, workspaceId, sessionId, cwd, fontSizeP
             ))}
           </div>
         )}
-      </div>
+      </ScrollArea>
       <GitDiffDialog
         open={selected !== null}
         onOpenChange={(open) => { if (!open) setSelected(null) }}
@@ -285,7 +286,7 @@ function GitDirRow({ node, depth, collapsed, onToggle }: { node: Extract<GitTree
     >
       {collapsed ? <ChevronRight className="h-3.5 w-3.5 flex-none text-sidebar-foreground/50" /> : <ChevronDown className="h-3.5 w-3.5 flex-none text-sidebar-foreground/50" />}
       <Folder className="h-3.5 w-3.5 flex-none text-sidebar-foreground/55" />
-      <span className="min-w-0 flex-1 truncate font-mono text-[0.95em]">{node.name}</span>
+      <span className="min-w-0 flex-1 truncate font-mono text-inherit">{node.name}</span>
     </button>
   )
 }
@@ -302,7 +303,7 @@ function GitFileRow({ file, depth, label, onOpen }: { file: GitFileChange; depth
     >
       <span className={cn('flex h-4 w-4 flex-none items-center justify-center rounded text-caption font-semibold', statusBadgeClass(file.status))}>{GIT_STATUS_LABEL[file.status]}</span>
       <FileCode2 className="h-3.5 w-3.5 flex-none text-sidebar-foreground/55" />
-      <span className="min-w-0 flex-1 truncate font-mono text-[0.95em]">{label === 'basename' ? basename(file.path) : file.path}</span>
+      <span className="min-w-0 flex-1 truncate font-mono text-inherit">{label === 'basename' ? basename(file.path) : file.path}</span>
     </button>
   )
 }
@@ -335,13 +336,13 @@ function GitDiffDialog({ open, onOpenChange, socket, workspaceId, sessionId, cwd
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[92dvh] w-[96vw] max-w-[min(1180px,96vw)] gap-0 overflow-hidden p-0" data-testid="source-control-diff-dialog">
-        <DialogHeader className="border-b border-border px-3 py-2.5 pr-10 sm:px-4">
+        <DialogHeader className="border-b border-border/50 px-3 py-2.5 pr-10 sm:px-4">
           <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:gap-3">
             <div className="min-w-0 flex-1">
               <DialogTitle className="truncate font-mono text-sm font-medium">{path ?? t('sourceControl.gitDiff')}</DialogTitle>
               <DialogDescription className="text-xs">{t('sourceControl.diffDescription')}</DialogDescription>
             </div>
-            <div className="grid w-fit flex-none grid-cols-2 rounded-md border border-border bg-muted/40 p-0.5" aria-label={t('sourceControl.diffLayout')}>
+            <div className="grid w-fit flex-none grid-cols-2 rounded-md border border-border/50 bg-muted/40 p-0.5" aria-label={t('sourceControl.diffLayout')}>
               <button
                 type="button"
                 className={cn('flex h-7 items-center justify-center gap-1.5 rounded px-2 text-xs font-medium', renderSideBySide ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:bg-muted hover:text-foreground')}

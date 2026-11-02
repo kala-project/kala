@@ -172,8 +172,8 @@ function AgentSectionForScope({ payload, onPayloadChange }: AgentSectionProps): 
               <div
                 key={slot.id}
                 className={cn(
-                  'flex min-h-36 flex-col rounded-md border p-3 transition-colors',
-                  editing ? 'border-primary/70 bg-primary/5 ring-1 ring-primary/30' : 'border-border bg-card/60',
+                  'flex min-h-36 flex-col rounded-md border border-border/50 p-3 transition-colors',
+                  editing ? 'border-primary/70 bg-primary/5 ring-1 ring-primary/30' : 'border-border/50 bg-card/60',
                 )}
                 data-testid={`settings-agent-slot-${slot.id}`}
               >
@@ -230,7 +230,7 @@ function AgentSectionForScope({ payload, onPayloadChange }: AgentSectionProps): 
         ) : null}
 
         {editingSlot && persistedEditingSlot ? (
-          <div className="space-y-3 rounded-md border border-border bg-card/40 p-3 sm:p-4" data-testid="settings-agent-editor">
+          <div className="space-y-3 rounded-md border border-border/50 bg-card/40 p-3 sm:p-4" data-testid="settings-agent-editor">
             <div className="text-sm font-semibold text-foreground">{t('settings.agent.editorTitle')}</div>
             <div className="space-y-1.5">
               <label htmlFor="settings-agent-slot-name" className="text-sm font-medium text-foreground">{t('settings.agent.slotName')}</label>

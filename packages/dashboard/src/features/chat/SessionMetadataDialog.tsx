@@ -1,3 +1,4 @@
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 /**
  * Read-only + editable "session info" modal opened from the workbench toolbar.
  *
@@ -260,7 +261,7 @@ export function SessionMetadataDialog({
         <DialogHeader className="relative border-b border-border/60 px-4 py-3 pr-14 sm:px-6 sm:py-4 sm:pr-14">
           <DialogTitle className="flex items-center gap-1 text-lg">{t('dialogs.sessionInfo')}<HelpHint label={t('dialogs.sessionInfo')}>{t('dialogs.sessionInfoDescription')}</HelpHint></DialogTitle>
           <DialogDescription className="sr-only">{t('common.contextualHelp')}</DialogDescription>
-          <div className="mt-3 flex gap-1 overflow-x-auto" role="tablist" aria-label={t('sessionMetadata.tabs.label')}>
+          <ScrollArea className="mt-3" role="tablist" aria-label={t('sessionMetadata.tabs.label')} contentClassName="flex gap-1 min-w-full w-max">
             <MetadataTab active={activeTab === 'overview'} testId="session-info-overview-tab" onClick={() => setActiveTab('overview')}>
               {t('sessionMetadata.tabs.overview')}
             </MetadataTab>
@@ -270,13 +271,13 @@ export function SessionMetadataDialog({
             <MetadataTab active={activeTab === 'storage'} testId="session-info-storage-tab" onClick={() => setActiveTab('storage')}>
               {t('sessionMetadata.tabs.storage')}
             </MetadataTab>
-          </div>
+          </ScrollArea>
           <DialogClose className={dialogTouchCloseClassName} aria-label={t('common.close')}>
             <X className="h-5 w-5" aria-hidden="true" />
           </DialogClose>
         </DialogHeader>
 
-        <DialogBody className="px-4 py-4 sm:px-6" data-testid="session-metadata-body">
+        <DialogBody contentClassName="px-4 py-4 sm:px-6" data-testid="session-metadata-body">
         {activeTab === 'overview' ? (
         <>
         <div className="grid gap-3 text-sm">

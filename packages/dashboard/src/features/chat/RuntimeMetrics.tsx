@@ -1,3 +1,4 @@
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ChevronDown, ChevronUp } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -284,10 +285,10 @@ export function RuntimeMetrics({
         ) : null}
       </button>
       {open ? (
-        <div
-          className="ak-motion-popover pointer-events-auto absolute inset-x-0 bottom-full z-30 mb-2 w-auto max-h-[min(32rem,calc(100dvh-7rem))] sm:left-auto sm:w-[min(24rem,calc(100vw-1rem))] overflow-y-auto overflow-x-hidden rounded-lg border border-border/70 bg-popover p-4 text-sm shadow-xl"
+        <ScrollArea
+          className="ak-motion-popover pointer-events-auto absolute inset-x-0 bottom-full z-30 mb-2 w-auto max-h-[min(32rem,calc(100dvh-7rem))] sm:left-auto sm:w-[min(24rem,calc(100vw-1rem))] overflow-x-hidden rounded-lg border border-border/70 bg-popover text-sm shadow-xl"
           data-testid="context-pressure-popover"
-        >
+         contentClassName="p-4 min-w-full">
           <div className="text-lg font-semibold tracking-tight text-foreground">{t('chat.runtimeMetrics.contextWindow')}</div>
 
           <div className="mt-3 flex items-baseline justify-between gap-3">
@@ -363,7 +364,7 @@ export function RuntimeMetrics({
               />
             </div>
           ) : null}
-          <div className="relative mt-3 h-2 overflow-hidden rounded-full border border-border bg-muted">
+          <div className="relative mt-3 h-2 overflow-hidden rounded-full border border-border/50 bg-muted">
             {breakdownSegments.length > 0 ? (
               <div className="absolute inset-y-0 left-0 right-0 flex">
                 {breakdownSegments.map((seg) => (
@@ -479,7 +480,7 @@ export function RuntimeMetrics({
 
           <button
             type="button"
-            className="mt-4 flex h-9 w-full items-center justify-center rounded-md border border-border bg-transparent px-3 text-xs text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+            className="mt-4 flex h-9 w-full items-center justify-center rounded-md border border-border/50 bg-transparent px-3 text-xs text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
             disabled={!onCompact || compactDisabled}
             onClick={() => {
               onCompact?.()
@@ -489,7 +490,7 @@ export function RuntimeMetrics({
           >
             {t('chat.runtimeMetrics.compactConversation')}
           </button>
-        </div>
+        </ScrollArea>
       ) : null}
     </div>
   )

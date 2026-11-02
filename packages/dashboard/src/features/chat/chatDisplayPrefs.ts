@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react'
-import { CHAT_FONT_SIZE_PX } from '../../lib/display-sizes.js'
+import { CHAT_FONT_SIZE_PX, readableFontSize } from '../../lib/display-sizes.js'
 export { CHAT_FONT_SIZE_PX } from '../../lib/display-sizes.js'
 
 export type ChatDisplayPrefs = {
@@ -27,8 +27,8 @@ export function chatDisplayStyle(displayPrefs: ChatDisplayPrefs | undefined): CS
   const mathScale = clampIndex(displayPrefs?.mathScale, CHAT_MATH_SCALE_EM, 2)
   const sideSpace = CHAT_SIDE_SPACE[clampIndex(displayPrefs?.sideSpace, CHAT_SIDE_SPACE, 1)] ?? CHAT_SIDE_SPACE[1]
   return {
-    '--ak-chat-font-size': `${(CHAT_FONT_SIZE_PX[fontSize] ?? 15) / 16}rem`,
-    '--ak-code-font-size': `${Math.min(48, Math.max(10, displayPrefs?.codeBlockFontSize ?? 15)) / 16}rem`,
+    '--ak-chat-font-size': `${readableFontSize(CHAT_FONT_SIZE_PX[fontSize] ?? 15) / 16}rem`,
+    '--ak-code-font-size': `${readableFontSize(displayPrefs?.codeBlockFontSize ?? 15) / 16}rem`,
     '--ak-chat-line-height': String(CHAT_LINE_HEIGHT[lineHeight]),
     '--ak-chat-content-width': `${CHAT_CONTENT_WIDTH_REM[contentWidth]}rem`,
     '--ak-chat-math-scale': `${CHAT_MATH_SCALE_EM[mathScale]}em`,

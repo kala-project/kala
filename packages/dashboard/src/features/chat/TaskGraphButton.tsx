@@ -1,3 +1,4 @@
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Circle, CircleDashed, GitBranch, LockKeyhole, X } from 'lucide-react'
 import { createPortal } from 'react-dom'
@@ -59,9 +60,9 @@ export function TaskGraphButton({ graph, appearance = 'icon' }: Props): JSX.Elem
         <button className="ml-auto rounded px-2 py-1 text-xs hover:bg-accent" onClick={() => setGraphView((value) => !value)}>{graphView ? t('taskGraph.listView') : t('taskGraph.graphView')}</button>
         <ModalSizeToggle expanded={expanded} onToggle={() => setExpanded((value) => !value)} testId="task-graph-size-toggle" />
       </div>
-      <div className="min-h-0 flex-1 overflow-auto p-3">
+      <ScrollArea className="min-h-0 flex-1" contentClassName="p-3 min-h-full">
         {graphView ? <GraphView graph={graph} /> : <GroupedList graph={graph} />}
-      </div>
+      </ScrollArea>
     </div>, document.body) : null}
   </div>
 }
@@ -134,7 +135,7 @@ function GraphView({ graph }: { graph: TaskGraphSnapshot }): JSX.Element {
       const dimmed = related !== null && !related.has(node.id)
       const blocked = graph.blocked.some((item) => item.id === node.id)
       return <button key={node.id} type="button" onClick={() => setSelected((current) => current === node.id ? null : node.id)}
-        className={cn('absolute flex flex-col overflow-hidden rounded-lg border bg-background px-3 py-2 text-left shadow-sm transition-all hover:shadow-md',
+        className={cn('absolute flex flex-col overflow-hidden rounded-lg border border-border/50 bg-background px-3 py-2 text-left shadow-sm transition-all hover:shadow-md',
           node.status === 'completed' && 'border-emerald-500/60', node.status === 'in_progress' && 'ak-task-node-running border-sky-500/75 ring-1 ring-sky-500/20',
           blocked && 'border-amber-500/60', node.status === 'cancelled' && 'border-dashed opacity-60', selected === node.id && 'ring-2 ring-sky-500', dimmed && 'opacity-25')}
         style={{ left: x, top: y, width: GRAPH_NODE_WIDTH, height: GRAPH_NODE_HEIGHT }} data-node-id={node.id}>

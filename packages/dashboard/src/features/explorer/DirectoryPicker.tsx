@@ -331,10 +331,10 @@ export function DirectoryPicker({
           <div className="text-xs text-rose-600 dark:text-rose-300" data-testid="dir-picker-create-folder-error">{createError}</div>
         ) : null}
         {crumbs.length > 0 ? (
-          <div
-            className="flex min-w-0 items-center gap-0.5 overflow-x-auto"
+          <ScrollArea
+            className="min-w-0"
             data-testid="dir-picker-breadcrumbs"
-          >
+           contentClassName="flex items-center gap-0.5 min-w-full w-max">
             {crumbs.map((crumb, i) => (
               <div key={`${crumb.path}-${i}`} className="flex flex-none items-center gap-0.5">
                 {i > 0 ? (
@@ -357,15 +357,15 @@ export function DirectoryPicker({
                 </button>
               </div>
             ))}
-          </div>
+          </ScrollArea>
         ) : null}
       </div>
       <div className="min-h-0 flex-1 overflow-hidden">
-        <div
-          ref={finderScrollRef}
-          className="h-full overflow-x-auto overflow-y-hidden"
+        <ScrollArea
+          viewportRef={finderScrollRef}
+          className="h-full overflow-y-hidden"
           data-testid="directory-picker-finder"
-        >
+          contentClassName="h-full min-w-full">
           <div className="flex h-full min-h-0 min-w-full md:w-max">
             {columns.length === 0 ? (
               <div className="flex h-48 w-full items-center justify-center text-sm text-muted-foreground">
@@ -383,7 +383,7 @@ export function DirectoryPicker({
               />
             ))}
           </div>
-        </div>
+        </ScrollArea>
       </div>
     </div>
   )
@@ -413,11 +413,11 @@ function DirectoryColumn({
         {directoryName(column.path)}
       </div>
       {column.error ? (
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2 text-xs text-rose-600 dark:text-rose-300">{column.error}</div>
+        <ScrollArea className="min-h-0 flex-1 text-xs text-rose-600 dark:text-rose-300" contentClassName="px-3 py-2 min-h-full">{column.error}</ScrollArea>
       ) : column.entries.length === 0 ? (
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2 text-xs text-muted-foreground">{t('directory.noSubdirectories')}</div>
+        <ScrollArea className="min-h-0 flex-1 text-xs text-muted-foreground" contentClassName="px-3 py-2 min-h-full">{t('directory.noSubdirectories')}</ScrollArea>
       ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-1" data-testid="finder-column-scroll">
+        <ScrollArea className="min-h-0 flex-1 overscroll-contain" data-testid="finder-column-scroll" contentClassName="py-1 min-h-full">
           {column.entries.map((entry) => {
             // Older executors omitted `type` because the picker originally
             // returned directories only. Preserve that behavior for them.
@@ -454,7 +454,7 @@ function DirectoryColumn({
               </button>
             )
           })}
-        </div>
+        </ScrollArea>
       )}
     </div>
   )

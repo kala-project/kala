@@ -148,6 +148,32 @@ describe('SessionFilesPanel', () => {
     expect(socket.emitMock).toHaveBeenCalledWith('workspace:read_binary', expect.objectContaining({ workspaceId: 'ws-1', path: '/repo/notes.txt', maxBytes: 1024 * 1024 }), expect.any(Function))
   })
 
+  it('reloads on a same-workspace Session switch and ignores the previous Session response', async () => {
+    const socket = makeSessionFilesSocket({ file: { kind: 'text', content: '', size: 0 } })
+    const requests: Array<Record<string, unknown>> = []
+    socket.emitMock.mockImplementation((event: string, payload: Record<string, unknown>) => {
+      if (event === 'client:list_dirs') requests.push(payload)
+    })
+    const dashboardSocket = socket.asDashboardSocket()
+    const { rerender } = render(<SessionFilesPanel socket={dashboardSocket} workspaceId="ws-1" sessionId="sess-1" cwd="/repo" mode="sidebar" />)
+    await waitFor(() => expect(requests).toHaveLength(1))
+
+    rerender(<SessionFilesPanel socket={dashboardSocket} workspaceId="ws-1" sessionId="sess-2" cwd="/repo" mode="sidebar" />)
+    await waitFor(() => expect(requests).toHaveLength(2))
+    expect(requests[1]).toEqual(expect.objectContaining({ workspaceId: 'ws-1', sessionId: 'sess-2', path: '/repo' }))
+
+    act(() => socket.serverEmit('server:dir_list', dirList(String(requests[1]!.requestId), [
+      { name: 'second.txt', path: '/repo/second.txt', type: 'file', size: 2 },
+    ])))
+    expect(await screen.findByText('second.txt')).toBeTruthy()
+
+    act(() => socket.serverEmit('server:dir_list', dirList(String(requests[0]!.requestId), [
+      { name: 'first.txt', path: '/repo/first.txt', type: 'file', size: 1 },
+    ])))
+    expect(screen.queryByText('first.txt')).toBeNull()
+    expect(screen.getByText('second.txt')).toBeTruthy()
+  })
+
   it('uses the configured file view font size', async () => {
     localStorage.setItem('ak-file-view-font-size', '4')
     const socket = makeSessionFilesSocket({
@@ -203,7 +229,7 @@ describe('SessionFilesPanel', () => {
     expect(dialog.className).toContain('w-screen')
     expect(dialog.className).toContain('--ak-viewport-h')
     expect(dialog.className).toContain('grid-rows-[auto_minmax(0,1fr)]')
-    expect(screen.getByTestId('session-file-view-actions').className).toContain('overflow-x-auto')
+    expect(screen.getByTestId('session-file-view-actions').querySelector('[data-radix-scroll-area-viewport]')).toBeTruthy()
     expect(screen.getByTestId('session-file-view-close').className).toContain('h-11 w-11')
   })
 
@@ -257,7 +283,7 @@ describe('SessionFilesPanel', () => {
 
     const image = await screen.findByRole('img')
     expect(image.getAttribute('src')).toBe('data:image/png;base64,aW1hZ2U=')
-    expect(screen.getByTestId('session-file-image-stage').className).toContain('overflow-auto')
+    expect(screen.getByTestId('session-file-image-stage').querySelector('[data-radix-scroll-area-viewport]')).toBeTruthy()
     expect(screen.getByTestId('readonly-image-preview-controls')).toBeTruthy()
     expect(screen.getByText('image/png')).toBeTruthy()
     expect(socket.emitMock).toHaveBeenCalledWith('client:list_dirs', expect.objectContaining({ workspaceId: 'ws-1', sessionId: 'sess-1', path: '/repo' }))

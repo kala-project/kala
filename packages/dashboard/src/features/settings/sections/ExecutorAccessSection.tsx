@@ -208,7 +208,7 @@ export function ExecutorAccessSection({ executors = [] }: { executors?: readonly
               ? labelValue || t('settings.executorAccess.boundInvite')
               : t('settings.executorAccess.waitingForFirstUse')
             return (
-              <article key={invite.id} className="rounded-md border border-border bg-card/60 px-3 py-3" data-testid="executor-invite-row">
+              <article key={invite.id} className="rounded-md border border-border/50 bg-card/60 px-3 py-3" data-testid="executor-invite-row">
                 <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                   <div className="min-w-0 flex-1 space-y-2">
                     <div className="flex flex-wrap items-start gap-2">
@@ -269,7 +269,7 @@ function ConnectedWorkspace({ executor }: { executor: AttachedExecutor }): JSX.E
   const runtime = executor.runtime === 'node' ? 'Node.js' : executor.runtime === 'browser-webcontainer' ? 'Browser WebContainer' : executor.runtime
   const instance = [executor.hostname, `${runtime} ${executor.runtimeVersion}`, executor.os].filter(Boolean).join(' · ')
   return (
-    <details className="rounded-lg border border-border bg-card/40">
+    <details className="rounded-lg border border-border/50 bg-card/40">
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 [&::-webkit-details-marker]:hidden">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -283,7 +283,7 @@ function ConnectedWorkspace({ executor }: { executor: AttachedExecutor }): JSX.E
           <ChevronRight className="h-4 w-4" />
         </div>
       </summary>
-      <div className="grid gap-2 border-t border-border px-4 py-3 text-xs sm:grid-cols-2">
+      <div className="grid gap-2 border-t border-border/50 px-4 py-3 text-xs sm:grid-cols-2">
         <InviteMeta label={t('settings.deployment.workspace')} value={executor.workspaceId} mono />
         <InviteMeta label={t('settings.deployment.executor')} value={executor.executorId} mono />
         <InviteMeta label={t('settings.deployment.executorProtocol')} value={executor.clientVersion ?? '—'} mono />

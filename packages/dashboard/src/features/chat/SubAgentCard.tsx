@@ -16,12 +16,14 @@
  */
 
 import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 import {
   AlertCircle,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
   Clock3,
+  LoaderCircle,
   MoreHorizontal,
   Shield,
   Square,
@@ -225,6 +227,7 @@ const SubAgentRow = memo(function SubAgentRow({
   const terminal = status === 'completed' || status === 'failed' || status === 'cancelled'
   const renderedRows = nestedTranscriptRowCount(displayedMessages)
   const virtualizeTranscript = renderedRows > VIRTUALIZED_TRANSCRIPT_THRESHOLD
+  const TranscriptFrame = virtualizeTranscript ? 'div' : ScrollArea
   const transcriptViewportHeight = virtualizeTranscript
     ? Math.min(
         VIRTUALIZED_TRANSCRIPT_MAX_HEIGHT_PX,
@@ -264,7 +267,7 @@ const SubAgentRow = memo(function SubAgentRow({
       className={cn(
         'ak-sub-agent-card relative min-w-0 max-w-full overflow-hidden transition-colors',
         grouped ? 'w-full' : 'rounded-xl border border-border/70 bg-card/55',
-        open && !grouped && 'border-border bg-card/80',
+        open && !grouped && 'border-border/50 bg-card/80',
       )}
       data-testid={`sub-agent-row-${call.callId}`}
       data-sub-agent-status={status}
@@ -282,7 +285,7 @@ const SubAgentRow = memo(function SubAgentRow({
           )}
           data-testid={`sub-agent-toggle-${call.callId}`}
         >
-          {status === 'running' || status === 'idle' ? null : (
+          {status === 'idle' ? null : (
             <span className="flex h-5 w-5 flex-none items-center justify-center">
               <StatusIcon status={status} />
             </span>
@@ -375,13 +378,14 @@ const SubAgentRow = memo(function SubAgentRow({
             </div>
           ) : null}
           {displayedMessages.length > 0 ? (
-            <div
+            <TranscriptFrame
               className={cn(
-                'flex min-h-0 flex-col py-1',
+                'min-h-0',
                 virtualizeTranscript
-                  ? 'max-h-[min(20rem,55dvh)]'
-                  : compact ? 'max-h-[22rem] overflow-y-auto' : 'max-h-96 overflow-y-auto',
+                  ? 'flex max-h-[min(20rem,55dvh)] flex-col py-1'
+                  : compact ? 'max-h-[22rem]' : 'max-h-96',
               )}
+              {...(!virtualizeTranscript ? { contentClassName: 'py-1' } : {})}
               style={transcriptViewportHeight === undefined ? undefined : { height: transcriptViewportHeight }}
               data-testid={`sub-agent-transcript-frame-${call.callId}`}
               data-layout={virtualizeTranscript ? 'viewport' : 'content'}
@@ -391,7 +395,7 @@ const SubAgentRow = memo(function SubAgentRow({
                 compact={false}
                 virtualized={virtualizeTranscript}
               />
-            </div>
+            </TranscriptFrame>
           ) : (
             <EmptyChild status={status} />
           )}
@@ -416,6 +420,8 @@ function EmptyChild({ status }: { status: SubAgentLifecycle['status'] }): JSX.El
 }
 
 function StatusIcon({ status }: { status: SubAgentLifecycle['status'] }): JSX.Element {
+  if (status === 'running')
+    return <LoaderCircle className="h-3.5 w-3.5 flex-none text-primary motion-safe:animate-spin" data-testid="sub-agent-running-icon" aria-hidden="true" />
   if (status === 'completed')
     return (
       <CheckCircle2

@@ -1,3 +1,4 @@
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { Bell, ChevronRight, CircleAlert, LoaderCircle, X } from 'lucide-react'
@@ -191,10 +192,10 @@ export function ScheduledTaskInbox({ host, token, onOpenTask, onOpenSession, ses
       role="dialog"
       aria-modal="false"
       aria-labelledby="scheduled-task-inbox-title"
-      className="z-[100] overflow-hidden rounded-xl border border-border bg-popover text-popover-foreground shadow-xl"
+      className="z-[100] overflow-hidden rounded-xl border border-border/50 bg-popover text-popover-foreground shadow-xl"
       style={popoverStyle}
     >
-      <div className="flex items-center justify-between border-b border-border px-3 py-2.5">
+      <div className="flex items-center justify-between border-b border-border/50 px-3 py-2.5">
         <div className="min-w-0">
           <h2 id="scheduled-task-inbox-title" className="text-sm font-semibold">{t('scheduledTaskInbox.title')}</h2>
           {currentState.unreadCount > 0 ? <p className="text-xs text-muted-foreground">{unreadLabel}</p> : null}
@@ -204,7 +205,7 @@ export function ScheduledTaskInbox({ host, token, onOpenTask, onOpenSession, ses
         </button>
       </div>
 
-      <div className="max-h-[22rem] overflow-y-auto p-1.5">
+      <ScrollArea className="max-h-[22rem]" contentClassName="p-1.5 min-h-full">
         {currentState.loading ? (
           <div role="status" className="flex items-center justify-center gap-2 px-3 py-8 text-sm text-muted-foreground">
             <LoaderCircle className="size-4 animate-spin" aria-hidden="true" /> {t('scheduledTaskInbox.loading')}
@@ -236,18 +237,18 @@ export function ScheduledTaskInbox({ host, token, onOpenTask, onOpenSession, ses
                   <span className={`size-2 shrink-0 rounded-full ${item.seen ? 'bg-muted-foreground/30' : 'bg-primary'}`} aria-hidden="true" />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-xs font-semibold" title={item.taskLabel}>{item.taskLabel || t('scheduledTaskInbox.taskFallback', { id: item.taskId })}</span>
-                    <span className="mt-1 block break-all text-[11px] text-muted-foreground">
+                    <span className="mt-1 block break-all text-caption text-muted-foreground">
                       {target?.kind === 'workspace'
                         ? t('scheduledTaskInbox.workspace', { name: target.workspaceName || target.workspaceId })
                         : sessionName ? t('scheduledTaskInbox.session', { name: sessionName }) : t('scheduledTaskInbox.contextUnavailable')}
                     </span>
-                    {target?.kind === 'workspace' && sessionName ? <span className="mt-1 block truncate text-[11px] text-muted-foreground" title={sessionName}>{t('scheduledTaskInbox.session', { name: sessionName })}</span> : null}
-                    {target?.kind === 'workspace' && target.cwd ? <span className="block truncate text-[11px] text-muted-foreground" title={target.cwd}>{target.cwd}</span> : null}
+                    {target?.kind === 'workspace' && sessionName ? <span className="mt-1 block truncate text-caption text-muted-foreground" title={sessionName}>{t('scheduledTaskInbox.session', { name: sessionName })}</span> : null}
+                    {target?.kind === 'workspace' && target.cwd ? <span className="block truncate text-caption text-muted-foreground" title={target.cwd}>{target.cwd}</span> : null}
                     <span className="flex items-center gap-2">
-                      <span className={`mt-1 rounded px-1.5 py-0.5 text-[11px] font-medium ${details.className}`}>{t(`scheduledTaskInbox.status.${item.status}`)}</span>
+                      <span className={`mt-1 rounded px-1.5 py-0.5 text-caption font-medium ${details.className}`}>{t(`scheduledTaskInbox.status.${item.status}`)}</span>
                     </span>
-                    <time className="mt-1 block text-[11px] text-muted-foreground" dateTime={item.updatedAt}>{t('scheduledTaskInbox.updatedAt', { time: formatScheduledTime(item.updatedAt) })}</time>
-                    <span className="mt-1 block text-[11px] text-muted-foreground">{t(`scheduledTaskInbox.outcome.${item.status}`)}</span>
+                    <time className="mt-1 block text-caption text-muted-foreground" dateTime={item.updatedAt}>{t('scheduledTaskInbox.updatedAt', { time: formatScheduledTime(item.updatedAt) })}</time>
+                    <span className="mt-1 block text-caption text-muted-foreground">{t(`scheduledTaskInbox.outcome.${item.status}`)}</span>
                     {item.error ? <span className="mt-1 block whitespace-pre-wrap break-words text-xs text-destructive">{item.error}</span> : null}
                   </span>
                   <ChevronRight className="size-4 shrink-0 text-muted-foreground group-hover:text-foreground" aria-hidden="true" />
@@ -257,7 +258,7 @@ export function ScheduledTaskInbox({ host, token, onOpenTask, onOpenSession, ses
               )
             })}
             {currentState.items.length > MAX_VISIBLE_ITEMS ? (
-              <div className="flex items-center justify-between border-t border-border px-2.5 py-2 text-xs">
+              <div className="flex items-center justify-between border-t border-border/50 px-2.5 py-2 text-xs">
                 <button type="button" disabled={page === 0} onClick={() => setPage((value) => value - 1)} className="text-primary disabled:text-muted-foreground">{t('scheduledTaskInbox.newer')}</button>
                 <span className="text-muted-foreground">{page * MAX_VISIBLE_ITEMS + 1}–{Math.min((page + 1) * MAX_VISIBLE_ITEMS, currentState.items.length)} / {currentState.items.length}</span>
                 <button type="button" disabled={(page + 1) * MAX_VISIBLE_ITEMS >= currentState.items.length} onClick={() => setPage((value) => value + 1)} className="text-primary disabled:text-muted-foreground">{t('scheduledTaskInbox.older')}</button>
@@ -266,7 +267,7 @@ export function ScheduledTaskInbox({ host, token, onOpenTask, onOpenSession, ses
             {currentState.error ? <p role="alert" className="px-2.5 py-2 text-xs text-destructive">{currentState.error}</p> : null}
           </>
         )}
-      </div>
+      </ScrollArea>
     </div>,
     document.body,
   ) : null

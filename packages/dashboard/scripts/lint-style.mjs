@@ -1,68 +1,49 @@
 #!/usr/bin/env node
 // Ratchet-based STYLE.md audit. Rules and rationale live in
-// packages/dashboard/STYLE.md §11. We can't fail-on-any today (the tree has
-// ~450 legacy hits), so this script snapshots counts and only fails when a
-// count goes UP. Ratchet the baseline down whenever you clean up hits.
+// packages/dashboard/STYLE.md §11. Explicit soft/semantic rims are allowed;
+// remaining content overflow uses the global skin. Counts may only decrease.
 //
 // Update baseline: `node scripts/lint-style.mjs --write`
 
-import { spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { RULES, auditSource } from './style-rules.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
 const baselinePath = join(here, 'lint-style.baseline.json')
 
-const RULES = [
-  {
-    id: 'bare-border',
-    pattern: '\\bborder\\b(?![-a-zA-Z/])',
-    hint: 'Use border-border/50, /60, or drop it for a bg step (STYLE.md §2).',
-  },
-  {
-    id: 'border-border-full-opacity',
-    pattern: 'border-border(?![-/\\w])',
-    hint: 'Prefer border-border/50 or /60 (STYLE.md §2).',
-  },
-  {
-    id: 'directional-bare-border',
-    pattern: '\\bborder-[tblr]\\b',
-    hint: 'A directional border between panels is the wireframe move; use a bg step (STYLE.md §2).',
-  },
-  {
-    id: 'naked-overflow-scroll',
-    pattern: 'overflow-(auto|scroll|x-auto|y-auto|x-scroll|y-scroll)',
-    hint: 'Wrap in <ScrollArea/> unless it is content-level fallback (STYLE.md §9).',
-  },
-  {
-    id: 'micro-typography',
-    pattern: 'text-\\[(0\\.(5|5625|625|6875)rem|([0-9]|1[01])px)\\]',
-    hint: 'Use a semantic typography token; product UI must not render below the caption role.',
-  },
-]
-
-function countHits(pattern) {
-  const res = spawnSync('rg', ['-nP', pattern, 'src', '--glob', '!*.test.*', '--glob', '!*.snap'], {
-    cwd: root,
-    encoding: 'utf8',
-  })
-  if (res.status === 1) return { count: 0, sample: [] }
-  if (res.status !== 0) {
-    console.error(`ripgrep failed for ${pattern}:`, res.stderr)
-    process.exit(2)
+function auditTree(directory) {
+  const results = Object.fromEntries(RULES.map(({ id }) => [id, { count: 0, sample: [] }]))
+  function visit(dir) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) { visit(path); continue }
+      if (!/\.(?:tsx?|jsx?|css)$/.test(entry.name) || /\.(?:test|spec)\./.test(entry.name)) continue
+      const source = readFileSync(path, 'utf8')
+      const lines = source.split('\n')
+      for (const [id, hits] of Object.entries(auditSource(source, path))) {
+        results[id].count += hits.length
+        results[id].sample.push(...hits.map((line) => `${path}:${line}:${lines[line - 1]}`))
+      }
+    }
   }
-  const lines = res.stdout.trim().split('\n').filter(Boolean)
-  return { count: lines.length, sample: lines.slice(0, 5) }
+  visit(directory)
+  return results
 }
 
 const write = process.argv.includes('--write')
 
-const results = Object.fromEntries(RULES.map((rule) => [rule.id, countHits(rule.pattern)]))
+const results = auditTree(join(root, 'src'))
 
 if (write) {
   const snap = Object.fromEntries(Object.entries(results).map(([id, r]) => [id, r.count]))
+  const previous = JSON.parse(readFileSync(baselinePath, 'utf8'))
+  if (Object.entries(snap).some(([id, count]) => count > (previous[id] ?? 0))) {
+    console.error('Refusing to increase a STYLE.md baseline. Fix the regressions first.')
+    process.exit(1)
+  }
   writeFileSync(baselinePath, `${JSON.stringify(snap, null, 2)}\n`)
   console.log(`Wrote baseline to ${baselinePath}:`)
   for (const [id, count] of Object.entries(snap)) console.log(`  ${id}: ${count}`)
@@ -86,12 +67,12 @@ for (const rule of RULES) {
   if (current > allowed) {
     regressed = true
     console.log(`  hint: ${rule.hint}`)
-    for (const line of results[rule.id].sample) console.log(`    ${line}`)
+    for (const line of results[rule.id].sample.slice(0, 5)) console.log(`    ${line}`)
   }
 }
 
 if (regressed) {
-  console.error('\nSTYLE.md regressions detected. Fix the new hits or, if intentional, ratchet the baseline UP with `pnpm --filter @agent-kernel/dashboard lint:style -- --write`.')
+  console.error('\nSTYLE.md regressions detected. Fix the UI; baselines may only decrease.')
   process.exit(1)
 }
 

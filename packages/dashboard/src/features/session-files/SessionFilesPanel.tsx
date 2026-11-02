@@ -35,7 +35,7 @@ import { ReadonlyImageCanvas } from '../../components/ReadonlyImagePreview.js'
 import { MarkdownTable } from '../../components/MarkdownTable.js'
 import { ScrollArea } from '../../components/ui/scroll-area.js'
 import { DEFAULT_FILE_VIEW_FONT_SIZE, PREF_FILE_VIEW_FONT_SIZE, useNumberPref } from '../../lib/prefs.js'
-import { FILE_VIEW_FONT_SIZE_PX, FONT_SIZE_MIN, FONT_SIZE_MAX } from '../../lib/display-sizes.js'
+import { FILE_VIEW_FONT_SIZE_PX, readableFontSize } from '../../lib/display-sizes.js'
 import { useInterfaceScale } from '../../lib/interface-scale.js'
 import { ensureWorkspaceSubscription, workspaceReadBinary } from '../../lib/workspace-exec.js'
 import { notify } from '../../notify.js'
@@ -157,7 +157,7 @@ export function WorkspaceFileViewDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="!bottom-0 !top-auto h-[calc(var(--ak-viewport-h,100dvh)-env(safe-area-inset-top))] max-h-none min-w-0 w-screen max-w-none !translate-y-0 grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden rounded-none border-x-0 p-0 pb-[env(safe-area-inset-bottom)] sm:!bottom-auto sm:!top-[calc(50%+(env(safe-area-inset-top)-env(safe-area-inset-bottom))/2)] sm:h-[min(92dvh,52rem)] sm:w-[calc(100vw-2rem)] sm:max-w-[68.75rem] sm:!translate-y-[-50%] sm:rounded-lg sm:border-x sm:pb-0" data-testid="session-file-view-dialog">
-        <DialogHeader className="relative min-w-0 max-w-full overflow-hidden border-b border-border px-3 py-2.5 pr-14 sm:px-4 sm:pr-14">
+        <DialogHeader className="relative min-w-0 max-w-full overflow-hidden border-b border-border/50 px-3 py-2.5 pr-14 sm:px-4 sm:pr-14">
           <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:gap-3">
             <div className="min-w-0 flex-1">
               <div className="flex min-w-0 items-center gap-1.5">
@@ -170,7 +170,7 @@ export function WorkspaceFileViewDialog({
                 {viewerMeta(viewer).map((item) => <span key={item}>{item}</span>)}
               </div>
             </div>
-            <div className="flex w-full min-w-0 max-w-full flex-none items-center gap-1 overflow-x-auto overscroll-x-contain pb-0.5 sm:w-auto sm:flex-nowrap sm:justify-end sm:overflow-visible sm:pb-0" data-testid="session-file-view-actions">
+            <ScrollArea className="w-full min-w-0 max-w-full flex-none overscroll-x-contain sm:w-auto sm:overflow-visible" data-testid="session-file-view-actions" contentClassName="flex items-center gap-1 pb-0.5 sm:flex-nowrap sm:justify-end sm:pb-0 min-w-full w-max">
               <div className="flex flex-wrap items-center gap-1">
                 <Button variant="ghost" size="icon" className="h-7 w-7" disabled={!copyableViewerContent(viewer)} onClick={() => void copyView('content')} title={t('sessionFiles.copyContent')} aria-label={t('sessionFiles.copyContent')}>
                   {copied === 'content' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
@@ -187,23 +187,23 @@ export function WorkspaceFileViewDialog({
                   </Button>
                 ) : null}
               </div>
-              <div className="flex items-center gap-1 sm:border-l sm:border-border sm:pl-2">
+              <div className="flex items-center gap-1 sm:border-l sm:border-border/50 sm:pl-2">
                 <Button variant="ghost" size="icon" className="h-7 w-7" disabled={viewer.kind !== 'text' || fontSizeDelta <= -2} onClick={() => setFontSizeDelta((value) => Math.max(-2, value - 1))} title={t('sessionFiles.decreaseFont')} aria-label={t('sessionFiles.decreaseFont')}>
                   <Minus className="h-3.5 w-3.5" />
                 </Button>
-                <div className="flex h-7 min-w-9 items-center justify-center rounded border border-border px-1.5 font-mono text-caption text-muted-foreground" title={t('sessionFiles.currentFont', { size: effectiveFontSize })} aria-label={t('sessionFiles.currentFont', { size: effectiveFontSize })} data-testid="session-file-view-font-size">
+                <div className="flex h-7 min-w-9 items-center justify-center rounded border border-border/50 px-1.5 font-mono text-caption text-muted-foreground" title={t('sessionFiles.currentFont', { size: effectiveFontSize })} aria-label={t('sessionFiles.currentFont', { size: effectiveFontSize })} data-testid="session-file-view-font-size">
                   {effectiveFontSize}px
                 </div>
                 <Button variant="ghost" size="icon" className="h-7 w-7" disabled={viewer.kind !== 'text' || fontSizeDelta >= 2} onClick={() => setFontSizeDelta((value) => Math.min(2, value + 1))} title={t('sessionFiles.increaseFont')} aria-label={t('sessionFiles.increaseFont')}>
                   <Plus className="h-3.5 w-3.5" />
                 </Button>
               </div>
-              <div className="sm:border-l sm:border-border sm:pl-2">
+              <div className="sm:border-l sm:border-border/50 sm:pl-2">
                 <Button variant="ghost" size="icon" className="h-7 w-7" disabled={!viewPath || viewer.kind === 'loading'} onClick={() => void viewFile()} title={t('sessionFiles.refreshFile')} aria-label={t('sessionFiles.refreshFile')}>
                   <RefreshCw className="h-3.5 w-3.5" />
                 </Button>
               </div>
-            </div>
+            </ScrollArea>
           </div>
           <DialogDescription className="sr-only">{t('sessionFiles.readOnly')}</DialogDescription>
           <DialogClose className="absolute right-1.5 top-1.5 inline-flex h-11 w-11 items-center justify-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={t('sessionFiles.close')} data-testid="session-file-view-close">
@@ -234,7 +234,7 @@ function SessionFilesPanelImpl({
   fontSizePx?: number
 }): JSX.Element {
   const { t } = useTranslation()
-  const resourceKey = `${workspaceId ?? 'offline'}\0${cwd ?? ''}`
+  const resourceKey = `${sessionId ?? 'unscoped'}\0${workspaceId ?? 'offline'}\0${cwd ?? ''}`
   const [nodes, setNodes] = useState<FileNode[]>([])
   const [loadingPath, setLoadingPath] = useState<string | null>(null)
   const [selected, setSelected] = useState<FileNode | null>(null)
@@ -242,6 +242,7 @@ function SessionFilesPanelImpl({
   const [viewOpen, setViewOpen] = useState(false)
   const [downloadingPath, setDownloadingPath] = useState<string | null>(null)
   const fileRequestGeneration = useRef(0)
+  const directoryRequestGeneration = useRef(0)
   const sessionIdRef = useRef(sessionId)
   sessionIdRef.current = sessionId
   const online = Boolean(socket && workspaceId)
@@ -249,9 +250,11 @@ function SessionFilesPanelImpl({
 
   const loadDir = useCallback(async (path?: string): Promise<void> => {
     if (!socket || !workspaceId) return
+    const generation = directoryRequestGeneration.current
     const targetPath = path ?? cwd
     setLoadingPath(targetPath ?? '__root__')
     const result = await requestDir(socket, workspaceId, sessionIdRef.current ?? undefined, targetPath)
+    if (directoryRequestGeneration.current !== generation) return
     setLoadingPath(null)
     if ('error' in result) {
       setViewer({ kind: 'error', message: result.error })
@@ -266,6 +269,7 @@ function SessionFilesPanelImpl({
   }, [cwd, resourceKey, socket, workspaceId])
 
   useEffect(() => {
+    directoryRequestGeneration.current += 1
     setNodes([])
     setSelected(null)
     setViewer({ kind: 'empty' })
@@ -343,9 +347,9 @@ function SessionFilesPanelImpl({
   }
 
   return (
-    <div className="grid h-[min(82dvh,760px)] min-h-0 grid-cols-1 grid-rows-[minmax(160px,0.75fr)_minmax(220px,1fr)_180px] overflow-hidden rounded-md border border-border bg-background md:h-[min(78vh,760px)] md:grid-cols-[280px_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)_220px]" data-testid="session-files-panel">
-      <div className="flex min-h-0 flex-col border-b border-border bg-muted/20 md:border-b-0 md:border-r">
-        <div className="flex h-10 items-center justify-between border-b border-border px-2">
+    <div className="grid h-[min(82dvh,760px)] min-h-0 grid-cols-1 grid-rows-[minmax(160px,0.75fr)_minmax(220px,1fr)_180px] overflow-hidden rounded-md border border-border/50 bg-background md:h-[min(78vh,760px)] md:grid-cols-[280px_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)_220px]" data-testid="session-files-panel">
+      <div className="flex min-h-0 flex-col border-b border-border/50 bg-muted/20 md:border-b-0 md:border-r">
+        <div className="flex h-10 items-center justify-between border-b border-border/50 px-2">
           <div className="min-w-0 truncate text-xs font-medium">{t('sessionFiles.files')}</div>
           <Button variant="ghost" size="icon" className="h-7 w-7" disabled={!online || loadingPath !== null} onClick={() => void loadDir()} title={t('sessionFiles.refresh')} aria-label={t('sessionFiles.refresh')}>
             {loadingPath ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
@@ -364,7 +368,7 @@ function SessionFilesPanelImpl({
         </div>
       </div>
       <FileView viewer={viewer} selected={selected} socket={socket} workspaceId={workspaceId} cwd={cwd} />
-      <div className="min-h-0 border-t border-border md:col-span-2">
+      <div className="min-h-0 border-t border-border/50 md:col-span-2">
         {sessionId !== null ? (
           <SessionTerminal key={`${workspaceId ?? 'offline'}:${sessionId}`} socket={socket} workspaceId={workspaceId} sessionId={sessionId} cwd={cwd} />
         ) : null}
@@ -639,7 +643,7 @@ function MediaFileView({ viewer, chrome, socket, workspaceId, cwd }: { viewer: E
 
 function MarkdownFileView({ content, fontSize }: { content: string; fontSize: number }): JSX.Element {
   return (
-    <div className="ak-markdown-body ak-reader-surface h-full min-h-0 overflow-auto bg-background px-4 py-4 leading-[1.65] sm:px-6 sm:py-5" style={{ fontSize }} data-testid="session-file-markdown-preview">
+    <ScrollArea className="ak-markdown-body ak-reader-surface h-full min-h-0 bg-background leading-[1.65]" style={{ fontSize }} data-testid="session-file-markdown-preview" contentClassName="px-4 py-4 sm:px-6 sm:py-5 min-h-full">
       <ReactMarkdown remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: false }]]} rehypePlugins={[rehypeKatex]} components={{
         h1: ({ children }) => <h1 className="mb-3 mt-0 text-xl font-semibold leading-tight sm:text-2xl">{children}</h1>,
         h2: ({ children }) => <h2 className="mb-2 mt-5 text-lg font-semibold leading-tight sm:text-xl">{children}</h2>,
@@ -650,14 +654,14 @@ function MarkdownFileView({ content, fontSize }: { content: string; fontSize: nu
         li: ({ children }) => <li className="my-1">{children}</li>,
         a: ({ children, href }) => safeExternalHref(href) ? <a className="text-primary underline underline-offset-2" href={safeExternalHref(href)} target="_blank" rel="noreferrer">{children}</a> : <span>{children}</span>,
         img: ({ alt }) => <span className="rounded bg-muted px-1.5 py-1 text-xs text-muted-foreground">[Image blocked in preview{alt ? `: ${alt}` : ''}]</span>,
-        code: ({ className, children }) => <code className={cn('rounded-md border border-border/45 bg-muted/55 px-1 py-0.5 font-mono text-[0.9em] text-foreground', className)}>{children}</code>,
+        code: ({ className, children }) => <code className={cn('rounded-md border border-border/45 bg-muted/55 px-1 py-0.5 font-mono text-inherit text-foreground', className)}>{children}</code>,
         pre: ({ children }) => <MarkdownPre>{children}</MarkdownPre>,
         blockquote: ({ children }) => <blockquote className="my-3 rounded-r-xl border-l-2 border-primary/45 bg-muted/30 px-3 py-1 text-muted-foreground">{children}</blockquote>,
         table: ({ children }) => <MarkdownTable label="File preview table">{children}</MarkdownTable>,
       }}>
         {content}
       </ReactMarkdown>
-    </div>
+    </ScrollArea>
   )
 }
 
@@ -682,12 +686,12 @@ function useFileViewFontSize(delta = 0): number {
   const [fontSizePref] = useNumberPref(PREF_FILE_VIEW_FONT_SIZE, DEFAULT_FILE_VIEW_FONT_SIZE, { min: 0, max: FILE_VIEW_FONT_SIZE_PX.length - 1 })
   const scale = useInterfaceScale()
   const pixels = FILE_VIEW_FONT_SIZE_PX[fontSizePref] ?? 14
-  return Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, pixels + delta * 2)) * scale
+  return readableFontSize(pixels + delta * 2, scale)
 }
 
 function ViewerShell({ title, meta, children, chrome = true }: { title: string; meta?: string; children: ReactNode; chrome?: boolean }): JSX.Element {
   if (!chrome) return <div className="flex h-full w-full min-h-0 min-w-0 flex-col overflow-hidden">{children}</div>
-  return <div className="flex h-full min-h-0 min-w-0 flex-col"><div className="flex h-10 items-center gap-2 border-b border-border px-3"><div className="min-w-0 truncate font-mono text-xs">{title}</div>{meta ? <div className="ml-auto flex-none text-xs text-muted-foreground">{meta}</div> : null}</div><div className="min-h-0 flex-1 overflow-hidden">{children}</div></div>
+  return <div className="flex h-full min-h-0 min-w-0 flex-col"><div className="flex h-10 items-center gap-2 border-b border-border/50 px-3"><div className="min-w-0 truncate font-mono text-xs">{title}</div>{meta ? <div className="ml-auto flex-none text-xs text-muted-foreground">{meta}</div> : null}</div><div className="min-h-0 flex-1 overflow-hidden">{children}</div></div>
 }
 
 function viewerTitle(viewer: FileViewState, path?: string | null): string {
@@ -889,7 +893,7 @@ function SessionTerminal({ socket, workspaceId, sessionId, cwd }: { socket: Dash
   }, [])
 
   useEffect(() => {
-    if (terminalRef.current) terminalRef.current.options.fontSize = Math.round(12 * interfaceScale)
+    if (terminalRef.current) terminalRef.current.options.fontSize = Math.round(readableFontSize(12, interfaceScale))
     fitRef.current?.fit()
   }, [interfaceScale])
 

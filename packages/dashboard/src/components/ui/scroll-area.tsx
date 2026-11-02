@@ -8,8 +8,10 @@ export const ScrollArea = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof ScrollAreaPrimitive.Root> & {
     viewportRef?: React.Ref<React.ElementRef<typeof ScrollAreaPrimitive.Viewport>>
     viewportClassName?: string
+    viewportProps?: Omit<React.ComponentPropsWithoutRef<typeof ScrollAreaPrimitive.Viewport>, 'className' | 'children'>
+    contentClassName?: string
   }
->(({ className, children, type = 'always', viewportRef, viewportClassName, ...props }, ref) => (
+>(({ className, children, type = 'always', viewportRef, viewportClassName, viewportProps, contentClassName, ...props }, ref) => (
   <ScrollAreaPrimitive.Root
     ref={ref}
     type={type}
@@ -18,9 +20,10 @@ export const ScrollArea = React.forwardRef<
   >
     <ScrollAreaPrimitive.Viewport
       ref={viewportRef}
-      className={cn('h-full w-full rounded-[inherit]', viewportClassName)}
+      {...viewportProps}
+      className={cn('h-full max-h-[inherit] w-full rounded-[inherit]', contentClassName && '[&>div]:!block [&>div]:h-full', viewportClassName)}
     >
-      {children}
+      {contentClassName ? <div className={cn('min-h-full', contentClassName)}>{children}</div> : children}
     </ScrollAreaPrimitive.Viewport>
     <ScrollBar />
     <ScrollBar orientation="horizontal" />

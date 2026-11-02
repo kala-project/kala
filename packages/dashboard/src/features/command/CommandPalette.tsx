@@ -37,6 +37,7 @@ import { useTranslation } from 'react-i18next'
 
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../components/ui/dialog.js'
 import { cn } from '../../lib/utils.js'
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 
 export type CommandPaletteItem = {
   id: string
@@ -106,7 +107,7 @@ export function CommandPalette({ open, onOpenChange, commands }: Props): JSX.Ele
               autoFocus
             />
           </div>
-          <Command.List className="max-h-80 overflow-y-auto p-1">
+          <ScrollArea className="max-h-80"><Command.List className="p-1">
             <Command.Empty className="px-3 py-6 text-center text-xs text-muted-foreground">
               {t('commandPalette.empty')}
             </Command.Empty>
@@ -132,7 +133,7 @@ export function CommandPalette({ open, onOpenChange, commands }: Props): JSX.Ele
                 ))}
               </Command.Group>
             ))}
-          </Command.List>
+          </Command.List></ScrollArea>
         </Command>
       </DialogContent>
     </Dialog>

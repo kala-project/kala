@@ -34,11 +34,13 @@ export function ProductSwitcher({
   onSelect,
   compact = false,
   adaptive = false,
+  onOpenManagement,
 }: {
   section: AppSection
   onSelect(section: AppSection): void
   compact?: boolean
   adaptive?: boolean
+  onOpenManagement?(): void
 }): JSX.Element {
   const { t } = useTranslation()
   const detailsRef = useRef<HTMLDetailsElement | null>(null)
@@ -85,6 +87,12 @@ export function ProductSwitcher({
           <span>{t(labelKey)}</span>
         </button>
       ))}
+      {onOpenManagement ? (
+        <button type="button" role="menuitem" data-testid="product-switcher-management" title={t('deploymentCenter.title')} onClick={() => { if (detailsRef.current) detailsRef.current.open = false; setAdaptiveOpen(false); onOpenManagement() }} className="flex min-h-11 w-full items-center gap-3 rounded-xl px-2.5 text-left text-sm hover:bg-accent">
+          <Activity className="h-4 w-4 flex-none text-muted-foreground" aria-hidden />
+          <span>{t('deploymentCenter.nav')}</span>
+        </button>
+      ) : null}
     </div>
   )
   return (
@@ -136,6 +144,7 @@ export function DesktopSessionRail({
   onNewSession,
   onConnectWorkspace,
   globalActions,
+  onOpenManagement,
 }: {
   section: AppSection
   onSelectSection(section: AppSection): void
@@ -144,6 +153,7 @@ export function DesktopSessionRail({
   onNewSession(): void
   onConnectWorkspace?: () => void
   globalActions: ReactNode
+  onOpenManagement?(): void
 }): JSX.Element {
   const { t } = useTranslation()
   const actionClass = 'h-10 w-10 rounded-xl border border-transparent text-muted-foreground hover:border-border/35 hover:bg-muted hover:text-foreground'
@@ -162,7 +172,8 @@ export function DesktopSessionRail({
       <div className="mb-2 grid h-10 w-10 place-items-center" data-testid="desktop-rail-brand">
         {connectionStatus ?? <img src={staticAssetUrl(isDesktopClient() ? '/icons/octopus-desktop.svg' : '/icons/octopus-web.svg')} alt="" className="h-6 w-6" aria-hidden />}
       </div>
-      <ProductSwitcher section={section} onSelect={onSelectSection} compact />
+      <ProductSwitcher section={section} onSelect={onSelectSection} compact onOpenManagement={onOpenManagement} />
+      {onOpenManagement ? <Button type="button" variant="ghost" size="icon" className={actionClass} title={t('deploymentCenter.title')} aria-label={t('deploymentCenter.nav')} onClick={onOpenManagement} data-testid="desktop-rail-management"><Activity className="h-4 w-4" aria-hidden /></Button> : null}
       {section === 'agent' ? (
         <div className="mt-3 flex flex-col items-center gap-1.5" data-testid="desktop-rail-agent-actions">
           {onExpand ? <Button type="button" variant="ghost" size="icon" className={actionClass} title={t('app.openExplorer')} aria-label={t('app.openExplorer')} data-testid="desktop-rail-expand" onClick={onExpand}><PanelLeftOpen className="h-4 w-4" aria-hidden /></Button> : null}
@@ -313,10 +324,11 @@ export function AppShellNav({
         />
         <KalaWordmark className="h-5" />
       </span>
-      <div
-        ref={navItemsRef}
-        className="relative flex min-w-0 flex-1 items-center gap-1 overflow-x-auto snap-x snap-mandatory [-webkit-overflow-scrolling:touch] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden lg:overflow-visible"
-      >
+      <ScrollArea
+        viewportRef={navItemsRef}
+        className="min-w-0 flex-1"
+        viewportClassName="snap-x snap-mandatory"
+        contentClassName="relative flex min-w-full w-max items-center gap-1">
         {activePill ? (
           <span
             className="pointer-events-none absolute z-0 rounded-xl bg-card/80 shadow-[inset_0_0_0_1px_hsl(var(--border)/0.32)] transition-[transform,width,height,opacity] duration-200 ease-out motion-reduce:transition-none"
@@ -352,7 +364,7 @@ export function AppShellNav({
             </Button>
           )
         })}
-      </div>
+      </ScrollArea>
       <AppShellGlobalActions connectionStatus={connectionStatus} onOpenSettings={onOpenSettings} account={account} accountLoading={accountLoading} onSignOut={onSignOut} onOpenAccount={onOpenAccount} onOpenAdmin={onOpenAdmin} evaluationUrl={evaluationUrl} collapseControl={{ kind: 'collapse', onClick: onCollapse }} />
     </nav>
   )
@@ -366,7 +378,6 @@ type GlobalActionProps = {
   onSignOut?(): void | Promise<void>
   onOpenAccount?(): void
   onOpenAdmin?(): void
-  onOpenDeployment?(): void
   evaluationUrl?: string
   collapseControl?: { kind: 'collapse' | 'expand'; onClick(): void; sidebar?: boolean }
 }
@@ -383,7 +394,6 @@ export function SidebarGlobalActions({
   onSignOut,
   onOpenAccount,
   onOpenAdmin,
-  onOpenDeployment,
   evaluationUrl,
   collapseControl,
   orientation = 'horizontal',
@@ -394,13 +404,14 @@ export function SidebarGlobalActions({
   const vertical = orientation === 'vertical'
   const expandedFooter = accountPlacement === 'footer' && !legacyTopbar
   const actionClass = cn(
-    vertical ? 'h-10 w-10 rounded-xl' : expandedFooter ? 'h-8 min-w-0 flex-1 gap-2 rounded-md px-2.5' : 'h-8 w-8',
+    vertical ? 'h-11 w-11 rounded-xl' : expandedFooter ? 'h-11 w-11 flex-none rounded-lg' : 'h-8 w-8',
     'text-muted-foreground hover:text-foreground',
   )
   const iconActionClass = cn(vertical ? 'h-10 w-10 rounded-xl' : 'h-8 w-8', 'text-muted-foreground hover:text-foreground')
   return (
-    <div className={cn('flex flex-none gap-1', vertical ? 'flex-col items-center' : expandedFooter ? 'w-full flex-wrap items-center rounded-lg border border-border/35 bg-muted/25 p-1' : 'ml-auto items-center')} data-testid={vertical ? 'sidebar-global-actions' : 'app-shell-global-actions'} data-orientation={orientation} data-presentation={expandedFooter ? 'expanded-footer' : undefined}>
-      {!isDesktopClient() ? legacyTopbar ? <DesktopDownloadDialog /> : <DesktopDownloadDialog trigger={<Button variant="ghost" size={expandedFooter ? 'sm' : 'icon'} className={actionClass} data-testid="app-shell-download-desktop" title={t('desktopDownload.title')} aria-label={t('desktopDownload.open')}><Download className="h-4 w-4 flex-none" aria-hidden />{expandedFooter ? <span className="truncate">{t('desktopDownload.action')}</span> : null}</Button>} /> : <DesktopUpdateEntry />}
+    <div className={cn('flex flex-none gap-1', vertical ? 'flex-col items-center' : expandedFooter ? 'w-full items-center rounded-xl bg-muted/25 p-1' : 'ml-auto items-center')} data-testid={vertical ? 'sidebar-global-actions' : 'app-shell-global-actions'} data-orientation={orientation} data-presentation={expandedFooter ? 'expanded-footer' : undefined}>
+      {expandedFooter && (account || accountLoading) ? <AccountMenu account={account} loading={accountLoading} onSignOut={onSignOut} onOpenAccount={onOpenAccount} onOpenAdmin={onOpenAdmin} placement="footer" /> : null}
+      {!isDesktopClient() ? legacyTopbar ? <DesktopDownloadDialog /> : <DesktopDownloadDialog trigger={<Button variant="ghost" size="icon" className={actionClass} data-testid="app-shell-download-desktop" title={t('desktopDownload.title')} aria-label={t('desktopDownload.open')}><Download className="h-4 w-4 flex-none" aria-hidden /></Button>} /> : <DesktopUpdateEntry />}
       {evaluationUrl ? (
         <Button variant="ghost" size="icon" asChild className={iconActionClass}>
           <a href={evaluationUrl} target="_blank" rel="noreferrer" data-testid="app-shell-open-evaluation" title={t('appShell.nav.evaluation')} aria-label={t('appShell.nav.evaluation')}><ExternalLink className="h-4 w-4" aria-hidden /></a>
@@ -408,7 +419,7 @@ export function SidebarGlobalActions({
       ) : null}
       <Button
         variant="ghost"
-        size={expandedFooter ? 'sm' : 'icon'}
+        size="icon"
         data-testid="app-shell-nav-settings-icon"
         onClick={onOpenSettings}
         title={t('app.openSettings')}
@@ -416,12 +427,8 @@ export function SidebarGlobalActions({
         className={actionClass}
       >
         <SettingsIcon className="h-4 w-4 flex-none" aria-hidden />
-        {expandedFooter ? <span className="truncate">{t('common.settings')}</span> : null}
       </Button>
-      {onOpenDeployment ? <Button variant="ghost" size={expandedFooter ? 'sm' : 'icon'} className={expandedFooter ? 'h-10 w-full basis-full justify-start gap-2 px-2.5 text-foreground' : iconActionClass} onClick={onOpenDeployment} title={t('deploymentCenter.title')} aria-label={t('deploymentCenter.title')} data-testid="app-shell-deployment-center">
-        <Activity className="h-4 w-4 flex-none" aria-hidden />{expandedFooter ? <span className="min-w-0 truncate">{t('deploymentCenter.title')}</span> : null}
-      </Button> : null}
-      {account || accountLoading ? <AccountMenu account={account} loading={accountLoading} onSignOut={onSignOut} onOpenAccount={onOpenAccount} onOpenAdmin={onOpenAdmin} placement={accountPlacement ?? (vertical ? 'rail' : 'default')} /> : null}
+      {!expandedFooter && (account || accountLoading) ? <AccountMenu account={account} loading={accountLoading} onSignOut={onSignOut} onOpenAccount={onOpenAccount} onOpenAdmin={onOpenAdmin} placement={accountPlacement ?? (vertical ? 'rail' : 'default')} /> : null}
       {connectionStatus}
       {collapseControl ? (
         <Button
@@ -496,11 +503,10 @@ function AccountMenu({ account, loading, onSignOut, onOpenAccount, onOpenAdmin, 
     window.addEventListener('pagehide', () => { void onSignOut() }, { once: true })
   }
   return (
-    <details ref={detailsRef} open={open} className={cn('relative min-w-0', placement === 'footer' && 'mt-1 w-full basis-full rounded-md bg-card/50 pt-1')} data-testid="account-menu">
-      <summary onClick={(event) => { event.preventDefault(); setOpen(!open) }} className={cn('flex cursor-pointer list-none items-center gap-2 rounded-md text-sm text-muted-foreground hover:bg-accent hover:text-foreground [&::-webkit-details-marker]:hidden', placement === 'footer' ? 'min-h-12 w-full justify-start px-2 py-1.5' : 'h-8 min-w-8 justify-center px-1')} aria-haspopup="menu" aria-expanded={open} aria-label={account ? t('appShell.account.trigger', { name: account.displayName }) : t('appShell.account.loading')} data-testid="account-menu-trigger">
-        <span className="flex h-6 w-6 flex-none items-center justify-center rounded-full bg-primary/15 text-caption font-semibold text-primary">{loading ? '…' : account?.initials ?? <UserRound className="h-3.5 w-3.5" aria-hidden />}</span>
-        {account ? placement === 'footer' ? <span className="min-w-0 flex-1 text-left"><span className="block truncate text-sm font-medium text-foreground">{account.displayName}</span>{account.email ? <span className="block truncate text-xs">{account.email}</span> : null}</span> : <span className="hidden max-w-32 truncate lg:inline">{account.displayName}</span> : null}
-        {placement === 'footer' ? <ChevronUp className="h-4 w-4 flex-none" aria-hidden /> : null}
+    <details ref={detailsRef} open={open} className={cn('relative min-w-0', placement === 'footer' && 'flex-1')} data-testid="account-menu">
+      <summary onClick={(event) => { event.preventDefault(); setOpen(!open) }} className={cn('flex cursor-pointer list-none items-center gap-2 rounded-lg text-sm text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden', placement === 'footer' ? 'min-h-11 w-full justify-start px-2' : placement === 'rail' ? 'h-11 w-11 justify-center' : 'h-8 min-w-8 justify-center px-1')} aria-haspopup="menu" aria-expanded={open} aria-label={account ? t('appShell.account.trigger', { name: account.displayName }) : t('appShell.account.loading')} data-testid="account-menu-trigger">
+        <span className="flex h-7 w-7 flex-none items-center justify-center rounded-full bg-primary/10 text-primary" aria-hidden>{loading ? <span className="text-caption">…</span> : <UserRound className="h-4 w-4" />}</span>
+        {account && placement !== 'rail' ? <span className={cn('min-w-0 truncate text-sm font-medium text-foreground', placement === 'footer' ? 'flex-1 text-left' : 'hidden max-w-32 lg:inline')}>{account.displayName}</span> : null}
       </summary>
       {open ? createPortal(<div ref={menuRef} style={{ ...position, width: 'min(18rem, calc(100vw - 1rem))', maxHeight: 'calc(100dvh - 1rem)' }} className="fixed z-50 overflow-hidden rounded-xl border border-border/45 bg-popover text-popover-foreground shadow-lg" role="menu">
         <ScrollArea viewportClassName="max-h-[calc(100dvh-1rem)]">

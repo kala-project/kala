@@ -871,9 +871,10 @@ describe('Composer', () => {
     expect(footer.className).toContain('flex-col')
     expect(footer.className).toContain('sm:flex-row')
     expect(footer.className).toContain('sm:overflow-hidden')
-    expect(rail.className).toContain('flex-wrap')
-    expect(rail.className).toContain('sm:flex-nowrap')
-    expect(rail.className).toContain('sm:overflow-x-auto')
+    const railLayout = rail.querySelector('.flex-wrap')!
+    expect(railLayout).toBeTruthy()
+    expect(railLayout.className).toContain('sm:flex-nowrap')
+    expect(rail.querySelector('[data-radix-scroll-area-viewport]')).toBeTruthy()
     expect(actions.className).toContain('flex-none')
     expect(actions.className).toContain('justify-end')
     expect(rail.contains(screen.getByTestId('composer-mode-toggle'))).toBe(true)

@@ -187,7 +187,7 @@
   padding: 0.12em 0.35em;
   background: hsl(var(--muted));
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.875em;
+  font-size: max(var(--ak-type-caption-size), 0.875em);
 }
 
 .memo-editor__content pre {
@@ -251,7 +251,8 @@
   border-top: 1px solid hsl(var(--border) / 0.3);
   padding-inline: 0.85rem;
   color: hsl(var(--muted-foreground));
-  font-size: 0.6875rem;
+  font-size: var(--ak-type-caption-size);
+  line-height: var(--ak-type-caption-leading);
   background: hsl(var(--background) / 0.42);
 }
 

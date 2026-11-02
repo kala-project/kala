@@ -1,3 +1,4 @@
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
 import { Monitor, RefreshCw, Square, ZoomIn } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -177,7 +178,7 @@ export function ComputerPanel({ socket, workspaceId, sessionId, visible }: Props
 
   const panel = (
     <div className="flex h-full min-h-0 flex-col overflow-hidden" data-testid="computer-panel">
-      <div className="flex items-center gap-2 border-b px-3 py-2">
+      <div className="flex items-center gap-2 bg-card px-3 py-2">
         <Monitor className="size-4" />
         <span className="min-w-0 flex-1 text-sm font-medium">{t('computer.title')}</span>
         <Button size="icon" variant="ghost" aria-label={t('computer.refresh')} onClick={() => {
@@ -190,15 +191,15 @@ export function ComputerPanel({ socket, workspaceId, sessionId, visible }: Props
         {lease.current ? <Button data-testid="computer-stop" size="sm" variant="destructive" onClick={() => { void stop() }}><Square className="mr-1 size-3" />{t('computer.stop')}</Button> : null}
       </div>
       {error ? <p role="alert" className="break-words px-3 py-2 text-xs text-destructive">{error}</p> : null}
-      {!lease.current ? <div className="space-y-3 overflow-y-auto p-3 text-xs">
+      {!lease.current ? <ScrollArea className="text-xs" contentClassName="space-y-3 p-3 min-h-full">
         <p>{t('computer.description')}</p>
         {!workspaceId || !sessionId ? <p>{t('computer.workspaceRequired')}</p> : !status?.available ? <p className="break-words text-muted-foreground">{status?.reason ?? t('computer.checking')}</p> : null}
         {status?.active ? <p className="text-amber-600">{t('computer.occupied')}</p> : null}
         <label className="flex items-start gap-2"><input data-testid="computer-consent" type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />{t('computer.consent')}</label>
         <label className="flex items-start gap-2"><input type="checkbox" checked={allowAgent} onChange={(event) => setAllowAgent(event.target.checked)} />{t('computer.allowAgent')}</label>
         <Button data-testid="computer-start" disabled={!consent || !status?.available || status.active || busy} onClick={() => { void start() }}>{busy ? t('computer.starting') : t('computer.start')}</Button>
-      </div> : <>
-        <div className="flex items-center justify-between gap-2 border-b px-3 py-2 text-xs">
+      </ScrollArea> : <>
+        <div className="flex items-center justify-between gap-2 border-b border-border/50 px-3 py-2 text-xs">
           <span className="text-emerald-600">{t('computer.sharing')}</span>
           <label className="flex items-center gap-2"><input data-testid="computer-agent-permission" type="checkbox" checked={allowAgent} onChange={(event) => {
             const allowed = event.target.checked
@@ -209,7 +210,7 @@ export function ComputerPanel({ socket, workspaceId, sessionId, visible }: Props
             }).catch((error: unknown) => { if (generation.current === ownGeneration && lease.current === id) setError(error instanceof Error ? error.message : String(error)) })
           }} />{t('computer.agentControl')}</label>
         </div>
-        <div ref={region} tabIndex={0} role="group" aria-label={t('computer.input')} data-computer-input="true" className="min-h-0 flex-1 overflow-auto bg-black/90 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" onKeyDown={keyboard} onContextMenu={(event) => event.preventDefault()}>
+        <ScrollArea viewportRef={region} viewportProps={{ tabIndex: 0 }} role="group" aria-label={t('computer.input')} data-computer-input="true" className="min-h-0 flex-1 bg-black/90" viewportClassName="outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" onKeyDown={keyboard} onContextMenu={(event) => event.preventDefault()}>
           {screenshot ? <img data-testid="computer-screen" src={`data:${screenshot.mimeType};base64,${screenshot.base64}`} alt={t('computer.screen')} className="h-auto w-full select-none touch-none" draggable={false} onPointerDown={(event) => {
             region.current?.focus()
             const position = point(event)
@@ -247,11 +248,11 @@ export function ComputerPanel({ socket, workspaceId, sessionId, visible }: Props
             const bounds = event.currentTarget.getBoundingClientRect()
             void send({ type: 'scroll', x: screenshot.originX + Math.min(screenshot.width - 1, Math.max(0, Math.floor((event.clientX - bounds.left) * screenshot.width / bounds.width))), y: screenshot.originY + Math.min(screenshot.height - 1, Math.max(0, Math.floor((event.clientY - bounds.top) * screenshot.height / bounds.height))), deltaX: Math.sign(event.deltaX) * 120, deltaY: Math.sign(event.deltaY) * 120 })
           }} /> : <p className="p-4 text-xs text-white">{t('computer.capturing')}</p>}
-        </div>
-        <div className="space-y-2 border-t p-2">
+        </ScrollArea>
+        <div className="space-y-2 bg-card p-2">
           <p className="text-caption text-muted-foreground">{t('computer.keyboardHelp')}</p>
           <div className="flex gap-1">{['Tab', 'Escape', 'Enter', 'Ctrl+L', 'Ctrl+C'].map((key) => <Button key={key} size="sm" variant="outline" className="h-7 px-2 text-caption" onClick={() => { void send({ type: 'key', key }) }}>{key}</Button>)}</div>
-          <textarea value={text} maxLength={COMPUTER_TYPE_MAX_LENGTH} onChange={(event) => setText(event.target.value)} aria-label={t('computer.text')} placeholder={t('computer.textHelp')} className="min-h-16 w-full rounded border bg-background p-2 text-xs" />
+          <textarea value={text} maxLength={COMPUTER_TYPE_MAX_LENGTH} onChange={(event) => setText(event.target.value)} aria-label={t('computer.text')} placeholder={t('computer.textHelp')} className="min-h-16 w-full rounded border border-border/50 bg-background p-2 text-xs" />
           <Button size="sm" disabled={!text || typing} onClick={() => {
             const value = text
             const ownGeneration = generation.current

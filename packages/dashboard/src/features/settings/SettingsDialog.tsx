@@ -123,7 +123,7 @@ export function SettingsDialog({ open, cacheNamespace = 'default', autoHideOffli
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className={cn(dialogMobileSheetClassName, 'h-auto grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)] border-x-0 border-border/60 bg-background text-foreground shadow-2xl sm:h-[min(90dvh,46rem)] sm:max-w-5xl sm:overflow-hidden sm:rounded-2xl sm:border-x [&_input]:border-border [&_input]:bg-card/70 [&_input]:text-foreground [&_select]:border-border [&_select]:bg-card/70 [&_select]:text-foreground [&_table]:bg-muted/10 [&_td]:text-foreground [&_textarea]:border-border [&_textarea]:bg-card/70 [&_textarea]:text-foreground [&_th]:bg-muted/30 [&_th]:text-foreground')}
+        className={cn(dialogMobileSheetClassName, 'h-auto grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)] border-x-0 border-border/60 bg-background text-foreground shadow-2xl sm:h-[min(90dvh,46rem)] sm:max-w-5xl sm:overflow-hidden sm:rounded-2xl sm:border-x [&_input]:border-border/50 [&_input]:bg-card/70 [&_input]:text-foreground [&_select]:border-border/50 [&_select]:bg-card/70 [&_select]:text-foreground [&_table]:bg-muted/10 [&_td]:text-foreground [&_textarea]:border-border/50 [&_textarea]:bg-card/70 [&_textarea]:text-foreground [&_th]:bg-muted/30 [&_th]:text-foreground')}
         data-testid="settings-dialog"
       >
         <DialogHeader className="relative min-h-[4.5rem] min-w-0 justify-center border-b border-border/40 bg-card/75 px-4 py-2 pr-14 backdrop-blur md:min-h-0 md:px-6 md:py-4 md:pr-14">
@@ -161,7 +161,7 @@ export function SettingsDialog({ open, cacheNamespace = 'default', autoHideOffli
         </DialogHeader>
         <div className={cn('grid min-h-0 min-w-0', desktopLayout && 'grid-cols-[14.5rem_minmax(0,1fr)]')}>
           <aside className={cn('min-h-0 min-w-0 border-r border-border/35 bg-muted/15', !desktopLayout && 'hidden')}>
-            <nav className="h-full space-y-4 overflow-x-hidden overflow-y-auto px-3 py-4" aria-label={t('settings.sectionsLabel')}>
+            <ScrollArea className="h-full overflow-x-hidden" aria-label={t('settings.sectionsLabel')} contentClassName="space-y-4 px-3 py-4 min-w-full" role="navigation">
               {SECTION_GROUPS.map((group) => (
                 <div key={group} className="space-y-1" data-testid={`settings-group-${group}`}>
                   <div className="px-2 pb-1 text-caption font-semibold uppercase tracking-[0.16em] text-muted-foreground/70">
@@ -174,7 +174,7 @@ export function SettingsDialog({ open, cacheNamespace = 'default', autoHideOffli
                   </div>
                 </div>
               ))}
-            </nav>
+            </ScrollArea>
           </aside>
           <ScrollArea
             className="ak-workspace-canvas min-h-0 min-w-0 max-w-full overflow-x-hidden"

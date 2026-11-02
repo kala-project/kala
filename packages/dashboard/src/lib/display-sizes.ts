@@ -7,8 +7,14 @@ export const INTERFACE_DENSITY_OPTIONS = [
   { value: 112, density: 'comfortable', scale: 1.125 },
 ] as const
 export type InterfaceDensity = typeof INTERFACE_DENSITY_OPTIONS[number]['density']
-export const FONT_SIZE_MIN = 10
+export const FONT_SIZE_MIN = 12
 export const FONT_SIZE_MAX = 48
+
+export function readableFontSize(pixels: number, scale = 1): number {
+  const size = Number.isFinite(pixels) ? pixels : 15
+  const density = Number.isFinite(scale) && scale > 0 ? scale : 1
+  return Math.max(FONT_SIZE_MIN, Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, size)) * density)
+}
 
 export function interfaceDensityForPercent(percent: number): InterfaceDensity {
   if (percent <= 95) return 'compact'

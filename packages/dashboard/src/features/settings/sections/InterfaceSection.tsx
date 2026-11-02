@@ -1,3 +1,4 @@
+import { ScrollArea } from '../../../components/ui/scroll-area.js'
 import type { DurableSessionViewCache } from '../../../durable-session-cache.js'
 import { Check, Eye, Loader2, Monitor, Moon, RefreshCw, Sun } from 'lucide-react'
 import { useEffect, useState } from 'react'
@@ -67,7 +68,7 @@ import { cn } from '../../../lib/utils.js'
 import { InterfaceToggle, SectionHeader, Toggle } from '../controls.js'
 import { formatBytes, responseError } from '../section-utils.js'
 import { SizePreference } from '../SizePreference.js'
-import { CHAT_FONT_SIZE_PX, SESSION_EXPLORER_FONT_SIZE_PX, FILE_EXPLORER_FONT_SIZE_PX, FILE_VIEW_FONT_SIZE_PX, DEFAULT_INTERFACE_SCALE, FONT_SIZE_MIN, FONT_SIZE_MAX, INTERFACE_DENSITY_OPTIONS, interfacePreferenceForPercent } from '../../../lib/display-sizes.js'
+import { CHAT_FONT_SIZE_PX, SESSION_EXPLORER_FONT_SIZE_PX, FILE_EXPLORER_FONT_SIZE_PX, FILE_VIEW_FONT_SIZE_PX, DEFAULT_INTERFACE_SCALE, FONT_SIZE_MIN, FONT_SIZE_MAX, INTERFACE_DENSITY_OPTIONS, interfacePreferenceForPercent, readableFontSize } from '../../../lib/display-sizes.js'
 import { DASHBOARD_PREFERENCES, PREF_INTERFACE_SCALE, numberPreferenceOptions } from '../../../lib/prefs.js'
 
 function LanguageSetting(): JSX.Element {
@@ -83,7 +84,7 @@ function LanguageSetting(): JSX.Element {
         onChange={(event) => { void i18n.changeLanguage(event.target.value as DashboardLanguage) }}
         data-testid="settings-language"
         aria-label={t('common.language')}
-        className="h-9 rounded-md border border-border bg-background px-3 text-sm"
+        className="h-9 rounded-md border border-border/50 bg-background px-3 text-sm"
       >
         <option value="en">{t('language.english')}</option>
         <option value="zh">{t('language.chinese')}</option>
@@ -165,7 +166,7 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
           <div className="min-w-0">
             <div className="flex items-center gap-1 font-medium">{t('settings.interface.theme.label')}<HelpHint label={t('settings.interface.theme.label')}>{t('settings.interface.theme.desc')}</HelpHint></div>
           </div>
-          <select value={theme} onChange={(event) => setTheme(event.target.value as 'system' | 'dark' | 'light')} aria-label={t('settings.interface.theme.label')} className="h-9 max-w-[45%] rounded-md border border-border bg-background px-2 text-xs md:hidden">
+          <select value={theme} onChange={(event) => setTheme(event.target.value as 'system' | 'dark' | 'light')} aria-label={t('settings.interface.theme.label')} className="h-9 max-w-[45%] rounded-md border border-border/50 bg-background px-2 text-xs md:hidden">
             <option value="system">{t('settings.interface.theme.system')}</option>
             <option value="dark">{t('settings.interface.theme.dark')}</option>
             <option value="light">{t('settings.interface.theme.light')}</option>
@@ -173,7 +174,7 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
           <div
             role="radiogroup"
             aria-label={t('settings.interface.theme.label')}
-            className="hidden flex-none overflow-hidden rounded-md border border-border md:inline-flex"
+            className="hidden flex-none overflow-hidden rounded-md border border-border/50 md:inline-flex"
             data-testid="settings-theme-toggle"
           >
             <button
@@ -199,7 +200,7 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
               onClick={() => setTheme('dark')}
               data-testid="settings-theme-dark"
               className={cn(
-                'inline-flex items-center gap-1.5 border-l border-border px-3 py-1.5 text-xs',
+                'inline-flex items-center gap-1.5 border-l border-border/50 px-3 py-1.5 text-xs',
                 theme === 'dark'
                   ? 'bg-primary/10 text-primary'
                   : 'bg-transparent text-muted-foreground hover:text-foreground',
@@ -215,7 +216,7 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
               onClick={() => setTheme('light')}
               data-testid="settings-theme-light"
               className={cn(
-                'inline-flex items-center gap-1.5 border-l border-border px-3 py-1.5 text-xs',
+                'inline-flex items-center gap-1.5 border-l border-border/50 px-3 py-1.5 text-xs',
                 theme === 'light'
                   ? 'bg-primary/10 text-primary'
                   : 'bg-transparent text-muted-foreground hover:text-foreground',
@@ -226,7 +227,7 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
             </button>
           </div>
         </li>
-        <li className="rounded-md border border-border bg-card/60 px-4 py-3">
+        <li className="rounded-md border border-border/50 bg-card/60 px-4 py-3">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -247,7 +248,7 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
         <SizePreference
           label={t('settings.interface.chatFontSize')}
           description={t('settings.interface.chatFontSizeDesc')}
-          value={CHAT_FONT_SIZE_PX[chatFontSize] ?? 15}
+          value={readableFontSize(CHAT_FONT_SIZE_PX[chatFontSize] ?? 15)}
           onChange={(pixels) => setChatFontSize(CHAT_FONT_SIZE_PX.indexOf(pixels))}
           min={FONT_SIZE_MIN} max={FONT_SIZE_MAX} defaultValue={CHAT_FONT_SIZE_PX[DEFAULT_CHAT_FONT_SIZE] ?? 15} unit="px"
           testId="settings-chat-font-size"
@@ -263,7 +264,7 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
         <SizePreference
           label={t('settings.interface.fileViewFontSize')}
           description={t('settings.interface.fileViewFontSizeDesc')}
-          value={FILE_VIEW_FONT_SIZE_PX[fileViewFontSize] ?? 14}
+          value={readableFontSize(FILE_VIEW_FONT_SIZE_PX[fileViewFontSize] ?? 14)}
           onChange={(pixels) => setFileViewFontSize(FILE_VIEW_FONT_SIZE_PX.indexOf(pixels))}
           min={FONT_SIZE_MIN} max={FONT_SIZE_MAX} defaultValue={FILE_VIEW_FONT_SIZE_PX[DEFAULT_FILE_VIEW_FONT_SIZE] ?? 14} unit="px"
           testId="settings-file-view-font-size"
@@ -271,7 +272,7 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
         <SizePreference
           label={t('settings.interface.sessionExplorerFontSize')}
           description={t('settings.interface.sessionExplorerFontSizeDesc')}
-          value={SESSION_EXPLORER_FONT_SIZE_PX[sessionExplorerFontSize] ?? 13}
+          value={readableFontSize(SESSION_EXPLORER_FONT_SIZE_PX[sessionExplorerFontSize] ?? 13)}
           onChange={(pixels) => setSessionExplorerFontSize(SESSION_EXPLORER_FONT_SIZE_PX.indexOf(pixels))}
           min={FONT_SIZE_MIN} max={FONT_SIZE_MAX} defaultValue={SESSION_EXPLORER_FONT_SIZE_PX[DEFAULT_SESSION_EXPLORER_FONT_SIZE] ?? 13} unit="px"
           testId="settings-session-explorer-font-size"
@@ -279,9 +280,9 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
         <SizePreference
           label={t('settings.interface.fileExplorerFontSize')}
           description={t('settings.interface.fileExplorerFontSizeDesc')}
-          value={FILE_EXPLORER_FONT_SIZE_PX[fileExplorerFontSize] ?? 11}
+          value={readableFontSize(FILE_EXPLORER_FONT_SIZE_PX[fileExplorerFontSize] ?? 11)}
           onChange={(pixels) => setFileExplorerFontSize(FILE_EXPLORER_FONT_SIZE_PX.indexOf(pixels))}
-          min={FONT_SIZE_MIN} max={FONT_SIZE_MAX} defaultValue={FILE_EXPLORER_FONT_SIZE_PX[DEFAULT_FILE_EXPLORER_FONT_SIZE] ?? 11} unit="px"
+          min={FONT_SIZE_MIN} max={FONT_SIZE_MAX} defaultValue={readableFontSize(FILE_EXPLORER_FONT_SIZE_PX[DEFAULT_FILE_EXPLORER_FONT_SIZE] ?? 12)} unit="px"
           testId="settings-file-explorer-font-size"
         />
         <SegmentedNumberPref
@@ -328,7 +329,7 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
             label: t(`settings.interface.chatMathScaleOptions.${value}`),
           }))}
         />
-        <li className="flex items-center justify-between gap-4 rounded-md border border-border bg-card/60 px-4 py-3">
+        <li className="flex items-center justify-between gap-4 rounded-md border border-border/50 bg-card/60 px-4 py-3">
           <div className="min-w-0">
             <div className="flex items-center gap-1 font-medium">{t('settings.interface.showToolCallTab')}<HelpHint label={t('settings.interface.showToolCallTab')}>{t('settings.interface.showToolCallTabDesc')}</HelpHint></div>
           </div>
@@ -395,7 +396,7 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
           onChange={setHideSubAgentSessions}
           testId="settings-toggle-hide-sub-agent-sessions"
         />
-        <li className="flex items-center justify-between gap-4 rounded-md border border-border bg-card/60 px-4 py-3">
+        <li className="flex items-center justify-between gap-4 rounded-md border border-border/50 bg-card/60 px-4 py-3">
           <div className="min-w-0">
             <div className="font-medium">{t('settings.interface.chapterReadingMode')}</div>
             <div className="mt-0.5 text-xs text-muted-foreground">{t('settings.interface.chapterReadingModeDesc')}</div>
@@ -405,7 +406,7 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
             <option value="continuous">{t('chat.transcript.chapterContinuous')}</option>
           </select>
         </li>
-        <li className="flex items-center justify-between gap-4 rounded-md border border-border bg-card/60 px-4 py-3">
+        <li className="flex items-center justify-between gap-4 rounded-md border border-border/50 bg-card/60 px-4 py-3">
           <div className="min-w-0">
             <div className="font-medium">{t('settings.interface.messageTimestamps')}</div>
             <div className="mt-0.5 text-xs text-muted-foreground">{t('settings.interface.messageTimestampsDesc')}</div>
@@ -416,7 +417,7 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
             <option value="hidden">{t('settings.interface.messageTimestampsHidden')}</option>
           </select>
         </li>
-        <li className="flex items-center justify-between gap-4 rounded-md border border-border bg-card/60 px-4 py-3">
+        <li className="flex items-center justify-between gap-4 rounded-md border border-border/50 bg-card/60 px-4 py-3">
           <div className="min-w-0">
             <div className="flex items-center gap-1 font-medium">{t('settings.interface.liveToolActivityTail')}<HelpHint label={t('settings.interface.liveToolActivityTail')}>{t('settings.interface.liveToolActivityTailDesc')}</HelpHint></div>
           </div>
@@ -431,7 +432,7 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
           min={100} max={300} defaultValue={DEFAULT_TOOL_ACTIVITY_ICON_SCALE}
           unit="%" testId="settings-tool-activity-icon-scale"
         />
-        <li className="flex items-center justify-between gap-4 rounded-md border border-border bg-card/60 px-4 py-3">
+        <li className="flex items-center justify-between gap-4 rounded-md border border-border/50 bg-card/60 px-4 py-3">
           <div className="min-w-0">
             <div className="flex items-center gap-1 font-medium">{t('settings.interface.sessionCacheMaxMb')}<HelpHint label={t('settings.interface.sessionCacheMaxMb')}>{t('settings.interface.sessionCacheMaxMbDesc')}</HelpHint></div>
           </div>
@@ -441,7 +442,7 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
             <span className="text-xs text-muted-foreground">MB</span>
           </div>
         </li>
-        <li className="flex items-center justify-between gap-4 rounded-md border border-border bg-card/60 px-4 py-3">
+        <li className="flex items-center justify-between gap-4 rounded-md border border-border/50 bg-card/60 px-4 py-3">
           <div className="min-w-0">
             <div className="flex items-center gap-1 font-medium">{t('settings.interface.sessionSubscriptionWarmth')}<HelpHint label={t('settings.interface.sessionSubscriptionWarmth')}>{t('settings.interface.sessionSubscriptionWarmthDesc')}</HelpHint></div>
           </div>
@@ -588,7 +589,7 @@ function MarketplaceThemeBrowser({
         </div>
         <div className="flex min-w-0 gap-2">
           <input
-            className="h-8 min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+            className="h-8 min-w-0 rounded-md border border-border/50 bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder={t('settings.interface.vscodeTheme.searchPlaceholder')}
@@ -601,12 +602,12 @@ function MarketplaceThemeBrowser({
         </div>
       </div>
       {searchQuery.error ? <div className="text-xs text-destructive">{(searchQuery.error as Error).message}</div> : null}
-      <div className="rounded-md border border-border bg-background/40 p-2">
+      <div className="rounded-md border border-border/50 bg-background/40 p-2">
         <div className="mb-2 flex items-center justify-between gap-2 text-xs">
           <div className="font-medium text-muted-foreground">{t('settings.interface.vscodeTheme.searchResults')}</div>
           {selected ? <div className="min-w-0 truncate text-caption text-muted-foreground">{selected.displayName}</div> : null}
         </div>
-        <div className="max-h-36 space-y-1 overflow-y-auto pr-1">
+        <ScrollArea className="max-h-36" contentClassName="space-y-1 pr-1 min-h-full">
           {(searchQuery.data ?? []).map((result) => (
             <button
               key={`${result.namespace}.${result.name}`}
@@ -624,10 +625,10 @@ function MarketplaceThemeBrowser({
           {searchQuery.isLoading ? <div className="px-2 py-1 text-xs text-muted-foreground">{t('common.loading')}</div> : null}
           {selected !== null && extensionQuery.isLoading ? <div className="px-2 py-1 text-xs text-muted-foreground">{t('settings.interface.vscodeTheme.loadingThemes')}</div> : null}
           {extensionQuery.error ? <div className="px-2 py-1 text-xs text-destructive">{(extensionQuery.error as Error).message}</div> : null}
-        </div>
+        </ScrollArea>
       </div>
-      <div className="overflow-hidden rounded-md border border-border bg-background/60" data-testid="settings-vscode-theme-list">
-        <div className="max-h-72 divide-y divide-border overflow-y-auto">
+      <div className="overflow-hidden rounded-md border border-border/50 bg-background/60" data-testid="settings-vscode-theme-list">
+        <ScrollArea className="max-h-72" contentClassName="divide-y divide-border min-h-full">
           {themeRows.map((row) => {
             const active = activeThemeId === row.id || (!activeThemeId && row.id === `agent-kernel-${effectiveTheme}`)
             return (
@@ -645,7 +646,7 @@ function MarketplaceThemeBrowser({
               />
             )
           })}
-        </div>
+        </ScrollArea>
       </div>
     </div>
   )
@@ -715,17 +716,17 @@ function SegmentedNumberPref({
   testId: string
 }): JSX.Element {
   return (
-    <li className="flex items-center justify-between gap-3 rounded-md border border-border bg-card/60 px-4 py-3">
+    <li className="flex items-center justify-between gap-3 rounded-md border border-border/50 bg-card/60 px-4 py-3">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1 font-medium">{label}<HelpHint label={label}>{description}</HelpHint></div>
       </div>
-      <select aria-label={label} value={value} onChange={(event) => onChange(Number(event.target.value))} className="h-9 max-w-[45%] rounded-md border border-border bg-background px-2 text-xs md:hidden" data-testid={`${testId}-select`}>
+      <select aria-label={label} value={value} onChange={(event) => onChange(Number(event.target.value))} className="h-9 max-w-[45%] rounded-md border border-border/50 bg-background px-2 text-xs md:hidden" data-testid={`${testId}-select`}>
         {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
       </select>
       <div
         role="radiogroup"
         aria-label={label}
-        className="hidden max-w-[65%] flex-wrap gap-1 rounded-md border border-border bg-background/70 p-1 md:flex"
+        className="hidden max-w-[65%] flex-wrap gap-1 rounded-md border border-border/50 bg-background/70 p-1 md:flex"
         data-testid={testId}
       >
         {options.map((option) => (

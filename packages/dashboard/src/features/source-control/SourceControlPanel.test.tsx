@@ -112,6 +112,7 @@ describe('SourceControlPanel', () => {
 
     rerender(<SourceControlPanel socket={socket.asDashboardSocket()} workspaceId="ws-1" sessionId="s-2" cwd="/repo" />)
     await waitFor(() => expect(screen.getByTestId('source-control-view-mode-toggle').getAttribute('data-view-mode')).toBe('tree'))
+    await waitFor(() => expect(socket.emitMock.mock.calls.filter(([event, payload]) => event === 'workspace:exec' && (payload.argv as string[]).includes('status'))).toHaveLength(2))
     expect(screen.getByTestId('source-control-dir').textContent).toBe('src')
   })
 

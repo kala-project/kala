@@ -19,7 +19,7 @@ describe('TasksButton', () => {
     fireEvent.click(screen.getByTestId('tasks-button-trigger'))
 
     expect(screen.getByTestId('tasks-popover').textContent).toContain('a-long-unbroken-token')
-    expect(screen.getByTestId('tasks-popover-scroll').className).toContain('overflow-y-auto')
+    expect(screen.getByTestId('tasks-popover-scroll').querySelector('[data-radix-scroll-area-viewport]')).toBeTruthy()
     expect(screen.getByTestId('tasks-popover').className).toContain('max-h-[min(60dvh,28rem)]')
     expect(screen.getByTestId('tasks-popover').className).toContain('flex-col')
     expect(screen.getByTestId('tasks-popover').className).toContain('z-[70]')

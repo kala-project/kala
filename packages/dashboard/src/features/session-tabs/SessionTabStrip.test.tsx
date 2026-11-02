@@ -16,7 +16,7 @@ describe('SessionTabStrip', () => {
     render(<SessionTabStrip sessions={[parent]} openIds={['parent']} pinned={[]} active="parent" {...callbacks} />)
 
     const strip = screen.getByTestId('session-tab-strip')
-    expect(strip.className).toContain('gap-px')
+    expect(strip.querySelector('[data-radix-scroll-area-viewport] .gap-px')).toBeTruthy()
     expect(strip.querySelector('button')?.className).not.toContain('border-r')
   })
 

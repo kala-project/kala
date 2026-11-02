@@ -1,3 +1,4 @@
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 /**
  * Explorer — single left column that fuses the old Workspaces/Sessions
  * columns into a two-level tree: workspace parents with session children.
@@ -666,7 +667,7 @@ function HiddenItemsBar({
         </span>
       </button>
       {open ? (
-        <div className="mt-1 max-h-[min(40vh,16rem)] space-y-2 overflow-y-auto overscroll-contain px-1 pb-1" data-testid="hidden-items-list">
+        <ScrollArea className="mt-1 max-h-[min(40vh,16rem)] overscroll-contain" data-testid="hidden-items-list" contentClassName="space-y-2 px-1 pb-1 min-h-full">
           {workspaceCount > 0 ? <section data-testid="hidden-workspaces-group">
             <div className="px-1 pb-0.5 text-meta font-semibold uppercase tracking-wider text-muted-foreground">{t('explorer.hiddenWorkspacesGroup', { count: workspaceCount })}</div>
             {workspaces.map((workspace) => workspace.workspaceId === null ? null : (
@@ -680,7 +681,7 @@ function HiddenItemsBar({
             <div className="px-1 pb-0.5 text-meta font-semibold uppercase tracking-wider text-muted-foreground">{t('explorer.hiddenSessionsGroup', { count: sessions.length })}</div>
             {sessions.map((entry) => <HiddenSessionItem key={entry.sessionId} sessionId={entry.sessionId} label={entry.label} onUnhide={onUnhideSession} />)}
           </section> : null}
-        </div>
+        </ScrollArea>
       ) : null}
     </div>
   )
@@ -791,10 +792,10 @@ function Header({
 
   return (
     <div className={cn(
-      'relative z-30 flex flex-none items-center border-b px-3.5',
+      'relative z-30 flex flex-none items-center px-3.5',
       embedded
-        ? 'h-14 border-border/30 bg-card/35'
-        : 'border-border/35 bg-card/30 py-2.5 backdrop-blur supports-[backdrop-filter]:bg-card/25',
+        ? 'h-14 bg-card'
+        : 'bg-card py-2.5 backdrop-blur',
     )}>
       {searchOpen ? (
         <label className="flex h-10 w-full min-w-0 items-center gap-2 rounded-2xl bg-background/55 pl-3 text-sm ring-1 ring-border/35 transition-shadow focus-within:ring-primary/35">
@@ -1067,7 +1068,7 @@ function WorkspaceRow({
           {w.workspaceId === null ? <span className="inline-flex h-5 w-5 flex-none items-center justify-center text-muted-foreground/75"><Sparkles className="h-3.5 w-3.5" data-testid="chats-icon" aria-hidden="true" /><span className="sr-only">{statusLabel}</span></span> : <span className={cn('inline-flex h-5 w-5 flex-none items-center justify-center transition-colors', workspaceIconCls)} data-testid="workspace-status-icon" data-os={w.os ?? 'unknown'} title={iconLabel} role="img" aria-label={iconLabel}><WorkspaceOsIcon os={w.os} /></span>}
           <span
             className="ak-workspace-title-cell min-w-0 truncate font-medium leading-5 text-muted-foreground group-hover/ws:text-foreground"
-            style={{ fontSize: Math.max(11, fontSizePx - 1), lineHeight: 1.35, '--ak-workspace-font-size': `${Math.max(11, fontSizePx - 1)}px` } as React.CSSProperties}
+            style={{ fontSize: Math.max(12, fontSizePx - 1), lineHeight: 1.35, '--ak-workspace-font-size': `${Math.max(12, fontSizePx - 1)}px` } as React.CSSProperties}
             title={canRename ? t('explorer.doubleClickRename') : undefined}
             onDoubleClick={(e) => {
               if (!canRename) return
@@ -1388,7 +1389,7 @@ function SessionRow({
             <>
               <button type="button" className="pointer-events-auto fixed inset-0 z-[55] cursor-default" aria-label={t('common.close')} onClick={(e) => { e.stopPropagation(); setTouchMenuPosition(null) }} />
               <div
-                className="pointer-events-auto fixed z-[60] min-w-40 overflow-hidden rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-xl"
+                className="pointer-events-auto fixed z-[60] min-w-40 overflow-hidden rounded-lg border border-border/50 bg-popover p-1 text-popover-foreground shadow-xl"
                 style={{ right: touchMenuPosition.right, top: touchMenuPosition.top }}
                 data-testid="session-action-menu"
                 onClick={(e) => e.stopPropagation()}
@@ -1612,7 +1613,7 @@ function ToolbarSessionStatus({ status, label, compact }: { status: SessionActiv
           ? LoaderCircle
           : Circle
   return (
-    <span className={cn('inline-flex h-6 flex-none items-center gap-1.5 rounded-md border text-caption font-medium', compact ? 'w-6 justify-center px-0 sm:w-auto sm:justify-start sm:px-2' : 'px-2', tone)} data-testid="session-status-indicator" data-status={status ?? 'unknown'} aria-label={label}>
+    <span className={cn('inline-flex h-6 flex-none items-center gap-1.5 rounded-md border border-border/50 text-caption font-medium', compact ? 'w-6 justify-center px-0 sm:w-auto sm:justify-start sm:px-2' : 'px-2', tone)} data-testid="session-status-indicator" data-status={status ?? 'unknown'} aria-label={label}>
       <span className={cn('inline-flex', running && 'ak-session-status-spinner')} data-testid={running ? 'session-status-spinner' : undefined} aria-hidden="true">
         <Icon className="h-3 w-3" strokeWidth={2.3} />
       </span>

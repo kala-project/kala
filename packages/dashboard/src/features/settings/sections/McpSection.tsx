@@ -188,7 +188,7 @@ export function McpSection({ executors = [], token }: { executors?: readonly Att
             <label className="block text-sm font-medium" htmlFor="settings-mcp-workspace">{t('settings.mcp.workspace')}</label>
             <select
               id="settings-mcp-workspace"
-              className="mt-2 h-9 w-full min-w-0 rounded-md border px-3 text-sm"
+              className="mt-2 h-9 w-full min-w-0 rounded-md border border-border/50 px-3 text-sm"
               value={workspaceId}
               disabled={loading || saving}
               onChange={(event) => setWorkspaceId(event.target.value)}
@@ -247,16 +247,16 @@ export function McpSection({ executors = [], token }: { executors?: readonly Att
                     <div className="grid min-w-0 gap-3 sm:grid-cols-2">
                       <label className="min-w-0 text-sm font-medium">
                         {t('settings.mcp.name')}
-                        <input className="mt-1 h-9 w-full min-w-0 rounded-md border px-3 text-sm" value={draft.name} disabled={saving} onChange={(event) => updateDraft(index, 'name', event.target.value)} aria-label={t('settings.mcp.nameNumber', { number: index + 1 })} />
+                        <input className="mt-1 h-9 w-full min-w-0 rounded-md border border-border/50 px-3 text-sm" value={draft.name} disabled={saving} onChange={(event) => updateDraft(index, 'name', event.target.value)} aria-label={t('settings.mcp.nameNumber', { number: index + 1 })} />
                       </label>
                       <label className="min-w-0 text-sm font-medium">
                         {t('settings.mcp.command')}
-                        <input className="mt-1 h-9 w-full min-w-0 rounded-md border px-3 font-mono text-sm" value={draft.command} disabled={saving} onChange={(event) => updateDraft(index, 'command', event.target.value)} aria-label={t('settings.mcp.commandNumber', { number: index + 1 })} />
+                        <input className="mt-1 h-9 w-full min-w-0 rounded-md border border-border/50 px-3 font-mono text-sm" value={draft.command} disabled={saving} onChange={(event) => updateDraft(index, 'command', event.target.value)} aria-label={t('settings.mcp.commandNumber', { number: index + 1 })} />
                       </label>
                     </div>
                     <label className="block min-w-0 text-sm font-medium">
                       {t('settings.mcp.args')}
-                      <textarea className="mt-1 min-h-24 w-full min-w-0 resize-y rounded-md border px-3 py-2 font-mono text-sm" value={draft.args} disabled={saving} onChange={(event) => updateDraft(index, 'args', event.target.value)} aria-label={t('settings.mcp.argsNumber', { number: index + 1 })} spellCheck={false} />
+                      <textarea className="mt-1 min-h-24 w-full min-w-0 resize-y rounded-md border border-border/50 px-3 py-2 font-mono text-sm" value={draft.args} disabled={saving} onChange={(event) => updateDraft(index, 'args', event.target.value)} aria-label={t('settings.mcp.argsNumber', { number: index + 1 })} spellCheck={false} />
                     </label>
                     <p className="text-xs text-muted-foreground">{t('settings.mcp.argsHint')}</p>
                     <Button type="button" variant="outline" disabled={saving} onClick={() => { setDrafts((current) => current.filter((_, draftIndex) => draftIndex !== index)); setSaved(false) }} aria-label={t('settings.mcp.removeServerNumber', { number: index + 1 })}>

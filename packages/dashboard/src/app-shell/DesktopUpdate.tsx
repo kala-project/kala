@@ -21,7 +21,7 @@ export function DesktopUpdateSettings(): JSX.Element {
   const update = useDesktopUpdate()
   const error = update.error ?? (!update.bridge ? t('desktopUpdate.legacy') : null)
   return (
-    <section className="space-y-3 rounded-lg border border-border p-4" aria-label={t('desktopUpdate.title')} data-testid="desktop-update-settings">
+    <section className="space-y-3 rounded-lg border border-border/50 p-4" aria-label={t('desktopUpdate.title')} data-testid="desktop-update-settings">
       <div className="flex items-center gap-1 text-sm font-medium">{t('desktopUpdate.title')}<HelpHint label={t('desktopUpdate.title')}>{t('desktopUpdate.help')}</HelpHint></div>
       <p className="text-sm">{t('desktopUpdate.installed', { version: update.installedVersion ?? t('desktopUpdate.unknown') })}</p>
       <div className="flex flex-wrap gap-2">

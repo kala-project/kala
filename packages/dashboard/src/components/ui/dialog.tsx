@@ -2,6 +2,7 @@ import * as React from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
 
 import { cn } from '../../lib/utils.js'
+import { ScrollArea } from './scroll-area.js'
 
 export const Dialog = DialogPrimitive.Root
 export const DialogTrigger = DialogPrimitive.Trigger
@@ -61,9 +62,12 @@ export function DialogHeader({
 
 export function DialogBody({
   className,
+  contentClassName,
+  onScroll,
+  dir,
   ...props
-}: React.HTMLAttributes<HTMLDivElement>): JSX.Element {
-  return <div className={cn('min-h-0 overflow-y-auto overscroll-contain', className)} {...props} />
+}: React.HTMLAttributes<HTMLDivElement> & { contentClassName?: string }): JSX.Element {
+  return <ScrollArea className={cn('min-h-0', className)} contentClassName={contentClassName} dir={dir === 'rtl' || dir === 'ltr' ? dir : undefined} viewportClassName="overscroll-contain" viewportProps={{ onScroll }} {...props} />
 }
 
 export function DialogFooter({

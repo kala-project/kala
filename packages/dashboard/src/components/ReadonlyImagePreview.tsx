@@ -3,6 +3,7 @@ import { Maximize2, Minus, Plus, Scan, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { cn } from '../lib/utils.js'
+import { ScrollArea } from './ui/scroll-area.js'
 import {
   Dialog,
   DialogClose,
@@ -75,9 +76,10 @@ function ReadonlyMediaCanvas({
 
   return (
     <div className={cn('relative grid h-full w-full min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_auto] overflow-hidden bg-neutral-950', className)}>
-      <div
-        ref={stageRef}
-        className="min-h-0 min-w-0 touch-pan-x touch-pan-y overflow-auto overscroll-contain bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.055),transparent_62%)]"
+      <ScrollArea
+        viewportRef={stageRef}
+        className="min-h-0 min-w-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.055),transparent_62%)]"
+        viewportClassName="touch-pan-x touch-pan-y overscroll-contain"
         data-testid={stageTestId}
       >
         <div
@@ -109,7 +111,7 @@ function ReadonlyMediaCanvas({
             />
           )}
         </div>
-      </div>
+      </ScrollArea>
       <div className="flex min-h-12 items-center justify-center gap-1 border-t border-white/10 bg-black/92 px-2 pb-[env(safe-area-inset-bottom)] text-white sm:min-h-11 sm:pb-0" data-testid="readonly-image-preview-controls">
         <PreviewControl label="Fit image" onClick={() => setZoom(1)}><Scan className="h-4 w-4" /></PreviewControl>
         <PreviewControl label="Zoom out" disabled={zoom <= MIN_ZOOM} onClick={() => setBoundedZoom(zoom - ZOOM_STEP)}><Minus className="h-4 w-4" /></PreviewControl>

@@ -153,7 +153,7 @@ export function NewSessionDialog({
             <X className="h-4 w-4" aria-hidden="true" />
           </DialogClose>
         </DialogHeader>
-        <section className="grid min-h-0 min-w-0 max-h-[min(40vh,14rem)] grid-cols-1 gap-3 overflow-y-auto overscroll-contain border-b border-border/50 bg-muted/20 px-3 py-2 sm:grid-cols-2" data-testid="new-session-options">
+        <ScrollArea className="min-h-0 min-w-0 max-h-[min(40vh,14rem)] overscroll-contain border-b border-border/50 bg-muted/20" data-testid="new-session-options" contentClassName="grid grid-cols-1 gap-3 px-3 py-2 sm:grid-cols-2 min-h-full">
           <div className="flex min-w-0 flex-col gap-1">
             <div className="flex items-center gap-1">
               <span id="new-session-runtime-label" className="text-caption font-semibold text-muted-foreground">
@@ -161,7 +161,7 @@ export function NewSessionDialog({
               </span>
               <HelpHint label={t('dialogs.chooseAgentRuntime')} trigger={<span className="inline-flex h-6 w-6 flex-none items-center justify-center rounded text-muted-foreground/70 hover:text-foreground" aria-label={t('dialogs.chooseAgentRuntime')}><Info className="h-3.5 w-3.5" aria-hidden="true" /></span>}>{agentRuntimes.map((runtime) => <span className="mb-2 block last:mb-0" key={runtime.id}><strong>{runtimeDisplayLabel(t, runtime)}</strong><br />{runtimeDisplayDescription(t, runtime)}</span>)}</HelpHint>
             </div>
-            <div className="grid min-w-0 grid-cols-2 gap-1 rounded-md border border-border bg-card p-0.5" role="radiogroup" aria-labelledby="new-session-runtime-label">
+            <div className="grid min-w-0 grid-cols-2 gap-1 rounded-md border border-border/50 bg-card p-0.5" role="radiogroup" aria-labelledby="new-session-runtime-label">
               {agentRuntimes.map((runtime) => {
                 const selected = agentRuntime === runtime.id
                 const label = runtimeDisplayLabel(t, runtime)
@@ -228,7 +228,7 @@ export function NewSessionDialog({
               </span>
               <HelpHint label={t('dialogs.chooseExecutionMode')}>{(['chat', 'dag'] as const).map((mode) => <span className="mb-2 block last:mb-0" key={mode}><strong>{t(`dialogs.executionMode.${mode}.label`)}</strong><br />{t(`dialogs.executionMode.${mode}.description`)}</span>)}</HelpHint>
             </div>
-            <div className="grid min-w-0 grid-cols-2 gap-1 rounded-md border border-border bg-card p-0.5" role="radiogroup" aria-labelledby="new-session-mode-label">
+            <div className="grid min-w-0 grid-cols-2 gap-1 rounded-md border border-border/50 bg-card p-0.5" role="radiogroup" aria-labelledby="new-session-mode-label">
               {(['chat', 'dag'] as const).map((mode) => {
                 const selected = executionMode === mode
                 return (
@@ -247,13 +247,13 @@ export function NewSessionDialog({
                     )}
                   >
                     <span>{t(`dialogs.executionMode.${mode}.label`)}</span>
-                    <span className="text-[11px] font-normal opacity-80">{t(`dialogs.executionMode.${mode}.shortDescription`)}</span>
+                    <span className="text-caption font-normal opacity-80">{t(`dialogs.executionMode.${mode}.shortDescription`)}</span>
                   </button>
                 )
               })}
             </div>
           </div>
-        </section>
+        </ScrollArea>
         <div className={cn(
           'grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] overflow-hidden',
           scopedWorkspace
@@ -297,7 +297,7 @@ export function NewSessionDialog({
                     data-testid={`workspace-pick-${w.workspaceId}`}
                     onClick={() => selectWorkspace(w.workspaceId)}
                     className={cn(
-                      'min-w-[13rem] flex-1 rounded-md border px-2 py-2 text-left transition-colors md:w-full md:min-w-0',
+                      'min-w-[13rem] flex-1 rounded-md border border-border/50 px-2 py-2 text-left transition-colors md:w-full md:min-w-0',
                       workspaceId === w.workspaceId
                         ? 'border-primary bg-primary/10 text-foreground'
                         : 'border-border/60 bg-card hover:bg-secondary',
@@ -346,7 +346,7 @@ export function NewSessionDialog({
             {error}
           </div>
         ) : null}
-        <DialogFooter className="min-h-0 overflow-y-auto border-t border-border/50 px-3 py-2 sm:px-4 sm:py-3">
+        <ScrollArea className="min-h-0 max-h-[30dvh]"><DialogFooter className="border-t border-border/50 px-3 py-2 sm:px-4 sm:py-3">
           <Button variant="outline" className="min-h-11" onClick={onCancel} disabled={submitting} data-testid="workspace-picker-cancel">
             {t('common.cancel')}
           </Button>
@@ -358,7 +358,7 @@ export function NewSessionDialog({
           >
             {submitting ? t('dialogs.newSessionCreating') : t('dialogs.newWorkspaceSessionCreate')}
           </Button>
-        </DialogFooter>
+        </DialogFooter></ScrollArea>
       </DialogContent>
     </Dialog>
   )

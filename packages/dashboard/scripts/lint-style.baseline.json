@@ -1,7 +1,7 @@
 {
-  "bare-border": 318,
-  "border-border-full-opacity": 72,
-  "directional-bare-border": 171,
-  "naked-overflow-scroll": 43,
+  "bare-border": 0,
+  "border-border-full-opacity": 0,
+  "directional-bare-border": 0,
+  "naked-overflow-scroll": 12,
   "micro-typography": 0
 }

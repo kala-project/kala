@@ -52,14 +52,14 @@ function DownloadContent({ update }: { update: boolean }): JSX.Element {
   }, [])
   const release = download?.release
   return (
-    <DialogBody className="min-w-0 space-y-4 px-4 py-4 sm:px-6" data-testid="desktop-download-body">
+    <DialogBody className="min-w-0" contentClassName="space-y-4 px-4 py-4 sm:px-6" data-testid="desktop-download-body">
       {release ? (
         <details role="note" data-testid="desktop-release-security" className="rounded-lg bg-amber-500/10 p-3 text-xs leading-5 ring-1 ring-inset ring-amber-500/40">
           <summary className="cursor-pointer font-semibold">{t('desktopDownload.unsigned')}</summary>
           <p className="mt-2 text-muted-foreground">{t('desktopDownload.security')} <code className="break-all">docs/operations/linux-desktop-supply-chain.md</code></p>
         </details>
       ) : null}
-      {release && update ? <p role="note" data-testid="desktop-update-restart" className="rounded-lg border border-border bg-muted/50 p-3 text-xs leading-5">{t('desktopUpdate.restartAfterInstall')}</p> : null}
+      {release && update ? <p role="note" data-testid="desktop-update-restart" className="rounded-lg border border-border/50 bg-muted/50 p-3 text-xs leading-5">{t('desktopUpdate.restartAfterInstall')}</p> : null}
       {error !== null ? (
         <div role="status" className="rounded-xl bg-muted/25 p-4 text-sm ring-1 ring-inset ring-border/60">
           <strong className="font-medium">{t('desktopDownload.releaseError')}</strong>
@@ -114,7 +114,7 @@ export function DesktopDownloadDialog({ trigger, update = false }: { trigger?: R
         </Button>}
       </DialogTrigger>
       <DialogContent className={cn(dialogMobileSheetClassName, 'h-[min(calc(var(--ak-viewport-h,100dvh)-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1rem),56rem)] min-w-0 grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)] sm:max-w-5xl')} data-testid="desktop-download-dialog">
-        <header className="relative border-b border-border px-4 py-3 pr-14 sm:px-6 sm:pr-14">
+        <header className="relative border-b border-border/50 px-4 py-3 pr-14 sm:px-6 sm:pr-14">
           <DialogTitle className="text-base">{t('desktopDownload.title')}</DialogTitle>
           <DialogDescription className="text-xs">{t('desktopDownload.description')}</DialogDescription>
           <DialogClose className={dialogTouchCloseClassName} aria-label={t('desktopDownload.close')}><X className="h-4 w-4" /></DialogClose>

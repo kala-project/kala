@@ -34,7 +34,7 @@ describe('dashboard preference registry', () => {
     expect(DEFAULT_LIVE_TOOL_ACTIVITY_TAIL_COUNT).toBe(DASHBOARD_PREFERENCES.liveToolActivityTailCount.defaultValue)
     expect(PREF_CHAT_FONT_SIZE).toBe(DASHBOARD_PREFERENCES.chatFontSize.key)
     expect(DEFAULT_CHAT_FONT_SIZE).toBe(DASHBOARD_PREFERENCES.chatFontSize.defaultValue)
-    expect(DASHBOARD_PREFERENCES.codeBlockFontSize).toEqual({ key: 'ak-code-block-font-size', type: 'number', defaultValue: 15, min: 10, max: 48 })
+    expect(DASHBOARD_PREFERENCES.codeBlockFontSize).toEqual({ key: 'ak-code-block-font-size', type: 'number', defaultValue: 15, min: 12, max: 48 })
     expect(PREF_FILE_VIEW_FONT_SIZE).toBe(DASHBOARD_PREFERENCES.fileViewFontSize.key)
     expect(DEFAULT_FILE_VIEW_FONT_SIZE).toBe(DASHBOARD_PREFERENCES.fileViewFontSize.defaultValue)
     expect(PREF_AUTO_HIDE_OFFLINE_WORKSPACES).toBe(DASHBOARD_PREFERENCES.autoHideOfflineWorkspaces.key)

@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { i18n } from '../i18n/index.js'
-import { AppShellNav, ProductSwitcher, SidebarBrand, SidebarGlobalActions } from './AppShellNav.js'
+import { AppShellNav, DesktopSessionRail, ProductSwitcher, SidebarBrand, SidebarGlobalActions } from './AppShellNav.js'
 
 function renderNav(overrides: Partial<Parameters<typeof AppShellNav>[0]> = {}): void {
   render(
@@ -60,8 +60,8 @@ describe('sidebar shell controls', () => {
     expect(onOpenSettings).toHaveBeenCalledOnce()
   })
 
-  it('renders Download and Settings as labeled buttons in one expanded footer row', () => {
-    render(<SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => {}} />)
+  it('aligns the account and accessible icon actions in one compact footer row', () => {
+    render(<SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => {}} account={{ displayName: 'Owner', initials: 'O' }} />)
     const actions = screen.getByTestId('app-shell-global-actions')
     const download = screen.getByTestId('app-shell-download-desktop')
     const settings = screen.getByTestId('app-shell-nav-settings-icon')
@@ -70,27 +70,64 @@ describe('sidebar shell controls', () => {
     expect(actions.className).toContain('w-full')
     expect(actions.className).toContain('bg-muted/25')
     expect(download.className).not.toContain('border-border')
-    expect(download.textContent).toBe('Download')
-    expect(settings.textContent).toBe('Settings')
+    expect(actions.className).not.toContain('flex-wrap')
+    expect(download.textContent).toBe('')
+    expect(settings.textContent).toBe('')
+    expect(download.getAttribute('aria-label')).toBeTruthy()
+    expect(settings.getAttribute('aria-label')).toBeTruthy()
+    expect(download.className).toContain('h-11')
+    expect(settings.className).toContain('h-11')
+    const account = screen.getByTestId('account-menu-trigger')
+    expect(account.textContent).toBe('Owner')
+    expect(account.querySelector('.lucide-user-round')).toBeTruthy()
+    expect(account.querySelector('button')).toBeNull()
+    expect(account.compareDocumentPosition(download) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(download.compareDocumentPosition(settings) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it('gives the footer profile its own row and keeps its menu outside clipped sidebars', () => {
-    const openDeployment = vi.fn()
+  it('keeps the compact account menu portalled, keyboard focused and dismissible', () => {
     const { container } = render(<div className="overflow-hidden">
-      <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => {}} onOpenDeployment={openDeployment} account={{ displayName: 'Production Owner', email: 'owner@example.test', initials: 'PO' }} />
+      <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => {}} account={{ displayName: 'Production Owner', email: 'owner@example.test', initials: 'PO' }} />
     </div>)
-    fireEvent.click(screen.getByTestId('app-shell-deployment-center'))
-    expect(openDeployment).toHaveBeenCalledOnce()
-    expect(screen.getByTestId('account-menu').className).toContain('basis-full')
-    expect(screen.getByTestId('account-menu-trigger').textContent).toContain('owner@example.test')
+    expect(screen.getByTestId('account-menu').className).not.toContain('basis-full')
+    expect(screen.getByTestId('account-menu-trigger').textContent).toBe('Production Owner')
     fireEvent.click(screen.getByTestId('account-menu-trigger'))
     const menu = screen.getByRole('menu')
     expect(menu.parentElement).toBe(document.body)
     expect(container.contains(menu)).toBe(false)
+    expect(menu.contains(document.activeElement)).toBe(true)
+    expect(screen.getByTestId('account-identity-summary').textContent).toContain('owner@example.test')
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('menu')).toBeNull()
     expect(document.activeElement).toBe(screen.getByTestId('account-menu-trigger'))
+  })
+
+  it('puts authorized Management alongside normal navigation, never in the account footer', async () => {
+    const openManagement = vi.fn()
+    const { rerender } = render(<ProductSwitcher section="agent" onSelect={() => {}} onOpenManagement={openManagement} />)
+    const management = screen.getByTestId('product-switcher-management')
+    expect(management.getAttribute('role')).toBe('menuitem')
+    expect(management.textContent).toBe('Management')
+    expect(management.title).toBe('Management & observability')
+    fireEvent.click(management)
+    expect(openManagement).toHaveBeenCalledOnce()
+    await i18n.changeLanguage('zh')
+    expect(management.textContent).toBe('管理中心')
+    await i18n.changeLanguage('en')
+    rerender(<ProductSwitcher section="agent" onSelect={() => {}} />)
+    expect(screen.queryByTestId('product-switcher-management')).toBeNull()
+  })
+
+  it('keeps an authorized management icon discoverable in the collapsed navigation rail', () => {
+    const onOpenManagement = vi.fn()
+    render(<DesktopSessionRail section="agent" onSelectSection={() => {}} onNewSession={() => {}} onOpenManagement={onOpenManagement} globalActions={<SidebarGlobalActions orientation="vertical" onOpenSettings={() => {}} account={{ displayName: 'Owner', initials: 'O' }} />} />)
+    const management = screen.getByTestId('desktop-rail-management')
+    expect(management.getAttribute('aria-label')).toBe('Management')
+    expect(screen.getByTestId('desktop-rail-footer').contains(management)).toBe(false)
+    fireEvent.click(management)
+    expect(onOpenManagement).toHaveBeenCalledOnce()
+    expect(screen.getByTestId('account-menu-trigger').textContent).toBe('')
+    expect(screen.getByTestId('account-menu-trigger').getAttribute('aria-label')).toContain('Owner')
   })
 })
 

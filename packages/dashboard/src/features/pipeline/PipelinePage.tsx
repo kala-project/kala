@@ -1,3 +1,4 @@
+import { ScrollArea } from '../../components/ui/scroll-area.js'
 import type { TFunction } from 'i18next'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ChevronLeft, ChevronRight, Sparkles } from 'lucide-react'
@@ -73,7 +74,7 @@ export function PipelinePage(): JSX.Element {
       } />
       <ProductPageBody className="flex min-h-0 flex-col">
         <ProductPanel className="relative">
-          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain" data-testid="pipeline-scroll-body">
+          <ScrollArea className="min-h-0 flex-1 overscroll-contain" data-testid="pipeline-scroll-body" contentClassName="min-h-full">
             <div className="mx-auto flex min-h-full w-full max-w-[88rem] items-center justify-center px-4 py-6 sm:px-8 sm:py-10">
           {current.kind === 'step' ? (
             <StepSlide step={current.step} index={current.index} total={current.total} whereToLook={t('pipeline.whereToLook')} />
@@ -81,7 +82,7 @@ export function PipelinePage(): JSX.Element {
             <PrinciplesSlide t={t} />
           )}
             </div>
-          </div>
+          </ScrollArea>
           <div className="flex flex-none items-center justify-between border-t border-border/35 bg-muted/20 px-3 py-2 sm:px-5">
             <Button
               type="button"
