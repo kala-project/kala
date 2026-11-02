@@ -104,6 +104,7 @@ export type ExecutorChangeListener = (change: ServerExecutorChangedPayload) => v
  */
 export type WorkspaceResolver = {
   workspaceIdFor(sessionId: string): string | undefined
+  assertSessionEffectOwner?(sessionId: string): Promise<void | { ownerGeneration: string }>
   /** Session-snapshotted MCP input schema; never substitute a new same-name tool. */
   mcpSchemaHashFor?(sessionId: string, toolName: string): string | undefined
 }
@@ -188,7 +189,7 @@ export function createExecutorRegistry(
     announcement: ExecutorAnnounce
     attachedAt: string
     clientVersion?: string
-    /** callId → Pending. Session is inside Pending — one flat map is enough for O(1) fulfill. */
+    /** Serialized [sessionId, callId] to pending call. */
     pending: Map<string, Pending>
   }
   const byExecutor = new Map<string, Bind>()
@@ -254,7 +255,7 @@ export function createExecutorRegistry(
         content: reason === 'credential_revoked'
           ? 'executor credential revoked while tool call outcome was unknown'
           : 'executor identity authority unavailable while tool call outcome was unknown',
-        failure: { code: reason === 'credential_revoked' ? 'executor_credential_revoked' : 'executor_identity_unavailable', category: 'infrastructure', outcome: 'indeterminate', retryable: true, responsibility: 'system' },
+        failure: { code: reason === 'credential_revoked' ? 'executor_credential_revoked' : 'executor_identity_unavailable', category: 'infrastructure', outcome: 'indeterminate', retryable: false, responsibility: 'system' },
       })
     }
     bind.pending.clear()
@@ -301,6 +302,7 @@ export function createExecutorRegistry(
    */
   function redispatchPending(oldBind: Bind, newBind: Bind): void {
     for (const p of oldBind.pending.values()) {
+      const key = JSON.stringify([p.sessionId, p.callId])
       clearTimeout(p.timer)
       if (isUnavailableMcpTool(newBind.announcement, p.name, knownMcpToolNames, resolver.mcpSchemaHashFor?.(p.sessionId, p.name))) {
         p.resolve({
@@ -316,14 +318,15 @@ export function createExecutorRegistry(
       // orphaned tool call pending forever.
       const remainingMs = Math.max(0, p.deadlineAt - Date.now())
       const timer = setTimeout(() => {
-        if (newBind.pending.delete(p.callId)) {
+        if (newBind.pending.delete(key)) {
           p.resolve({
             ok: false,
             content: `tool call ack timed out after ${ackTimeoutMs}ms (post-reconnect)`,
+            failure: { code: 'tool_ack_timeout', category: 'infrastructure', outcome: 'indeterminate', retryable: false, responsibility: 'system', timeoutStage: 'acknowledgement' },
           })
         }
       }, remainingMs)
-      newBind.pending.set(p.callId, {
+      newBind.pending.set(key, {
         sessionId: p.sessionId,
         callId: p.callId,
         name: p.name,
@@ -333,16 +336,17 @@ export function createExecutorRegistry(
         timer,
         deadlineAt: p.deadlineAt,
       })
+      let ownerGeneration: string | undefined
       const emit = (authorized: boolean): void => {
-        const pending = newBind.pending.get(p.callId)
+        const pending = newBind.pending.get(key)
         if (!pending) return
         if (!authorized) {
           clearTimeout(pending.timer)
-          newBind.pending.delete(p.callId)
+          newBind.pending.delete(key)
           pending.resolve({
             ok: false,
             content: 'executor unavailable before reconnect dispatch; previous outcome unknown',
-            failure: { code: 'executor_reconnect_unavailable', category: 'infrastructure', outcome: 'indeterminate', retryable: true, responsibility: 'system' },
+            failure: { code: 'executor_reconnect_unavailable', category: 'infrastructure', outcome: 'indeterminate', retryable: false, responsibility: 'system' },
           })
           return
         }
@@ -355,18 +359,27 @@ export function createExecutorRegistry(
             input: p.input,
             ...(p.cwd !== undefined ? { cwd: p.cwd } : {}),
             ackTimeoutMs,
+            ...(ownerGeneration !== undefined ? { ownerGeneration } : {}),
           },
           (ack: ToolResultAck) => {
-            const acknowledged = newBind.pending.get(ack.callId)
+            if (ack.callId !== p.callId) return
+            const acknowledged = newBind.pending.get(key)
             if (!acknowledged) return
             clearTimeout(acknowledged.timer)
-            newBind.pending.delete(ack.callId)
+            newBind.pending.delete(key)
             acknowledged.resolve({ ok: ack.ok, content: ack.content, ...(ack.failure ? { failure: ack.failure } : {}) })
           },
         )
       }
       const authorization = authorizeCurrent(newBind)
-      if (typeof authorization === 'boolean') emit(authorization)
+      if (resolver.assertSessionEffectOwner) {
+        void Promise.resolve(authorization).then(async (authorized) => {
+          if (!authorized) return false
+          const owner = await resolver.assertSessionEffectOwner!(p.sessionId)
+          ownerGeneration = owner?.ownerGeneration
+          return isCurrent(newBind)
+        }).then(emit, () => emit(false))
+      } else if (typeof authorization === 'boolean') emit(authorization)
       else void authorization.then(emit)
     }
     oldBind.pending.clear()
@@ -732,20 +745,23 @@ export function createExecutorRegistry(
         }
       }
       const ackTimeoutMs = ackTimeoutMsFor(eff.name, eff.input, toolAckTimeoutMs)
+      const owner = resolver.assertSessionEffectOwner ? await resolver.assertSessionEffectOwner(sessionId) : undefined
+      if (!isCurrent(bind)) return { ok: false, content: 'executor unavailable before dispatch' }
+      const key = JSON.stringify([sessionId, eff.callId])
       audit?.log({ action: 'tool.dispatch', actor: { kind: 'system' }, target: { sessionId, workspaceId: bind.announcement.workspaceId, callId: eff.callId, toolName: eff.name }, outcome: 'ok', metadata: { cwd: eff.cwd } })
       return await new Promise<{ ok: boolean; content: string; failure?: import('@agent-kernel/kernel').ToolFailure; durationMs?: number }>((resolve) => {
         const deadlineAt = Date.now() + ackTimeoutMs
         const timer = setTimeout(() => {
-          if (bind.pending.delete(eff.callId)) {
+          if (bind.pending.delete(key)) {
             audit?.log({ action: 'tool.result', actor: { kind: 'executor', executorId: bind.announcement.executorId, workspaceId: bind.announcement.workspaceId }, target: { sessionId, callId: eff.callId, toolName: eff.name }, outcome: 'error', error: 'timeout' })
             resolve({
               ok: false,
               content: `tool call ack timed out after ${ackTimeoutMs}ms`,
-              failure: { code: 'tool_ack_timeout', category: 'infrastructure', outcome: 'indeterminate', retryable: true, responsibility: 'system', timeoutStage: 'acknowledgement' },
+              failure: { code: 'tool_ack_timeout', category: 'infrastructure', outcome: 'indeterminate', retryable: false, responsibility: 'system', timeoutStage: 'acknowledgement' },
             })
           }
         }, ackTimeoutMs)
-        bind.pending.set(eff.callId, {
+        bind.pending.set(key, {
           sessionId,
           callId: eff.callId,
           name: eff.name,
@@ -765,12 +781,14 @@ export function createExecutorRegistry(
             ...(eff.cwd !== undefined ? { cwd: eff.cwd } : {}),
             ackTimeoutMs,
             ...(turnId ? { turnId } : {}),
+            ...(owner ? { ownerGeneration: owner.ownerGeneration } : {}),
           },
           (ack: ToolResultAck) => {
-            const pending = bind.pending.get(ack.callId)
+            if (ack.callId !== eff.callId) return
+            const pending = bind.pending.get(key)
             if (!pending) return
             clearTimeout(pending.timer)
-            bind.pending.delete(ack.callId)
+            bind.pending.delete(key)
             audit?.log({ action: 'tool.result', actor: { kind: 'executor', executorId: bind.announcement.executorId, workspaceId: bind.announcement.workspaceId }, target: { sessionId, callId: ack.callId, toolName: eff.name }, outcome: ack.ok ? 'ok' : 'error', metadata: { contentBytes: Buffer.byteLength(ack.content, 'utf8') }, ...(ack.ok ? {} : { error: ack.content.slice(0, 200) }) })
             pending.resolve({ ok: ack.ok, content: ack.content, ...(ack.failure ? { failure: ack.failure } : {}), ...(ack.durationMs !== undefined ? { durationMs: ack.durationMs } : {}) })
           },
@@ -799,7 +817,7 @@ export function createExecutorRegistry(
         for (const p of [...bind.pending.values()]) {
           if (p.sessionId !== sessionId) continue
           clearTimeout(p.timer)
-          bind.pending.delete(p.callId)
+          bind.pending.delete(JSON.stringify([p.sessionId, p.callId]))
           p.resolve({ ok: false, content: 'cancelled by user' })
           const authorization = authorizeCurrent(bind)
           const emitCancel = (authorized: boolean): void => {

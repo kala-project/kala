@@ -59,6 +59,39 @@ function makeMockSocket() {
 }
 
 describe('executor idempotency', () => {
+  it('rejects different requests sharing an execution identity while running and after completion', async () => {
+    let finish!: (value: string) => void
+    const runs = vi.fn(() => new Promise<string>((resolve) => { finish = resolve }))
+    const first = makeMockSocket()
+    const second = makeMockSocket()
+    const sharedExecution = createExecutorSharedExecution(false)
+    const common = {
+      host: 'http://localhost', workspaceId: 'ws-conflict', executorId: 'executor-conflict',
+      tools: [{ name: 'effect', run: runs } satisfies Tool], sharedExecution,
+    }
+    const handles = [
+      startExecutor({ ...common, ioFactory: (() => first) as never }),
+      startExecutor({ ...common, ioFactory: (() => second) as never }),
+    ]
+    const call = { sessionId: 'session', callId: 'call', name: 'effect', input: { value: 'original' } }
+    const originalAck = vi.fn()
+    first.__trigger('tool:call', call, originalAck)
+    await vi.waitFor(() => expect(runs).toHaveBeenCalledTimes(1))
+    const conflictingAck = vi.fn()
+    second.__trigger('tool:call', { ...call, input: { value: 'replacement' } }, conflictingAck)
+    await vi.waitFor(() => expect(conflictingAck).toHaveBeenCalled())
+    expect(JSON.parse(conflictingAck.mock.calls[0]![0].content)).toMatchObject({ outcome: 'execution_conflict' })
+    expect(originalAck).not.toHaveBeenCalled()
+    finish('original-result')
+    await vi.waitFor(() => expect(originalAck).toHaveBeenCalled())
+    const completedConflict = vi.fn()
+    second.__trigger('tool:call', { ...call, cwd: '/different' }, completedConflict)
+    await vi.waitFor(() => expect(completedConflict).toHaveBeenCalled())
+    expect(JSON.parse(completedConflict.mock.calls[0]![0].content)).toMatchObject({ outcome: 'execution_conflict' })
+    expect(runs).toHaveBeenCalledTimes(1)
+    await Promise.all(handles.map((handle) => handle.close()))
+  })
+
   it('serves a duplicate tool:call from cache without re-running the tool', async () => {
     const runs = vi.fn(async () => 'ran-tool')
     const testTool: Tool = { name: 'stub', run: runs }

@@ -1,19 +1,43 @@
+import { createHash } from 'node:crypto'
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import type { ToolResultAck } from '@agent-kernel/shared'
+import type { ToolCallMessage, ToolResultAck } from '@agent-kernel/shared'
 
 const MAX_RECEIPTS = 500
 const RECEIPT_TTL_MS = 24 * 60 * 60_000
 
-type CompletedReceipt = { completedAt: number; result: ToolResultAck }
-type StartedReceipt = { startedAt: number; callId: string }
+type CompletedReceipt = { completedAt: number; result: ToolResultAck; requestDigest?: string; ownerGeneration?: string }
+type StartedReceipt = { startedAt: number; callId: string; requestDigest?: string; ownerGeneration?: string }
 type Receipt = CompletedReceipt | StartedReceipt
 type CommitWaiter = { generation: number; resolve(): void; reject(error: unknown): void }
+
+export function executionRequestDigest(call: ToolCallMessage): string {
+  const request = [call.sessionId, call.callId, call.name, call.input, call.cwd ?? null, call.origin ?? null]
+  const canonical = JSON.stringify(request, (_key, value: unknown) =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
+      : value)
+  return createHash('sha256').update(canonical).digest('hex')
+}
+
+export function conflictingExecutionResult(callId: string): ToolResultAck {
+  return {
+    callId,
+    ok: false,
+    failure: { code: 'execution_conflict', category: 'precondition', outcome: 'blocked', retryable: false, responsibility: 'system' },
+    content: JSON.stringify({
+      outcome: 'execution_conflict',
+      callId,
+      message: 'This execution identity is already bound to a different request. The replacement request was not started. Do not automatically retry with a new identity; reconcile the original operation first.',
+    }),
+  }
+}
 
 export function unknownExecutionResult(callId: string): ToolResultAck {
   return {
     callId,
     ok: false,
+    failure: { code: 'execution_unknown', category: 'infrastructure', outcome: 'indeterminate', retryable: false, responsibility: 'system' },
     content: JSON.stringify({
       outcome: 'execution_unknown',
       callId,
@@ -25,6 +49,8 @@ export function unknownExecutionResult(callId: string): ToolResultAck {
 function validReceipt(value: unknown): value is Receipt {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const receipt = value as Record<string, unknown>
+  if (receipt.requestDigest !== undefined && (typeof receipt.requestDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(receipt.requestDigest))) return false
+  if (receipt.ownerGeneration !== undefined && (typeof receipt.ownerGeneration !== 'string' || !/^[1-9]\d*$/u.test(receipt.ownerGeneration))) return false
   if ('result' in receipt) {
     const result = receipt.result as Partial<ToolResultAck> | null
     return typeof receipt.completedAt === 'number' && Number.isFinite(receipt.completedAt)
@@ -64,18 +90,35 @@ export class ExecutionReceiptStore {
     this.prune()
   }
 
-  get(callId: string): ToolResultAck | undefined {
+  get(callId: string, requestDigest?: string, requestCallId?: string): ToolResultAck | undefined {
     this.prune()
     const receipt = this.receipts.get(callId)
+    if (receipt && requestDigest !== undefined) {
+      const replyCallId = requestCallId ?? ('result' in receipt ? receipt.result.callId : receipt.callId)
+      if (receipt.requestDigest === undefined) {
+        return {
+          ...unknownExecutionResult(replyCallId),
+          content: JSON.stringify({
+            outcome: 'execution_unknown',
+            callId: replyCallId,
+            message: 'This legacy execution receipt has no request digest, so the request cannot be reconciled safely. External effects may already have occurred. Do not automatically retry; reconcile the external target first.',
+          }),
+        }
+      }
+      if (receipt.requestDigest !== requestDigest) return conflictingExecutionResult(replyCallId)
+    }
     return receipt && ('result' in receipt ? receipt.result : unknownExecutionResult(receipt.callId))
   }
 
-  begin(key: string, callId: string): Promise<void> {
+  begin(key: string, callId: string, requestDigest?: string, ownerGeneration?: string): Promise<void> {
+    if (ownerGeneration !== undefined && (typeof ownerGeneration !== 'string' || !/^[1-9]\d*$/u.test(ownerGeneration))) {
+      return Promise.reject(new Error('invalid execution owner generation'))
+    }
     this.prune()
     if (this.receipts.has(key)) return Promise.reject(new Error('execution identity already recorded'))
     const unresolved = [...this.receipts].filter(([id, receipt]) => !('result' in receipt) || this.committingCompletions.has(id)).length
     if (unresolved >= MAX_RECEIPTS) return Promise.reject(new Error('unresolved execution journal is full; reconciliation is required'))
-    const receipt = { startedAt: Date.now(), callId }
+    const receipt = { startedAt: Date.now(), callId, ...(requestDigest ? { requestDigest } : {}), ...(ownerGeneration !== undefined ? { ownerGeneration } : {}) }
     this.receipts.set(key, receipt)
     this.prune()
     return this.commit().catch((error: unknown) => {
@@ -90,7 +133,7 @@ export class ExecutionReceiptStore {
     // Refresh insertion order so capacity pruning retains recently repeated IDs.
     const previous = this.receipts.get(callId)
     if (previous && !('result' in previous)) this.committingCompletions.add(callId)
-    const receipt = { completedAt: Date.now(), result }
+    const receipt = { completedAt: Date.now(), result, ...(previous?.requestDigest ? { requestDigest: previous.requestDigest } : {}), ...(previous?.ownerGeneration !== undefined ? { ownerGeneration: previous.ownerGeneration } : {}) }
     this.receipts.delete(callId)
     this.receipts.set(callId, receipt)
     this.prune()

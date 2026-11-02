@@ -582,6 +582,7 @@ async function createExperimentalUnitStorage(
               tenantId: organizationId, scopeType: 'session', scopeId: sessionId,
             }, owner)
           })
+          return { ownerGeneration: String(owner.generation) }
         },
       } : {}),
       objectStorage,

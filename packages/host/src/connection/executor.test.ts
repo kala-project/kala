@@ -119,6 +119,53 @@ function callEffect(
 }
 
 describe('ExecutorRegistry', () => {
+  it.each([false, true])('keeps same-callId results scoped to their Sessions (reconnect: %s)', async (reconnect) => {
+    const reg = createExecutorRegistry(fakeIo() as never, makeResolver({ x: 'ws-default', y: 'ws-default' }), 5_000)
+    const first = makeFakeSocket('shared-original')
+    reg.attach(first as never, announceOf('shared-executor'))
+    const x = reg.callTool('x', callEffect('same-provider-id'))
+    const y = reg.callTool('y', callEffect('same-provider-id'))
+    let active = first
+    if (reconnect) {
+      active = makeFakeSocket('shared-reconnected')
+      reg.attach(active as never, announceOf('shared-executor'))
+      expect(active.emitted).toHaveLength(2)
+    }
+    expect(reg.activeSessions().sort()).toEqual(['x', 'y'])
+    active.emitted[1]!.ack!({ callId: 'same-provider-id', ok: true, content: 'result-y' })
+    await expect(y).resolves.toEqual({ ok: true, content: 'result-y' })
+    expect(reg.activeSessions()).toEqual(['x'])
+    active.emitted[0]!.ack!({ callId: 'same-provider-id', ok: true, content: 'result-x' })
+    await expect(x).resolves.toEqual({ ok: true, content: 'result-x' })
+    expect(reg.activeSessions()).toEqual([])
+  })
+
+  it('rechecks the Session effect owner before initial dispatch and reconnect redispatch', async () => {
+    let owned = true
+    const assertSessionEffectOwner = vi.fn(async () => {
+      if (!owned) throw new Error('owner generation fenced')
+      return { ownerGeneration: '9' }
+    })
+    const reg = createExecutorRegistry(fakeIo() as never, {
+      ...makeResolver({ x: 'ws-default' }), assertSessionEffectOwner,
+    }, 5_000)
+    const first = makeFakeSocket('owner-original')
+    reg.attach(first as never, announceOf('owner-executor'))
+    const pending = reg.callTool('x', callEffect('effect-started'))
+    await vi.waitFor(() => expect(first.emitted).toHaveLength(1))
+    expect(first.emitted[0]!.payload).toMatchObject({ ownerGeneration: '9' })
+    owned = false
+    const replacement = makeFakeSocket('owner-replacement')
+    reg.attach(replacement as never, announceOf('owner-executor'))
+    await expect(pending).resolves.toMatchObject({
+      ok: false, failure: { outcome: 'indeterminate', retryable: false },
+    })
+    expect(replacement.emitted).toHaveLength(0)
+    await expect(reg.callTool('x', callEffect('must-not-dispatch'))).rejects.toThrow('owner generation fenced')
+    expect(replacement.emitted).toHaveLength(0)
+    expect(assertSessionEffectOwner).toHaveBeenCalledTimes(3)
+  })
+
   it('measures Host to Executor latency and reports an offline workspace', async () => {
     const registry = createExecutorRegistry(fakeIo() as never, makeResolver())
     const socket = makeFakeSocket('latency')
@@ -305,7 +352,7 @@ describe('ExecutorRegistry', () => {
 
     await expect(inFlight).resolves.toMatchObject({
       ok: false,
-      failure: { code, outcome: 'indeterminate', retryable: true },
+      failure: { code, outcome: 'indeterminate', retryable: false },
       content: reason === 'credential_revoked'
         ? 'executor credential revoked while tool call outcome was unknown'
         : 'executor identity authority unavailable while tool call outcome was unknown',
@@ -434,7 +481,7 @@ describe('ExecutorRegistry', () => {
       await expect(p).resolves.toMatchObject({
         ok: false,
         content: 'tool call ack timed out after 100ms',
-        failure: { code: 'tool_ack_timeout', outcome: 'indeterminate', timeoutStage: 'acknowledgement' },
+        failure: { code: 'tool_ack_timeout', outcome: 'indeterminate', retryable: false, timeoutStage: 'acknowledgement' },
       })
     } finally {
       vi.useRealTimers()
@@ -466,9 +513,10 @@ describe('ExecutorRegistry', () => {
       await Promise.resolve()
       expect(settled).toBe(false)
       await vi.advanceTimersByTimeAsync(1)
-      await expect(pending).resolves.toEqual({
+      await expect(pending).resolves.toMatchObject({
         ok: false,
         content: 'tool call ack timed out after 100ms (post-reconnect)',
+        failure: { code: 'tool_ack_timeout', outcome: 'indeterminate', retryable: false },
       })
     } finally {
       vi.useRealTimers()

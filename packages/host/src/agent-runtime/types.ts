@@ -22,7 +22,7 @@ export type AgentRuntimeContext = {
   store: SessionStore
   tools: ToolDispatcher
   /** Optional fail-closed owner check before sending the SDK's model request. */
-  assertSessionEffectOwner?: (sessionId: string) => Promise<void>
+  assertSessionEffectOwner?: (sessionId: string) => Promise<void | { ownerGeneration: string }>
   broadcast: AgentRuntimeBroadcast
   messageAttachments?: MessageAttachmentStorage
   publishLocalImages?: (sessionId: string, record: SessionRecord, message: Message) => Promise<Message>

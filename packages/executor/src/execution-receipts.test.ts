@@ -3,9 +3,51 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-import { ExecutionReceiptStore } from './execution-receipts.js'
+import { executionRequestDigest, ExecutionReceiptStore } from './execution-receipts.js'
 
 describe('ExecutionReceiptStore', () => {
+  it('binds persisted started and completed receipts to canonical requests, not transport timeouts', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'ak-receipts-digest-'))
+    const path = join(dir, 'receipts.json')
+    const original = { sessionId: 'session', callId: 'call', name: 'shell', cwd: '/workspace', input: { command: 'effect', env: { Z: 'z', A: 'a' } } }
+    const equivalent = { ...original, ackTimeoutMs: 42, ownerGeneration: '8', input: { env: { A: 'a', Z: 'z' }, command: 'effect' } }
+    const digest = executionRequestDigest(original)
+    expect(executionRequestDigest(equivalent)).toBe(digest)
+    const store = new ExecutionReceiptStore(path)
+    await store.begin('session:call', 'call', digest, '7')
+    expect(JSON.parse(await readFile(path, 'utf8'))['session:call'].ownerGeneration).toBe('7')
+    const pending = new ExecutionReceiptStore(path)
+    await pending.load()
+    expect(JSON.parse(pending.get('session:call', digest)!.content).outcome).toBe('execution_unknown')
+    const changed = executionRequestDigest({ ...original, input: { command: 'different-effect' } })
+    expect(JSON.parse(pending.get('session:call', changed)!.content).outcome).toBe('execution_conflict')
+    await store.set('session:call', { callId: 'call', ok: true, content: 'done' })
+    const completed = new ExecutionReceiptStore(path)
+    await completed.load()
+    expect(JSON.parse(await readFile(path, 'utf8'))['session:call'].ownerGeneration).toBe('7')
+    expect(completed.get('session:call', digest)?.content).toBe('done')
+    for (const request of [{ ...original, name: 'other' }, { ...original, cwd: '/other' }, { ...original, sessionId: 'other' }, { ...original, callId: 'replacement' }]) {
+      const result = completed.get('session:call', executionRequestDigest(request), request.callId)!
+      expect(result.callId).toBe(request.callId)
+      expect(JSON.parse(result.content).outcome).toBe('execution_conflict')
+    }
+    expect(await readFile(path, 'utf8')).not.toContain('different-effect')
+  })
+
+  it('keeps legacy receipts as replay barriers without claiming that their requests match', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'ak-receipts-legacy-'))
+    const path = join(dir, 'receipts.json')
+    await writeFile(path, JSON.stringify({
+      call: { completedAt: Date.now(), result: { callId: 'call', ok: true, content: 'old-result' } },
+    }))
+    const store = new ExecutionReceiptStore(path)
+    await store.load()
+    const digest = executionRequestDigest({ sessionId: 'session', callId: 'call', name: 'shell', input: {} })
+    expect(JSON.parse(store.get('call', digest)!.content)).toMatchObject({ outcome: 'execution_unknown' })
+    await expect(store.begin('call', 'call', digest)).rejects.toThrow('already recorded')
+    expect(await readFile(path, 'utf8')).toContain('old-result')
+  })
+
   it('persists completed call receipts across store instances', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'ak-receipts-'))
     const path = join(dir, 'receipts.json')

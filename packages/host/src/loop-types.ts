@@ -190,7 +190,7 @@ export type HostLoopDeps = {
   llm: LLMAdapter
   tools: ToolDispatcher
   /** Optional fail-closed check immediately before each model or tool effect. */
-  assertSessionEffectOwner?: (sessionId: string) => Promise<void>
+  assertSessionEffectOwner?: (sessionId: string) => Promise<void | { ownerGeneration: string }>
   llmQuota?: LlmQuotaEnforcer
   modelPolicy?: TenantModelPolicyEnforcer
   broadcast: LoopBroadcast

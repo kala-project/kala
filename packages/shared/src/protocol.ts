@@ -1458,6 +1458,8 @@ export type ToolCallMessage = {
   cwd?: string
   ackTimeoutMs?: number
   turnId?: string
+  /** Server-asserted dispatch provenance, not an external-effect fencing capability. */
+  ownerGeneration?: string
 }
 
 export type ToolCancelMessage = {

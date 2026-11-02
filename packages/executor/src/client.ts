@@ -43,7 +43,7 @@ import { loadOrCreateWorkspaceId } from './workspace-id.js'
 import { collectIpAddresses, normalizeOs } from './announce-info.js'
 import { subscribeBackgroundTasks } from './tools/background-shell.js'
 import { createTerminalManager } from './terminal-manager.js'
-import { ExecutionReceiptStore, unknownExecutionResult } from './execution-receipts.js'
+import { conflictingExecutionResult, executionRequestDigest, ExecutionReceiptStore, unknownExecutionResult } from './execution-receipts.js'
 import type { RuntimeLogger } from './logger.js'
 import { executorReleaseVersion } from './build-info.js'
 import { failureForToolError } from './tool-failure.js'
@@ -162,6 +162,7 @@ export type ExecutorSharedExecution = {
   readonly receiptStore: ExecutionReceiptStore | null
   readonly receiptStoreReady: Promise<void>
   readonly completedCalls: Map<string, ToolResultAck>
+  readonly requestDigests: Map<string, string>
   readonly inFlight: Map<string, AbortController>
   readonly inFlightAcks: Map<string, Array<(result: ToolResultAck) => void>>
 }
@@ -175,6 +176,7 @@ export function createExecutorSharedExecution(receiptStorePath: string | false):
     receiptStore,
     receiptStoreReady,
     completedCalls: new Map(),
+    requestDigests: new Map(),
     inFlight: new Map(),
     inFlightAcks: new Map(),
   }
@@ -244,7 +246,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
   const sharedExecution = options.sharedExecution ?? createExecutorSharedExecution(
     options.receiptStorePath === false ? false : options.receiptStorePath ?? join(workspaceRoot, '.kala', 'execution-receipts.json'),
   )
-  const { receiptStore, receiptStoreReady, completedCalls, inFlight, inFlightAcks } = sharedExecution
+  const { receiptStore, receiptStoreReady, completedCalls, requestDigests, inFlight, inFlightAcks } = sharedExecution
 
   const factory = options.ioFactory ?? clientIO
   const socket = factory(`${options.host}/executor`, {
@@ -275,6 +277,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
       const oldest = completedCalls.keys().next().value
       if (oldest === undefined) break
       completedCalls.delete(oldest)
+      if (!inFlight.has(oldest)) requestDigests.delete(oldest)
     }
   }
 
@@ -436,6 +439,13 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
       }
     }
     const key = receiptKey(payload.sessionId, payload.callId)
+    const requestDigest = executionRequestDigest(payload)
+    const existingDigest = requestDigests.get(key)
+    if (existingDigest !== undefined && existingDigest !== requestDigest) {
+      logger.warn({ sessionId: payload.sessionId, callId: payload.callId, tool: payload.name }, 'conflicting execution identity rejected')
+      ack(conflictingExecutionResult(payload.callId))
+      return
+    }
     // A started record is unknown after process recovery, not while a surviving
     // runner owns this call. Replica sockets must wait for that runner's result.
     if (inFlight.has(key)) {
@@ -444,7 +454,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
       inFlightAcks.set(key, waiters)
       return
     }
-    const cached = completedCalls.get(key) ?? (!internal ? receiptStore?.get(key) : undefined)
+    const cached = completedCalls.get(key) ?? (!internal ? receiptStore?.get(key, requestDigest, payload.callId) : undefined)
     if (cached) {
       logger.debug({ sessionId: payload.sessionId, callId: payload.callId, tool: payload.name }, 'tool result served from execution cache')
       ack(cached)
@@ -456,6 +466,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
       return
     }
     const controller = new AbortController()
+    requestDigests.set(key, requestDigest)
     inFlight.set(key, controller)
     localInFlight.add(key)
     inFlightAcks.set(key, [ack])
@@ -464,7 +475,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
     let executionStarted = false
     let replyResult: ToolResultAck = unknownExecutionResult(payload.callId)
     try {
-      if (!internal) await receiptStore?.begin(key, payload.callId)
+      if (!internal) await receiptStore?.begin(key, payload.callId, requestDigest, payload.ownerGeneration)
       executionStarted = true
       logger.info({ sessionId: payload.sessionId, callId: payload.callId, tool: payload.name, internal, ...(!desktopCall && !knownMcpToolNames.has(payload.name) ? { input: safeToolInput(payload.input) } : {}), ...(payload.cwd ? { cwd: payload.cwd } : {}) }, 'tool execution started')
       const rawResult = await runOne(tools, sandbox, controller.signal, payload, overflowConfig, options.networkPolicy, async (event) => {
@@ -487,6 +498,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
       localInFlight.delete(key)
       const waiters = inFlightAcks.get(key) ?? []
       inFlightAcks.delete(key)
+      if (!completedCalls.has(key)) requestDigests.delete(key)
       logger.info({ sessionId: payload.sessionId, callId: payload.callId, tool: payload.name, internal, ok: replyResult.ok, durationMs: replyResult.durationMs, resultBytes: Buffer.byteLength(replyResult.content, 'utf8') }, 'tool execution completed')
       for (const reply of waiters) reply(replyResult)
     }

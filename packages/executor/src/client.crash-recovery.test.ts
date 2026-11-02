@@ -195,6 +195,11 @@ describe('executor process crash recovery', () => {
 
     const second = startFixture()
     const secondSocket = await nextSocket(second)
+    const conflictingPending = await dispatch(secondSocket, {
+      ...unresolvedCall,
+      input: { command: `printf 'CONFLICT\\n' >> ${shellQuote(markerPath)}` },
+    })
+    expect(JSON.parse(conflictingPending.content)).toMatchObject({ outcome: 'execution_conflict' })
     const unknown = await dispatch(secondSocket, unresolvedCall)
     expect(lines(await readFile(markerPath, 'utf8')).filter((line) => line === 'BEGIN')).toHaveLength(1)
     expect(unknown.ok).toBe(false)
@@ -220,9 +225,15 @@ describe('executor process crash recovery', () => {
     await stopFixture(second)
     const third = startFixture()
     const thirdSocket = await nextSocket(third)
+    const conflictingCompleted = await dispatch(thirdSocket, {
+      ...completedCall,
+      input: { command: `printf 'CONFLICT\\n' >> ${shellQuote(markerPath)}` },
+    })
+    expect(JSON.parse(conflictingCompleted.content)).toMatchObject({ outcome: 'execution_conflict' })
     const replayed = await dispatch(thirdSocket, completedCall)
     expect(replayed).toEqual(completed)
     await new Promise((resolve) => setTimeout(resolve, 150))
     expect(lines(await readFile(markerPath, 'utf8')).filter((line) => line === 'BENIGN')).toHaveLength(1)
+    expect(lines(await readFile(markerPath, 'utf8'))).not.toContain('CONFLICT')
   }, 20_000)
 })

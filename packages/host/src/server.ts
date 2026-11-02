@@ -146,7 +146,7 @@ export type HostServerOptions = {
   /** Durable queue paired with the Session authority; never silently use JSONL snapshots. */
   messageQueueAuthority?: MessageQueueAuthority
   /** Optional SQL-checked Session owner gate before external model and tool effects. */
-  assertSessionEffectOwner?: (sessionId: string) => Promise<void>
+  assertSessionEffectOwner?: (sessionId: string) => Promise<void | { ownerGeneration: string }>
   /** Workspace alias authority. Omit to retain workspace-aliases.json. */
   workspaceAliasStore?: WorkspaceAliasStorage
   /** Executor installation authority. Omit to retain executor-installations.json. */
@@ -599,6 +599,7 @@ export async function startHostServer(
     io,
     {
       workspaceIdFor: (sid) => store.get(sid)?.workspaceId,
+      ...(options.assertSessionEffectOwner ? { assertSessionEffectOwner: options.assertSessionEffectOwner } : {}),
       mcpSchemaHashFor: (sid, name) => store.get(sid)?.config.tools.find((tool) => tool.name === name && tool.name.includes('__') && !tool.name.startsWith('__') && tool.schemaHash && tool.version === tool.schemaHash)?.schemaHash,
     },
     options.toolTimeoutMs ?? DEFAULT_TOOL_ACK_TIMEOUT_MS,
