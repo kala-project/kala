@@ -1,4 +1,6 @@
 using Aspire.Hosting.ApplicationModel;
+using Aspire.Hosting.Docker.Resources.ServiceNodes;
+using Aspire.Hosting.Docker.Resources.ServiceNodes.Swarm;
 using System.Text.RegularExpressions;
 
 var builder = DistributedApplication.CreateBuilder(args);
@@ -11,6 +13,8 @@ builder.AddDockerComposeEnvironment("compose").WithDashboard(enabled: false);
 var publicHostname = Required("KALA_PUBLIC_HOSTNAME");
 var publicOrigin = Required("KALA_PUBLIC_ORIGIN");
 var publicPort = PositivePort("KALA_PUBLIC_PORT", 443);
+var observabilityEnabled = Environment.GetEnvironmentVariable("KALA_ASPIRE_OBSERVABILITY")?.Trim() == "1";
+var observabilityManagementPort = PositivePort("KALA_ASPIRE_OBSERVABILITY_PORT", 18888);
 var runtimeLlmModel = Required("KALA_RUNTIME_LLM_MODEL");
 var runtimeLlmBaseUrl = Required("KALA_RUNTIME_LLM_BASE_URL");
 
@@ -20,6 +24,9 @@ var runtimeImage = RequiredDigestImage("KALA_RUNTIME_IMAGE");
 var dashboardImage = RequiredDigestImage("KALA_DASHBOARD_IMAGE");
 var postgresImage = RequiredDigestImage("KALA_POSTGRES_IMAGE");
 var siloImage = RequiredDigestImage("KALA_SILO_IMAGE");
+var observabilityDashboardImage = observabilityEnabled ? RequiredDigestImage("KALA_ASPIRE_DASHBOARD_IMAGE") : null;
+var otelCollectorImage = observabilityEnabled ? RequiredDigestImage("KALA_OTEL_COLLECTOR_IMAGE") : null;
+var observabilityProbeImage = observabilityEnabled ? RequiredDigestImage("KALA_OBSERVABILITY_PROBE_IMAGE") : null;
 
 // Bind mounts deliberately keep authoritative bytes outside the Compose
 // project lifecycle. The outside deployer must create, permission, back up,
@@ -47,6 +54,9 @@ var siloRootSecretKey = builder.AddParameter("silo-root-secret-key", secret: tru
 var runtimeS3AccessKey = builder.AddParameter("runtime-s3-access-key", secret: true);
 var runtimeS3SecretKey = builder.AddParameter("runtime-s3-secret-key", secret: true);
 var llmApiKey = builder.AddParameter("llm-api-key", secret: true);
+var observabilityBrowserToken = observabilityEnabled ? builder.AddParameter("observability-browser-token", secret: true) : null;
+var observabilityOtlpApiKey = observabilityEnabled ? builder.AddParameter("observability-otlp-api-key", secret: true) : null;
+var observabilityIngestToken = observabilityEnabled ? builder.AddParameter("observability-ingest-token", secret: true) : null;
 
 // Bootstrap only the PostgreSQL maintenance database and superuser. The
 // operator initialization flow creates independent control/Runtime databases
@@ -67,6 +77,58 @@ var silo = builder.AddContainer("silo", siloImage)
 
 var dashboard = builder.AddContainer("dashboard", dashboardImage)
     .WithImagePullPolicy(ImagePullPolicy.Missing);
+
+IResourceBuilder<ContainerResource>? observabilityDashboard = null;
+IResourceBuilder<ContainerResource>? otelCollector = null;
+IResourceBuilder<ContainerResource>? observabilityReadiness = null;
+if (observabilityEnabled)
+{
+    // Standalone Aspire Dashboard is an OTLP viewer only. It does not provide
+    // AppHost orchestration controls. UI and ingestion use separate credentials.
+    observabilityDashboard = builder.AddContainer("observability-dashboard", observabilityDashboardImage!)
+        .WithEnvironment("ASPNETCORE_URLS", "http://0.0.0.0:18888")
+        .WithEnvironment("ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL", "http://0.0.0.0:18889")
+        .WithEnvironment("ASPIRE_DASHBOARD_OTLP_HTTP_ENDPOINT_URL", "http://0.0.0.0:18890")
+        .WithEnvironment("ASPIRE_DASHBOARD_CONFIG_FILE_PATH", "/etc/kala-observability/dashboard.settings.json")
+        .WithEnvironment("Dashboard__Frontend__BrowserToken", observabilityBrowserToken!)
+        .WithEnvironment("Dashboard__Otlp__PrimaryApiKey", observabilityOtlpApiKey!)
+        .WithEnvironment("Dashboard__Api__PrimaryApiKey", observabilityOtlpApiKey!)
+        .WithBindMount(Path.Combine(builder.AppHostDirectory, "telemetry", "dashboard.settings.json"), "/etc/kala-observability/dashboard.settings.json", isReadOnly: true)
+        .WithImagePullPolicy(ImagePullPolicy.Missing);
+    observabilityDashboard.PublishAsDockerComposeService((_, service) => {
+        service.Ports.Add($"127.0.0.1:{observabilityManagementPort}:18888");
+        service.Restart = "unless-stopped";
+        service.Logging = new() { Driver = "json-file", Options = new() { ["max-size"] = "10m", ["max-file"] = "3" } };
+        WithResourceLimits(service, "0.50", "384M");
+    });
+
+    otelCollector = builder.AddContainer("otel-collector", otelCollectorImage!)
+        .WithArgs("--config=/etc/otelcol-contrib/config.yaml")
+        .WithEnvironment("KALA_OTEL_INGEST_TOKEN", observabilityIngestToken!)
+        .WithEnvironment("KALA_ASPIRE_DASHBOARD_OTLP_API_KEY", observabilityOtlpApiKey!)
+        .WithBindMount(Path.Combine(builder.AppHostDirectory, "telemetry", "otel-collector.yaml"), "/etc/otelcol-contrib/config.yaml", isReadOnly: true)
+        .WithImagePullPolicy(ImagePullPolicy.Missing);
+    otelCollector.PublishAsDockerComposeService((_, service) => {
+        service.Restart = "unless-stopped";
+        service.Logging = new() { Driver = "json-file", Options = new() { ["max-size"] = "10m", ["max-file"] = "3" } };
+        WithResourceLimits(service, "0.50", "256M");
+    });
+
+    // Both official images are intentionally minimal and contain no HTTP probe
+    // executable. A finite, unprivileged init service checks their native runtime
+    // health endpoints; application services wait for its successful exit.
+    observabilityReadiness = builder.AddContainer("observability-readiness", observabilityProbeImage!)
+        .WithEntrypoint("/bin/sh")
+        .WithArgs("-c", "set -eu; for url in http://observability-dashboard:18888/health http://otel-collector:13133/; do attempts=0; until curl -fsS --max-time 3 \"$url\" >/dev/null; do attempts=$((attempts+1)); [ \"$attempts\" -lt 60 ] || exit 1; sleep 1; done; done")
+        .WaitFor(observabilityDashboard)
+        .WaitFor(otelCollector)
+        .WithImagePullPolicy(ImagePullPolicy.Missing);
+    observabilityReadiness.PublishAsDockerComposeService((_, service) => {
+        service.Restart = "no";
+        service.Logging = new() { Driver = "json-file", Options = new() { ["max-size"] = "1m", ["max-file"] = "1" } };
+        WithResourceLimits(service, "0.10", "32M");
+    });
+}
 
 var runtime = builder.AddContainer("runtime", runtimeImage)
     .WithEnvironment("KALA_DEPLOYMENT_CONFIG", "/etc/kala/deployment.json")
@@ -103,6 +165,14 @@ var runtime = builder.AddContainer("runtime", runtimeImage)
     .WaitFor(postgres)
     .WaitFor(silo)
     .WithImagePullPolicy(ImagePullPolicy.Missing);
+if (otelCollector is not null && observabilityReadiness is not null)
+{
+    runtime.WithEnvironment("KALA_OTEL_ENABLED", "1")
+        .WithEnvironment("KALA_OTEL_SERVICE_VERSION", runtimeImage[^64..].ToLowerInvariant())
+        .WithEnvironment("KALA_OTEL_EXPORTER_ENDPOINT", "http://otel-collector:4318")
+        .WithEnvironment("KALA_OTEL_EXPORTER_TOKEN", observabilityIngestToken!)
+        .WaitForCompletion(observabilityReadiness);
+}
 
 var gateway = builder.AddContainer("gateway", gatewayImage)
     .WithEnvironment("KALA_DEPLOYMENT_CONFIG", "/etc/kala/deployment.json")
@@ -126,8 +196,18 @@ var gateway = builder.AddContainer("gateway", gatewayImage)
     .WaitFor(runtime)
     .WaitFor(dashboard)
     .WithImagePullPolicy(ImagePullPolicy.Missing);
+if (otelCollector is not null && observabilityReadiness is not null)
+{
+    gateway.WithEnvironment("KALA_OTEL_ENABLED", "1")
+        .WithEnvironment("KALA_OTEL_SERVICE_VERSION", gatewayImage[^64..].ToLowerInvariant())
+        .WithEnvironment("KALA_OTEL_EXPORTER_ENDPOINT", "http://otel-collector:4318")
+        .WithEnvironment("KALA_OTEL_EXPORTER_TOKEN", observabilityIngestToken!)
+        .WaitForCompletion(observabilityReadiness);
+}
 
-// Caddy is the only resource with a host-published endpoint. Gateway,
+// Caddy remains the only public endpoint. The optional observability management
+// endpoint is explicitly host-loopback-only; OTLP ports are never published.
+// Gateway,
 // Runtime, Dashboard, PostgreSQL, and SILO stay on the Compose network.
 var ingress = builder.AddContainer("ingress", edgeImage)
     .WithEnvironment("KALA_PUBLIC_HOSTNAME", publicHostname)
@@ -146,7 +226,6 @@ WithReadiness(dashboard, "CMD", "/nodejs/bin/node", "-e", "fetch('http://127.0.0
 WithReadiness(runtime, "CMD", "/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:13002/internal/health',{headers:{'x-agent-runlab-ingress-secret':process.env.KALA_INGRESS_SHARED_SECRET},signal:AbortSignal.timeout(3000)}).then(async r=>process.exit(r.ok&&(await r.json()).state==='ready'?0:1)).catch(()=>process.exit(1))");
 WithReadiness(gateway, "CMD", "/nodejs/bin/node", "-e", "const q=require('node:http').get('http://127.0.0.1:13001/healthz',{headers:{Host:new URL(process.env.KALA_PUBLIC_URLS).host},timeout:3000},r=>{r.resume();process.exit(r.statusCode===200?0:1)});q.on('error',()=>process.exit(1));q.on('timeout',()=>q.destroy())");
 WithReadiness(ingress, "CMD", "wget", "-q", "--spider", "-T", "3", "http://127.0.0.1:8081/healthz");
-
 builder.Build().Run();
 
 static void WithReadiness(IResourceBuilder<ContainerResource> resource, params string[] command)
@@ -154,7 +233,15 @@ static void WithReadiness(IResourceBuilder<ContainerResource> resource, params s
     resource.PublishAsDockerComposeService((_, service) => {
         service.Healthcheck = new() { Test = [.. command], Interval = "5s", Timeout = "4s", Retries = 12, StartPeriod = "20s" };
         service.Restart = "unless-stopped";
+        service.Logging = new() { Driver = "json-file", Options = new() { ["max-size"] = "10m", ["max-file"] = "3" } };
     });
+}
+
+static void WithResourceLimits(Aspire.Hosting.Docker.Resources.ComposeNodes.Service service, string cpus, string memory)
+{
+    service.Deploy = new Deploy {
+        Resources = new Resources { Limits = new ResourceSpec { Cpus = cpus, Memory = memory } }
+    };
 }
 
 static string Required(string name)

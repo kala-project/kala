@@ -157,6 +157,123 @@ export class DedicatedOwnerBootstrapService {
   }
 }
 
+export type DedicatedOwnerCredentialUpdate = { organizationId: string; principalId: string; revokedSessionCount: number }
+
+/** Administrative credential lifecycle operations. These never provision or alter Owner identity. */
+export class DedicatedOwnerCredentialService {
+  constructor(
+    private readonly database: ControlPlaneDatabase,
+    private readonly parameters: ScryptParameters = PRODUCTION_SCRYPT,
+  ) { validateParameters(parameters) }
+
+  async changePassword(input: { currentPassword: string; newPassword: string }): Promise<DedicatedOwnerCredentialUpdate> {
+    if (!validPasswordShape(input.currentPassword)) throw credentialUpdateDenied()
+    assertStrongPassword(input.newPassword)
+    return this.updateCredential(input.newPassword, input.currentPassword)
+  }
+
+  async resetPassword(input: { newPassword: string }): Promise<DedicatedOwnerCredentialUpdate> {
+    assertStrongPassword(input.newPassword)
+    return this.updateCredential(input.newPassword)
+  }
+
+  private async updateCredential(
+    newPassword: string,
+    currentPassword?: string,
+  ): Promise<DedicatedOwnerCredentialUpdate> {
+    return this.database.transaction(async (transaction) => {
+      await transaction.query("SELECT pg_advisory_xact_lock(hashtextextended('kala-dedicated-owner-bootstrap', 0))")
+      const result = await transaction.query<CredentialRow>(`SELECT c.principal_id,c.organization_id,c.password_algorithm,c.password_salt,c.password_hash,
+        c.scrypt_n,c.scrypt_r,c.scrypt_p,c.disabled_at,p.display_name,p.email
+        FROM dedicated_owner_credentials c
+        JOIN principals p ON p.id=c.principal_id
+        JOIN organizations o ON o.id=c.organization_id
+        JOIN organization_memberships m ON m.organization_id=o.id AND m.principal_id=p.id
+        WHERE c.singleton=true AND c.disabled_at IS NULL
+          AND p.kind='human' AND p.issuer=$1 AND p.subject=$2
+          AND o.status='active' AND m.status='active' AND m.role='owner'
+          AND EXISTS (SELECT 1 FROM contract_entitlements e WHERE e.organization_id=o.id AND e.starts_at<=now() AND e.ends_at>now())
+          AND (SELECT count(*) FROM organizations)=1
+        FOR UPDATE OF c,p,o,m`, [DEDICATED_OWNER_ISSUER, DEDICATED_OWNER_SUBJECT])
+      const credential = result.rows[0]
+      if (result.rowCount !== 1 || !credential || !storedCredentialIsUsable(credential)) throw credentialUpdateDenied()
+      if (currentPassword !== undefined && !(await matchesCredential(currentPassword, credential))) throw credentialUpdateDenied()
+      if (await matchesCredential(newPassword, credential)) {
+        throw new Error('New Dedicated Owner password must differ from the current password')
+      }
+      const replacementParameters = strongerParameters(this.parameters, credential)
+      const replacement = await createVerifier(newPassword, replacementParameters)
+
+      const updated = await transaction.query(`UPDATE dedicated_owner_credentials SET
+        password_algorithm='scrypt',password_salt=$1,password_hash=$2,scrypt_n=$3,scrypt_r=$4,scrypt_p=$5
+        WHERE singleton=true AND principal_id=$6 AND organization_id=$7 AND disabled_at IS NULL
+          AND password_algorithm=$8 AND password_salt=$9 AND password_hash=$10 AND scrypt_n=$11 AND scrypt_r=$12 AND scrypt_p=$13`, [
+        replacement.salt, replacement.hash, replacementParameters.N, replacementParameters.r, replacementParameters.p,
+        credential.principal_id, credential.organization_id, credential.password_algorithm, credential.password_salt,
+        credential.password_hash, credential.scrypt_n, credential.scrypt_r, credential.scrypt_p,
+      ])
+      if (updated.rowCount !== 1) throw credentialUpdateDenied()
+      const revoked = await transaction.query(`UPDATE browser_sessions SET revoked_at=now(),revocation_reason='administrator'
+        WHERE principal_id=$1 AND organization_id=$2 AND revoked_at IS NULL`, [credential.principal_id, credential.organization_id])
+      return {
+        organizationId: credential.organization_id,
+        principalId: credential.principal_id,
+        revokedSessionCount: revoked.rowCount ?? 0,
+      }
+    })
+  }
+}
+
+async function createVerifier(password: string, parameters: ScryptParameters): Promise<{ salt: string; hash: string }> {
+  const salt = randomBytes(24)
+  const hash = await derive(password, salt, parameters)
+  return { salt: salt.toString('base64url'), hash: hash.toString('base64url') }
+}
+
+async function matchesCredential(password: string, credential: CredentialRow): Promise<boolean> {
+  if (!validPasswordShape(password) || !storedCredentialIsUsable(credential)) return false
+  const expected = decodeCanonicalBase64url(credential.password_hash)
+  const salt = decodeCanonicalBase64url(credential.password_salt)
+  if (!expected || !salt) return false
+  try {
+    const actual = await derive(password, salt, {
+      N: credential.scrypt_n,
+      r: credential.scrypt_r,
+      p: credential.scrypt_p,
+      keyLength: expected.length,
+      maxmem: scryptMaxmem(credential.scrypt_n, credential.scrypt_r),
+    })
+    return actual.length === expected.length && timingSafeEqual(actual, expected)
+  } catch { return false }
+}
+
+function storedCredentialIsUsable(credential: CredentialRow): boolean {
+  if (credential.disabled_at || credential.password_algorithm !== 'scrypt') return false
+  const expected = decodeCanonicalBase64url(credential.password_hash)
+  const salt = decodeCanonicalBase64url(credential.password_salt)
+  if (!expected || !salt || expected.length !== 32 || salt.length < 16) return false
+  try {
+    scryptMaxmem(credential.scrypt_n, credential.scrypt_r)
+    return Number.isSafeInteger(credential.scrypt_p) && credential.scrypt_p >= 1 && credential.scrypt_p <= 16
+  } catch { return false }
+}
+
+function strongerParameters(configured: ScryptParameters, credential: CredentialRow): ScryptParameters {
+  const N = Math.max(configured.N, credential.scrypt_n)
+  const r = Math.max(configured.r, credential.scrypt_r)
+  return {
+    N,
+    r,
+    p: Math.max(configured.p, credential.scrypt_p),
+    keyLength: configured.keyLength,
+    maxmem: Math.max(configured.maxmem, scryptMaxmem(N, r)),
+  }
+}
+
+function credentialUpdateDenied(): Error {
+  return new Error('Dedicated Owner credential update denied; no credentials or sessions were changed')
+}
+
 async function derive(password: string, salt: Buffer, parameters: ScryptParameters): Promise<Buffer> {
   return await new Promise<Buffer>((resolve, reject) => {
     nodeScrypt(password, salt, parameters.keyLength, {

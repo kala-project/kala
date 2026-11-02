@@ -52,6 +52,10 @@
     "./runtime-logger": {
       "types": "./dist/runtime-logger.d.ts",
       "import": "./dist/runtime-logger.js"
+    },
+    "./node-telemetry": {
+      "types": "./dist/node-telemetry.d.ts",
+      "import": "./dist/node-telemetry.js"
     }
   },
   "files": [

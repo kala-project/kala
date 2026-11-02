@@ -5,6 +5,7 @@ import { Readable, type Duplex } from 'node:stream'
 
 import httpProxy from 'http-proxy'
 import { parsePublicUrls, validatePublicRequest, type PublicUrlPattern } from '@agent-kernel/shared'
+import { createOnlineTelemetryFromEnv } from '@agent-kernel/shared/node-telemetry'
 
 import type { LoginStateStore } from '../auth/login-state-store.js'
 import type { OidcClient } from '../auth/oidc-client.js'
@@ -67,6 +68,16 @@ const DASHBOARD_API_PREFIXES = [
   '/socket.io/', '/runtime/', '/internal/', '/settings/', '/auth/', '/push/', '/api/', '/user/', '/organization/',
   '/artifacts/', '/session-artifacts/', '/router/', '/enhancement/', '/install/', '/release-assets/', '/themes/',
 ]
+
+function telemetryRoute(pathname: string): string {
+  if (pathname === '/healthz') return 'gateway.health'
+  if (pathname.startsWith('/auth/')) return 'gateway.auth'
+  if (pathname.startsWith('/api/')) return 'gateway.api'
+  if (pathname.startsWith('/runtime/')) return 'gateway.runtime'
+  if (pathname.startsWith('/internal/')) return 'gateway.internal'
+  if (pathname.startsWith('/install')) return 'gateway.install'
+  return 'gateway.frontend'
+}
 
 function isDashboardRequest(request: IncomingMessage, pathname: string): boolean {
   if (request.method !== 'GET' && request.method !== 'HEAD') return false
@@ -203,6 +214,7 @@ export async function startRuntimeIngressGateway(options: {
   backgroundAuthority?: BackgroundAuthority
   provision?(unitId: string): Promise<void>
 }): Promise<RuntimeIngressGateway> {
+  const telemetry = createOnlineTelemetryFromEnv('kala-gateway')
   const recheckMs = options.socketRecheckMs ?? 15_000
   if (!Number.isSafeInteger(recheckMs) || recheckMs < 1) throw new Error('socketRecheckMs must be positive')
   const browserSockets = new Map<Duplex, { sessionId: string; identity: AuthenticatedIdentity; upstream?: Duplex; timer?: ReturnType<typeof setTimeout> }>()
@@ -1040,6 +1052,15 @@ export async function startRuntimeIngressGateway(options: {
     proxy.web(request, response, { target: runtimeOrigin, ...(replayBody ? { buffer: Readable.from(replayBody) } : {}) }, () => { if (!response.headersSent) response.writeHead(502); response.end() })
   }
   const http = createServer((request, response) => {
+    const pathname = (request.url ?? '/').split('?', 1)[0] ?? '/'
+    // Socket.IO polling and upgrades are long-lived transports, not short commands.
+    const span = pathname.startsWith('/socket.io/') ? undefined : telemetry?.startHttpSpan(request.method, telemetryRoute(pathname), request.headers.traceparent)
+    if (span) {
+      request.headers.traceparent = span.traceparent
+      response.setHeader('x-request-id', span.correlationId)
+      response.once('finish', () => span.end(response.statusCode))
+      response.once('close', () => { if (!response.writableFinished) span.end(499) })
+    }
     // Service-authenticated endpoint, never a browser-cookie or Runtime proxy route.
     if (request.url?.split('?')[0] === '/internal/background-authority') {
       void handleBackgroundAuthority(request, response, options.ingressSecret, options.backgroundAuthority)
@@ -1159,6 +1180,7 @@ export async function startRuntimeIngressGateway(options: {
     for (const socket of executorSockets.keys()) closeExecutorSocket(socket)
     proxy.close(); dashboardProxy?.close()
     await new Promise<void>((resolve) => http.close(() => resolve()))
+    void telemetry?.close()
   } }
 }
 

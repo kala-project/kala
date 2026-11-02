@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-29",
+  "fixture": "synthetic-six-service-dedicated",
+  "applicationSourceRevision": "c948fe30367ef2b863b5f3937ebccc0c676f84f1",
+  "operatorRevision": "working-tree-2026-10-29",
+  "result": "cold-backup-restore-passed-release-gates-open",
+  "passed": [
+    "fresh authority initialization and six actual services healthy",
+    "CA-verified Owner login before backup",
+    "production cold backup with authority-credential and parameter-file provenance",
+    "missing source-fenced acknowledgment and wrong PostgreSQL-major policy refused",
+    "production restore into fresh disjoint roots preserves directory and file UID/GID/mode without chown workaround",
+    "six restored actual services healthy",
+    "original opaque Owner session remains usable after cold restore",
+    "fresh CA-verified Owner login after restore",
+    "SQL sentinel and S3 object match original SHA-256 values",
+    "same-schema same-image upgrade orchestration smoke includes a completed pre-upgrade backup"
+  ],
+  "correctedEarlierDiagnosis": "The first continuation driver reset destination roots to root ownership. Independent unmodified production extraction and clean-directory business revalidation passed; the extractor was not the permissions defect.",
+  "notProved": [
+    "latest application image Agent/Executor acceptance",
+    "distinct predecessor release upgrade compatibility",
+    "failed-target upgrade and recovery drill",
+    "PG-major or arbitrary schema migration",
+    "public ACME and recovery of Caddy named-volume PKI",
+    "external effect settlement or automatic replay",
+    "supported signed production release"
+  ],
+  "sentinelHashes": {
+    "sqlSha256": "8f4d7f78c3241af75e668a84fcc7d9ccf5b56fb3eb6e8fde6717673ffc377778",
+    "objectSha256": "2eb730307ac1f14d92516ab70c6c563e6f22e5c7edb3c93ca9d146d234e36cf4"
+  },
+  "tlsBoundary": "Fresh isolated Caddy CA was trusted normally with hostname verification; no verification bypass. Named-volume PKI is outside the cold payload."
+}

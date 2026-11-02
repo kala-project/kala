@@ -9,6 +9,17 @@ usage() {
 [[ $# -eq 3 || $# -eq 4 ]] || usage
 [[ ${4:-} == "" || ${4:-} == "--initialize-only" || ${4:-} == "--resume-initialized" ]] || usage
 (( EUID == 0 )) || { echo 'Run Dedicated initialization as the root operator; protected files are root-owned' >&2; exit 1; }
+# Serialize initialization with backup/restore/upgrade on this host. Root may
+# intentionally bypass this boundary; separate operators must not do so.
+lock_directory=/run/kala-dedicated
+[[ ! -L $lock_directory ]] || { echo 'Lifecycle lock directory must not be a symlink' >&2; exit 1; }
+mkdir -p -m 700 "$lock_directory"
+[[ $(stat -c '%u' "$lock_directory") == 0 ]] && (( (8#$(stat -c '%a' "$lock_directory") & 077) == 0 )) || {
+  echo 'Lifecycle lock directory must be root-owned and private' >&2; exit 1;
+}
+[[ ! -L $lock_directory/lifecycle.lock ]] || { echo 'Lifecycle lock must not be a symlink' >&2; exit 1; }
+exec 9>"$lock_directory/lifecycle.lock"
+flock -n 9 || { echo 'Another Dedicated lifecycle operation holds the host lock' >&2; exit 1; }
 compose_file=$(realpath "$1")
 env_file=$(realpath "$2")
 export KALA_ASPIRE_SECRETS_DIR
@@ -130,5 +141,5 @@ if [[ $operation_mode == --initialize-only ]]; then
   echo 'Initialization completed; application services were not started'
 else
   "${compose[@]}" up -d --wait --wait-timeout "$start_timeout"
-  echo 'Dedicated Aspire initialization verified and all six services are healthy (not full Agent/TLS acceptance)'
+  echo 'Dedicated Aspire initialization verified; selected service graph is ready (not full Agent/TLS acceptance)'
 fi

@@ -1,0 +1,63 @@
+extensions:
+  bearertokenauth/ingest:
+    token: ${env:KALA_OTEL_INGEST_TOKEN}
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+        auth:
+          authenticator: bearertokenauth/ingest
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 192
+    spike_limit_mib: 48
+  batch:
+    timeout: 2s
+    send_batch_size: 256
+    send_batch_max_size: 512
+
+exporters:
+  otlphttp/aspire:
+    endpoint: http://observability-dashboard:18890
+    # Dashboard 13.6 OTLP/HTTP reads protobuf directly and doesn't decompress
+    # the Collector's default gzip request body.
+    compression: none
+    encoding: proto
+    headers:
+      x-otlp-api-key: ${env:KALA_ASPIRE_DASHBOARD_OTLP_API_KEY}
+    timeout: 5s
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      queue_size: 256
+      sizer: requests
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 5s
+      max_elapsed_time: 30s
+
+service:
+  extensions: [bearertokenauth/ingest, health_check]
+  telemetry:
+    logs:
+      level: warn
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/aspire]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/aspire]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/aspire]

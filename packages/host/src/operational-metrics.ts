@@ -7,6 +7,8 @@ const ALLOWED_LABELS = new Set(['component', 'operation', 'outcome', 'status_cla
 export class OperationalMetrics {
   private readonly counters = new Map<string, Counter>()
 
+  constructor(private readonly onIncrement?: (name: string, value: number, labels: MetricLabels) => void) {}
+
   increment(name: string, help: string, labels: MetricLabels = {}, value = 1): void {
     const safe = normalizeLabels(labels)
     const counter = this.counters.get(name) ?? { name: metricName(name), help, values: new Map() }
@@ -14,6 +16,7 @@ export class OperationalMetrics {
     const current = counter.values.get(key)
     counter.values.set(key, { labels: safe, value: (current?.value ?? 0) + value })
     this.counters.set(name, counter)
+    this.onIncrement?.(counter.name, value, safe)
   }
 
   render(): string {

@@ -198,6 +198,8 @@
     "identity-zitadel",
     "mock-llm",
     "orchestrator",
+    "observability-dashboard",
+    "otel-collector",
     "origin",
     "portable",
     "provider",

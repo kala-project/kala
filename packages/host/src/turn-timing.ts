@@ -62,6 +62,11 @@ export class TurnTimingTracker {
     if (!turn) return undefined
 
     let span = input.span ? { ...input.span, turnId: turn.turnId } : undefined
+    // A structured unknown receipt is not a confirmed tool failure. Keep the
+    // business event untouched and preserve uncertainty in its timing projection.
+    if (span?.kind === 'tool' && input.event.kind === 'tool_result' && input.event.failure?.outcome === 'indeterminate') {
+      span = { ...span, status: 'interrupted' }
+    }
     if (span) turn.spans.push(span)
     const approval = input.effects.find((effect) => effect.kind === 'request_approval')
     if (approval && !turn.approval) turn.approval = { startedAt: new Date().toISOString(), startedMono: performance.now(), callId: approval.callId }

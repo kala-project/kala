@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 2,
+  "date": "2026-10-29",
+  "result": "bounded-local-candidate-passed-not-production-release",
+  "candidate": {
+    "applicationSource": "1e6fd5bdf8acea6cba180621998c23ae5fece7f0",
+    "operatorSource": "1e6fd5bdf8acea6cba180621998c23ae5fece7f0",
+    "operatorSha256": "f6c4f339708c60129b8d23929394ee830121d505f8d70411dd0131b06e2fc09c",
+    "aspirePublishedComposeSha256": "a7fd7027c04315a175a3569ef9b2748c6e7b75f9c3663c5e438953cd1e1af300",
+    "images": {
+      "runtime": "kala-dedicated-agent-runtime@sha256:1b6d3fbc95468e9104e8d56d1eb6f29c54f7b0e21dc1a52d7b6426efe8a57828",
+      "gateway": "kala-dedicated-agent-gateway@sha256:fa8b00139f0f8436ea32df2dfdb57a585a25e3fd0e0c37480cc8de9ef41b8e6e",
+      "dashboard": "kala-dedicated-lifecycle-dashboard@sha256:2a4ffff831fc37d620bbfc6c802246a930cd94c5f68565a8d7b9b7f11f35429c",
+      "postgres": "postgres@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36",
+      "silo": "pgsty/silo@sha256:2636fc4155d9a7e41ff58cdb65ddd13ba9304e67184e13c25bc5cb34016269d7",
+      "ingress": "caddy@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d",
+      "observability-dashboard": "mcr.microsoft.com/dotnet/aspire-dashboard@sha256:e4220c55fa3c3e40ad2d733ef07973392299b420e9bde6924e8f6a1e71ff01a8",
+      "otel-collector": "otel/opentelemetry-collector-contrib@sha256:faf125d656fa47cea568b2f3b4494efd2525083bc75c1e96038bc23f05cd68fd",
+      "observability-readiness": "curlimages/curl@sha256:463eaf6072688fe96ac64fa623fe73e1dbe25d8ad6c34404a669ad3ce1f104b6"
+    },
+    "dashboardSourceNote": "Product Dashboard source is unchanged between c948fe30 and this candidate; its previously pinned image was reused.",
+    "passed": [
+      "official .NET SDK 10.0.403 and Aspire CLI 13.6.3 published the actual nine-resource model",
+      "eight long-running services and one readiness job exiting zero; explicit restart, log limits and image-digest service versions",
+      "CA-verified public HTTPS through Caddy and packaged Gateway, privately proxied to Runtime over HTTP; both services and correlated spans readable in the authenticated Dashboard API",
+      "actual packaged normal Owner password change and acknowledged local-root recovery revoked live browser sessions; fresh login preserved the Organization",
+      "production backup stopped all nine resources and emitted a complete five-root artifact v2",
+      "production recovery restored fresh disjoint PostgreSQL, SILO and recovery roots plus two new local Caddy volumes",
+      "all nine restored resources reached the selected ready state without permission workarounds",
+      "original TLS context without adding a new CA and original opaque Owner cookie remained usable after recovery",
+      "SQL and S3 sentinels remained byte-exact",
+      "source and restored test containers were removed"
+    ],
+    "coldRestore": {
+      "artifactSchemaVersion": 2,
+      "policySchemaVersion": 1,
+      "migrationMode": "none",
+      "postgresMajor": "16",
+      "sourceCaSha256": "dca108d4f0821ed292aabc63b9e202b02f63136e15c45578961733be13f535d5",
+      "restoredCaSha256": "dca108d4f0821ed292aabc63b9e202b02f63136e15c45578961733be13f535d5",
+      "sqlSha256": "8f4d7f78c3241af75e668a84fcc7d9ccf5b56fb3eb6e8fde6717673ffc377778",
+      "objectSha256": "2eb730307ac1f14d92516ab70c6c563e6f22e5c7edb3c93ca9d146d234e36cf4"
+    }
+  },
+  "agentTelemetryComponentProof": {
+    "source": "b2a8ee03c2e4fcb7ca80783db9d25f7b30fbcae8",
+    "input": "synthetic persisted timing metadata through the actual AgentTelemetryBridge; not a model or Executor business run",
+    "passed": [
+      "actual OnlineTelemetry to authenticated Collector to protected standalone Dashboard",
+      "returned Agent root and LLM plus overlapping tool children share an anonymous trace and correct parent IDs",
+      "interrupted tool retains unset OTLP status and unknown execution state",
+      "histogram encoding and Collector acceptance, metrics resource presence, fixed safe failure log and sensitive-field exclusion",
+      "different Units reusing identical Session and turn IDs generate independent anonymous traces in focused tests",
+      "bounded queue and finite close when the backend is unavailable"
+    ],
+    "limits": "Dashboard resource-summary API does not expose arbitrary resource attributes or prove histogram bucket values. service.version encoding and histogram structure are separately checked at client output. HTTP and Socket.IO Agent trees remain separate; no native SDK or remote Executor span is fabricated. Metrics are observations, not an exactly-once billing ledger."
+  },
+  "historicalUpgradeAndFailureRecovery": {
+    "predecessorApplicationSource": "c948fe30367ef2b863b5f3937ebccc0c676f84f1",
+    "targetApplicationSource": "9c04a7eac42d0577fe8db88420b629e4a9b489c3",
+    "targetRuntime": "kala-dedicated-ops-runtime@sha256:957bb0e935795aac70be6325c87c0a9891827c8ebbb122efe160932476252c45",
+    "targetGateway": "kala-dedicated-ops-gateway@sha256:5b8f088c13a7fb546078dec15a0ff3db4a58015676a1bed8ad2d2f3b0c8caa73",
+    "operatorSnapshot": "pre-v2 working copy; historical application-image evidence, not certification of the final operator bytes",
+    "policy": "exact predecessor/target images, PostgreSQL 16, migrationMode none; migration-directory diff empty",
+    "passed": [
+      "production upgrade performed a completed cold backup before starting the genuinely different source images",
+      "six target services healthy, CA-verified fresh Owner login and byte-exact SQL/S3 sentinels",
+      "injected target Gateway process.exit(17) returned nonzero after a completed backup and did not report upgrade_completed",
+      "failed command remained installed; no automatic rollback was attempted",
+      "separately authorized production cold recovery into new roots preserved the original opaque Owner cookie and SQL/S3 data"
+    ],
+    "limits": "Original pre-upgrade cookie was lost with the first evidence driver before its assertion; the subsequent failure-recovery proof separately preserved its own original cookie. That driver misparsed Compose JSON-lines after a successful upgrade; a bounded continuation completed the checks. This is not a controlled distinct-image upgrade to the latest candidate, arbitrary schema migration or external-effect settlement."
+  },
+  "postCandidateCorrection": {
+    "source": "b2a8ee03c2e4fcb7ca80783db9d25f7b30fbcae8",
+    "includedInNineResourceCandidateImages": false,
+    "description": "Final review found the older timing projection classified all ok=false tool results as failed even when the authoritative structured failure outcome was indeterminate. The projection now emits interrupted/unknown without changing the receipt, and tool-count timing completeness no longer pretends to settle external effects.",
+    "verified": "Host build, structured frozen receipt through actual TurnTimingTracker and AgentTelemetryBridge into OTLP, existing timing/bridge regressions, and real Collector/Dashboard component re-run passed.",
+    "remaining": "Rebuild candidate images with this correction and perform the latest-image real model/SDK/Executor business acceptance. The nine-resource full-profile evidence stays bound to 1e6fd5bd, not relabeled as this source."
+  },
+  "cleanup": {
+    "passed": true,
+    "removedOwnedVolumes": 6,
+    "removedFixtureAllocatedKiB": 1486316,
+    "removedPublisherCapsules": 3,
+    "removedFrozenSourceContexts": 4,
+    "globalPrune": false,
+    "retained": "small result logs, source and image manifests, final generated Compose, public toolchain and local images"
+  },
+  "notProved": [
+    "real model, native SDK, remote Executor and implementation-child business acceptance on the latest candidate",
+    "one end-to-end logical WebSocket command trace spanning Gateway, native SDK and remote Executor",
+    "continuous PostgreSQL/SILO/Caddy/host metrics, durable history and actionable alerting",
+    "generic database/S3/service-secret hot rotation or state-master-key decrypt/re-encrypt migration",
+    "arbitrary schema or PostgreSQL-major upgrades and supported predecessor-release compatibility",
+    "public ACME/DNS issuance or renewal, long soak and complete workload/container hardening",
+    "signed supported cross-platform release or registry provenance; all artifacts are unsigned local candidates"
+  ],
+  "preservation": {
+    "pushPerformed": false,
+    "existingDeploymentReplaced": false,
+    "realSessionCopied": false,
+    "fixture": "owned synthetic installation, random synthetic credentials and SQL/S3 sentinels; no real business Session",
+    "unrelatedMainWorktreeChanges": "14 UI/mock changes retained unchanged"
+  },
+  "localEvidence": [
+    ".tmp/dedicated-lifecycle/nine-agent-restore-final.log",
+    ".tmp/dedicated-lifecycle/standalone-unknown-final.log",
+    ".tmp/dedicated-lifecycle/caddy-v2-parent-final.log",
+    ".tmp/dedicated-lifecycle/failed-upgrade-final.log",
+    ".tmp/dedicated-lifecycle/final-nine-compose.yaml",
+    ".tmp/dedicated-lifecycle/owned-cleanup-summary.json",
+    ".tmp/dedicated-agent-images-1e6fd5bd/source-revision",
+    ".tmp/dedicated-agent-images-1e6fd5bd/image-digests.jsonl"
+  ]
+}

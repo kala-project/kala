@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createInitialState } from '@agent-kernel/kernel'
+import { OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
+import { AgentTelemetryBridge } from './agent-telemetry.js'
 import { TurnTimingTracker } from './turn-timing.js'
 
 const config = { systemPrompt: '', tools: [], maxTurns: 10, approvalMode: 'auto' as const }
@@ -30,6 +32,26 @@ describe('TurnTimingTracker', () => {
     const done = { ...state, cursor: state.cursor + 1, status: 'done' as const }
     const complete = tracker.observe({ sessionId: 's', event: { kind: 'llm_response', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } }, prior: state, next: done, effects: [] })
     expect(complete?.summary?.tools).toMatchObject({ wallDurationMs: 3000, aggregateDurationMs: 3000, callCount: 2, peakConcurrency: 2, partial: false })
+  })
+
+  it('preserves an indeterminate receipt as unknown through authoritative timing and OTLP without changing the receipt', async () => {
+    const tracker = new TurnTimingTracker()
+    const prior = createInitialState({ systemPrompt: '', approvalMode: 'auto' })
+    const thinking = { ...prior, status: 'thinking' as const }
+    tracker.observe({ sessionId: 's', event: { kind: 'user_message', operationId: 'turn-unknown', text: 'fixture' }, prior, next: thinking, effects: [] })
+    const event = Object.freeze({ kind: 'tool_result' as const, callId: 'call-unknown', ok: false, content: 'fixture', failure: Object.freeze({ code: 'executor_disconnected', category: 'infrastructure' as const, outcome: 'indeterminate' as const, retryable: false, responsibility: 'system' as const }) })
+    const span = Object.freeze({ spanId: 'tool-unknown', kind: 'tool' as const, component: 'host' as const, startedAt: '2026-01-01T00:00:00.000Z', completedAt: '2026-01-01T00:00:01.000Z', durationMs: 1000, status: 'failed' as const })
+    const metadata = tracker.observe({ sessionId: 's', event, prior: thinking, next: thinking, effects: [], span })
+    expect(metadata?.span?.status).toBe('interrupted')
+    expect(event.failure.outcome).toBe('indeterminate')
+    expect(span.status).toBe('failed')
+    const bodies: string[] = []
+    const telemetry = new OnlineTelemetry({ serviceName: 'kala-runtime', endpoint: 'http://localhost:4318', authToken: 'o'.repeat(32), flushIntervalMs: 60000, fetch: vi.fn(async (_url, init) => { bodies.push(String(init?.body)); return new Response('', { status: 200 }) }) as typeof fetch })
+    new AgentTelemetryBridge(telemetry, 'unit-fixture').observe('s', metadata)
+    await telemetry.close()
+    const exported = bodies.map((body) => JSON.parse(body)).find((body) => body.resourceSpans).resourceSpans[0].scopeSpans[0].spans[0]
+    expect(exported.status.code).toBe(0)
+    expect(exported.attributes).toContainEqual({ key: 'execution.state', value: { stringValue: 'unknown' } })
   })
 
   it('recovers an open Turn from durable events and marks cross-restart wall time estimated', () => {

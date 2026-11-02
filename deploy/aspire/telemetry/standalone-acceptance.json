@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "executedAtUtc": "2026-10-29T09:16:00Z",
+  "result": "pass",
+  "environment": {
+    "architecture": "amd64",
+    "dockerServer": "29.9.2",
+    "isolation": "random synthetic credentials, dedicated bridge network, loopback ephemeral host ports"
+  },
+  "images": {
+    "dashboard": "mcr.microsoft.com/dotnet/aspire-dashboard@sha256:e4220c55fa3c3e40ad2d733ef07973392299b420e9bde6924e8f6a1e71ff01a8",
+    "dashboardVersion": "13.6.2+af07e33f8d1ef733645138b3f8e36067d073148d",
+    "collector": "otel/opentelemetry-collector-contrib@sha256:faf125d656fa47cea568b2f3b4494efd2525083bc75c1e96038bc23f05cd68fd",
+    "readinessProbe": "curlimages/curl@sha256:463eaf6072688fe96ac64fa623fe73e1dbe25d8ad6c34404a669ad3ce1f104b6"
+  },
+  "checks": {
+    "dashboardNativeHealth": "200 Healthy",
+    "collectorRuntimeHealth": "200 Server available",
+    "anonymousUi": "302 login challenge",
+    "browserTokenUi": "200 authenticated",
+    "anonymousTelemetryApi": 401,
+    "apiKeyTelemetryApi": 200,
+    "anonymousOtlpTracesLogsMetrics": 401,
+    "apiKeyOtlpTracesLogsMetrics": 200,
+    "collectorBearerMissing": 401,
+    "collectorBearerValid": 200,
+    "onlineTelemetryClose": "completed against live services and, after both containers stopped, against the disconnected endpoint within a 5 second outer bound",
+    "dashboardTraceReadable": true,
+    "dashboardLogReadable": true,
+    "dashboardMetricResourceHasMetrics": true,
+    "sensitiveFixtureAbsentFromProtectedApiPayloads": true,
+    "collectorErrorLogsAfterFix": 0,
+    "targetedCleanup": true
+  },
+  "defectsFoundAndFixed": [
+    "The official Dashboard image is distroless and contains neither /bin/bash nor /bin/sh, so its published healthcheck could never run.",
+    "Collector config validation is not runtime readiness; a finite curl init service now checks Dashboard /health and Collector health_check before application startup.",
+    "AllowedHosts rejected Compose DNS Host observability-dashboard with HTTP 400.",
+    "Collector OTLP/HTTP defaults to gzip, which Dashboard 13.6.2 doesn't decompress and parsed as invalid protobuf with HTTP 500; export now uses compression none and encoding proto."
+  ],
+  "coverageLimit": "OnlineTelemetry proves HTTP boundary spans, safe operational logs, and operational aggregate metrics only; it is not full Agent trace coverage."
+}

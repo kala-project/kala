@@ -1,0 +1,25 @@
+{
+  "Dashboard": {
+    "ApplicationName": "Kala Dedicated observability",
+    "Frontend": {
+      "AuthMode": "BrowserToken",
+      "MaxConsoleLogCount": 5000
+    },
+    "Otlp": {
+      "AuthMode": "ApiKey"
+    },
+    "Api": {
+      "AuthMode": "ApiKey"
+    },
+    "TelemetryLimits": {
+      "MaxLogCount": 10000,
+      "MaxTraceCount": 10000,
+      "MaxMetricsCount": 10000,
+      "MaxAttributeCount": 32,
+      "MaxAttributeLength": 128,
+      "MaxSpanEventCount": 16,
+      "MaxResourceCount": 64
+    }
+  },
+  "AllowedHosts": "localhost;127.0.0.1;observability-dashboard"
+}

@@ -24,6 +24,7 @@ import type {
   SessionErrorScope,
 } from '@agent-kernel/shared'
 import { validatePublicRequest } from '@agent-kernel/shared'
+import { createOnlineTelemetryFromEnv } from '@agent-kernel/shared/node-telemetry'
 import type {
   AgentConfig,
   RequestApprovalEffect,
@@ -55,6 +56,7 @@ import { createPushDispatcher } from './push/dispatch.js'
 import { createPushRoutes } from './push/routes.js'
 import { PushActivityTracker } from './push/activity.js'
 import { OperationalMetrics } from './operational-metrics.js'
+import { AgentTelemetryBridge } from './agent-telemetry.js'
 import {
   createExecutorRegistry,
   DEFAULT_TOOL_ACK_TIMEOUT_MS,
@@ -279,6 +281,16 @@ export type HostServer = {
   close(): Promise<void>
 }
 
+function telemetryRoute(pathname: string): string {
+  if (pathname === '/internal/health') return 'runtime.health'
+  if (pathname === '/internal/metrics') return 'runtime.metrics'
+  if (pathname.startsWith('/internal/')) return 'runtime.internal'
+  if (pathname.startsWith('/runtime/')) return 'runtime.command'
+  if (pathname.startsWith('/api/')) return 'runtime.api'
+  if (pathname.startsWith('/artifacts/') || pathname.startsWith('/session-artifacts/')) return 'runtime.artifact'
+  return 'runtime.dashboard'
+}
+
 export async function startHostServer(
   options: HostServerOptions,
 ): Promise<HostServer> {
@@ -303,11 +315,28 @@ export async function startHostServer(
     throw new Error('Durable Session and message queue authorities must be configured together')
   }
   const tenancy = effectiveTenancy(deployment)
-  const metrics = new OperationalMetrics()
+  const telemetry = createOnlineTelemetryFromEnv('kala-runtime')
+  const agentTelemetry = telemetry ? new AgentTelemetryBridge(telemetry, options.resourceUnitId ?? 'local') : undefined
+  const metrics = new OperationalMetrics((name, value, labels) => telemetry?.counter(name, value, {
+    ...(labels.component ? { component: labels.component } : {}),
+    ...(labels.operation ? { operation: labels.operation } : {}),
+    ...(labels.outcome ? { outcome: labels.outcome } : {}),
+    ...(labels.provider ? { provider: labels.provider } : {}),
+  }))
   metrics.increment('agent_kernel_process_starts_total', 'Host process starts', { component: 'host', deployment_mode: product })
   const capabilities = options.capabilities ?? (deployment.runtimeProfile === 'full' ? FULL_RUNTIME_CAPABILITIES : AGENT_RUNTIME_CAPABILITIES)
   const audit = options.audit ?? noopAuditLogger
   const http = options.httpServer ?? createServer()
+  http.on('request', (request, response) => {
+    const pathname = (request.url ?? '/').split('?', 1)[0] ?? '/'
+    // Socket.IO polling and upgrades are long-lived transports, not short commands.
+    if (pathname.startsWith('/socket.io/')) return
+    const span = telemetry?.startHttpSpan(request.method, telemetryRoute(pathname), request.headers.traceparent)
+    if (!span) return
+    if (!response.headersSent) response.setHeader('x-request-id', span.correlationId)
+    response.once('finish', () => span.end(response.statusCode))
+    response.once('close', () => { if (!response.writableFinished) span.end(499) })
+  })
   const io = new IOServer(http, {
     cors: { origin: true, credentials: true },
     ...(options.publicUrls ? {
@@ -397,6 +426,7 @@ export async function startHostServer(
     if (options.objectStorage?.messageAttachments instanceof SqliteMessageAttachmentStore) await options.objectStorage.messageAttachments.close()
     if (options.sessionAuthority instanceof SqliteSessionAuthority) await options.sessionAuthority.close()
     if (ownsStateStore) stateStore.close()
+    void telemetry?.close()
   }
   let activeSocketAdmin: SocketAdminConfig | undefined
   const activateSocketAdmin = (config: SocketAdminConfig): void => {
@@ -1122,10 +1152,10 @@ export async function startHostServer(
   const resourceUnitId = options.resourceUnitId
   const resourceGovernor = options.resourceGovernor
   const syncGovernedQueueUsage = (): void => {
+    const queuedMessageCount = [...queuedMessages.values()].reduce((total, queue) => total + queue.length, 0)
+    telemetry?.gauge('kala_runtime_queue_depth', queuedMessageCount, { component: 'runtime' })
     if (!resourceGovernor || !resourceUnitId) return
-    resourceGovernor.reconcile(resourceUnitId, {
-      queuedMessages: [...queuedMessages.values()].reduce((total, queue) => total + queue.length, 0),
-    })
+    resourceGovernor.reconcile(resourceUnitId, { queuedMessages: queuedMessageCount })
   }
 
   const withQueueMutation = async <T>(sessionId: string, fn: () => Promise<T>): Promise<T> => {
@@ -1833,6 +1863,7 @@ export async function startHostServer(
 
   const broadcast: LoopBroadcast = {
     onEvent(sessionId, seq, event, effects, state, llmTrace, model, extras) {
+      agentTelemetry?.observe(sessionId, extras?.timing, llmTrace?.provider)
       if (event.kind === 'llm_response') {
         metrics.increment('agent_kernel_llm_calls_total', 'LLM calls', { provider: llmTrace?.provider ?? 'unknown', outcome: 'ok' })
         if (event.usage) {
