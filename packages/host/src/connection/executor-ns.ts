@@ -24,6 +24,7 @@ import type { Namespace } from 'socket.io'
 
 import { SessionStore } from '../store/session.js'
 import { createExecutorRegistry } from './executor.js'
+import { appDebugRelayFor } from './app-debug.js'
 import type { DashboardNs } from './dashboard-ns.js'
 import type { AuthConfig, ExecutorIdentity } from '../auth-control.js'
 import { authenticateExecutorToken, validateExecutorAnnouncement } from '../auth-control.js'
@@ -180,6 +181,11 @@ export function configureExecutorNamespace(
   })
 
   ns.on('connection', (socket) => {
+    const appDebug = appDebugRelayFor(deps.executors)
+    socket.on('executor:app_debug_frame', (frame, ack) => {
+      if (typeof ack !== 'function') return
+      void appDebug.executorFrame(socket.id, frame).then(ack)
+    })
     const auth = socket.handshake.auth as HandshakeAuth
     // An executor is a daemon: no session binding at connect time. Host
     // routes each `tool:call` to it by sessionId when needed.
@@ -367,6 +373,7 @@ export function configureExecutorNamespace(
       const timer = validationTimers.get(socket)
       if (timer) clearTimeout(timer)
       validationTimers.delete(socket)
+      appDebug.closeExecutor(socket.id)
       deps.executors.detach(socket)
       const runtime = executorTenantRuntime.get(socket)
       if (runtime && deps.executorQuota?.recordExecutorRuntime) {

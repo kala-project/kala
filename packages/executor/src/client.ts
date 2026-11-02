@@ -25,7 +25,8 @@ import type {
   ToolCancelMessage,
   ToolResultAck,
 } from '@agent-kernel/shared'
-import { PROTOCOL_VERSION } from '@agent-kernel/shared'
+import { PROTOCOL_VERSION, APP_DEBUG_ACK_MS, appDebugFailure } from '@agent-kernel/shared'
+import { createAppDebugEndpoint } from './app-debug.js'
 import { io as clientIO, type Socket } from 'socket.io-client'
 import { ulid } from 'ulid'
 
@@ -283,10 +284,22 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
 
   let mcpDescriptors: readonly McpToolDescriptor[] = []
   let mcpInitialized = false
+  const appDebug = createAppDebugEndpoint({
+    ...(options.networkPolicy ? { networkPolicy: options.networkPolicy } : {}),
+    send: (frame) => socket.connected
+      ? socket.timeout(APP_DEBUG_ACK_MS).emitWithAck('executor:app_debug_frame', frame)
+      : Promise.resolve(appDebugFailure('Host disconnected. Forwarding was stopped; application requests are not replayed.')),
+  })
+  socket.on('executor:app_debug_request', (request, ack) => {
+    if (typeof ack !== 'function') return
+    if (drainRequested || executorClosing) { ack(appDebugFailure('Executor is draining or closing. Restart forwarding when it is available.')); return }
+    void appDebug.request(request).then(ack).catch(() => ack(appDebugFailure('Executor debug request failed. Check forwarding status before retrying; the request may have been partially applied.')))
+  })
   const mcpToolNames = new Set<string>()
   const knownMcpToolNames = new Set<string>()
   type AnnounceWithMcp = ExecutorAnnounce & { mcpTools?: McpToolDescriptor[] }
   const createAnnouncement = (): AnnounceWithMcp => ({
+    appDebugVersion: 1,
     executorId,
     ...(options.installId ? { installId: options.installId } : {}),
     executorVersion: executorReleaseVersion(),
@@ -361,6 +374,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
     logger.debug({ ...summary, diagnostic: compactDiagnostic(err) }, 'host connection failure diagnostic')
   })
   socket.on('disconnect', (reason) => {
+    appDebug.close()
     computer.revoke()
     logger.info({ reason }, 'socket disconnected')
     // Interactive terminals cannot be safely resumed after losing their output
@@ -668,11 +682,12 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
     activeToolCount: () => inFlight.size,
     activeTerminalCount: () => terminals.activeCount(),
     draining: () => drainRequested,
-    beginDrain() { drainRequested = true },
+    beginDrain() { drainRequested = true; appDebug.close() },
     resume() { drainRequested = false },
     async close() {
       if (executorClosing) return
       executorClosing = true
+      appDebug.close()
       computer.revoke()
       desktopManagerUsers -= 1
       const closeDesktop = desktopManagerUsers === 0

@@ -20,6 +20,7 @@ import type { ContextUsageSnapshot } from './context-usage/types.js'
 import type { LLMTrace } from './log.js'
 import type { DagGraphPatch, DagRun } from './dag.js'
 import type { ComputerRequest, ComputerResponse } from './computer-use.js'
+import type { AppDebugControl, AppDebugExecutorRequest, AppDebugFrame, AppDebugReply, AppDebugClosed } from './app-debug.js'
 
 export type AgentRuntimeId = 'kernel' | 'copilot'
 export type SessionExecutionMode = 'chat' | 'dag'
@@ -878,6 +879,7 @@ export type ExecutorMcpConfigStatusAck = {
 }
 
 export type ExecutorAnnounce = {
+  appDebugVersion?: 1
   executorId: string
   installId?: string
   /** agent-kernel executor package version. */
@@ -2052,6 +2054,8 @@ export type RpcAck<T = undefined> =
   | { ok: false; error: string }
 
 export type DashboardClientToServerEvents = {
+  'app_debug:control': (payload: AppDebugControl, ack: (result: AppDebugReply) => void) => void
+  'app_debug:frame': (payload: AppDebugFrame, ack: (result: AppDebugReply) => void) => void
   'computer:request': (payload: ComputerRequest, ack: (result: ComputerResponse) => void) => void
   'client:connection_ping': (sentAt: number, ack: (serverAt: number) => void) => void
   'client:executor_ping': (workspaceId: string, ack: (result: { rttMs?: number; error?: string }) => void) => void
@@ -2142,6 +2146,8 @@ export type DashboardClientToServerEvents = {
 }
 
 export type DashboardServerToClientEvents = {
+  'app_debug:frame': (payload: AppDebugFrame, ack: (result: AppDebugReply) => void) => void
+  'app_debug:closed': (payload: AppDebugClosed) => void
   'session:ready': (payload: SessionReadyEvent) => void
   'state:changed': (payload: StateChangedEvent) => void
   'event:appended': (payload: EventAppendedEvent) => void
@@ -2195,6 +2201,7 @@ export type QueuedMessagePreview = {
 }
 
 export type ExecutorClientToServerEvents = {
+  'executor:app_debug_frame': (payload: AppDebugFrame, ack: (result: AppDebugReply) => void) => void
   'executor:announce': (payload: ExecutorAnnounce) => void
   'executor:tool_progress': (payload: ToolProgressPayload) => void
   'executor:bg_task_updated': (payload: ServerBgTaskUpdated) => void
@@ -2212,13 +2219,15 @@ export type ExecutorClientToServerEvents = {
  * spill management) now travels through `tool:call` using internal tool names
  * conventionally prefixed `__`. The executor runs the named tool; only the
  * host decides whether the result is a kernel tool result or an internal RPC
- * response.
+ * response. Application debugging is an explicit exception: its bounded opaque
+ * TCP data plane uses dedicated events and must never enter tool/history storage.
  *
  * The kernel-echo events (`session:ready`, `state:changed`, `event:appended`,
  * `session:error`) that used to be declared here were never actually
  * subscribed by any executor; they were pure type noise. Gone.
  */
 export type ExecutorServerToClientEvents = {
+  'executor:app_debug_request': (payload: AppDebugExecutorRequest, ack: (result: AppDebugReply) => void) => void
   'executor:health_ping': (sentAt: number, ack: (executorAt: number) => void) => void
   'executor:mcp_configure': (payload: ExecutorMcpConfigureRequest, ack: (result: ExecutorMcpConfigureAck) => void) => void
   'executor:mcp_config_status': (payload: ExecutorMcpConfigStatusRequest, ack: (result: ExecutorMcpConfigStatusAck) => void) => void

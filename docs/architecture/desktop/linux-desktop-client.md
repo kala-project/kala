@@ -8,8 +8,11 @@ Ship an official Tauri 2 Linux-only **remote-first client**, not another Host,
 Runtime, proxy, or independently versioned copy of Dashboard. The packaged local
 connection screen opens the existing React Dashboard in an isolated WebKitGTK
 window. The chosen deployment serves its own matching frontend and APIs.
-No listener or port is added; the current deployment remains
-`http://127.0.0.1:13000`.
+The platform connection adds no listener or port; the existing deployment address
+is unchanged. The only approved exception is the explicit, user-started loopback
+forwarder specified by [Desktop application debugging](application-debugging.md),
+which is the sole SoT for that feature. It neither proxies platform authentication
+nor embeds a Host/Runtime/Executor in the desktop.
 
 This is deliberate: Dashboard account authentication uses same-origin HttpOnly
 cookies and numerous same-origin HTTP routes in addition to Socket.IO. Loading a

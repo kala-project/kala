@@ -1,8 +1,12 @@
 # @agent-kernel/dashboard
 
-The **visualization layer**. A React SPA that subscribes to a Host session over Socket.IO and renders chat + a live state inspector + a replay/fork UI. Served by Host from `packages/dashboard/dist/` — no separate deploy required.
+The **visualization layer**. A React SPA that subscribes to a Host session over Socket.IO and renders chat + a live state inspector + a replay/fork UI. Portable can serve `packages/dashboard/dist/` from Host. Dedicated uses an independently versioned immutable Dashboard release served by Stable Ingress; publishing it must not restart Runtime/Ingress/Executor. Private Cloud retains one product Origin through its authenticated Gateway. See the [deployment-mode contract](../../docs/architecture/deployment-mode-contract.md) and [Dedicated delivery contract](../../docs/architecture/dedicated-platform-runtime-unit.md).
 
 ---
+
+## Resource-bounded build
+
+Use `pnpm build` (or `node scripts/build.mjs` in this package); prototype builds use the same runner. Typecheck and production bundling run sequentially. Linux user-systemd isolation is automatic when available; `KALA_BUILD_SYSTEMD=required` makes absence of the hard resource boundary an error. CI with an existing external cgroup/container budget may select `off`. Other platforms explicitly report that heap limits alone do not bound total RSS. Budgets, cancellation behavior and evidence have one [build contract](../../docs/development/dashboard-build.md); do not bypass the runner with a larger Vite heap.
 
 ## Stack
 
@@ -14,7 +18,7 @@ The **visualization layer**. A React SPA that subscribes to a Host session over 
 - **socket.io-client** for wire
 - **Vitest** + **@testing-library/react** for component tests
 
-Not Next.js (see [ADR 0008](../../docs/architecture/adr/0008-dashboard-vite-react.md)). This is a static SPA — no SSR, no server components. Ships as a `dist/` you can host anywhere (Cloudflare Pages, Vercel static, GitHub Pages, or the Host process serving `/`).
+Not Next.js (see [ADR 0008](../../docs/architecture/adr/0008-dashboard-vite-react.md)). This is a static SPA — no SSR, no server components. Produces static `dist/` assets; production serving, authentication and route ownership follow the selected deployment contract, not an arbitrary separate-Origin hosting recipe.
 
 ## Layout
 
@@ -69,7 +73,7 @@ The Host does not add a global Content-Security-Policy to the static dashboard. 
 ## What it does NOT do
 
 - Call the LLM directly — always goes through Host.
-- Persist sessions — Host owns the JSONL log; the dashboard is a viewer.
+- Own authoritative Session persistence — Runtime owns it (Portable file-backed stores; the Private Cloud enterprise target requires PostgreSQL). The dashboard is a projection, not a replacement authority.
 - Modify kernel state — every user action is a Socket.IO event dispatched to Host.
 
 ## References

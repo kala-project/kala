@@ -115,6 +115,8 @@ import type {
 } from '@agent-kernel/kernel'
 import { createInitialState } from '@agent-kernel/kernel'
 import type { Namespace } from 'socket.io'
+import { createHash } from 'node:crypto'
+import { registerAppDebugDashboard } from './app-debug-dashboard.js'
 import { ulid } from 'ulid'
 
 import type { HostLoopDeps, LoopHandle } from '../loop.js'
@@ -552,7 +554,7 @@ export function configureDashboardNamespace(
         'client:user_message', 'client:user_approve', 'client:user_reject', 'client:ask_user_choice', 'client:cancel', 'client:interrupt_sub_agent',
         'client:clear', 'client:compact', 'client:cancel_stream', 'client:set_approval_mode', 'client:fork',
         'client:create_session', 'client:delete_session', 'client:prepare_storage_cleanup', 'client:execute_storage_cleanup', 'client:update_preferences', 'client:set_cwd',
-        'client:prepare_session_route',
+        'client:prepare_session_route', 'app_debug:control',
         'client:reorder_queued_message', 'client:update_queued_message', 'client:delete_queued_message',
         'client:rename_session', 'client:rename_workspace', 'client:create_directory', 'client:consolidate_memory', 'bg:kill',
         'client:initialize_dag', 'client:answer_dag_decision',
@@ -566,6 +568,24 @@ export function configureDashboardNamespace(
         next(new Error('forbidden: runtime:write required'))
       })
     }
+
+    // Debug frames have their own read-only/owner guard and must not enter
+    // per-frame audit persistence. Register cleanup before any awaited load.
+    registerAppDebugDashboard(socket, {
+      executors: deps.executors,
+      resolveContext: async (targetSessionId) => {
+        if (!mutableRuntimeReady()) return { error: 'Runtime is not ready for application debugging. Wait until it is available, then retry.' }
+        const freshAuth = authenticateDashboardHandshake(socket.handshake.auth as HandshakeAuth, socket.request, deps.auth)
+        if (!freshAuth.ok || operationPrincipal(freshAuth.actor) !== operationPrincipal(socket.data.dashboardActor as DashboardActor | undefined) || (freshAuth.actor.kind === 'ingress' && freshAuth.actor.role === 'viewer')) return { error: 'Application debugging authorization expired or requires runtime:write. Sign in again with an authorized account before restarting forwarding.' }
+        const record = deps.store.get(targetSessionId) ?? await deps.store.load(targetSessionId, { recoverDangling: false }).catch(() => undefined)
+        if (!record?.workspaceId) return { error: 'Select an existing Session bound to an online Workspace before opening application debugging.' }
+        const accessError = await validateBgSessionAccess(targetSessionId, record.workspaceId) ?? await validateEffectOwner(targetSessionId)
+        if (accessError) return { error: `Application debugging denied: ${accessError}. Select a subscribed Session you are authorized to modify, then retry.` }
+        const target = deps.executors.appDebugTarget?.(record.workspaceId)
+        if (!target) return { error: 'The selected Workspace is offline or its Executor does not support application debugging v1. Connect or update that Executor before retrying.' }
+        return { principalKey: createHash('sha256').update(operationPrincipal(freshAuth.actor)).digest('hex'), workspaceId: record.workspaceId, executorId: target.executorId }
+      },
+    })
 
     // Register first-paint request handlers before any awaited session load.
     // The dashboard emits these immediately after the websocket connects or

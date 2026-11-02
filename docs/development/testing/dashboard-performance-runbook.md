@@ -180,6 +180,8 @@ The paid model is the only controlled boundary. Host, Executor, Socket.IO, persi
 
 ### Source-map attribution only
 
+Dashboard profiling must use the [resource-bounded build entrypoint](../dashboard-build.md). Its current full source-map build still exceeds the fixed heap at chunk rendering; this is an open gate, not permission to increase the budget or analyze stale maps. The analyzer supports nested lazy-graph maps, but that narrower verification does not certify the full profiling build. Continue only after a successful matching profiling build, and restore map-free release assets afterward.
+
 First create a profiling build:
 
 ```bash

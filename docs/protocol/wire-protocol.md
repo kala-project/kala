@@ -19,6 +19,19 @@ Host exposes a Socket.IO server at a single HTTP(S) port with two namespaces:
 
 Both use the same underlying transport. Namespaces isolate the routing logic.
 
+### Manual desktop application debugging v1
+
+The sole product/security/flow-control contract is [Desktop application debugging](../architecture/desktop/application-debugging.md). `ExecutorAnnounce.appDebugVersion?: 1` is an additive capability; absence disables the feature and never falls back to tool calls. The shared `app-debug.ts` schemas define the exact bounded JSON shapes.
+
+- Dashboard → Host: `app_debug:control` (`context`/`start` with subscribed `sessionId`, expected `executorId` and approved `ports`; `renew` with `grantId`, `stop` with an optional `grantId` (omission cancels only the calling socket's group, including pending start)); `app_debug:frame` (`open`/`data`/`end`/`close`). Each has an `AppDebugReply` acknowledgement.
+- Host → Dashboard: `app_debug:frame` with an `AppDebugReply` acknowledgement, and `app_debug:closed` with `{ grantId, error }` when the entire grant stops.
+- Host → Executor: `executor:app_debug_request` (grant start/renew/stop or stream frame), with an `AppDebugReply` acknowledgement.
+- Executor → Host: `executor:app_debug_frame`, with an `AppDebugReply` acknowledgement.
+- `AppDebugReply` is `{ ok: true, grantId?, context? }` or `{ ok: false, error: string }`. Context is authenticated `{ principalKey, workspaceId, executorId }`; principal keys are opaque and contain no token.
+- `open` carries `grantId`, `streamId`, `port`; `data` carries those IDs, nonnegative ordered `seq` and canonical base64 `data` decoding to at most 16 KiB; `end` carries IDs and `seq`; `close` carries IDs. Unknown keys/operations are rejected. Only `open` may create a stream.
+- Ports are 1–8 unique integers in 1024–65535; a grant permits at most 32 streams. Each direction has one outstanding frame, a 15-second per-hop acknowledgement deadline, independent ordered sequence and explicit half-close. Grants expire after 60 seconds without authorized renewal; streams idle for 10 minutes are closed.
+- These events are an opaque TCP data plane, not agent tools or Session events: never persist/log payloads, and never retry/replay frames after disconnect. Server-side grants pin both the owning Dashboard socket and the exact Executor connection generation.
+
 **Rooms**: Both namespaces use rooms named `session:<sessionId>` for per-session fan-out.
 
 ---

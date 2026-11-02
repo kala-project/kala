@@ -16,7 +16,8 @@
  */
 
 import type { Server, Socket } from 'socket.io'
-import { createTerminalRequestManager, TERMINAL_CREATE_ACK_TIMEOUT_MS } from '@agent-kernel/shared'
+import { createTerminalRequestManager, TERMINAL_CREATE_ACK_TIMEOUT_MS, APP_DEBUG_ACK_MS, appDebugFailure, appDebugWait } from '@agent-kernel/shared'
+import type { AppDebugTarget } from './app-debug.js'
 
 import type {
   CallToolEffect,
@@ -137,6 +138,7 @@ export type ExecutorLookup = {
 type ExecutorInvalidationReason = 'credential_revoked' | 'identity_authority_unavailable'
 
 export type ExecutorRegistry = ToolDispatcher & ExecutorLookup & {
+  appDebugTarget(workspaceId: string): AppDebugTarget | undefined
   attach(
     socket: Socket<
       ExecutorClientToServerEvents,
@@ -1126,6 +1128,18 @@ export function createExecutorRegistry(
       if (!bind) return fail('Workspace is offline')
       if (!bind.announcement.tools.includes('__computer_use')) return fail('This Executor needs an update before it can share its desktop')
       return await callInternalTool<ComputerResponse>(bind, payload.workspaceId, '__computer_use', { request: payload, owner }, fail)
+    },
+    appDebugTarget(workspaceId) {
+      const bind = findBindByWorkspace(workspaceId)
+      if (!bind?.socket.connected || bind.announcement.appDebugVersion !== 1) return undefined
+      return {
+        executorId: bind.announcement.executorId,
+        connectionId: bind.socket.id,
+        request: async (request) => {
+          if (!bind.socket.connected || findBindByWorkspace(workspaceId)?.socket !== bind.socket) return appDebugFailure('Executor connection changed. Forwarding stopped without migrating or replaying application data.')
+          return appDebugWait(() => bind.socket.timeout(APP_DEBUG_ACK_MS).emitWithAck('executor:app_debug_request', request))
+        },
+      }
     },
     async workspaceExec(payload) {
       const bind = findBindByWorkspace(payload.workspaceId)
