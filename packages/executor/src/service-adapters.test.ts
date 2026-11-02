@@ -73,6 +73,18 @@ describe('Linux service adapter', () => {
     expect(seen.some((value) => value.includes('disable --now'))).toBe(true)
   })
 
+  it('persists organization enrollment routing and workspace identity without the invite', () => {
+    const rendered = renderLinuxServiceFiles({
+      ...session, workspaceId: 'workspace_enrolled', routeHint: 'invitation-route',
+      installationSource: 'private-cloud-invite',
+    }, '/home/example')
+    expect(JSON.parse(rendered.config)).toMatchObject({
+      workspaceId: 'workspace_enrolled', routeHint: 'invitation-route', installationSource: 'private-cloud-invite',
+    })
+    expect(rendered.unit).not.toContain('secret-value')
+    expect(rendered.config).not.toContain('secret-value')
+  })
+
   it('enables no-new-privileges only in Restricted Mode', () => {
     const rendered = renderLinuxServiceFiles({ ...session, privilegeMode: 'restricted' }, '/home/example')
     expect(rendered.unit).toContain('NoNewPrivileges=yes')

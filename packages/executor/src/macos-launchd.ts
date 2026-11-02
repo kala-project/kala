@@ -76,6 +76,7 @@ export type CreateLaunchdServiceOptions = {
   homeDirectory?: string
   label?: string
   executablePath?: string
+  executableSearchPath?: string
 }
 
 export type LaunchdOperationExecutor<T = unknown> = (
@@ -163,6 +164,8 @@ export function createMacosLaunchdService(
 <dict>
   <key>Label</key>
   <string>${xml(label)}</string>
+  ${options.executableSearchPath ? `<key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>${xml(options.executableSearchPath)}</string></dict>` : ''}
   <key>ProgramArguments</key>
   <array>
     <string>${xml(executablePath)}</string>

@@ -36,7 +36,11 @@ export class TenantRuntimeUnitRegistry {
   private readonly closing = new Map<TenantRuntimeUnitId, Promise<void>>()
   private draining = false
 
-  constructor(private readonly factory: TenantRuntimeUnitFactory, private readonly maxLoadedUnits = Number.POSITIVE_INFINITY) {}
+  constructor(
+    private readonly factory: TenantRuntimeUnitFactory,
+    private readonly maxLoadedUnits = Number.POSITIVE_INFINITY,
+    private readonly countsTowardCapacity: (id: TenantRuntimeUnitId) => boolean = () => true,
+  ) {}
 
   get(id: TenantRuntimeUnitId): TenantRuntimeUnit | undefined {
     return this.units.get(id)
@@ -54,7 +58,10 @@ export class TenantRuntimeUnitRegistry {
     if (this.draining) throw new Error('TenantRuntimeUnitRegistry is draining')
     const pending = this.loading.get(id)
     if (pending) return pending
-    if (this.units.size + this.loading.size >= this.maxLoadedUnits) throw new Error('TenantRuntimeUnit capacity exceeded')
+    if (this.countsTowardCapacity(id)) {
+      const count = [...this.units.keys(), ...this.loading.keys()].filter(this.countsTowardCapacity).length
+      if (count >= this.maxLoadedUnits) throw new Error('TenantRuntimeUnit capacity exceeded')
+    }
     const creation = this.factory(id).then((unit) => {
       if (unit.id !== id) throw new Error('TenantRuntimeUnit factory returned a mismatched id')
       this.units.set(id, unit)

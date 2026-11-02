@@ -59,6 +59,8 @@ COPY --from=node-runtime-source /usr/lib/x86_64-linux-gnu/libpthread.so.0 /usr/l
 COPY --from=node-runtime-source /usr/lib/x86_64-linux-gnu/libc.so.6 /usr/lib/x86_64-linux-gnu/libc.so.6
 COPY --from=node-runtime-source /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
 COPY --from=node-runtime-source /usr/lib64/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
+COPY --from=build --chmod=0555 /usr/bin/dash /bin/sh
+COPY --from=build /usr/share/doc/dash/copyright /usr/share/doc/dash/copyright
 COPY --from=node-runtime-source /var/lib/dpkg/status.d/base-files* /var/lib/dpkg/status.d/
 COPY --from=node-runtime-source /var/lib/dpkg/status.d/ca-certificates* /var/lib/dpkg/status.d/
 COPY --from=node-runtime-source /var/lib/dpkg/status.d/gcc-14-base* /var/lib/dpkg/status.d/

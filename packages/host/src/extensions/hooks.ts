@@ -77,6 +77,13 @@ async function runOne(
     })
     const stdoutChunks: Buffer[] = []
     const stderrChunks: Buffer[] = []
+    child.stdin.on('error', (error: NodeJS.ErrnoException) => {
+      // An immediately rejecting hook may close stdin before reading its payload.
+      // Its exit status still decides the outcome.
+      if (error.code === 'EPIPE') return
+      stderrChunks.push(Buffer.from(error.message))
+      finish(-1)
+    })
     let done = false
     let timedOut = false
 

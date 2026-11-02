@@ -2315,7 +2315,7 @@ export async function startHostServer(
     // installed SDK depend on an undocumented per-machine environment variable.
     enabled: options.copilot?.enabled ?? !['0', 'false'].includes((process.env.KALA_COPILOT_ENABLED ?? '').trim().toLowerCase()),
     sessionsDir: options.sessionsDir,
-    ...(process.env.KALA_NATIVE_POSIX_ROOT ? { nativePosixRoot: process.env.KALA_NATIVE_POSIX_ROOT } : {}),
+    ...(options.copilot?.enabled !== false && process.env.KALA_NATIVE_POSIX_ROOT ? { nativePosixRoot: process.env.KALA_NATIVE_POSIX_ROOT } : {}),
     ...(options.copilot?.runtimeEntryPath ? { runtimeEntryPath: options.copilot.runtimeEntryPath } : {}),
     ...(options.copilot?.gitHubToken ?? process.env.COPILOT_GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN
       ? { gitHubToken: options.copilot?.gitHubToken ?? process.env.COPILOT_GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN }

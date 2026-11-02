@@ -13,6 +13,7 @@ import { startLoopbackHostRuntimeUnit } from '../src/tenant-runtime/loopback-hos
 import { resolveBuiltinAgentModule } from '../src/builtin-tools.js'
 import type { DashboardActor } from '../src/auth-control.js'
 import { PostgresAgentPromptSettingsStore } from '../src/tenant-runtime/postgres-agent-settings.js'
+import { loadRuntimeHooks } from '../src/tenant-runtime/runtime-hooks.js'
 import { ExplicitLLMClientFactory } from '../src/llm/client-factory.js'
 import { DedicatedModelSettings } from '../src/llm/dedicated-model-settings.js'
 import { startTenantRuntimeService } from '../src/tenant-runtime/service.js'
@@ -213,6 +214,7 @@ async function main(): Promise<void> {
     ingressSecret,
     requireProvisioning: true,
     maxLoadedUnits: product === 'dedicated' ? 1 : Number(process.env.KALA_RUNTIME_HOST_MAX_LOADED_UNITS ?? 100),
+    countsTowardCapacity: (unitId) => unitId !== publicInstallerUnitId,
     ...(experimentalStorage ? { catalog } : {}),
     ...(placementOwnership ? {
       placementOwnership,
@@ -324,6 +326,7 @@ async function main(): Promise<void> {
             join(unitRoot, 'session-artifacts'),
             join(unitRoot, 'message-attachments'),
           ])
+      const runtimeHooks = loadRuntimeHooks({ unitRoot, product, ...(id !== publicInstallerUnitId && process.env.KALA_RUNTIME_HOOKS_CONFIG ? { configPath: process.env.KALA_RUNTIME_HOOKS_CONFIG } : {}) })
       const makeSettings = async (actor: DashboardActor): Promise<ServerSettingsPayload> => {
         const prompt = await refreshAgentSettings(actor)
         const objectUsage = await persistentStorage?.objectStorage.resourceArtifactUsageSnapshot()
@@ -335,7 +338,7 @@ async function main(): Promise<void> {
             id: provider.id, label: provider.label ?? provider.id, wire: provider.wire, baseUrl: provider.baseUrl,
             models: currentModels().filter(model => model.providerId === provider.id),
           })) ?? [],
-          defaultModel: currentDefaultModel(), hooks: [],
+          defaultModel: currentDefaultModel(), hooks: runtimeHooks.hooks.map(({ event, command, match }) => ({ event, command, ...(match ? { match } : {}) })),
           modelConfiguration: modelSettings ? { management: 'dashboard' } : { management: 'operator', ...(catalogPath ? { providerCatalogPath: catalogPath } : {}) },
           versions: { host: packageJson.version, protocol: PROTOCOL_VERSION },
           agentModule: currentAgentModule().metadata,
@@ -348,7 +351,7 @@ async function main(): Promise<void> {
             },
           } : {}),
           mcp: { supported: false, note: 'MCP availability is resolved by the Runtime.' },
-          paths: { claudeSettings: '', codexConfig: '', manualModels: '', hooksConfig: '', sessionsDir: join(unitRoot, 'sessions') },
+          paths: { claudeSettings: '', codexConfig: '', manualModels: '', hooksConfig: runtimeHooks.configPath, sessionsDir: join(unitRoot, 'sessions') },
           ...(objectUsage && organizationId ? {
             storage: {
               kind: 'postgres-s3' as const,
@@ -366,6 +369,8 @@ async function main(): Promise<void> {
       const speechCredentialStore = persistentStorage?.speechCredentialStore ?? localSpeechCredentialStore
       return startLoopbackHostRuntimeUnit(id, {
         telemetry,
+        hooks: runtimeHooks.hooks,
+        hookRunner: runtimeHooks.hookRunner,
         requireIngressIdentity: true,
         authorizeScheduledPrincipal: createScheduledPrincipalAuthorizer({
           origin: process.env.KALA_RUNTIME_AUTHORITY_ORIGIN,
@@ -376,7 +381,10 @@ async function main(): Promise<void> {
         // The container entrypoint is in /app/packages/host/dist, while the
         // verified Copilot CLI platform pair is in /app/release. Discover it
         // from the published release, not the service script directory.
-        ...(releaseAssetsDir ? { copilot: { runtimeEntryPath: join(releaseAssetsDir, 'kala-runtime.cjs') } } : {}),
+        ...(releaseAssetsDir ? { copilot: {
+          runtimeEntryPath: join(releaseAssetsDir, 'kala-runtime.cjs'),
+          ...(id === publicInstallerUnitId ? { enabled: false } : {}),
+        } } : {}),
         // Trace/message-assembly captures currently write only to the local
         // artifact tree; do not publish disposable captures in PG/S3 mode.
         artifactRootDir: persistentStorage ? false : join(unitRoot, 'artifacts'),

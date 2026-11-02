@@ -49,6 +49,24 @@ describe('TenantRuntimeUnitRegistry', () => {
     await expect(registry.getOrLoad(parseTenantRuntimeUnitId('a'))).resolves.toMatchObject({ id: 'a' })
   })
 
+  it.each([['tenant-a', 'public-installer'], ['public-installer', 'tenant-a']])('keeps shared installers outside tenant capacity when loading %s first', async (first, second) => {
+    const registry = new TenantRuntimeUnitRegistry(async id => unit(id), 1, id => id !== 'public-installer')
+    await registry.getOrLoad(parseTenantRuntimeUnitId(first))
+    await expect(registry.getOrLoad(parseTenantRuntimeUnitId(second))).resolves.toMatchObject({ id: second })
+    await expect(registry.getOrLoad(parseTenantRuntimeUnitId('tenant-b'))).rejects.toThrow('capacity')
+  })
+
+  it('counts pending tenants but not pending shared installer loads', async () => {
+    const tenant = deferred<TenantRuntimeUnit>()
+    const installer = deferred<TenantRuntimeUnit>()
+    const registry = new TenantRuntimeUnitRegistry(id => id === 'public-installer' ? installer.promise : tenant.promise, 1, id => id !== 'public-installer')
+    const first = registry.getOrLoad(parseTenantRuntimeUnitId('tenant-a'))
+    const second = registry.getOrLoad(parseTenantRuntimeUnitId('public-installer'))
+    await expect(registry.getOrLoad(parseTenantRuntimeUnitId('tenant-b'))).rejects.toThrow('capacity')
+    tenant.resolve(unit('tenant-a')); installer.resolve(unit('public-installer'))
+    await Promise.all([first, second])
+  })
+
   it('drains loaded units and rejects later loads', async () => {
     const a = unit('a')
     const registry = new TenantRuntimeUnitRegistry(async () => a)

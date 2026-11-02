@@ -297,10 +297,28 @@ describe('multi-tenant Host composition', () => {
       requiresPlacement: (id) => id !== 'public-installer', resolveUnitId: () => 'public-installer',
       factory: async () => { throw new Error('request need not load for this assertion') },
     })
+
     await host.markRoutable('public-installer')
     expect(ownership.activate).not.toHaveBeenCalled()
     await fetch(`http://127.0.0.1:${host.port}/missing`)
     expect(ownership.isCurrent).not.toHaveBeenCalled()
+  })
+
+  it('does not apply tenant-native storage to an explicitly disabled shared installer engine', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'shared-installer-native-')); roots.push(root)
+    const previous = process.env.KALA_NATIVE_POSIX_ROOT
+    process.env.KALA_NATIVE_POSIX_ROOT = join(root, 'must-not-mount-tenant-storage')
+    try {
+      const unit = await startLoopbackHostRuntimeUnit('public-installer', {
+        sessionsDir: join(root, 'sessions'), llm,
+        defaultConfig: createConfig({ systemPrompt: 'test', tools: [] }),
+        capabilities: AGENT_RUNTIME_CAPABILITIES, copilot: { enabled: false },
+      })
+      await unit.close()
+    } finally {
+      if (previous === undefined) delete process.env.KALA_NATIVE_POSIX_ROOT
+      else process.env.KALA_NATIVE_POSIX_ROOT = previous
+    }
   })
 
   it('interrupts unfinished checkpoints on Unit close and disposes its resource exactly once', async () => {

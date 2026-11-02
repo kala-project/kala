@@ -30,6 +30,7 @@ export async function startTenantRuntimeService(options: {
   listenHost?: string
   requireProvisioning?: boolean
   maxLoadedUnits?: number
+  countsTowardCapacity?: (unitId: TenantRuntimeUnitId) => boolean
   placementOwnership?: RuntimeUnitPlacementOwnership
   replicaMembership?: RuntimeReplicaMembership
   /** Opt-in composition-root authority; legacy/local services keep their existing lifecycle. */
@@ -44,7 +45,7 @@ export async function startTenantRuntimeService(options: {
   if (options.replicaMembership && !options.placementOwnership) {
     throw new Error('Runtime replica membership requires Unit placement: either exclusive ownership or an operator-gated parallel barrier')
   }
-  const units = new TenantRuntimeUnitRegistry(options.factory, options.maxLoadedUnits)
+  const units = new TenantRuntimeUnitRegistry(options.factory, options.maxLoadedUnits, options.countsTowardCapacity)
   const allowedUnits = new Set<TenantRuntimeUnitId>()
   const generations = new Map<TenantRuntimeUnitId, number>()
   const epochs = new Map<TenantRuntimeUnitId, number>()

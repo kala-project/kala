@@ -1,6 +1,6 @@
 import { dirname, join } from 'node:path'
 
-import type { InstallerSession } from './installer-session.js'
+import { renderExecutorServiceConfig, type InstallerSession } from './installer-session.js'
 import type { ServiceAction, ServiceMode } from './cli-args.js'
 
 export type Command = {
@@ -70,19 +70,7 @@ export function renderLinuxServiceFiles(session: InstallerSession, home: string)
 } {
   const paths = linuxServicePaths(session.mode, home)
   const servicePath = `${dirname(process.execPath)}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`
-  const config = `${JSON.stringify({
-    version: 1,
-    host: session.host,
-    ...(session.profile ? { profile: session.profile } : {}),
-    ...(session.name ? { name: session.name } : {}),
-    sandboxRoots: session.sandboxRoots,
-    privilegeMode: session.privilegeMode,
-    credentialFile: paths.credential,
-    ...(session.installationId ? { installationId: session.installationId } : {}),
-    installationSource: 'dashboard-native',
-    ...(session.managedRoot ? { managedRoot: session.managedRoot, serviceMode: session.mode } : {}),
-    ...(session.update ? { update: { enabled: true, ...session.update } } : {}),
-  }, null, 2)}\n`
+  const config = renderExecutorServiceConfig(session, paths.credential)
   const credential = session.credential.token
     ? `${session.credential.token}\n`
     : `${session.credential.invite!}\n`

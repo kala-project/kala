@@ -51,6 +51,7 @@ import { executorProfileDir, loadOrCreateWorkspaceId, normalizeExecutorProfile }
 import { acquireExecutorLock } from '../src/local-lock.js'
 import { assertSupportedInstallerPrivileges, bootstrapEnvironment, defaultManagedRoot, downloadExecutorUpdateAssets, redeemInstallation, reportInstallation, waitForApproval, writeInstallerSession } from '../src/installer-flow.js'
 import { createLinuxServicePlan, executeLinuxServicePlan, linuxServicePaths, type Command } from '../src/linux-service.js'
+import { installPosixService, macosServiceDefinition, manageMacosService } from '../src/posix-service.js'
 import { assertElevatedWindowsAdministrator, assertManagedWindowsInstallation, copyWindowsNodePtyRuntime, copyWindowsServiceHost, createWindowsSelfRemovalPlan, createWindowsServicePlan, deleteWindowsSelfRemovalTask, encodeWindowsTaskXml, executeWindowsServicePlan, registerWindowsSelfRemovalTask, renderWindowsServiceConfig, secureWindowsServiceDataDir, waitForWindowsServiceStopped, type WindowsServiceAction } from '../src/windows-service.js'
 import type { ServiceAction, ServiceMode } from '../src/cli-args.js'
 import type { InstallerSession } from '../src/installer-session.js'
@@ -284,7 +285,7 @@ async function runInternalInstaller(): Promise<void> {
     managedInstall = installManagedGeneration(installSource, managedRoot, release, installSource === process.execPath ? undefined : process.execPath)
   }
   const executable = managedInstall?.executable ?? process.execPath
-  const updateAssets = service ? await downloadExecutorUpdateAssets(env.HOST_URL) : undefined
+  const updateAssets = service && process.platform === 'linux' ? await downloadExecutorUpdateAssets(env.HOST_URL) : undefined
   if (service && !updateAssets) {
     process.stdout.write('Kala automatic updates are unavailable for this deployment; continuing without managed updates.\n')
   }
@@ -310,23 +311,25 @@ async function runInternalInstaller(): Promise<void> {
   if (updateAssets) writeFileSync(join(managedRoot, 'update-public-key.pem'), updateAssets.publicKey, { mode: 0o600 })
   const sessionFile = join(managedRoot, 'installer-session.json')
   writeInstallerSession(sessionFile, installerSession)
-  const plan = createLinuxServicePlan('install', installerSession.mode, homedir(), installerSession)
   await reportInstallation(env, 'service_installing')
   // Enter `starting` before `systemctl enable --now`: a fast service can announce
   // during that command, and Host only accepts online completion from starting.
   await reportInstallation(env, 'starting')
-  await executeLinuxServicePlan(plan, { run: runServiceCommand })
+  await installPosixService(installerSession, posixServiceOptions())
   rmSync(sessionFile, { force: true })
   process.stdout.write(`[4/4] Service started and connected.\n`)
   printServiceCommands(installerSession.mode, executable)
 }
 
 async function runInviteInstaller(): Promise<void> {
-  if (process.platform !== 'win32') throw new Error('Invite installation is available on Windows only')
+  if (!['linux', 'darwin', 'win32'].includes(process.platform)) throw new Error('Unsupported invite installation platform')
   const host = process.env.HOST_URL?.replace(/\/$/u, '')
   const invite = process.env.EXECUTOR_INVITE
   const mode = process.env.KALA_INVITE_INSTALL_MODE
+  const privilegeMode = process.env.KALA_INVITE_PRIVILEGE_MODE ?? 'privileged'
   if (!host || !invite || !/^ak_invite_[A-Za-z0-9_-]+$/u.test(invite) || (mode !== 'temporary' && mode !== 'service')) throw new Error('Invalid invite installation environment')
+  if (privilegeMode !== 'privileged' && privilegeMode !== 'restricted') throw new Error('Invalid invite privilege mode')
+  if (mode === 'service' && privilegeMode === 'restricted' && (process.platform !== 'linux' || process.getuid?.() === 0)) throw new Error('Restricted services require a non-root Linux user')
   const hostUrl = new URL(host)
   if (hostUrl.username || hostUrl.password || hostUrl.search || hostUrl.hash || (hostUrl.protocol !== 'https:' && !(hostUrl.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(hostUrl.hostname)))) throw new Error('Invite installation requires a secure Host URL')
   const workspaceRoot = resolve(process.cwd())
@@ -334,10 +337,18 @@ async function runInviteInstaller(): Promise<void> {
     await main(['--host', host, '--sandbox-root', workspaceRoot])
     return
   }
-  if (basename(process.execPath).toLowerCase() === 'node.exe') throw new Error('Windows service mode requires the native kala-executor asset')
-  await assertElevatedWindowsAdministrator()
-  process.stdout.write('Starting Private Cloud invite enrollment.\n')
-  const workspaceId = loadOrCreateWorkspaceId()
+  if (process.platform === 'win32') {
+    if (basename(process.execPath).toLowerCase() === 'node.exe') throw new Error('Windows service mode requires the native kala-executor asset')
+    await assertElevatedWindowsAdministrator()
+  } else {
+    const servicePaths = process.platform === 'linux'
+      ? linuxServicePaths(process.getuid?.() === 0 ? 'system' : 'user', homedir())
+      : { config: macosServiceDefinition(process.getuid?.() === 0 ? 'system' : 'user', posixServiceOptions()).configPath }
+    if (existsSync(servicePaths.config)) throw new Error('Refusing to replace an existing Executor service')
+  }
+  process.stdout.write('Starting organization-bound invite enrollment.\n')
+  const profile = normalizeExecutorProfile(process.env.KALA_EXECUTOR_PROFILE)
+  const workspaceId = loadOrCreateWorkspaceId(undefined, profile)
   const routeHint = hashExecutorInviteRoute(invite)
   let acceptToken!: (token: string) => void
   const enrolledToken = new Promise<string>((resolveToken) => { acceptToken = resolveToken })
@@ -350,15 +361,37 @@ async function runInviteInstaller(): Promise<void> {
     const enrollment = await Promise.race([Promise.all([handle.ready, enrolledToken]).then(([, token]) => ({ token })), handle.permanentError.then((error) => ({ error })), timedOut])
     if ('error' in enrollment) throw new Error(`Executor invite enrollment failed: ${enrollment.error.code}`)
     delete process.env.EXECUTOR_INVITE
-    process.stdout.write('Private Cloud invited device enrolled.\n')
+    process.stdout.write('Organization-bound device enrolled.\n')
     await handle.close()
-    process.stdout.write('Installing Private Cloud Windows service.\n')
-    await installWindowsService({ HOST_URL: host, EXECUTOR_PRIVILEGE_MODE: 'privileged', EXECUTOR_INSTALL_ID: `invite-${routeHint}` }, workspaceRoot, enrollment.token, workspaceId, { routeHint, installationSource: 'private-cloud-invite', reportProgress: false })
+    if (process.platform === 'win32') {
+      await installWindowsService({ HOST_URL: host, EXECUTOR_PRIVILEGE_MODE: privilegeMode, EXECUTOR_INSTALL_ID: `invite-${routeHint}` }, workspaceRoot, enrollment.token, workspaceId, { routeHint, installationSource: 'private-cloud-invite', reportProgress: false })
+    } else {
+      const managedRoot = defaultManagedRoot(homedir(), process.getuid?.() === 0)
+      const installSource = managedInstallSourceExecutable(process.execPath, process.argv[1])
+      const managed = installManagedGeneration(installSource, managedRoot, executorReleaseVersion(), installSource === process.execPath ? undefined : process.execPath)
+      const updateAssets = process.platform === 'linux' ? await downloadExecutorUpdateAssets(host) : undefined
+      if (!updateAssets) process.stdout.write('Automatic updates are unavailable for this deployment; the service remains manually updatable.\n')
+      if (updateAssets) writeFileSync(join(managedRoot, 'update-public-key.pem'), updateAssets.publicKey, { mode: 0o600 })
+      const session: InstallerSession = {
+        version: 1, mode: process.getuid?.() === 0 ? 'system' : 'user', privilegeMode,
+        executable: managed.executable, host, sandboxRoots: [workspaceRoot],
+        credential: { token: enrollment.token }, workspaceId, routeHint, installationSource: 'private-cloud-invite', managedRoot,
+        ...(profile ? { profile } : {}),
+        ...(updateAssets ? { update: { manifestUrl: updateAssets.manifestUrl, publicKeyFile: join(managedRoot, 'update-public-key.pem'), channel: 'stable', intervalMinutes: 60 } } : {}),
+      }
+      await installPosixService(session, posixServiceOptions())
+      process.stdout.write('Executor service installed. It can reconnect without the invite or this terminal.\n')
+      printServiceCommands(session.mode, managed.executable)
+    }
   } finally {
     if (enrollmentTimeout) clearTimeout(enrollmentTimeout)
     delete process.env.EXECUTOR_INVITE
     await handle.close().catch(() => undefined)
   }
+}
+
+function posixServiceOptions() {
+  return { platform: process.platform, architecture: process.arch, home: homedir(), uid: process.getuid?.(), runner: { run: runServiceCommand } }
 }
 
 async function installWindowsService(env: Pick<ReturnType<typeof bootstrapEnvironment>, 'HOST_URL' | 'EXECUTOR_PRIVILEGE_MODE'> & Partial<Pick<ReturnType<typeof bootstrapEnvironment>, 'EXECUTOR_INSTALL_LABEL' | 'EXECUTOR_INSTALL_ID'>>, workspaceRoot: string, token: string, workspaceId: string, options: { routeHint?: string; installationSource?: 'dashboard-native' | 'private-cloud-invite'; reportProgress?: boolean } = {}): Promise<void> {
@@ -475,6 +508,12 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
 
   if (args.command === 'service') {
     if (process.platform === 'win32') { await manageWindowsService(args.serviceAction!); return }
+    if (process.platform === 'darwin') {
+      const mode = args.serviceMode ?? (existsSync(macosServiceDefinition('system', posixServiceOptions()).configPath) ? 'system' : 'user')
+      const action = { start: 'bootstrap', stop: 'bootout', restart: 'kickstart', status: 'status', logs: 'logs', uninstall: 'uninstall' } as const
+      await manageMacosService(action[args.serviceAction!], mode, posixServiceOptions())
+      return
+    }
     if (process.platform !== 'linux') throw new Error('Executor service management is currently available on Linux and Windows only')
     const systemPaths = linuxServicePaths('system', homedir())
     const userPaths = linuxServicePaths('user', homedir())
