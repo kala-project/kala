@@ -33,6 +33,7 @@ export type GatewayAuthentication =
       oidc: OidcClient
       loginStates: LoginStateStore
       secretBox: SessionSecretBox
+      resolveIdentity?(identity: AuthenticatedIdentity): Promise<AuthenticatedIdentity | undefined>
       ownerBootstrap?: OwnerBootstrapGateway
       enterpriseSso?: EnterpriseSsoResolver
     }
@@ -52,11 +53,13 @@ function publicProfile(session: AuthenticatedIdentity): { displayName: string; e
   return { displayName, ...(session.email ? { email: session.email } : {}), initials }
 }
 
-function isDocumentNavigation(request: IncomingMessage): boolean {
+function isDocumentNavigation(request: IncomingMessage, pathname: string): boolean {
   if (request.method !== 'GET') return false
   const accept = request.headers.accept ?? ''
   const destination = request.headers['sec-fetch-dest']
-  return accept.includes('text/html') && (destination === 'document' || destination === undefined)
+  // Service Worker shell fetches use "empty"; only Dashboard paths qualify.
+  return accept.includes('text/html') && (destination === 'document' || destination === undefined
+    || (destination === 'empty' && isDashboardRequest(request, pathname)))
 }
 
 function isPublicInstallerPath(pathname: string): boolean {
@@ -165,7 +168,33 @@ function cookies(request: IncomingMessage): Record<string, string> {
 }
 
 function signedOutPage(): string {
-  return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Signed out · Kala</title><style>html{color-scheme:light dark}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#09090b;color:#f8fafc;font:16px system-ui,sans-serif}.card{width:min(28rem,calc(100% - 2rem));padding:2rem;border:1px solid #27272a;border-radius:1rem;background:#18181b;box-sizing:border-box}.mark{width:3rem;height:3rem;display:grid;place-items:center;border-radius:.75rem;background:#0f766e;font-weight:800}h1{font-size:1.5rem;margin:1.25rem 0 .5rem}p{color:#a1a1aa;line-height:1.5}a{display:inline-flex;margin-top:1rem;padding:.75rem 1rem;border-radius:.65rem;background:#0f766e;color:white;text-decoration:none;font-weight:650}</style></head><body><main class="card"><div class="mark">AR</div><h1>You are signed out</h1><p>Your Kala browser session has ended. Sign in again when you are ready.</p><a href="/auth/login">Sign in</a></main></body></html>'
+  return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Signed out · Kala</title><style>html{color-scheme:light dark}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#09090b;color:#f8fafc;font:16px system-ui,sans-serif}.card{width:min(28rem,calc(100% - 2rem));padding:2rem;border:1px solid #27272a;border-radius:1rem;background:#18181b;box-sizing:border-box}.mark{width:3rem;height:3rem;display:grid;place-items:center;border-radius:.75rem;background:#0f766e;font-weight:800}h1{font-size:1.5rem;margin:1.25rem 0 .5rem}p{color:#a1a1aa;line-height:1.5}a{display:inline-flex;margin-top:1rem;padding:.75rem 1rem;border-radius:.65rem;background:#0f766e;color:white;text-decoration:none;font-weight:650}</style></head><body><main class="card"><div class="mark">K</div><h1>You are signed out</h1><p>Your Kala browser session has ended. Sign in again when you are ready.</p><a href="/auth/recover">Sign in</a></main></body></html>'
+}
+
+function loginRecoveryPage(): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · Kala</title></head><body>
+<main><h1>Opening Kala sign-in</h1><p id="status" role="status">Refreshing the browser application before signing in.</p><button id="retry" hidden>Retry</button><noscript>JavaScript is required to refresh this browser application before signing in.</noscript></main>
+<script>
+async function recover() {
+  document.getElementById('retry').hidden = true;
+  try {
+    if ('serviceWorker' in navigator) {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      const kala = registrations.filter((registration) =>
+        registration.scope === location.origin + '/' &&
+        [registration.active, registration.waiting, registration.installing].some((worker) =>
+          worker && new URL(worker.scriptURL).pathname === '/sw.js'));
+      await Promise.all(kala.map((registration) => registration.unregister()));
+    }
+    location.replace('/auth/login');
+  } catch {
+    document.getElementById('status').textContent = 'Could not refresh the browser application. Retry before signing in.';
+    document.getElementById('retry').hidden = false;
+  }
+}
+document.getElementById('retry').addEventListener('click', recover);
+recover();
+</script></body></html>`
 }
 
 function dedicatedOwnerLoginPage(error = false): string {
@@ -191,6 +220,7 @@ export async function startRuntimeIngressGateway(options: {
   port: number
   telemetry?: OnlineTelemetry
   authentication: GatewayAuthentication
+  singleTenantOwner?: boolean
   directory: RuntimeAssignmentStore
   organizations?: OrganizationStore
   hostOrigin: string
@@ -332,6 +362,7 @@ export async function startRuntimeIngressGateway(options: {
     if (!token || token.length < 32 || token.length > 128) return undefined
     let session = await options.sessions.findByTokenHash(browserSessionTokenHash(token))
     if (!session || !isLive(session, Date.now())) return undefined
+    if (options.singleTenantOwner && (await options.organizations?.findAccess(session.identity))?.membership.role !== 'owner') return undefined
     if (session.refreshToken && session.providerRefreshAfter !== undefined && session.providerRefreshAfter <= Date.now()) {
       if (options.authentication.kind !== 'oidc') return undefined
       try {
@@ -418,13 +449,19 @@ export async function startRuntimeIngressGateway(options: {
       response.end(signedOutPage())
       return
     }
+    if (url.pathname === '/auth/recover') {
+      if (request.method !== 'GET' && request.method !== 'HEAD') { response.writeHead(405, { allow: 'GET, HEAD', 'cache-control': 'no-store' }); response.end(); return }
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' })
+      response.end(request.method === 'HEAD' ? undefined : loginRecoveryPage())
+      return
+    }
     if (url.pathname === '/auth/invite-result' && url.searchParams.get('status') === 'accepted') {
       response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
       response.end(inviteResultPage('accepted')); return
     }
     if (url.pathname === '/auth/owner-bootstrap') {
       const token = url.searchParams.get('token')?.trim() ?? ''
-      if (options.authentication.kind !== 'oidc' || !options.authentication.ownerBootstrap || !isOwnerBootstrapToken(token)) { response.writeHead(404, { 'cache-control': 'no-store' }); response.end('owner bootstrap unavailable'); return }
+      if (options.singleTenantOwner || options.authentication.kind !== 'oidc' || !options.authentication.ownerBootstrap || !isOwnerBootstrapToken(token)) { response.writeHead(404, { 'cache-control': 'no-store' }); response.end('owner bootstrap unavailable'); return }
       const tokenHash = ownerBootstrapHash(token)
       try { await options.authentication.ownerBootstrap.assertAvailable(tokenHash) } catch { response.writeHead(410, { 'cache-control': 'no-store' }); response.end('owner bootstrap unavailable'); return }
       const oidcNonce = randomBytes(24).toString('base64url')
@@ -464,8 +501,13 @@ export async function startRuntimeIngressGateway(options: {
         response.writeHead(303, { location: publicUrl.href, 'cache-control': 'no-store', 'set-cookie': `ak_session=${sessionToken}; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=2592000` })
         response.end(); return
       }
+      if (request.method !== 'GET') { response.writeHead(405, { allow: 'GET', 'cache-control': 'no-store' }); response.end(); return }
       const forceLogin = url.searchParams.get('prompt') === 'login'
       const organizationInviteToken = url.searchParams.get('invite')?.trim()
+      if (options.singleTenantOwner && organizationInviteToken) {
+        response.writeHead(403, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        response.end(JSON.stringify({ error: 'dedicated_single_owner' })); return
+      }
       if (organizationInviteToken && !/^ak_org_invite_[A-Za-z0-9_-]{43}$/u.test(organizationInviteToken)) {
         response.writeHead(400, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
         response.end(inviteResultPage('unavailable')); return
@@ -492,8 +534,15 @@ export async function startRuntimeIngressGateway(options: {
       const nonce = cookies(request).ak_login
       const login = nonce ? await options.authentication.loginStates.take(nonce) : undefined
       if (!login) { response.writeHead(400); response.end('invalid login state'); return }
-      const authentication = await options.authentication.oidc.callback(url, login.redirectUri, login.codeVerifier, login.state, login.oidcNonce)
-      const identity = authentication.identity
+      const upstreamAuthentication = await options.authentication.oidc.callback(url, login.redirectUri, login.codeVerifier, login.state, login.oidcNonce)
+      const identity = options.authentication.resolveIdentity
+        ? await options.authentication.resolveIdentity(upstreamAuthentication.identity)
+        : upstreamAuthentication.identity
+      if (!identity) {
+        response.writeHead(403, { 'content-type': 'application/json', 'cache-control': 'no-store', 'set-cookie': `ak_login=; HttpOnly${secure}; SameSite=Lax; Path=/auth; Max-Age=0` })
+        response.end(JSON.stringify({ error: 'dedicated_owner_not_authorized' })); return
+      }
+      const authentication = { ...upstreamAuthentication, identity }
       if (login.ownerBootstrapHash) {
         try {
           const result = await options.authentication.ownerBootstrap?.captureCandidate(login.ownerBootstrapHash, identity)
@@ -508,7 +557,7 @@ export async function startRuntimeIngressGateway(options: {
       }
       if (login.ssoConnectionId) {
         const connection = await options.authentication.enterpriseSso?.resolve(login.ssoConnectionId)
-        if (!connection || !await options.authentication.enterpriseSso!.authorize(connection, identity)) {
+        if (!connection || !await options.authentication.enterpriseSso!.authorize(connection, upstreamAuthentication.identity)) {
           response.writeHead(403, { 'content-type': 'application/json', 'cache-control': 'no-store' })
           response.end(JSON.stringify({ error: 'sso_authentication_mismatch' })); return
         }
@@ -529,7 +578,13 @@ export async function startRuntimeIngressGateway(options: {
           response.end(inviteResultPage(kind)); return
         }
       } else {
-        access = options.organizations ? await options.organizations.getOrCreateForIdentity(identity) : undefined
+        access = options.organizations
+          ? await (options.singleTenantOwner ? options.organizations.findAccess(identity) : options.organizations.getOrCreateForIdentity(identity))
+          : undefined
+      }
+      if (options.singleTenantOwner && (!access || access.membership.role !== 'owner')) {
+        response.writeHead(403, { 'content-type': 'application/json', 'cache-control': 'no-store', 'set-cookie': `ak_login=; HttpOnly${secure}; SameSite=Lax; Path=/auth; Max-Age=0` })
+        response.end(JSON.stringify({ error: 'dedicated_owner_not_authorized' })); return
       }
       if (access && access.organization.status !== 'active') {
         denyInactiveOrganization(response, access.organization.status)
@@ -866,7 +921,7 @@ export async function startRuntimeIngressGateway(options: {
       }
       response.writeHead(204, { 'cache-control': 'no-store' }); response.end(); return
     }
-    const dedicatedIdentityMutation = options.authentication.kind === 'dedicated-owner' && (
+    const dedicatedIdentityMutation = (options.singleTenantOwner || options.authentication.kind === 'dedicated-owner') && (
       (url.pathname === '/organization/invites' && request.method === 'POST')
       || (/^\/organization\/invites\//u.test(url.pathname) && request.method === 'DELETE')
       || (url.pathname === '/organization/members' && ['POST', 'PATCH', 'DELETE'].includes(request.method ?? ''))
@@ -952,7 +1007,7 @@ export async function startRuntimeIngressGateway(options: {
     if (session && organizationAccess && !enforceRateLimit(response, options.rateLimiter, `${organizationAccess.organization.id}:${session.identity.issuer}:${session.identity.subject}`)) return
     const assignment = organizationAccess ? { unitId: organizationAccess.organization.unitId, identity: identity! } : identity ? await options.directory.findByIdentity(identity) : undefined
     if (!identity || !assignment || identity.issuer !== assignment.identity.issuer || identity.subject !== assignment.identity.subject) {
-      if (isDocumentNavigation(request)) response.writeHead(303, { location: '/auth/login', 'cache-control': 'no-store' })
+      if (isDocumentNavigation(request, url.pathname)) response.writeHead(303, { location: '/auth/login', 'cache-control': 'no-store' })
       else { response.writeHead(401, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ error: 'authentication_required' })); return }
       response.end(); return
     }

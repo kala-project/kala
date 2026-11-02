@@ -79,6 +79,7 @@ export function RuntimeSection({
     }
   }, [operation?.operationId, operation?.phase, platform])
   const runtime = payload.runtime
+  const externallyManaged = payload.runtimeManagement === 'external'
   const currentAttempt = runtime?.current
   const restartActive = platform ? Boolean(operation && !['completed', 'aborted', 'rolled_back', 'rollback_failed', 'failed', 'rejected'].includes(operation.phase)) : Boolean(currentAttempt)
   return (
@@ -100,7 +101,7 @@ export function RuntimeSection({
               {operation?.blockers?.length ? <div className="text-xs text-amber-600">{t('settings.runtime.restartBlockers')}: {operation.blockers.join(', ')}</div> : null}
               {operation?.operationId ? <div className="break-all font-mono text-caption text-muted-foreground">{operation.operationId}</div> : null}
             </div>
-            <div className="flex flex-col gap-2 sm:flex-row">
+            {!externallyManaged ? <div className="flex flex-col gap-2 sm:flex-row">
               <Button type="button" size="sm" className="h-9" disabled={restart.isPending || restartActive} onClick={() => restart.mutate()}>
                 <RefreshCw className="mr-1.5 h-4 w-4" aria-hidden="true" /> {t('settings.runtime.restartHost')}
               </Button>
@@ -109,12 +110,20 @@ export function RuntimeSection({
                   {t('settings.runtime.abortRestart')}
                 </Button>
               ) : null}
-            </div>
+            </div> : null}
           </div>
-          <p className="mt-3 text-xs leading-5 text-muted-foreground">{t('settings.runtime.restartDesc')}</p>
+          <p className="mt-3 text-xs leading-5 text-muted-foreground">{t(externallyManaged ? 'settings.runtime.externallyManaged' : 'settings.runtime.restartDesc')}</p>
           {error ? <div className="mt-2 text-xs text-destructive">{error}</div> : null}
         </div>
-      ) : null}
+      ) : <p className="text-sm text-muted-foreground">{t('settings.runtime.unavailable')}</p>}
+      {payload.agentRuntimes?.map((agentRuntime) => (
+        <div key={agentRuntime.id} className="mb-3 rounded-md bg-muted/40 p-4 text-sm" data-testid={`agent-runtime-${agentRuntime.id}`}>
+          <div className="font-medium">{agentRuntime.label}</div>
+          <div>{t(`settings.runtime.status.${agentRuntime.status}`)}</div>
+          {agentRuntime.reason ? <p className="text-destructive">{agentRuntime.reason}</p> : null}
+          {agentRuntime.models?.length ? <p className="text-muted-foreground">{t('settings.runtime.availableModels', { count: agentRuntime.models.length })}</p> : null}
+        </div>
+      ))}
     </div>
   )
 }

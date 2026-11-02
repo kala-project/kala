@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
-import { NarrowContextualRow, NoSessionArea, TopbarRestoreButton, WorkbenchToolbar, connectionStatusForTransport, readInitialConfig, resolveSessionDirectoryLoadingOwner, selectedSessionHistoryIsLoading, sessionDirectoryIsLoading, shouldRenderWorkbenchToolbar, workspaceTerminalCloseNeedsConfirmation, workspaceTerminalDialogSizeClass, workspaceTerminalSessionId } from './app.js'
+import { NarrowContextualRow, NoSessionArea, TopbarRestoreButton, WorkbenchToolbar, connectionStatusForTransport, readInitialConfig, sessionLocationSearch, resolveSessionDirectoryLoadingOwner, selectedSessionHistoryIsLoading, sessionDirectoryIsLoading, shouldRenderWorkbenchToolbar, workspaceTerminalCloseNeedsConfirmation, workspaceTerminalDialogSizeClass, workspaceTerminalSessionId } from './app.js'
 import { DesktopSessionRail } from './app-shell/AppShellNav.js'
 import { coarseStatusForIndicator, deriveSelectedSessionActivity } from './app-logic/session-activity.js'
 
@@ -437,6 +437,13 @@ describe('NoSessionArea', () => {
   })
 
   describe('initial session selection', () => {
+    it('preserves a forced refresh through app boot while stripping credentials and unrelated query parameters', () => {
+      const search = '?__kala_refresh=once&token=secret&host=remote'
+      expect(sessionLocationSearch({ explicit: false, sessionId: null }, search)).toBe('?__kala_refresh=once')
+      expect(sessionLocationSearch({ explicit: true, sessionId: 'selected' }, search)).toBe('?sessionId=selected&__kala_refresh=once')
+      expect(sessionLocationSearch({ explicit: true, sessionId: 'selected' }, '?token=secret')).toBe('?sessionId=selected')
+    })
+
     it.each(['/', '/#/agent', '/#/docs'])('opens %s as an unsaved draft regardless of saved tabs', (url) => {
       window.history.replaceState(null, '', url)
       localStorage.setItem('ak-session-tabs-v1', JSON.stringify({ open: ['previous-session'] }))

@@ -1,6 +1,14 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { registerSW } from 'virtual:pwa-register'
 
-import { activatePwaUpdate, forcePwaRefresh, initPwa, isStandalone } from './pwa.js'
+vi.mock('virtual:pwa-register', () => ({ registerSW: vi.fn() }))
+
+import { activatePwaUpdate, activateWaitingWorker, forcePwaRefresh, initPwa, isStandalone } from './pwa.js'
+
+afterEach(() => {
+  vi.unstubAllEnvs()
+  vi.unstubAllGlobals()
+})
 
 function serviceWorkerHarness(): {
   serviceWorker: Pick<ServiceWorkerContainer, 'addEventListener' | 'removeEventListener'>
@@ -84,6 +92,7 @@ describe('activatePwaUpdate', () => {
       reload,
       timeoutMs: 10_000,
     })
+
     await Promise.resolve()
     expect(sendSkipWaiting).toHaveBeenCalledTimes(1)
     expect(reload).not.toHaveBeenCalled()
@@ -131,5 +140,105 @@ describe('activatePwaUpdate', () => {
 
     expect(reload).not.toHaveBeenCalled()
     expect(harness.remove).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('registered worker lifecycle', () => {
+  async function register(waiting: object | null, forced = false) {
+    const harness = serviceWorkerHarness()
+    const reload = vi.fn()
+    vi.stubEnv('PROD', true)
+    vi.stubGlobal('window', {
+      location: { href: 'https://kala.example/' + (forced ? '?__kala_refresh=test' : ''), reload },
+      history: { replaceState: vi.fn() },
+      addEventListener: vi.fn(),
+    })
+    const getRegistration = vi.fn(async () => ({ waiting }))
+    vi.stubGlobal('navigator', { serviceWorker: { ...harness.serviceWorker, getRegistration } })
+    const sendSkipWaiting = vi.fn(async () => {})
+    vi.mocked(registerSW).mockReset().mockReturnValue(sendSkipWaiting)
+    const handlers = { onNeedRefresh: vi.fn(), onOfflineReady: vi.fn(), onRegisterError: vi.fn() }
+    const controller = initPwa(handlers)
+    await vi.waitFor(() => expect(registerSW).toHaveBeenCalledOnce())
+    const options = vi.mocked(registerSW).mock.calls[0][0]!
+    return { harness, reload, getRegistration, sendSkipWaiting, handlers, controller, options }
+  }
+
+  it('does not advertise a new version for an external installation with no waiting worker', async () => {
+    const state = await register(null)
+    state.options.onNeedRefresh?.()
+    await vi.waitFor(() => expect(state.getRegistration).toHaveBeenCalledOnce())
+    expect(state.handlers.onNeedRefresh).not.toHaveBeenCalled()
+  })
+
+  it('keeps the update prompt for an actual waiting worker', async () => {
+    const state = await register({ state: 'installed' })
+    state.options.onNeedRefresh?.()
+    await vi.waitFor(() => expect(state.handlers.onNeedRefresh).toHaveBeenCalledOnce())
+  })
+
+  it('finishes an older page forced refresh instead of presenting the same waiting update again', async () => {
+    const waiting = Object.assign(new EventTarget(), {
+      state: 'installed',
+      postMessage: vi.fn(() => {
+        waiting.state = 'activated'
+        waiting.dispatchEvent(new Event('statechange'))
+      }),
+    })
+    const state = await register(waiting, true)
+    state.options.onNeedRefresh?.()
+    await vi.waitFor(() => expect(state.reload).toHaveBeenCalledOnce())
+    expect(state.handlers.onNeedRefresh).not.toHaveBeenCalled()
+  })
+
+  it('reloads other tabs on activation and deduplicates the explicit activation reload', async () => {
+    const state = await register({ state: 'installed' })
+    const applying = state.controller.applyUpdate()
+    await vi.waitFor(() => expect(state.sendSkipWaiting).toHaveBeenCalledOnce())
+    state.options.onNeedReload?.()
+    state.harness.dispatchControllerChange()
+    await applying
+    state.options.onNeedReload?.()
+    expect(state.reload).toHaveBeenCalledOnce()
+  })
+})
+
+describe('forced refresh activation', () => {
+  class WaitingWorker extends EventTarget {
+    state: ServiceWorkerState = 'installed'
+    postMessage = vi.fn(() => {
+      this.state = 'activated'
+      this.dispatchEvent(new Event('statechange'))
+    })
+  }
+
+  it('activates the waiting update before unregistering so another tab cannot retain the old active worker', async () => {
+    const waiting = new WaitingWorker()
+    const unregister = vi.fn(async () => {
+      expect(waiting.state).toBe('activated')
+      return true
+    })
+    const replace = vi.fn()
+    await forcePwaRefresh({
+      serviceWorker: { getRegistration: async () => ({ waiting, unregister }) } as unknown as ServiceWorkerContainer,
+      cacheStorage: { keys: async () => [], delete: async () => true },
+      location: { href: 'https://kala.example/', replace },
+    })
+    expect(waiting.postMessage).toHaveBeenCalledWith({ type: 'SKIP_WAITING' })
+    expect(unregister).toHaveBeenCalledOnce()
+    expect(replace).toHaveBeenCalledOnce()
+  })
+
+  it('reports an activation deadline rather than pretending a blocked update succeeded', async () => {
+    vi.useFakeTimers()
+    try {
+      const worker = new WaitingWorker()
+      worker.postMessage.mockImplementation(() => {})
+      const activation = expect(activateWaitingWorker(worker, 100)).rejects.toThrow('activation timed out')
+      await vi.advanceTimersByTimeAsync(100)
+      await activation
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

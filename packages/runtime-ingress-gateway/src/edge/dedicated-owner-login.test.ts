@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { FileBrowserSessionStore } from '../auth/browser-session-store.js'
+import type { LoginState } from '../auth/login-state-store.js'
+import { createSessionSecretBox } from '../auth/session-secret-box.js'
 import { MemoryRuntimeAssignmentStore, type AuthenticatedIdentity } from '../assignments/store.js'
 import { SlidingWindowRateLimiter } from '../governance/rate-limit.js'
 import { MemoryOrganizationStore } from '../organizations/store.js'
@@ -14,6 +16,50 @@ const running: Array<{ close(): Promise<void> }> = []
 afterEach(async () => { while (running.length) await running.pop()!.close() })
 
 describe('Dedicated Owner browser login', () => {
+  it('uses the shared OIDC flow without admitting other identities, creating tenants, or enabling membership mutation', async () => {
+    const owner = { issuer: 'https://identity.example.test', subject: 'explicit-owner' }
+    let callbackIdentity = owner
+    const organizations = new MemoryOrganizationStore()
+    const access = await organizations.getOrCreateForIdentity(owner)
+    const gateway = await createDedicatedGateway(owner, access.organization.id, organizations, () => callbackIdentity)
+    const origin = `http://127.0.0.1:${gateway.port}`
+    const signIn = async () => {
+      const login = await fetch(`${origin}/auth/login`, { redirect: 'manual' })
+      expect(login.status).toBe(302)
+      expect(login.headers.get('location')).toBe('https://identity.example.test/authorize')
+      return fetch(`${origin}/auth/callback?code=verified`, {
+        headers: { cookie: login.headers.get('set-cookie')!.split(';')[0]! }, redirect: 'manual',
+      })
+    }
+    callbackIdentity = { ...owner, subject: 'unprovisioned-user' }
+    const denied = await signIn()
+    expect(denied.status).toBe(403)
+    await expect(denied.json()).resolves.toEqual({ error: 'dedicated_owner_not_authorized' })
+    expect(denied.headers.get('set-cookie')).not.toContain('ak_session=')
+    expect(await organizations.findAccess(callbackIdentity)).toBeUndefined()
+    await organizations.addMember(access.organization.id, callbackIdentity, 'viewer')
+    expect((await signIn()).status).toBe(403)
+    callbackIdentity = owner
+    const accepted = await signIn()
+    expect(accepted.status).toBe(302)
+    const cookie = accepted.headers.getSetCookie().find((value) => value.startsWith('ak_session='))!.split(';')[0]!
+    const me = await fetch(`${origin}/auth/me`, { headers: { cookie } })
+    await expect(me.json()).resolves.toMatchObject({ authenticated: true, organization: { id: access.organization.id, role: 'owner' } })
+    const mutation = await fetch(`${origin}/organization/invites`, {
+      method: 'POST', headers: { cookie, origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'not-an-owner@example.test', role: 'admin' }),
+    })
+    expect(mutation.status).toBe(403)
+    await expect(mutation.json()).resolves.toEqual({ error: 'dedicated_single_owner' })
+    expect((await fetch(`${origin}/auth/login?invite=ak_org_invite_${'a'.repeat(43)}`, { redirect: 'manual' })).status).toBe(403)
+    expect((await fetch(`${origin}/auth/owner-bootstrap?token=untrusted`, { redirect: 'manual' })).status).toBe(404)
+    const legacy = await fetch(`${origin}/auth/login`, {
+      method: 'POST', headers: { origin, 'content-type': 'application/x-www-form-urlencoded' }, body: 'password=legacy', redirect: 'manual',
+    })
+    expect(legacy.status).toBe(405)
+    expect(legacy.headers.get('set-cookie')).toBeNull()
+  })
+
   it('issues a revocable opaque session only for the pre-provisioned Owner', async () => {
     const identity: AuthenticatedIdentity = { issuer: 'urn:kala:dedicated-owner', subject: 'owner', displayName: 'Owner' }
     const organizations = new MemoryOrganizationStore()
@@ -91,10 +137,11 @@ describe('Dedicated Owner browser login', () => {
   })
 })
 
-async function createDedicatedGateway(identity: AuthenticatedIdentity, organizationId: string, organizations: MemoryOrganizationStore): Promise<RuntimeIngressGateway> {
+async function createDedicatedGateway(identity: AuthenticatedIdentity, organizationId: string, organizations: MemoryOrganizationStore, oidcIdentity?: () => AuthenticatedIdentity): Promise<RuntimeIngressGateway> {
   const directory = mkdtempSync(join(tmpdir(), 'dedicated-owner-login-'))
   const sessions = new FileBrowserSessionStore(join(directory, 'sessions.json'))
   await sessions.load()
+  const states = new Map<string, LoginState>()
   const gateway = await startRuntimeIngressGateway({
     port: 0,
     listenHost: '127.0.0.1',
@@ -105,7 +152,17 @@ async function createDedicatedGateway(identity: AuthenticatedIdentity, organizat
     sessions,
     cacheNamespaceSecret: 'dedicated-owner-session-secret-with-entropy',
     ingressSecret: 'test-ingress-secret',
-    authentication: {
+    singleTenantOwner: Boolean(oidcIdentity),
+    authentication: oidcIdentity ? {
+      kind: 'oidc',
+      loginStates: { put: async (key, value) => { states.set(key, value) }, take: async (key) => { const value = states.get(key); states.delete(key); return value } },
+      secretBox: createSessionSecretBox('test', [{ id: 'test', key: Buffer.alloc(32, 1) }]),
+      oidc: {
+        authorizationUrl: async () => ({ url: new URL('https://identity.example.test/authorize'), codeVerifier: 'verifier', state: 'state' }),
+        callback: async () => ({ identity: oidcIdentity() }),
+        refresh: async () => ({}), revokeRefreshToken: async () => {},
+      },
+    } : {
       kind: 'dedicated-owner',
       loginRateLimiter: new SlidingWindowRateLimiter({ maxRequests: 5, windowMs: 60_000 }),
       owner: { authenticate: async (password) => password === 'correct-owner-password' ? { identity, organizationId } : undefined },

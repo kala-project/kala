@@ -34,7 +34,7 @@ integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptanc
   const model = `${project}-model`
   const executor = `${project}-executor`
   const workspaceVolume = `${project}-workspace`
-  const containers = [executor, gateway, ...(!dedicated ? [identity] : []), runtimeA, runtimeB, model, silo, postgres]
+  const containers = [executor, gateway, identity, runtimeA, runtimeB, model, silo, postgres]
   const repository = resolve(import.meta.dirname, '../../../..')
   const ingressSecret = `ingress-${randomUUID()}-${randomUUID()}`
   const postgresPassword = `pg-${randomUUID()}`
@@ -55,7 +55,6 @@ integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptanc
   const executorInvite = `ak_invite_${randomBytes(24).toString('base64url')}`
   const executorInviteId = `inv_${randomBytes(12).toString('base64url')}`
   let browserToken = randomBytes(32).toString('base64url')
-  const ownerPassword = randomBytes(32).toString('base64url')
   const routingTicketKey = randomBytes(32).toString('base64url')
   const sessionSecret = `session-${randomUUID()}-${randomUUID()}`
   let gatewayReaderConnection = ''
@@ -135,10 +134,10 @@ integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptanc
       await startFakeOpenAi()
       await Promise.all([startRuntime(runtimeA), startRuntime(runtimeB)])
       if (dedicated) await Promise.all([provision(runtimeA, 'provision-unit'), provision(runtimeB, 'provision-unit')])
-      if (!dedicated) await startIdentityDiscovery()
+      await startIdentityDiscovery()
       await startGateway()
       if (dedicated) await loginDedicatedOwner()
-      await assertPrivateNetwork([postgres, silo, model, runtimeA, runtimeB, ...(!dedicated ? [identity] : []), gateway])
+      await assertPrivateNetwork([postgres, silo, model, runtimeA, runtimeB, identity, gateway])
       runtimeEvidence.push(await runtimeIdentity(runtimeA), await runtimeIdentity(runtimeB))
       expect(runtimeEvidence[0]?.pid).toBeGreaterThan(1)
       expect(runtimeEvidence[1]?.pid).toBeGreaterThan(1)
@@ -193,7 +192,7 @@ integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptanc
         ].sort())
       }, 10_000)
       await startExternalExecutor()
-      await assertPrivateNetwork([postgres, silo, model, runtimeA, runtimeB, ...(!dedicated ? [identity] : []), gateway, executor])
+      await assertPrivateNetwork([postgres, silo, model, runtimeA, runtimeB, identity, gateway, executor])
 
       const initial = await runBrowserJourney('initial') as InitialGatewayResult
       expect(initial).toEqual({
@@ -422,7 +421,6 @@ integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptanc
       'runtime-url': `postgresql://postgres:${encodeURIComponent(postgresPassword)}@${postgres}:5432/${database}`,
       's3-access': accessKeyId,
       's3-secret': secretAccessKey,
-      'owner-password': ownerPassword,
     }
     for (const [name, value] of Object.entries(secretFiles)) await writeFile(join(testKeyDirectory, name), value, { flag: 'wx', mode: 0o600 })
     await docker('run', '--rm', '--network', network,
@@ -449,29 +447,34 @@ integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptanc
       '--workdir', '/app/packages/runtime-ingress-gateway',
       '--env', `KALA_DEPLOYMENT_CONFIG=${deploymentPath}`,
       '--env', `KALA_INGRESS_DATABASE_URL=postgresql://postgres:${encodeURIComponent(postgresPassword)}@${postgres}:5432/${controlDatabase}`,
-      '--env', 'KALA_DEDICATED_OWNER_PASSWORD_FILE=/run/kala-test/owner-password',
+      '--env', `OIDC_ISSUER=http://${identity}:8080`,
+      '--env', 'KALA_DEDICATED_OWNER_OIDC_SUBJECT=parallel-owner',
       '--env', 'KALA_DEDICATED_ORGANIZATION_NAME=Isolated Dedicated parallel acceptance',
-      nodeImage, 'node', '--import', '/app/packages/host/node_modules/tsx/dist/loader.mjs', 'src/bin/bootstrap-dedicated-owner.ts')
+      nodeImage, 'node', '--import', '/app/packages/host/node_modules/tsx/dist/loader.mjs', 'src/bin/bootstrap-dedicated-oidc-owner.ts')
     const result = parseLastJson(stdout) as { organizationId: string; runtimeUnitId: string }
     expect(result.organizationId).toMatch(/^org_[A-Za-z0-9_-]+$/u)
     expect(result.runtimeUnitId).toMatch(/^tenant_[A-Za-z0-9_-]+$/u)
     organizationId = result.organizationId
     unitId = result.runtimeUnitId
     const principal = await docker('exec', postgres, 'psql', '-U', 'postgres', '-d', controlDatabase, '-A', '-t', '-c',
-      "SELECT principal_id FROM dedicated_owner_credentials WHERE singleton=true")
+      "SELECT principal_id FROM dedicated_oidc_owner_bindings WHERE singleton=true")
     principalId = principal.stdout.trim()
     expect(principalId).toMatch(/^prn_[A-Za-z0-9_-]+$/u)
   }
 
   async function loginDedicatedOwner(): Promise<void> {
     const script = `const origin=process.env.TEST_ORIGIN;
-      const response=await fetch(origin+'/auth/login',{method:'POST',redirect:'manual',
-        headers:{origin,'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({password:process.env.TEST_PASSWORD})});
+      const login=await fetch(origin+'/auth/login',{redirect:'manual'});
+      if(login.status!==302)throw new Error('OIDC authorization redirect failed');
+      const authorization=await fetch(login.headers.get('location'),{redirect:'manual'});
+      if(authorization.status!==302)throw new Error('OIDC fixture authorization failed');
+      const response=await fetch(authorization.headers.get('location'),{redirect:'manual',
+        headers:{cookie:login.headers.get('set-cookie').split(';')[0]}});
       const token=response.headers.get('set-cookie')?.match(/ak_session=([^;]+)/u)?.[1];
-      if(response.status!==303||!token)throw new Error('Dedicated Owner login failed: '+response.status);
+      if(response.status!==302||!token)throw new Error('Dedicated OIDC Owner login failed: '+response.status);
       console.log(JSON.stringify({token}));`
     const { stdout } = await docker('run', '--rm', '--network', network,
-      '--env', `TEST_ORIGIN=http://${gateway}:13001`, '--env', `TEST_PASSWORD=${ownerPassword}`,
+      '--env', `TEST_ORIGIN=http://${gateway}:13001`,
       nodeImage, 'node', '--input-type=module', '--eval', script)
     const result = parseLastJson(stdout) as { token: string }
     expect(result.token).toMatch(/^[A-Za-z0-9_-]{43}$/u)
@@ -554,11 +557,44 @@ integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptanc
       authorization_endpoint: `${issuer}/authorize`,
       token_endpoint: `${issuer}/token`,
       jwks_uri: `${issuer}/jwks`,
+      userinfo_endpoint: `${issuer}/userinfo`,
       response_types_supported: ['code'],
       subject_types_supported: ['public'],
       id_token_signing_alg_values_supported: ['RS256'],
     })
-    const script = `import http from 'node:http';const body=${JSON.stringify(discovery)};http.createServer((request,response)=>{if(request.url?.includes('.well-known/openid-configuration')){response.writeHead(200,{'content-type':'application/json'});response.end(body);return}response.writeHead(404);response.end()}).listen(8080,'0.0.0.0',()=>console.log('identity_discovery_ready'))`
+    const script = `import http from 'node:http';
+      import {generateKeyPairSync,sign,randomUUID,createHash} from 'node:crypto';
+      const discovery=${discovery};
+      const {privateKey,publicKey}=generateKeyPairSync('rsa',{modulusLength:2048});
+      const jwk={...publicKey.export({format:'jwk'}),kid:'fixture',alg:'RS256',use:'sig'};
+      const codes=new Map();
+      const json=(response,status,value)=>{response.writeHead(status,{'content-type':'application/json'});response.end(JSON.stringify(value))};
+      http.createServer(async(request,response)=>{
+        const url=new URL(request.url,discovery.issuer);
+        if(url.pathname.includes('.well-known/openid-configuration'))return json(response,200,discovery);
+        if(url.pathname==='/jwks')return json(response,200,{keys:[jwk]});
+        if(url.pathname==='/userinfo')return json(response,200,{sub:'parallel-owner',name:'Parallel Owner'});
+        if(url.pathname==='/authorize'){
+          const code=randomUUID();codes.set(code,Object.fromEntries(url.searchParams));
+          const target=new URL(url.searchParams.get('redirect_uri'));
+          target.searchParams.set('code',code);target.searchParams.set('state',url.searchParams.get('state'));
+          response.writeHead(302,{location:target.href});return response.end();
+        }
+        if(url.pathname==='/token'){
+          let body='';for await(const chunk of request)body+=chunk;
+          const params=new URLSearchParams(body),code=params.get('code'),authorization=codes.get(code);codes.delete(code);
+          if(!authorization||createHash('sha256').update(params.get('code_verifier')??'').digest('base64url')!==authorization.code_challenge
+            ||params.get('redirect_uri')!==authorization.redirect_uri)return json(response,400,{error:'invalid_grant'});
+          const now=Math.floor(Date.now()/1000);
+          const header=Buffer.from(JSON.stringify({alg:'RS256',kid:'fixture'})).toString('base64url');
+          const payload=Buffer.from(JSON.stringify({iss:discovery.issuer,sub:'parallel-owner',aud:'acceptance-client',
+            iat:now,exp:now+3600,nonce:authorization.nonce})).toString('base64url');
+          const unsigned=header+'.'+payload;
+          return json(response,200,{access_token:randomUUID(),token_type:'Bearer',expires_in:3600,
+            id_token:unsigned+'.'+sign('RSA-SHA256',Buffer.from(unsigned),privateKey).toString('base64url')});
+        }
+        response.writeHead(404);response.end();
+      }).listen(8080,'0.0.0.0',()=>console.log('identity_discovery_ready'))`
     await docker('run', '--detach', '--name', identity,
       '--label', `dev.kala.test.project=${project}`, '--network', network, '--read-only',
       nodeImage, 'node', '--input-type=module', '--eval', script)

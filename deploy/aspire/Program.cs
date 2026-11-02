@@ -59,6 +59,10 @@ var runtimeDatabaseUrl = builder.AddParameter("runtime-database-url", secret: tr
 var runtimeReaderDatabaseUrl = builder.AddParameter("runtime-reader-database-url", secret: true);
 var ingressSharedSecret = builder.AddParameter("ingress-shared-secret", secret: true);
 var gatewaySessionSecret = builder.AddParameter("gateway-session-secret", secret: true);
+var oidcIssuer = RequiredHttpsOrigin("KALA_OIDC_ISSUER");
+var oidcIdentityOrigin = Environment.GetEnvironmentVariable("KALA_OIDC_IDENTITY_ORIGIN")?.Trim() ?? oidcIssuer;
+var oidcClientId = builder.AddParameter("oidc-client-id", secret: true);
+var oidcClientSecret = builder.AddParameter("oidc-client-secret", secret: true);
 var siloRootAccessKey = builder.AddParameter("silo-root-access-key", secret: true);
 var siloRootSecretKey = builder.AddParameter("silo-root-secret-key", secret: true);
 // A future provisioning job must issue bucket-scoped credentials; never give
@@ -202,6 +206,11 @@ if (otelCollector is not null && observabilityReadiness is not null)
 }
 
 var gateway = builder.AddContainer("gateway", gatewayImage)
+    .WithEnvironment("OIDC_ISSUER", oidcIssuer)
+    .WithEnvironment("OIDC_CLIENT_ID", oidcClientId)
+    .WithEnvironment("OIDC_CLIENT_SECRET", oidcClientSecret)
+    .WithEnvironment("KALA_INGRESS_IDENTITY_ORIGIN", oidcIdentityOrigin)
+    .WithEnvironment("KALA_INGRESS_LOGIN_STATE_STORE_KIND", "postgres")
     .WithEnvironment("KALA_DEDICATED_INGRESS_MODE", ingressMode)
     .WithEnvironment("KALA_DEDICATED_EXECUTION_PROFILE", "bounded-v2")
     .WithEnvironment("KALA_DEPLOYMENT_CONFIG", "/etc/kala/deployment.json")

@@ -1,0 +1,23 @@
+:8080 {
+  @login path /ui/v2/login*
+  handle @login {
+    reverse_proxy identity-login:3000 {
+      lb_try_duration 10s
+      lb_try_interval 250ms
+      header_up Host {$KALA_IDENTITY_HOST}
+      header_up X-Forwarded-Proto http
+    }
+  }
+
+  @identity path /.well-known/openid-configuration /.well-known/oauth-authorization-server /oauth/* /oidc/* /ui/* /idps/* /saml/* /v2/* /auth/v1/* /admin/* /management/* /zitadel.* /debug/healthz /debug/ready
+  handle @identity {
+    reverse_proxy h2c://identity-zitadel:8080 {
+      header_up Host {$KALA_IDENTITY_HOST}
+      header_up X-Forwarded-Proto http
+    }
+  }
+
+  handle {
+    reverse_proxy {$KALA_GATEWAY_ORIGIN}
+  }
+}

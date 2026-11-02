@@ -7,7 +7,10 @@ import { ACTIVE_CONTRACT_SQL } from './contract-access.js'
 import { assertInviteExpiration, normalizeInviteEmail, type CreatedOrganizationInvite, type Organization, type OrganizationAccess, type OrganizationInvite, type OrganizationMembership, type OrganizationRole, type OrganizationStatus, type OrganizationStore } from './store.js'
 
 export class PostgresOrganizationStore implements OrganizationStore {
-  constructor(private readonly database: SqlExecutor & { transaction<T>(operation: (transaction: SqlExecutor) => Promise<T>): Promise<T> }) {}
+  constructor(
+    private readonly database: SqlExecutor & { transaction<T>(operation: (transaction: SqlExecutor) => Promise<T>): Promise<T> },
+    private readonly options: { singleTenantOwner?: boolean } = {},
+  ) {}
 
   async getOrCreateForIdentity(identity: AuthenticatedIdentity): Promise<OrganizationAccess> {
     const existing = await this.findAccess(identity)
@@ -24,7 +27,12 @@ export class PostgresOrganizationStore implements OrganizationStore {
       JOIN organization_memberships m ON m.principal_id = p.id AND m.status = 'active'
       JOIN organizations o ON o.id = m.organization_id
       WHERE p.kind = 'human' AND p.issuer = $1 AND p.subject = $2
-      ORDER BY m.created_at LIMIT 2`, [identity.issuer, identity.subject])
+        AND ($3::boolean = false OR (m.role='owner'
+          AND EXISTS (SELECT 1 FROM dedicated_oidc_owner_bindings b WHERE b.principal_id=p.id AND b.organization_id=o.id)
+          AND NOT EXISTS (SELECT 1 FROM organizations other WHERE other.id<>o.id)
+          AND NOT EXISTS (SELECT 1 FROM organization_memberships other WHERE other.organization_id=o.id
+            AND other.status='active' AND other.role='owner' AND other.principal_id<>p.id)))
+      ORDER BY m.created_at LIMIT 2`, [identity.issuer, identity.subject, this.options.singleTenantOwner === true])
     if (result.rows.length > 1) throw new Error('identity_has_multiple_active_organizations')
     const row = result.rows[0]
     return row ? accessFromRow(row, identity) : undefined

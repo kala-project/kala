@@ -1121,7 +1121,7 @@ describe('Private Cloud edge request path', () => {
     expect(runtimePaths).toEqual(['/runtime/capabilities'])
   })
 
-  it('directs enterprise login through a server-resolved IdP and rejects mismatched callbacks', async () => {
+  it('validates server-selected SSO against provider claims before using a mapped principal', async () => {
     let callbackProvider = 'idp_enterprise'
     const authorizationOptions: Array<{ idpHint?: string; loginHint?: string }> = []
     const enterpriseSso = new MemoryEnterpriseSsoResolver([{ id: 'sso_acme', providerId: 'idp_enterprise', loginHint: 'employee@acme.test' }])
@@ -1129,6 +1129,7 @@ describe('Private Cloud edge request path', () => {
       enterpriseSso,
       authorizationOptions,
       callbackIdentity: () => ({ issuer: 'http://identity.example', subject: 'alice', upstreamProviderId: callbackProvider }),
+      resolveIdentity: async () => ({ issuer: 'urn:kala:dedicated-owner', subject: 'owner' }),
     })
 
     const unknown = await fetch(`http://127.0.0.1:${gateway.port}/auth/login?sso=unknown`, { redirect: 'manual' })
@@ -1149,6 +1150,33 @@ describe('Private Cloud edge request path', () => {
     const acceptedNonce = cookieValue(acceptedLogin.headers.getSetCookie(), 'ak_login')
     const accepted = await fetch(`http://127.0.0.1:${gateway.port}/auth/callback?code=ok`, { headers: { cookie: `ak_login=${acceptedNonce}` }, redirect: 'manual' })
     expect(accepted.status).toBe(302)
+  })
+
+  it('offers uncached browser recovery without granting unauthenticated Runtime access', async () => {
+    const gateway = await createGateway('http://127.0.0.1:9')
+    const origin = `http://127.0.0.1:${gateway.port}`
+    const signedOut = await fetch(`${origin}/signed-out`)
+    expect(signedOut.status).toBe(200)
+    expect(await signedOut.text()).toContain('href="/auth/recover"')
+    const recovery = await fetch(`${origin}/auth/recover`)
+    expect(recovery.status).toBe(200)
+    expect(recovery.headers.get('cache-control')).toBe('no-store')
+    expect(recovery.headers.get('referrer-policy')).toBe('no-referrer')
+    expect(recovery.headers.get('content-type')).toContain('text/html')
+    expect((await fetch(`${origin}/auth/recover`, { method: 'POST' })).status).toBe(405)
+    expect((await fetch(`${origin}/runtime/capabilities`)).status).toBe(401)
+  })
+
+  it('redirects Service Worker HTML shell fetches to login while keeping APIs unauthorized', async () => {
+    const gateway = await createGateway('http://127.0.0.1:9')
+    const origin = `http://127.0.0.1:${gateway.port}`
+    const headers = { accept: 'text/html', 'sec-fetch-dest': 'empty' }
+    const shell = await fetch(`${origin}/`, { headers, redirect: 'manual' })
+    expect(shell.status).toBe(303)
+    expect(shell.headers.get('location')).toBe('/auth/login')
+    const api = await fetch(`${origin}/runtime/capabilities`, { headers, redirect: 'manual' })
+    expect(api.status).toBe(401)
+    await expect(api.json()).resolves.toEqual({ error: 'authentication_required' })
   })
 
   it('fails closed for unauthenticated APIs and enforces same-origin POST logout', async () => {
@@ -1187,6 +1215,7 @@ async function createGateway(
     enterpriseSso?: MemoryEnterpriseSsoResolver
     authorizationOptions?: Array<{ idpHint?: string; loginHint?: string }>
     callbackIdentity?(): AuthenticatedIdentity
+    resolveIdentity?(identity: AuthenticatedIdentity): Promise<AuthenticatedIdentity | undefined>
     dashboardOrigin?: string
     organizations?: OrganizationStore
     rateLimiter?: SlidingWindowRateLimiter
@@ -1221,6 +1250,7 @@ async function createGateway(
       loginStates: new MemoryLoginStates(),
       secretBox: createSessionSecretBox('test', [{ id: 'test', key: Buffer.alloc(32, 7) }]),
       ...(auth?.enterpriseSso ? { enterpriseSso: auth.enterpriseSso } : {}),
+      ...(auth?.resolveIdentity ? { resolveIdentity: auth.resolveIdentity } : {}),
       oidc: {
         async authorizationUrl(_redirectUri, authorizationOptions) {
           const url = new URL('http://identity.example/authorize')

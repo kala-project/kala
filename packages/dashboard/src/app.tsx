@@ -46,6 +46,7 @@ import {
 import { cn } from './lib/utils.js'
 import { staticAssetUrl } from './lib/static-asset-url.js'
 import { randomId } from './lib/random-id.js'
+import { FORCE_REFRESH_PARAMETER } from './lib/pwa.js'
 import {
   Dialog,
   DialogClose,
@@ -275,14 +276,14 @@ export function App(): JSX.Element {
   const [highlightIndex, setHighlightIndex] = useState<number | null>(null)
   const runtimeDeployment = useRuntimeDeployment()
   const runtimeCapabilities = runtimeDeployment.capabilities
-  const privateCloudMode = runtimeDeployment.product === 'private-cloud'
-  const authSession = useAuthSession(privateCloudMode)
-  const productAccessReady = runtimeDeployment.loaded && !runtimeDeployment.error && (!privateCloudMode || authSession.session?.authenticated === true)
+  const platformMode = runtimeDeployment.deployment?.architecture === 'platform'
+  const authSession = useAuthSession(platformMode)
+  const productAccessReady = runtimeDeployment.loaded && !runtimeDeployment.error && (!platformMode || authSession.session?.authenticated === true)
   const account = authSession.session?.authenticated ? authSession.session.profile : undefined
   useEffect(() => {
-    if (!privateCloudMode || !authSession.checked || authSession.session?.authenticated !== false) return
+    if (!platformMode || !authSession.checked || authSession.session?.authenticated !== false) return
     window.location.replace('/signed-out')
-  }, [authSession.checked, authSession.session, privateCloudMode])
+  }, [authSession.checked, authSession.session, platformMode])
   const [explorerOpen, setExplorerOpen] = useBooleanPref(PREF_EXPLORER_OPEN, true)
   const [inspectorOpen, setInspectorOpen] = useBooleanPref(PREF_INSPECTOR_OPEN, true)
   const [topbarOpen, setTopbarOpen] = useBooleanPref(PREF_TOPBAR_OPEN, true)
@@ -382,19 +383,19 @@ export function App(): JSX.Element {
   const fileExplorerFontSizePx = Math.round((FILE_EXPLORER_FONT_SIZE_PX[fileExplorerFontSize] ?? 11) * interfaceScale)
   const cachedSessionIdsRef = useRef<ReadonlySet<string>>(new Set())
   const [hostEndpoint, setHostEndpoint] = useState<ResolvedHostEndpoint>(() => resolveHostEndpoint())
-  const identityCacheNamespace = privateCloudMode
+  const identityCacheNamespace = platformMode
     ? authSession.session?.authenticated ? authSession.session.cacheNamespace : 'signed-out'
     : 'local-operator'
   const cacheNamespace = `${sessionCacheNamespace(hostEndpoint.url, PROTOCOL_VERSION)}:${identityCacheNamespace}`
   const sessionViewCache = useMemo(() => createDurableSessionViewCache({
     namespace: cacheNamespace,
     maxBytes: sessionViewCacheMaxBytesFromMb(sessionViewCacheMaxMb),
-    enabled: durableSessionCacheEnabled && (!privateCloudMode || authSession.session?.authenticated === true),
+    enabled: durableSessionCacheEnabled && (!platformMode || authSession.session?.authenticated === true),
   }), [cacheNamespace])
   useEffect(() => {
     sessionViewCache.setMaxBytes(sessionViewCacheMaxBytesFromMb(sessionViewCacheMaxMb))
-    sessionViewCache.setEnabled(durableSessionCacheEnabled && (!privateCloudMode || authSession.session?.authenticated === true))
-  }, [authSession.session, durableSessionCacheEnabled, privateCloudMode, sessionViewCache, sessionViewCacheMaxMb])
+    sessionViewCache.setEnabled(durableSessionCacheEnabled && (!platformMode || authSession.session?.authenticated === true))
+  }, [authSession.session, durableSessionCacheEnabled, platformMode, sessionViewCache, sessionViewCacheMaxMb])
   useDeferredDispose(sessionViewCache, (cache) => cache.close())
   const previewStore = useMemo(() => new SessionPreviewStore(), [cacheNamespace])
   const getCachedSessionView = useCallback((sessionId: string) => sessionViewCache.peek(sessionId), [sessionViewCache])
@@ -453,23 +454,9 @@ export function App(): JSX.Element {
   }, [commandPaletteOpen, config.sessionId, settingsOpen, transcriptSearchOpen])
 
   useEffect(() => {
-    if (!config.explicit) {
-      if (window.location.search !== '') {
-        window.history.replaceState(null, '', window.location.pathname + window.location.hash)
-      }
-      return
-    }
-    if (!config.sessionId) {
-      if (window.location.search !== '') {
-        window.history.replaceState(null, '', window.location.pathname + window.location.hash)
-      }
-      return
-    }
-    // Only sessionId belongs in the URL. The bootstrap token stays in
-    // memory (see readInitialConfig) so it can't leak via history/referrer.
-    const next = `?${new URLSearchParams({ sessionId: config.sessionId }).toString()}`
+    const next = sessionLocationSearch(config, window.location.search)
     if (window.location.search !== next) {
-      window.history.replaceState(null, '', next + window.location.hash)
+      window.history.replaceState(null, '', window.location.pathname + next + window.location.hash)
     }
   }, [config])
 
@@ -488,7 +475,7 @@ export function App(): JSX.Element {
   }, [])
 
   const controlSocket = useDashboardControlSocket(hostEndpoint.url, config.token, productAccessReady)
-  const sessionRouteTickets = privateCloudMode && authSession.session?.authenticated === true
+  const sessionRouteTickets = runtimeDeployment.product === 'private-cloud' && authSession.session?.authenticated === true
   const sessionScoped = runtimeDeployment.product === 'dedicated'
   const sessionInspectionTransport = useMemo(() => ({
     host: hostEndpoint.url, socket: controlSocket, sessionScoped, sessionRouteTickets,
@@ -2095,10 +2082,10 @@ export function App(): JSX.Element {
     setExplorerDrawerOpen(false)
   }, [openWorkspaceTerminal])
 
-  if (!runtimeDeployment.loaded || (privateCloudMode && authSession.loading && !authSession.checked)) {
+  if (!runtimeDeployment.loaded || (platformMode && authSession.loading && !authSession.checked)) {
     return <PageLoadingFallback compact />
   }
-  if (runtimeDeployment.error || authSession.error || runtimeDeployment.unauthorized || (privateCloudMode && authSession.session?.authenticated !== true)) {
+  if (runtimeDeployment.error || authSession.error || runtimeDeployment.unauthorized || (platformMode && authSession.session?.authenticated !== true)) {
     const detail = runtimeDeployment.error ?? authSession.error ?? t('app.accessErrorDefault')
     return (
       <main className="fixed inset-0 grid place-items-center bg-background p-4 text-foreground" data-testid="product-access-error">
@@ -2114,9 +2101,9 @@ export function App(): JSX.Element {
     )
   }
 
-  const openAccount = privateCloudMode ? () => setAccountCenterOpen(true) : undefined
+  const openAccount = platformMode ? () => setAccountCenterOpen(true) : undefined
   const openAdmin = authSession.session?.authenticated && (authSession.session.organization?.role === 'owner' || authSession.session.organization?.role === 'admin') ? () => setAdminCenterOpen(true) : undefined
-  const announceSignOut = privateCloudMode ? () => {
+  const announceSignOut = platformMode ? () => {
     authSession.announceLogout()
     void sessionViewCache.clearDurable()
   } : undefined
@@ -2134,7 +2121,7 @@ export function App(): JSX.Element {
           onExpand={section === 'agent' ? () => setExplorerOpen(true) : undefined}
           onNewSession={newSession}
           onConnectWorkspace={runtimeCapabilities.workspace ? openConnectWorkspaceDialog : undefined}
-          globalActions={<SidebarGlobalActions orientation="vertical" onOpenSettings={() => setSettingsOpen(true)} account={account} accountLoading={privateCloudMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />}
+          globalActions={<SidebarGlobalActions orientation="vertical" onOpenSettings={() => setSettingsOpen(true)} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />}
         />
       ) : null}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -2198,10 +2185,10 @@ export function App(): JSX.Element {
                         </div>
                       </div>
                       <div className="min-h-0 flex-1 overflow-hidden">
-                        <Explorer executors={control.executors} sessions={control.sessions} loading={sessionDirectoryLoadingOwner === 'explorer'} autoHideOfflineWorkspacesByDefault={!privateCloudMode} selectedSessionId={explorerSelectedSessionId} sessionStatuses={sessionStatuses} onSelect={selectSession} onClearSelection={clearSessionSelection} onNewSession={newSession} onConnectWorkspace={runtimeCapabilities.workspace ? openConnectWorkspaceDialog : undefined} onDelete={deleteSessionAt} onRename={renameSessionAt} onRenameWorkspace={renameWorkspaceAt} embeddedHeader headerLeading={explorerHeaderLeading} fontSizePx={sessionExplorerFontSizePx} previewStore={previewStore} onOpenSessionInfo={openSessionInfoDialog} onWorkspaceInfo={setWorkspaceInfoId} onOpenWorkspaceTerminal={openWorkspaceTerminal} />
+                        <Explorer executors={control.executors} sessions={control.sessions} loading={sessionDirectoryLoadingOwner === 'explorer'} autoHideOfflineWorkspacesByDefault={!platformMode} selectedSessionId={explorerSelectedSessionId} sessionStatuses={sessionStatuses} onSelect={selectSession} onClearSelection={clearSessionSelection} onNewSession={newSession} onConnectWorkspace={runtimeCapabilities.workspace ? openConnectWorkspaceDialog : undefined} onDelete={deleteSessionAt} onRename={renameSessionAt} onRenameWorkspace={renameWorkspaceAt} embeddedHeader headerLeading={explorerHeaderLeading} fontSizePx={sessionExplorerFontSizePx} previewStore={previewStore} onOpenSessionInfo={openSessionInfoDialog} onWorkspaceInfo={setWorkspaceInfoId} onOpenWorkspaceTerminal={openWorkspaceTerminal} />
                       </div>
                       <div className="flex flex-none justify-end border-t border-border/35 px-3 py-2" data-testid="desktop-sidebar-footer">
-                        <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => setSettingsOpen(true)} account={account} accountLoading={privateCloudMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />
+                        <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => setSettingsOpen(true)} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />
                       </div>
                     </div>
                   </div>
@@ -2786,11 +2773,11 @@ export function App(): JSX.Element {
             </div>
             {section === 'agent' ? (
               <div className="min-h-0 flex-1 overflow-hidden">
-                <Explorer executors={control.executors} sessions={control.sessions} loading={sessionDirectoryLoadingOwner === 'explorer'} autoHideOfflineWorkspacesByDefault={!privateCloudMode} selectedSessionId={explorerSelectedSessionId} sessionStatuses={sessionStatuses} onSelect={selectSessionFromExplorerDrawer} onClearSelection={clearSessionSelectionFromExplorerDrawer} onNewSession={newSessionFromExplorerDrawer} onConnectWorkspace={runtimeCapabilities.workspace ? connectWorkspaceFromExplorerDrawer : undefined} onDelete={deleteSessionAt} onRename={renameSessionAt} onRenameWorkspace={renameWorkspaceAt} embeddedHeader fontSizePx={sessionExplorerFontSizePx} previewStore={previewStore} onOpenSessionInfo={openExplorerDrawerSessionInfo} onWorkspaceInfo={openExplorerDrawerWorkspaceInfo} onOpenWorkspaceTerminal={openWorkspaceTerminalFromExplorerDrawer} />
+                <Explorer executors={control.executors} sessions={control.sessions} loading={sessionDirectoryLoadingOwner === 'explorer'} autoHideOfflineWorkspacesByDefault={!platformMode} selectedSessionId={explorerSelectedSessionId} sessionStatuses={sessionStatuses} onSelect={selectSessionFromExplorerDrawer} onClearSelection={clearSessionSelectionFromExplorerDrawer} onNewSession={newSessionFromExplorerDrawer} onConnectWorkspace={runtimeCapabilities.workspace ? connectWorkspaceFromExplorerDrawer : undefined} onDelete={deleteSessionAt} onRename={renameSessionAt} onRenameWorkspace={renameWorkspaceAt} embeddedHeader fontSizePx={sessionExplorerFontSizePx} previewStore={previewStore} onOpenSessionInfo={openExplorerDrawerSessionInfo} onWorkspaceInfo={openExplorerDrawerWorkspaceInfo} onOpenWorkspaceTerminal={openWorkspaceTerminalFromExplorerDrawer} />
               </div>
             ) : <div className="min-h-0 flex-1" />}
             <div className="flex min-h-14 flex-none items-center justify-end border-t border-border/35 px-3 py-2" data-testid="narrow-drawer-footer">
-              <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => { setExplorerDrawerOpen(false); setSettingsOpen(true) }} account={account} accountLoading={privateCloudMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />
+              <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => { setExplorerDrawerOpen(false); setSettingsOpen(true) }} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />
             </div>
           </div>
         </DialogContent>
@@ -2928,7 +2915,7 @@ export function App(): JSX.Element {
           <SettingsDialog
             key={cacheNamespace}
             cacheNamespace={cacheNamespace}
-            autoHideOfflineWorkspacesByDefault={!privateCloudMode}
+            autoHideOfflineWorkspacesByDefault={!platformMode}
             open={settingsOpen}
             onOpenChange={(open) => {
               setSettingsOpen(open)
@@ -3007,10 +2994,10 @@ export function App(): JSX.Element {
         open={connectWorkspaceOpen}
         onOpenChange={setConnectWorkspaceOpen}
         host={hostEndpoint.url}
-        privateCloud={privateCloudMode}
+        privateCloud={platformMode}
         organizationRole={authSession.session?.authenticated ? authSession.session.organization?.role : undefined}
       />
-      <ExecutorPairingPrompt />
+      <ExecutorPairingPrompt enabled={runtimeDeployment.product === 'portable'} />
       <WorkspaceMetadataDialog
         open={workspaceInfoId !== null}
         onOpenChange={(open) => {
@@ -3205,6 +3192,16 @@ export function NarrowContextualRow({ section, onOpenNavigation }: { section: Ap
       <span className="min-w-0 flex-1 truncate text-sm font-semibold">{t(`appShell.nav.${section}`)}</span>
     </header>
   )
+}
+
+export function sessionLocationSearch(config: Pick<Config, 'explicit' | 'sessionId'>, search: string): string {
+  const params = new URLSearchParams()
+  if (config.explicit && config.sessionId) params.set('sessionId', config.sessionId)
+  // Keep the explicit refresh request until the PWA lifecycle consumes it.
+  const refresh = new URLSearchParams(search).get(FORCE_REFRESH_PARAMETER)
+  if (refresh !== null) params.set(FORCE_REFRESH_PARAMETER, refresh)
+  const query = params.toString()
+  return query ? `?${query}` : ''
 }
 
 export function readInitialConfig(): Config {

@@ -4,7 +4,7 @@ import { mkdir, readFile, readdir, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import process from 'node:process'
 
-import { AGENT_RUNTIME_CAPABILITIES, FULL_RUNTIME_CAPABILITIES, productVariant } from '@agent-kernel/shared'
+import { AGENT_RUNTIME_CAPABILITIES, FULL_RUNTIME_CAPABILITIES, PROTOCOL_VERSION, productVariant } from '@agent-kernel/shared'
 import { createConfiguredSecretResolver } from '@agent-kernel/shared/secret-resolver'
 import { createOnlineTelemetryFromEnv, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
 
@@ -46,6 +46,7 @@ import { initializePrivateCloudExperimentalStorageSchema } from '../src/store/po
 import { checkPostgresSchemaVersion, initializeExperimentalRuntimeResourceOwnershipSchema, type PostgresSchemaManagement } from '../src/postgres-migrations.js'
 import { assertPostgresInstallationClaim, assertS3InstallationClaim, createPostgresClaimPool, createS3ClaimClient } from '../src/storage/fresh-install-claim.js'
 import { assertRecoveryCheckpoint, readPostgresRecoveryCheckpoint, readS3RecoveryCheckpoint, stateKeySha256 } from '../src/storage/recovery-checkpoint.js'
+import packageJson from '../package.json' with { type: 'json' }
 
 function required(name: string): string {
   const value = process.env[name]?.trim()
@@ -334,11 +335,26 @@ async function main(): Promise<void> {
         ...(dashboardDir ? { staticDir: resolve(dashboardDir) } : {}),
         ...(docsDir ? { docsRootDir: resolve(docsDir) } : {}),
         ...(releaseAssetsDir ? { releaseAssetsDir: resolve(releaseAssetsDir) } : {}),
-        settings: {
-          providers: [], defaultModel: '', hooks: [],
-          paths: { claudeSettings: '', codexConfig: '', manualModels: '', hooksConfig: '', sessionsDir: join(unitRoot, 'sessions') },
-          mcp: { supported: false, note: 'disabled in Private Cloud bootstrap' },
-          ...(releaseAssetsDir ? { release: { bootstrapBaseUrl: '/release-assets', source: 'local' as const } } : {}),
+        settings: async (actor) => {
+          if (actor.kind === 'ingress' && actor.organizationId !== organizationId) {
+            throw new Error('tenant_forbidden')
+          }
+          return {
+            providers: [], defaultModel: runtimeProvider.defaultModel, hooks: [],
+            versions: { host: packageJson.version, protocol: PROTOCOL_VERSION },
+            agentModule: agentModule.metadata,
+            mcp: { supported: false, note: 'MCP availability is resolved by the Runtime.' },
+            paths: { claudeSettings: '', codexConfig: '', manualModels: '', hooksConfig: '', sessionsDir: join(unitRoot, 'sessions') },
+            ...(persistentStorage && organizationId ? {
+              storage: {
+                kind: 'postgres-s3' as const,
+                organizationId,
+                objectBytes: await resourceArtifactUsage(),
+                objectLimitBytes: maxArtifactBytes,
+              },
+            } : {}),
+            ...(releaseAssetsDir ? { release: { bootstrapBaseUrl: '/release-assets', source: 'local' as const } } : {}),
+          }
         },
       })
     },

@@ -90,6 +90,11 @@ export async function grantControlWriter(database: { query: (sql: string) => Pro
   // replace/bootstrap a credential or modify its identity and password columns.
   await database.query(`REVOKE INSERT, UPDATE, DELETE ON TABLE public.dedicated_owner_credentials FROM "${role}"`)
   await database.query(`GRANT UPDATE (last_authenticated_at) ON TABLE public.dedicated_owner_credentials TO "${role}"`)
+  await database.query(`DO $oidc$ BEGIN
+    IF to_regclass('public.dedicated_oidc_owner_bindings') IS NOT NULL THEN
+      REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public.dedicated_oidc_owner_bindings FROM "${role}";
+    END IF;
+  END $oidc$`)
   await database.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "${role}"`)
   // The fresh PG/S3 claim lives outside public; only its immutable marker is readable.
   await database.query(`DO $kala$ BEGIN

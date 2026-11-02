@@ -49,6 +49,9 @@ start_timeout=${KALA_ASPIRE_START_TIMEOUT_SECONDS:-180}
 [[ -n ${KALA_DEDICATED_ORGANIZATION_NAME:-} ]] || {
   echo 'KALA_DEDICATED_ORGANIZATION_NAME is required' >&2; exit 2;
 }
+[[ -n ${KALA_DEDICATED_OWNER_OIDC_SUBJECT:-} ]] || {
+  echo 'KALA_DEDICATED_OWNER_OIDC_SUBJECT must explicitly select the existing IdP user subject' >&2; exit 2;
+}
 
 [[ $(stat -c '%u' "$KALA_ASPIRE_SECRETS_DIR") == 0 ]] || {
   echo 'Protected initialization directory must be root-owned' >&2; exit 1;
@@ -77,7 +80,7 @@ grep -qx 'ingress' <<<"$resolved_services" && ingress_mode=bundled-caddy
 
 required=(postgres_admin_url control_owner_url gateway_database_url runtime_owner_url runtime_database_url
   runtime_reader_database_url silo_root_access_key silo_root_secret_key runtime_s3_access_key runtime_s3_secret_key
-  installation_id runtime_state_master_key owner_password)
+  installation_id runtime_state_master_key)
 if (( observability_enabled == 1 )); then
   required+=(observability_postgres_password observability_silo_metrics_token)
 fi
@@ -156,13 +159,13 @@ owner_args=(
   "${init_run[@]}" -v "$secret_mount"
   -e KALA_INGRESS_DATABASE_URL=
   -e KALA_INGRESS_DATABASE_URL_FILE=/run/kala-init-secrets/control_owner_url
-  -e KALA_DEDICATED_OWNER_PASSWORD_FILE=/run/kala-init-secrets/owner_password
+  -e "KALA_DEDICATED_OWNER_OIDC_SUBJECT=$KALA_DEDICATED_OWNER_OIDC_SUBJECT"
   -e "KALA_DEDICATED_ORGANIZATION_NAME=$KALA_DEDICATED_ORGANIZATION_NAME"
 )
 if [[ -n ${KALA_DEDICATED_OWNER_EMAIL:-} ]]; then
   owner_args+=( -e "KALA_DEDICATED_OWNER_EMAIL=$KALA_DEDICATED_OWNER_EMAIL" )
 fi
-owner_args+=(gateway packages/runtime-ingress-gateway/dist/src/bin/bootstrap-dedicated-owner.js)
+owner_args+=(gateway packages/runtime-ingress-gateway/dist/src/bin/bootstrap-dedicated-oidc-owner.js)
 if [[ $operation_mode == --resume-initialized ]]; then
   owner_args+=(--verify-existing)
 fi

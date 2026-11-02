@@ -1915,7 +1915,7 @@ describe('wire protocol', () => {
     dashboard.close()
   })
 
-  it('exposes host restart runtime status over HTTP and settings', async () => {
+  it.each([undefined, DEDICATED_DEPLOYMENT, PRIVATE_CLOUD_DEPLOYMENT])('exposes runtime status without requiring a local restart coordinator (%j)', async (deployment) => {
     const status = await fetch(`${url}/runtime/restart/status`).then((r) => r.json() as Promise<{ pid: number; current: unknown }>)
     expect(status.pid).toBe(process.pid)
     expect(status.current).toBeNull()
@@ -1930,6 +1930,7 @@ describe('wire protocol', () => {
       llm: scriptedLlm(),
       defaultConfig: config,
       httpServer: http,
+      ...(deployment ? { deployment } : {}),
       settings: {
         paths: {
           claudeSettings: '/tmp/claude.json',
@@ -1945,6 +1946,11 @@ describe('wire protocol', () => {
     const settings = await fetch(`${url}/settings`).then((r) => r.json() as Promise<ServerSettingsPayload>)
     expect(settings.runtime?.pid).toBe(process.pid)
     expect(settings.runtime?.current).toBeNull()
+    expect(settings.runtimeManagement).toBe(deployment ? 'external' : 'local')
+    expect(settings.agentRuntimes?.find((runtime) => runtime.id === 'copilot')).toMatchObject({
+      available: true,
+      status: 'ready',
+    })
     expect(settings.socketConnections).toMatchObject({
       total: expect.any(Number),
       dashboard: expect.any(Number),

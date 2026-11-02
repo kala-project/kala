@@ -33,11 +33,9 @@ const RUNTIME_ICON_CACHE = 'ak-icons-v1'
 // Precache the app shell + hashed assets. `__WB_MANIFEST` is replaced by
 // vite-plugin-pwa at build time with the actual file list.
 cleanupOutdatedCaches()
-precacheAndRoute(self.__WB_MANIFEST)
 
-// SPA navigation fallback → precached index.html, EXCEPT for host RPC paths.
-// Keep this list in sync with vite.config.ts HOST_HTTP_ROUTES.
-const HOST_RPC_DENYLIST: RegExp[] = [
+// Host RPC and same-origin identity pages must never use the cached SPA shell.
+const NETWORK_NAVIGATION_DENYLIST: RegExp[] = [
   /^\/socket\.io(\/|$)/,
   /^\/admin\/socket\.io(\/|$)/,
   /^\/auth(\/|$)/,
@@ -52,6 +50,18 @@ const HOST_RPC_DENYLIST: RegExp[] = [
   /^\/api(\/|$)/,
   /^\/events(\/|$)/,
   /^\/runtime(\/|$)/,
+  /^\/signed-out$/,
+  /^\/oauth(\/|$)/,
+  /^\/oidc(\/|$)/,
+  /^\/ui(\/|$)/,
+  /^\/idps(\/|$)/,
+  /^\/saml(\/|$)/,
+  /^\/v2(\/|$)/,
+  /^\/admin(\/|$)/,
+  /^\/management(\/|$)/,
+  /^\/zitadel\./,
+  /^\/\.well-known\/(openid-configuration|oauth-authorization-server)$/,
+  /^\/debug\/(healthz|ready)$/,
 ]
 
 registerRoute(
@@ -60,16 +70,19 @@ registerRoute(
     // deployment. Prefer the current network shell whenever online; use the
     // precache only as an actual offline fallback.
     try {
-      const response = await fetch(options.request, { cache: 'no-store' })
-      if (response.ok) return response
+      return await fetch(options.request, { cache: 'no-store' })
     } catch {
       // Offline: fall through to the precached shell.
     }
     return await createHandlerBoundToURL(APP_SHELL_URL)(options)
   }, {
-    denylist: HOST_RPC_DENYLIST,
+    denylist: NETWORK_NAVIGATION_DENYLIST,
   }),
 )
+
+// Directory-index precaching also matches "/"; navigation must run first so
+// expired sessions follow the server's login redirect instead of a cached shell.
+precacheAndRoute(self.__WB_MANIFEST)
 
 // Icons + manifest served under /icons/**. StaleWhileRevalidate — never
 // blocks paint, always refreshes in the background.

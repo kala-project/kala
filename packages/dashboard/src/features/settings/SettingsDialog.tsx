@@ -189,7 +189,7 @@ export function SettingsDialog({ open, cacheNamespace = 'default', autoHideOffli
               ) : section === 'runtime' ? (
                 <RuntimeSection payload={payload} />
               ) : section === 'storage' ? (
-                <StorageSection socket={storageSocket} />
+                <StorageSection socket={storageSocket} payload={payload} />
               ) : section === 'connection' ? (
                 <ConnectionSection />
               ) : section === 'agent' ? (

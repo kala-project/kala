@@ -1929,6 +1929,14 @@ export type ServerSettingsPayload = {
     build?: BuildMetadata
   }
   runtime?: HostRestartStatus
+  runtimeManagement?: 'local' | 'external'
+  agentRuntimes?: readonly AgentRuntimeDescriptor[]
+  storage?: {
+    kind: 'postgres-s3'
+    organizationId: string
+    objectBytes: number
+    objectLimitBytes: number
+  }
   socketConnections?: SocketConnectionAuditSnapshot
   agentModule?: AgentModuleMetadata
   agentPrompt?: SettingsAgentPrompt

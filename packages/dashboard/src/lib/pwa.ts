@@ -94,12 +94,27 @@ export function initPwa(handlers: PwaLifecycleHandlers): PwaController {
   // worker against a Vite dev server (which would break HMR).
   if (!import.meta.env.PROD) return NOOP_CONTROLLER
   const bootUrl = new URL(window.location.href)
-  if (bootUrl.searchParams.has(FORCE_REFRESH_PARAMETER)) {
+  const forcedRefresh = bootUrl.searchParams.has(FORCE_REFRESH_PARAMETER)
+  if (forcedRefresh) {
     bootUrl.searchParams.delete(FORCE_REFRESH_PARAMETER)
     window.history.replaceState(window.history.state, '', bootUrl.toString())
   }
 
   let updateSW: ((reloadPage?: boolean) => Promise<void>) | undefined
+  let reloading = false
+  const reloadOnce = (): void => {
+    if (reloading) return
+    reloading = true
+    window.location.reload()
+  }
+  const notifyWaitingUpdate = async (): Promise<void> => {
+    const registration = await navigator.serviceWorker.getRegistration()
+    if (!registration?.waiting) return
+    if (forcedRefresh) {
+      await activateWaitingWorker(registration.waiting)
+      reloadOnce()
+    } else handlers.onNeedRefresh()
+  }
   let pollTimer: ReturnType<typeof setTimeout> | undefined
   let lastUpdateCheckAt = 0
   let updateCheck: Promise<void> | null = null
@@ -119,11 +134,14 @@ export function initPwa(handlers: PwaLifecycleHandlers): PwaController {
       const mod = await import(/* @vite-ignore */ 'virtual:pwa-register')
       updateSW = mod.registerSW({
         immediate: true,
-        // Workbox otherwise reloads from its `controlling` callback while
-        // activatePwaUpdate reloads from `controllerchange`, causing duplicate
-        // navigations and, in some browsers, a waiting-worker reload loop.
-        onNeedReload: () => {},
-        onNeedRefresh: () => handlers.onNeedRefresh(),
+        // Other tabs also need the new shell when a worker takes control.
+        // Share the guard with explicit activation to avoid two reloads.
+        onNeedReload: reloadOnce,
+        onNeedRefresh: () => {
+          // Workbox can report an external installation without a waiting
+          // update, particularly after unregistering during force refresh.
+          void notifyWaitingUpdate().catch((error) => handlers.onRegisterError?.(error))
+        },
         onOfflineReady: () => handlers.onOfflineReady(),
         onRegisteredSW: (_url: string, registration: ServiceWorkerRegistration | undefined) => {
           handlers.onRegistered?.(registration)
@@ -195,11 +213,18 @@ export function initPwa(handlers: PwaLifecycleHandlers): PwaController {
         // virtual module's Workbox `controlling` callback.
         sendSkipWaiting: () => updateSW!(false),
         serviceWorker: navigator.serviceWorker,
-        reload: () => window.location.reload(),
+        reload: reloadOnce,
       })
     },
     forceRefresh: async () => {
-      await forcePwaRefresh()
+      reloading = true
+      try {
+        await forcePwaRefresh()
+      } catch (error) {
+        reloading = false
+        handlers.onRegisterError?.(error)
+        throw error
+      }
     },
     checkForUpdate: async () => {
       const registration = await navigator.serviceWorker.getRegistration()
@@ -208,7 +233,36 @@ export function initPwa(handlers: PwaLifecycleHandlers): PwaController {
   }
 }
 
-const FORCE_REFRESH_PARAMETER = '__kala_refresh'
+export const FORCE_REFRESH_PARAMETER = '__kala_refresh'
+
+export async function activateWaitingWorker(
+  worker: Pick<ServiceWorker, 'state' | 'postMessage' | 'addEventListener' | 'removeEventListener'>,
+  timeoutMs = UPDATE_RELOAD_TIMEOUT_MS,
+): Promise<void> {
+  if (worker.state === 'activated') return
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = (): void => {
+      clearTimeout(timer)
+      worker.removeEventListener('statechange', changed)
+    }
+    const changed = (): void => {
+      if (worker.state === 'activated') { cleanup(); resolve() }
+      else if (worker.state === 'redundant') { cleanup(); reject(new Error('Dashboard update was superseded before activation')) }
+    }
+    const timer = setTimeout(() => {
+      cleanup()
+      reject(new Error('Dashboard update activation timed out'))
+    }, timeoutMs)
+    worker.addEventListener('statechange', changed)
+    try {
+      worker.postMessage({ type: 'SKIP_WAITING' })
+      changed()
+    } catch (error) {
+      cleanup()
+      reject(error)
+    }
+  })
+}
 
 export async function forcePwaRefresh(options: {
   serviceWorker?: ServiceWorkerContainer
@@ -220,6 +274,9 @@ export async function forcePwaRefresh(options: {
   const cacheStorage = options.cacheStorage ?? caches
   const locationValue = options.location ?? window.location
   const registration = await serviceWorker.getRegistration().catch(() => undefined)
+  // Unregistering first can leave another tab's old worker active and reinstall
+  // the same waiting update on every refresh.
+  if (registration?.waiting) await activateWaitingWorker(registration.waiting)
   await registration?.unregister()
   const cacheNames = await cacheStorage.keys().catch(() => [])
   await Promise.all(cacheNames

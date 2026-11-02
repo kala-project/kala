@@ -635,7 +635,9 @@ export async function startHostServer(
         roots: defaultSkillRootsList,
         diagnostics: defaultSkillRegistry.diagnostics,
       },
-      ...(restart ? { runtime: restart.status() } : {}),
+      runtime: restart?.status() ?? restartUnavailableStatus(),
+      runtimeManagement: restart ? 'local' : 'external',
+      agentRuntimes: agentRuntimes?.catalog() ?? [],
       socketConnections: socketConnectionAuditSnapshot(io),
     }
   }

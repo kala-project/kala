@@ -1,9 +1,42 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
+import { DEDICATED_DEPLOYMENT, FULL_RUNTIME_CAPABILITIES, PRIVATE_CLOUD_DEPLOYMENT, type ServerSettingsPayload } from '@agent-kernel/shared'
 
 import { StorageSection } from './StorageSection.js'
 
 describe('StorageSection', () => {
+  it.each([
+    ['dedicated', DEDICATED_DEPLOYMENT],
+    ['private-cloud', PRIVATE_CLOUD_DEPLOYMENT],
+  ] as const)('shows tenant object accounting without host inventory or cleanup in %s', (product, deployment) => {
+    const emit = vi.fn()
+    const payload: ServerSettingsPayload = {
+      providers: [], defaultModel: '', hooks: [],
+      paths: { claudeSettings: '', codexConfig: '', manualModels: '', hooksConfig: '', sessionsDir: '' },
+      mcp: { supported: false },
+      deployment: { product, deployment, capabilities: FULL_RUNTIME_CAPABILITIES },
+      storage: { kind: 'postgres-s3', organizationId: 'org-owned', objectBytes: 123, objectLimitBytes: 456 },
+    }
+    render(<StorageSection socket={{ emit } as never} payload={payload} />)
+    expect(screen.getByText('org-owned')).toBeTruthy()
+    expect(screen.getByText('123 / 456 bytes')).toBeTruthy()
+    expect(screen.getByText('PostgreSQL')).toBeTruthy()
+    expect(screen.getByText('S3')).toBeTruthy()
+    expect(emit).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: /clean/i })).toBeNull()
+  })
+
+  it('does not fall back to host inventory when Platform accounting is unavailable', () => {
+    const emit = vi.fn()
+    render(<StorageSection socket={{ emit } as never} payload={{
+      providers: [], defaultModel: '', hooks: [], mcp: { supported: false },
+      paths: { claudeSettings: '', codexConfig: '', manualModels: '', hooksConfig: '', sessionsDir: '' },
+      deployment: { product: 'dedicated', deployment: DEDICATED_DEPLOYMENT, capabilities: FULL_RUNTIME_CAPABILITIES },
+    }} />)
+    expect(screen.getByText('Organization storage usage unavailable')).toBeTruthy()
+    expect(emit).not.toHaveBeenCalled()
+  })
+
   it('selects only safe cleanup candidates and requires two confirmations', async () => {
     const emit = vi.fn((event: string, payload: unknown, ack: (result: unknown) => void) => {
       if (event === 'client:get_global_storage') {
