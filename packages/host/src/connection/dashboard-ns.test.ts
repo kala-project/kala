@@ -163,7 +163,7 @@ describe('dashboard user message routing', () => {
       content,
       model: 'copilot:gpt-5',
       mode: 'queue',
-    }), undefined)
+    }), undefined, undefined)
     expect(drain).toHaveBeenCalledWith(message.sessionId)
     expect(order.indexOf('commit')).toBeLessThan(order.indexOf('enqueue'))
   })
@@ -206,7 +206,7 @@ describe('dashboard user message routing', () => {
       text: message.text,
       model: 'copilot:gpt-5',
       mode: 'steer',
-    }), 'front')
+    }), 'front', undefined)
     expect(drain).toHaveBeenCalledWith(message.sessionId)
     expect(requestStopAtBoundary).not.toHaveBeenCalled()
     expect(order.indexOf('commit')).toBeLessThan(order.indexOf('enqueue'))
@@ -229,7 +229,7 @@ describe('dashboard user message routing', () => {
       operationId: message.operationId,
       model: 'copilot:gpt-5',
       mode: 'steer',
-    }), 'front')
+    }), 'front', undefined)
   })
 })
 

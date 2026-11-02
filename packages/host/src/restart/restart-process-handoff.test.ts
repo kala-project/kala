@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -7,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 const roots: string[] = []
 const children: ChildProcess[] = []
+const tsxLoader = createRequire(import.meta.url).resolve('tsx')
 
 afterEach(async () => {
   for (const child of children.splice(0)) child.kill('SIGKILL')
@@ -49,7 +51,7 @@ describe('planned restart process handoff', () => {
 
 async function runTsx(script: string, statePath: string): Promise<string> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', 'tsx', script, statePath], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(process.execPath, ['--import', tsxLoader, script, statePath], { stdio: ['ignore', 'pipe', 'pipe'] })
     children.push(child)
     let stdout = ''; let stderr = ''
     child.stdout!.on('data', (chunk) => { stdout += String(chunk) })

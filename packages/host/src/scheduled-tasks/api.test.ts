@@ -283,6 +283,7 @@ describe('scheduled task product API', () => {
     server = await startHostServer({
       port: 0,
       sessionsDir: root,
+      scheduledTaskPollMs: 100,
       deployment: PRIVATE_CLOUD_DEPLOYMENT,
       authorizeScheduledPrincipal: async (principal) => {
         expect(principal).toEqual({ organizationId: 'org-queue', principal: 'org-queue-user' })
@@ -386,6 +387,7 @@ describe('scheduled task product API', () => {
     server = await startHostServer({
       port: 0,
       sessionsDir: root,
+      scheduledTaskPollMs: 100,
       deployment: PRIVATE_CLOUD_DEPLOYMENT,
       authorizeScheduledPrincipal: async () => 'member',
       auth: { executorTokens: [{ token: executorToken, workspaceId }] },

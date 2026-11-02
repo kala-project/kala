@@ -2918,7 +2918,7 @@ describe('wire protocol', () => {
       },
     })
     try {
-      await vi.waitFor(() => expect(second.store.get('old-desktop-session')?.config.systemPrompt).toContain('Additional manual desktop authorization is not required'))
+      await vi.waitFor(() => expect(second.store.get('old-desktop-session')?.config.systemPrompt).toBe(prompt()))
       const oldMessages = structuredClone(second.store.get('old-desktop-session')!.state.messages.filter((message) => message.role !== 'system'))
       const denied = await fetch(`http://localhost:${second.port}/settings/desktop-access`, {
         method: 'POST', headers: { ...headers, 'x-agent-runlab-organization-role': 'member' },
@@ -2933,9 +2933,7 @@ describe('wire protocol', () => {
         expect((await response.json() as ServerSettingsPayload).desktopAccess?.manualAuthorizationRequired).toBe(required)
         expect(loadAgentRuntimeSettings(path).desktopManualAuthorizationRequired).toBe(required)
         expect(loadAgentRuntimeSettings(path).slots).toEqual(defaultAgentRuntimeSettings().slots)
-        expect(second.store.get('old-desktop-session')?.config.systemPrompt).toContain(
-          `Additional manual desktop authorization is ${required ? '' : 'not '}required`,
-        )
+        expect(second.store.get('old-desktop-session')?.config.systemPrompt).toBe(prompt())
         expect(second.store.get('old-desktop-session')?.state.messages.filter((message) => message.role !== 'system')).toEqual(oldMessages)
       }
     } finally {

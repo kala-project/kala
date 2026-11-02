@@ -96,7 +96,7 @@ describe('versioned product API', () => {
     await expect(client.getSession('api-a')).rejects.toMatchObject({ status: 404 })
   })
 
-  it('preserves explicitly local legacy Dedicated token authentication', async () => {
+  it('requires Gateway ingress identity even when a Dedicated Host is given a legacy shared token', async () => {
     root = await mkdtemp(join(tmpdir(), 'kala-legacy-dedicated-api-'))
     server = await startHostServer({
       port: 0, sessionsDir: root, deployment: DEDICATED_DEPLOYMENT,
@@ -110,7 +110,7 @@ describe('versioned product API', () => {
       'x-agent-runlab-principal': 'forged', 'x-agent-runlab-organization-id': 'org-forged',
       'x-agent-runlab-organization-role': 'owner',
     } })).status).toBe(401)
-    expect((await fetch(url, { headers: { authorization: 'Bearer legacy-test-token' } })).status).toBe(200)
+    expect((await fetch(url, { headers: { authorization: `Bearer legacy-test-token` } })).status).toBe(401)
   })
 
   it('publishes OpenAPI without authentication and returns versioned error envelopes', async () => {

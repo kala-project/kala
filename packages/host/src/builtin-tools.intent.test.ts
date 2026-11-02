@@ -17,7 +17,7 @@ describe('built-in tool intent schema',()=>{
       actions:{type:'array',minItems:1,maxItems:8},
     })
     expect(tool.description).toContain('latest observation')
-    expect(tool.description).toContain('Never enable it')
+    expect(tool.description).toContain('Never bypass another Session owning the desktop')
   })
 
   it('registers multi_grep as a bounded executor read tool',()=>{

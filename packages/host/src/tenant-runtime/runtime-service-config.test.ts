@@ -61,14 +61,14 @@ describe('kala-runtime-service experimental Docker storage configuration', () =>
     }
   })
 
-  it('rejects direct and file forms together even when the direct value is blank', () => {
+  it('rejects populated direct and file forms together', () => {
     const result = runWithExperimentalEnv({
       ...completeStorageEnv(),
-      KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING: '   ',
+      KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING: 'postgres://unused',
       KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_FILE: '/unused/credential-file',
     })
     expect(result.status).toBe(1)
-    expect(result.stderr).toContain('KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING and KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_FILE are mutually exclusive')
+    expect(result.stderr).toContain('KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING, KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_FILE and KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_REF are mutually exclusive')
   })
 
   it('rejects a whitespace-only secret file', () => {
@@ -82,7 +82,7 @@ describe('kala-runtime-service experimental Docker storage configuration', () =>
 
       const result = runWithExperimentalEnv(values)
       expect(result.status).toBe(1)
-      expect(result.stderr).toContain('KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING or KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_FILE is required')
+      expect(result.stderr).toContain('KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING, KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_FILE or KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_REF is required')
     } finally {
       rmSync(secretDir, { recursive: true, force: true })
     }

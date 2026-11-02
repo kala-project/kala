@@ -164,6 +164,8 @@ export type HostServerOptions = {
   dagStore?: DagStorage
   /** Scheduled-task authority. Omit to retain the local state.json backend. */
   scheduledTaskStore?: ScheduledTaskStorage
+  /** Scheduler discovery interval; defaults to 30 seconds. */
+  scheduledTaskPollMs?: number
   authorizeScheduledPrincipal?: ScheduledPrincipalAuthorizer
   /** Push subscription authority. Private Cloud must inject a tenant-scoped implementation. */
   pushStore?: PushSubscriptionStorage
@@ -2509,7 +2511,7 @@ export async function startHostServer(
       }
       await enqueueUserMessage({ sessionId, text: task.prompt, intent: 'text', operationId, mode: 'queue', scheduledBy: scheduledAttribution(task), scheduledOwnerKey: task.ownerKey })
     },
-  }, { unitId: options.resourceUnitId ?? 'local', catchupLimit: 10 })
+  }, { unitId: options.resourceUnitId ?? 'local', catchupLimit: 10, ...(options.scheduledTaskPollMs !== undefined ? { pollMs: options.scheduledTaskPollMs } : {}) })
   publicApiHandler = createPublicApiHandler({
     authorize(request) {
       const authorization = request.headers.authorization
