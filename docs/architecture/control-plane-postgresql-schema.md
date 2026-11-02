@@ -1,7 +1,7 @@
 # Control-plane PostgreSQL Schema
 
-Status: normative schema design
-Migration: `packages/runtime-ingress-gateway/migrations/0001_control_plane.sql`
+Status: normative schema refinement of the [deployment-mode SoT](./deployment-mode-contract.md), not a claim that every target invariant is implemented.
+Migrations: ordered files in `packages/runtime-ingress-gateway/migrations/`; the durable delivery expansion is `0008_webhook_deliveries.sql`.
 
 ## Aggregate boundaries
 
@@ -9,7 +9,7 @@ Migration: `packages/runtime-ingress-gateway/migrations/0001_control_plane.sql`
 - **Workspace aggregate:** Workspace, grant and versioned Tool Policy.
 - **Executor aggregate:** pool, machine identity and one-time enrollment token.
 - **Identity/session aggregate:** principal, browser session and notification device.
-- **Ledgers:** Usage, Audit and Outbox are append-only from application code.
+- **Ledgers:** Usage/Audit records and Outbox event envelopes are append-only from application code. Separate per-endpoint webhook delivery rows carry mutable, lease-fenced operational state.
 
 All tenant-owned relationships carry `organization_id`. Composite foreign keys prevent a Workspace, membership, pool, browser session, notification device or Executor from referencing an object in another Organization even if IDs collide or application authorization is defective.
 
@@ -24,7 +24,7 @@ PostgreSQL constraints cover shape and referential isolation. The repository tra
 5. Placement mutation compares generation and `last_operation_id`; stale generations fail and repeated operation IDs return the original result.
 6. Usage insertion is idempotent on `(organization_id, source_operation_id)`.
 7. Audit and Usage rows are never updated or deleted by the application role. Retention runs through a separate narrowly scoped maintenance role.
-8. Outbox workers claim rows with `FOR UPDATE SKIP LOCKED`, bounded leases and retry/dead-letter state.
+8. Outbox recipient fan-out and delivery claims use short `FOR UPDATE SKIP LOCKED` transactions. Each endpoint has independent attempt/terminal state and a lease token/generation; completion requires the current unexpired claim. HTTP and SecretResolver calls occur outside transactions. Legacy unresolved events require review, never automatic replay. The deployment-mode SoT defines the protocol and rollout boundary.
 
 ## Deliberate choices
 
@@ -48,8 +48,15 @@ PostgreSQL constraints cover shape and referential isolation. The repository tra
 
 - `runlab_migrator`: DDL only during controlled release.
 - `runlab_app`: CRUD on mutable control tables; insert/select only on ledgers; no schema ownership.
-- `runlab_worker`: Outbox claim/delivery fields and maintenance jobs only.
+- Separately provisioned webhook identity: SELECT events/endpoints/deliveries/schema/installation markers, INSERT deliveries and UPDATE only fan-out/delivery progress columns; no other maintenance jobs, ledger mutation, schema ownership or Runtime/S3 authority. The operator chooses its role name.
+- Separate narrowly scoped maintenance identities own deliberate retention/repair jobs; they are not webhook worker credentials.
 - `runlab_backup`: read-only backup privileges.
 - ZITADEL uses a separate database and role.
 
 Production connections require TLS and server identity verification. Credentials are resolved through the secret boundary and are not stored in Compose environment values or repository files.
+
+## Source implementation boundary
+
+Migration 0008 separates immutable event envelopes from per-endpoint snapshots/attempts/leases. Endpoint invalidation generation prevents disable/re-enable or URL/reference reversion from reviving old work. The producer's six envelope INSERT columns exclude operational state. Physical event/endpoint deletion is restricted while delivery history references it; logical endpoint deletion disables delivery. Event-level legacy completion/retry columns remain historical, not the new delivery completion view.
+
+The [design/status ledger](./private-cloud-design-status.md#durable-external-delivery-bounded-local-source-acceptance) records the source acceptance and gaps. In particular, Audit/Usage broad application DML, retention's mutable audit outcomes, subscriber management and maintenance/archive tooling remain implementation gaps against the target above; this Outbox expansion does not silently declare them solved.

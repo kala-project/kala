@@ -38,7 +38,7 @@ Allowed examples:
 - `tool`: bounded built-in tool name, with unknown/custom collapsed to `other`;
 - `error_code`: normalized internal code.
 
-Opaque Unit and Session IDs belong in traces/log correlation only and must be hashed or omitted from exported resource metrics.
+Opaque derived Unit and Session IDs may appear in protected traces/log correlation only. All such IDs, including hashes, MUST be omitted from exported metric labels and resource attributes; hashing does not bound cardinality. Tenant-level audit/usage belongs in PostgreSQL, not metric series.
 
 ## Service objectives
 

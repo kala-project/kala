@@ -86,7 +86,7 @@ One Organization maps to one logical TenantRuntimeUnit in the initial topology. 
 - Artifact registry, push subscriptions, caches, timers and background work;
 - Workspace metadata and versioned policy projection.
 
-Cross-Organization identifier collision is expected and safe. Unit identity must be present in every persistent key, object prefix, metric context, and control operation. Unit-local code never receives an end-user credential or identity-provider token.
+Cross-Organization identifier collision is expected and safe. Unit identity must scope every persistent key, object prefix and control operation. Metrics omit tenant/Unit/Session identifiers, even hashed ones; only protected traces/logs may carry opaque derived correlation, per the deployment SoT and observability contract. Unit-local code never receives an end-user credential or identity-provider token.
 
 Lifecycle is generation-fenced:
 
@@ -137,7 +137,7 @@ Production TLS terminates at managed ingress. Internal HTTP is permitted only on
 
 - Authorization defaults deny when identity, policy, contract, placement, or repository dependencies are unavailable.
 - Agent Event Log and Queue durability remain first-persist-then-publish/delete.
-- Control-plane mutations are transactional; external effects use an Outbox and idempotent consumers.
+- Control-plane mutations are transactional; external effects use immutable Outbox envelopes and independent per-endpoint leased delivery state. Workers perform network/secret I/O outside transactions and receivers deduplicate stable delivery IDs; delivery is at-least-once, not exactly-once. The deployment SoT defines legacy review, lease fencing and destination policy.
 - Cached authorization carries a short bounded lifetime and a version; revocation signals close live channels.
 - Runtime restart recovery deduplicates committed operations using operation IDs and Executor receipts. An already-dispatched external effect with no confirmed receipt remains **unknown** until reconciled; leases and database fencing alone cannot make an uncooperative LLM, tool or customer system exactly-once. Retry must follow the effect's idempotency contract and surface an explicit incomplete/unknown state rather than silently repeating it.
 - Lease-loss isolation and desired-state recovery are separate operations. A still-running node closes the lost local Unit activation, then reconciles the authoritative catalog and may construct a fresh activation only while its current desired state is `ready`. New membership/owner generations are not new operator lifecycle commands. Suspend/delete, Organization binding and a changed lifecycle generation take precedence; recovery cannot revive an old handle, reclaim every prior Session automatically or replay unknown effects. Global drain stops reconciliation before closing stores. The deployment-mode SoT defines the shared re-entry invariant.

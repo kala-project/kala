@@ -1,0 +1,48 @@
+# Source-only opt-in overlay for compose.postgres-s3-base.yaml + compose.storage-postgres-s3.yaml.
+# Stop ALL legacy workers, migrate/review legacy events, then explicitly enable this overlay.
+# Reuse the immutable Gateway image; scale webhook-worker without container_name or published ports.
+services:
+  control-plane-init:
+    environment:
+      KALA_WEBHOOK_WORKER_ROLE: ${KALA_WEBHOOK_WORKER_ROLE:?set a separately pre-created standalone PostgreSQL login role}
+
+  webhook-worker:
+    image: ${KALA_INGRESS_IMAGE:?set the immutable Gateway name@sha256 digest built with the worker}
+    command: [packages/runtime-ingress-gateway/dist/src/bin/webhook-worker.js]
+    user: "65532:65532"
+    restart: unless-stopped
+    environment:
+      KALA_DEPLOYMENT_CONFIG: /etc/kala/deployment.json
+      KALA_INSTALLATION_ID_FILE: /run/kala-installation-id
+      KALA_WEBHOOK_DATABASE_URL_FILE: /run/kala-webhook/database_url
+      KALA_WEBHOOK_MIGRATIONS_DIR: /app/packages/runtime-ingress-gateway/migrations
+      KALA_WEBHOOK_ALLOWED_ORIGINS: ${KALA_WEBHOOK_ALLOWED_ORIGINS:?set exact HTTPS recipient origins separated by commas}
+      KALA_SECRET_RESOLVER: openbao-jwt
+      KALA_OPENBAO_ADDR: ${KALA_WEBHOOK_OPENBAO_ADDR:?set the HTTPS OpenBao origin}
+      KALA_OPENBAO_AUTH_MOUNT: ${KALA_WEBHOOK_OPENBAO_AUTH_MOUNT:?set the workload JWT auth mount}
+      KALA_OPENBAO_ROLE: ${KALA_WEBHOOK_OPENBAO_ROLE:?set the dedicated webhook resolver role}
+      KALA_OPENBAO_KV_MOUNT: ${KALA_WEBHOOK_OPENBAO_KV_MOUNT:?set the KV-v2 mount}
+      KALA_OPENBAO_JWT_FILE: /run/kala-webhook-identity/token
+    volumes:
+      - ${KALA_DEPLOYMENT_CONFIG_FILE:-./deployment.json}:/etc/kala/deployment.json:ro
+      # Dedicated directories, readable by uid/gid 65532; no Gateway/Runtime/S3 credentials.
+      - ${KALA_WEBHOOK_SECRETS_DIR:?set the dedicated worker credential directory}:/run/kala-webhook:ro
+      # Mount a directory so projected-token replacement remains visible.
+      - ${KALA_WEBHOOK_IDENTITY_DIR:?set the dedicated projected workload identity directory}:/run/kala-webhook-identity:ro
+    configs:
+      - source: installation_id
+        target: /run/kala-installation-id
+    depends_on:
+      control-plane-init: { condition: service_completed_successfully }
+    networks: [egress]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: [/tmp:rw,noexec,nosuid,size=16m]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 0.5
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

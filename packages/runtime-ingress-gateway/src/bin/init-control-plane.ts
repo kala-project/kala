@@ -6,6 +6,8 @@ import { pathToFileURL } from 'node:url'
 import pg from 'pg'
 import { createPostgresControlPlaneDatabase, migrateControlPlane, readControlPlaneMigrations } from '../persistence/postgres.js'
 
+import { grantWebhookWorker } from '../webhooks/worker-authority.js'
+
 const { Client } = pg
 
 interface ControlPlaneInitConfig {
@@ -31,6 +33,8 @@ export async function resolveControlPlaneInitConfig(
 async function main(): Promise<void> {
   const { adminUrl, databaseUrl, requireExistingDatabase } = await resolveControlPlaneInitConfig()
   const writerRole = process.env.KALA_INGRESS_CONTROL_WRITER_ROLE
+  const workerRole = process.env.KALA_WEBHOOK_WORKER_ROLE
+  if (workerRole && (!writerRole || workerRole === writerRole)) throw new Error('Webhook worker requires a separate control database identity')
   if (requireExistingDatabase) {
     if (new URL(databaseUrl).pathname !== '/runlab_control') throw new Error('external control database must be runlab_control')
     if (!writerRole) throw new Error('KALA_INGRESS_CONTROL_WRITER_ROLE is required for external control PostgreSQL')
@@ -57,7 +61,8 @@ async function main(): Promise<void> {
   try {
     const migrations = await readControlPlaneMigrations(resolve(process.env.KALA_INGRESS_MIGRATIONS_DIR ?? 'migrations'))
     const version = await migrateControlPlane(database, migrations)
-    if (writerRole) await grantControlWriter(database, writerRole)
+    if (writerRole) await database.transaction((tx) => grantControlWriter(tx, writerRole))
+    if (workerRole) await database.transaction((tx) => grantWebhookWorker(tx, workerRole))
     process.stdout.write(`${JSON.stringify({ event: 'control_plane_initialized', version })}\n`)
   } finally { await database.close() }
 }
@@ -69,6 +74,10 @@ export async function grantControlWriter(database: { query: (sql: string) => Pro
   await database.query(`GRANT CONNECT ON DATABASE runlab_control TO "${role}"`)
   await database.query(`GRANT USAGE ON SCHEMA public TO "${role}"`)
   await database.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "${role}"`)
+  // Business producers may append envelopes, never rewrite delivery progress or event history.
+  await database.query(`REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON outbox_events FROM "${role}"`)
+  await database.query(`REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON webhook_deliveries FROM "${role}"`)
+  await database.query(`GRANT INSERT (id,organization_id,topic,aggregate_type,aggregate_id,payload) ON outbox_events TO "${role}"`)
   // The running Gateway reads the verifier and records successful logins, but cannot
   // replace/bootstrap a credential or modify its identity and password columns.
   await database.query(`REVOKE INSERT, UPDATE, DELETE ON TABLE public.dedicated_owner_credentials FROM "${role}"`)
@@ -76,6 +85,15 @@ export async function grantControlWriter(database: { query: (sql: string) => Pro
   await database.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "${role}"`)
   // The fresh PG/S3 claim lives outside public; only its immutable marker is readable.
   await database.query(`DO $kala$ BEGIN
+    IF has_any_column_privilege('${role}','public.outbox_events','UPDATE')
+      OR has_table_privilege('${role}','public.outbox_events','DELETE,TRUNCATE,REFERENCES,TRIGGER')
+      OR has_any_column_privilege('${role}','public.webhook_deliveries','INSERT,UPDATE')
+      OR has_table_privilege('${role}','public.webhook_deliveries','DELETE,TRUNCATE,REFERENCES,TRIGGER')
+      OR EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='public.outbox_events'::regclass AND attnum>0 AND NOT attisdropped
+        AND attname NOT IN ('id','organization_id','topic','aggregate_type','aggregate_id','payload')
+        AND has_column_privilege('${role}','public.outbox_events',attname,'INSERT')) THEN
+      RAISE EXCEPTION 'Gateway writer must only append Outbox envelopes and must not mutate deliveries';
+    END IF;
     IF to_regclass('kala_installation_claim.marker') IS NOT NULL THEN
       IF to_regclass('kala_installation_claim.recovery_checkpoint') IS NULL THEN
         RAISE EXCEPTION 'Installation claim has no coordinated recovery checkpoint';

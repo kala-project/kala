@@ -11,7 +11,8 @@
     "agent-runlab-control-plane-import-json": "./dist/src/bin/import-json-control.js",
     "kala-dedicated-owner-bootstrap": "./dist/src/bin/bootstrap-dedicated-owner.js",
     "kala-dedicated-owner-rotate": "./dist/src/bin/rotate-dedicated-owner.js",
-    "kala-dedicated-owner-reset": "./dist/src/bin/reset-dedicated-owner.js"
+    "kala-dedicated-owner-reset": "./dist/src/bin/reset-dedicated-owner.js",
+    "kala-webhook-worker": "./dist/src/bin/webhook-worker.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -21,7 +22,8 @@
     "import:json": "node dist/src/bin/import-json-control.js",
     "bootstrap:dedicated-owner": "node dist/src/bin/bootstrap-dedicated-owner.js",
     "rotate:dedicated-owner": "node dist/src/bin/rotate-dedicated-owner.js",
-    "reset:dedicated-owner": "node dist/src/bin/reset-dedicated-owner.js"
+    "reset:dedicated-owner": "node dist/src/bin/reset-dedicated-owner.js",
+    "webhooks": "node dist/src/bin/webhook-worker.js"
   },
   "dependencies": {
     "@agent-kernel/shared": "workspace:*",
