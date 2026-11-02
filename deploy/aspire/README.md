@@ -136,3 +136,7 @@ The same drill preserved a real provisioning-client OOM and showed that a raw-lo
 
 
 The [online-client and ingress follow-up](telemetry/native-client-ingress-acceptance.md) supersedes only the earlier record's missing PG/S3 client and Caddy coverage. It builds new Runtime/Gateway images, validates real packaged clients against restricted running PG/S3, then performs a policy-reviewed cold-backup upgrade. Bundled telemetry now mounts an additional read-only Caddy scrape configuration; external telemetry intentionally does not. Full lifecycle/log inventory, remote/native Agent tracing and durable history/alerts remain separate work.
+
+## Dedicated API handoff follow-up
+
+[Current-image API acceptance](dedicated-api-acceptance.md) closes the earlier authenticated Session-list401 and memo/tab404. New Gateway-managed Platform composition requires the verified ingress actor in either tenancy mode; legacy direct Dedicated Token authentication remains and still rejects forged ingress headers. User state now uses the complete permission-checked Unit/service/Organization/role/principal handoff with same-origin cookie writes. The final image pair is frozen from source346b92fc; three actual Owner read routes returned200 and each had four production Runtime PG CLIENT children under Gateway→Runtime HTTP spans. This is not a real model/Executor run or successful live memo-write test.

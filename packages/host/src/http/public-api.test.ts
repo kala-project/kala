@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { createConfig } from '@agent-kernel/kernel'
-import { KalaApiClient, PRIVATE_CLOUD_DEPLOYMENT } from '@agent-kernel/shared'
+import { KalaApiClient, PRIVATE_CLOUD_DEPLOYMENT, DEDICATED_DEPLOYMENT } from '@agent-kernel/shared'
 
 import { startHostServer, type HostServer } from '../server.js'
 
@@ -19,13 +19,14 @@ describe('versioned product API', () => {
     root = undefined
   })
 
-  it('creates, pages, reads, admits messages, and idempotently deletes tenant Sessions', async () => {
+  it.each([PRIVATE_CLOUD_DEPLOYMENT, DEDICATED_DEPLOYMENT])('creates, pages, reads, admits messages, and deletes tenant Sessions for $tenancy', async (deployment) => {
     root = await mkdtemp(join(tmpdir(), 'kala-public-api-'))
     server = await startHostServer({
       port: 0,
       sessionsDir: root,
       defaultConfig: createConfig({ systemPrompt: 'test', tools: [] }),
-      deployment: PRIVATE_CLOUD_DEPLOYMENT,
+      deployment,
+      requireIngressIdentity: true,
       llm: {
         name: 'api-test',
         async call() {
@@ -42,6 +43,11 @@ describe('versioned product API', () => {
       return await fetch(input, { ...init, headers })
     }
     const client = new KalaApiClient({ baseUrl, fetch: tenantFetch })
+    expect((await fetch(`${baseUrl}/api/v1/sessions`)).status).toBe(401)
+    expect((await fetch(`${baseUrl}/api/v1/sessions`, { headers: {
+      'x-agent-runlab-principal': 'principal-a', 'x-agent-runlab-organization-id': 'org-a',
+      'x-agent-runlab-organization-role': 'invalid',
+    } })).status).toBe(401)
 
     const first = await client.createSession({ operationId: 'create-a', sessionId: 'api-a' })
     expect(first.session.summary).toMatchObject({ sessionId: 'api-a', executionMode: 'chat' })
@@ -87,6 +93,23 @@ describe('versioned product API', () => {
     await client.deleteSession('api-a', 'delete-a')
     await client.deleteSession('api-a', 'delete-a')
     await expect(client.getSession('api-a')).rejects.toMatchObject({ status: 404 })
+  })
+
+  it('preserves explicitly local legacy Dedicated token authentication', async () => {
+    root = await mkdtemp(join(tmpdir(), 'kala-legacy-dedicated-api-'))
+    server = await startHostServer({
+      port: 0, sessionsDir: root, deployment: DEDICATED_DEPLOYMENT,
+      defaultConfig: createConfig({ systemPrompt: 'test', tools: [] }),
+      auth: { sharedToken: 'legacy-test-token' },
+      llm: { name: 'unused', async call() { throw new Error('model must not run') } },
+    })
+    const url = `http://127.0.0.1:${server.port}/api/v1/sessions`
+    expect((await fetch(url)).status).toBe(401)
+    expect((await fetch(url, { headers: {
+      'x-agent-runlab-principal': 'forged', 'x-agent-runlab-organization-id': 'org-forged',
+      'x-agent-runlab-organization-role': 'owner',
+    } })).status).toBe(401)
+    expect((await fetch(url, { headers: { authorization: 'Bearer legacy-test-token' } })).status).toBe(200)
   })
 
   it('publishes OpenAPI without authentication and returns versioned error envelopes', async () => {

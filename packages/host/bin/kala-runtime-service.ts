@@ -282,6 +282,7 @@ async function main(): Promise<void> {
       const speechCredentialStore = persistentStorage?.speechCredentialStore ?? localSpeechCredentialStore
       return startLoopbackHostRuntimeUnit(id, {
         telemetry,
+        requireIngressIdentity: true,
         authorizeScheduledPrincipal: createScheduledPrincipalAuthorizer({
           origin: process.env.KALA_RUNTIME_AUTHORITY_ORIGIN,
           serviceSecret: ingressSecret,

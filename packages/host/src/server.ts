@@ -134,6 +134,8 @@ import { occurrenceSessionId, UnitScheduler } from './scheduled-tasks/scheduler.
 import type { ScheduledTask, ScheduledTaskSnapshot } from './scheduled-tasks/types.js'
 
 export type HostServerOptions = {
+  /** New Gateway composition only; legacy local authentication is unchanged. */
+  requireIngressIdentity?: boolean
   telemetry?: OnlineTelemetry
   port: number
   listenHost?: string
@@ -2344,8 +2346,16 @@ export async function startHostServer(
         auth,
       )
       if (!result.ok) return { ok: false, status: 401, code: 'authentication_required' }
+      if (options.requireIngressIdentity && result.actor.kind !== 'ingress') {
+        return { ok: false, status: 401, code: 'authentication_required' }
+      }
       if (result.actor.kind === 'ingress') {
-        if (effectiveTenancy(deployment) !== 'multi-tenant') {
+        // Both Dedicated and Private Cloud receive verified Gateway identities.
+        // Single tenancy is not Portable/local authentication.
+        if (deployment.architecture !== 'platform'
+            || (deployment.tenancy === 'single-tenant' && !options.requireIngressIdentity)) {
+          // Historical direct Dedicated listeners still reject forged ingress
+          // headers; only the outer-service-gated composition may trust them.
           return { ok: false, status: 401, code: 'authentication_required' }
         }
         return {

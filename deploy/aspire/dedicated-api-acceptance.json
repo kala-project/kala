@@ -1,0 +1,153 @@
+{
+  "schemaVersion": 1,
+  "kind": "dedicated-api-authority-handoff-fix",
+  "date": "2026-10-29",
+  "passedForApiSlice": true,
+  "applicationSourceRevision": "346b92fc7875eb26deb8ed8999f591329a99736c",
+  "initialFixRevision": "0ee99b0e5b991888edb5fea76526223b9886afd6",
+  "images": {
+    "runtime": {
+      "image": "kala-dedicated-api-runtime@sha256:9227664a910581a5da4f02cac55ddfe81be7cc84ba4068e3b1ead0666c18b95b",
+      "id": "sha256:9227664a910581a5da4f02cac55ddfe81be7cc84ba4068e3b1ead0666c18b95b"
+    },
+    "gateway": {
+      "image": "kala-dedicated-api-gateway@sha256:e42b057155f8f273b4066d54dd5741b47acf586f5cb35aa30e21e5adbcc7d63a",
+      "id": "sha256:e42b057155f8f273b4066d54dd5741b47acf586f5cb35aa30e21e5adbcc7d63a"
+    }
+  },
+  "liveProof": {
+    "passed": true,
+    "ownerPositiveReads": [
+      {
+        "path": "/api/v1/sessions?limit=1",
+        "status": 200,
+        "browserAuthorityOverwritten": true
+      },
+      {
+        "path": "/memo",
+        "status": 200,
+        "browserAuthorityOverwritten": true
+      },
+      {
+        "path": "/user/session-tabs",
+        "status": 200,
+        "browserAuthorityOverwritten": true
+      }
+    ],
+    "negativeCases": [
+      {
+        "path": "/api/v1/sessions?limit=1",
+        "case": "anonymousForgedAuthority",
+        "status": 401
+      },
+      {
+        "path": "/memo",
+        "case": "anonymousForgedAuthority",
+        "status": 401
+      },
+      {
+        "path": "/memo",
+        "case": "missingOrigin",
+        "status": 403
+      },
+      {
+        "path": "/memo",
+        "case": "crossOrigin",
+        "status": 403
+      },
+      {
+        "path": "/user/session-tabs",
+        "case": "anonymousForgedAuthority",
+        "status": 401
+      },
+      {
+        "path": "/user/session-tabs",
+        "case": "missingOrigin",
+        "status": 403
+      },
+      {
+        "path": "/user/session-tabs",
+        "case": "crossOrigin",
+        "status": 403
+      }
+    ],
+    "productionTraces": [
+      {
+        "path": "/api/v1/sessions?limit=1",
+        "traceId": "f4fdcb51c44351f284fab5f2def21491",
+        "runtimePgClientSpans": 4,
+        "gatewayRuntimePgParentsVerified": true
+      },
+      {
+        "path": "/memo",
+        "traceId": "b82ee65aa9f8bded6b520cd6e95d0823",
+        "runtimePgClientSpans": 4,
+        "gatewayRuntimePgParentsVerified": true
+      },
+      {
+        "path": "/user/session-tabs",
+        "traceId": "66baadc03d79ed89b0b74b0516a25205",
+        "runtimePgClientSpans": 4,
+        "gatewayRuntimePgParentsVerified": true
+      }
+    ],
+    "runtimeServiceBoundary": {
+      "passed": true,
+      "outerMissingOrWrongSecretRejected": true,
+      "innerMissingIdentityRejected": true
+    },
+    "noSessionOrMemoWrites": true,
+    "noModelOrExecutorRequest": true,
+    "modelConfigured": false,
+    "probeLoginExplicitlyLoggedOut": true,
+    "traceCorrelationUsesIncomingW3CNotApiRequestId": true,
+    "images": {
+      "runtime": "kala-dedicated-api-runtime@sha256:9227664a910581a5da4f02cac55ddfe81be7cc84ba4068e3b1ead0666c18b95b",
+      "gateway": "kala-dedicated-api-gateway@sha256:e42b057155f8f273b4066d54dd5741b47acf586f5cb35aa30e21e5adbcc7d63a"
+    },
+    "sourceRevision": "346b92fc",
+    "coldBackup": {
+      "schemaVersion": 3,
+      "rootCount": 5,
+      "entryCount": 2011,
+      "payloadAndEveryEntryValidated": true,
+      "restoreAttempted": false
+    },
+    "freshMetricResources": [
+      "dashboard",
+      "ingress",
+      "kala-gateway",
+      "kala-runtime",
+      "postgres",
+      "silo"
+    ],
+    "caSha256": "f0a68e2d6cfa3aa69d2d82d4aa9e807f58603b287b11bec72a72a50efcf8ee43"
+  },
+  "tests": {
+    "focusedCases": 47,
+    "hostTypecheck": "passed",
+    "gatewayTypecheck": "passed",
+    "legacyDedicatedTokenAndForgedIngressRegression": "passed",
+    "viewerWritesAndMissingCrossOriginWrites": "rejected in fixture",
+    "crossOrganizationSessions": "isolated in Dedicated and Private Cloud fixtures"
+  },
+  "realBrowserNavigationTested": false,
+  "successfulLiveMemoWritesTested": false,
+  "noBusinessSessionOrContentWrites": true,
+  "noModelOrExecutorRequest": true,
+  "tlsAuthorityPreserved": true,
+  "remainOpen": [
+    "complete resource lifecycle/log inventory",
+    "host metrics",
+    "durable history/alerts",
+    "monitor-aware cold restore",
+    "real model/SDK/remote Executor business",
+    "signed release/soak"
+  ],
+  "sourceSha256": {
+    "packages/host/src/server.ts": "0069ffc8ae4d7f88c891d394cc69057626c6624bee2bb1fae6ffe97eae37ce51",
+    "packages/host/bin/kala-runtime-service.ts": "190271fe85ba003f4702bffa9bae577128e746bb5a9aad98e24b15bed6eab348",
+    "packages/runtime-ingress-gateway/src/edge/server.ts": "cfa80624211573a1b35db04483cd7e2ab5ec43081b7d783f655bc417fa697ebb",
+    "docs/architecture/deployment-mode-contract.md": "0e955cec081d55c67f21c3359adf65996cc032922bbd0535ac5b450494f97ed7"
+  }
+}

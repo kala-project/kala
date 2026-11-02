@@ -941,13 +941,13 @@ export async function startRuntimeIngressGateway(options: {
       ])
       response.writeHead(204, { 'cache-control': 'no-store' }); response.end(); return
     }
-    if ((url.pathname === '/memo' || url.pathname === '/user/session-tabs') && ['GET', 'HEAD', 'PUT'].includes(request.method ?? '') && session && organizationAccess) {
-      if (!enforceRateLimit(response, options.rateLimiter, `${organizationAccess.organization.id}:${session.identity.issuer}:${session.identity.subject}`)) return
-      request.headers['x-agent-runlab-principal'] = Buffer.from(`${session.identity.issuer}\0${session.identity.subject}`, 'utf8').toString('base64url')
-      request.headers['x-agent-runlab-organization-id'] = organizationAccess.organization.id
-      const runtimeOrigin = await resolveRuntimeOrigin(organizationAccess.organization.unitId)
-      proxy.web(request, response, { target: runtimeOrigin }, () => { if (!response.headersSent) response.writeHead(502); response.end() })
-      return
+    // User state needs the complete trusted Unit handoff below, not a special
+    // proxy branch that omits its service credential or bypasses role checks.
+    if ((url.pathname === '/memo' || url.pathname === '/user/session-tabs')
+        && !['GET', 'HEAD', 'OPTIONS'].includes(request.method ?? '')
+        && session && request.headers.origin !== requestPublicOrigin(request)) {
+      response.writeHead(403, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      response.end(JSON.stringify({ error: 'same_origin_required' })); return
     }
     if (session && organizationAccess && !enforceRateLimit(response, options.rateLimiter, `${organizationAccess.organization.id}:${session.identity.issuer}:${session.identity.subject}`)) return
     const assignment = organizationAccess ? { unitId: organizationAccess.organization.unitId, identity: identity! } : identity ? await options.directory.findByIdentity(identity) : undefined

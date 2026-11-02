@@ -42,6 +42,61 @@ const running: Array<{ close(): Promise<void> }> = []
 afterEach(async () => { await Promise.all(running.splice(0).map((server) => server.close())) })
 
 describe('Private Cloud edge request path', () => {
+  it('routes memo and tabs through the complete trusted handoff without cookie, forged authority or viewer-write bypass', async () => {
+    const received: Array<Record<string, string | undefined>> = []
+    const upstream = createServer((request, response) => {
+      received.push({ unit: request.headers['x-agent-runlab-runtime-unit'] as string | undefined,
+        secret: request.headers['x-agent-runlab-ingress-secret'] as string | undefined,
+        organization: request.headers['x-agent-runlab-organization-id'] as string | undefined,
+        role: request.headers['x-agent-runlab-organization-role'] as string | undefined,
+        principal: request.headers['x-agent-runlab-principal'] as string | undefined,
+        cookie: request.headers.cookie, authorization: request.headers.authorization })
+      response.writeHead(200, { 'content-type': 'application/json' }); response.end('{}')
+    })
+    await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
+    running.push({ close: () => new Promise<void>(resolve => upstream.close(() => resolve())) })
+    const address = upstream.address()
+    const hostOrigin = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`
+    const organizations = new TestOrganizationStore()
+    const owner = { issuer: 'http://identity.example', subject: 'alice' }
+    const access = await organizations.getOrCreateForIdentity(owner)
+    const viewer = { issuer: owner.issuer, subject: 'viewer' }
+    await organizations.addMember(access.organization.id, viewer, 'viewer')
+    for (const [identity, role] of [[owner, 'owner'], [viewer, 'viewer']] as const) {
+      const gateway = await createGateway(hostOrigin, undefined, { organizations, callbackIdentity: () => identity })
+      const origin = `http://127.0.0.1:${gateway.port}`
+      const login = await fetch(`${origin}/auth/login`, { redirect: 'manual' })
+      const callback = await fetch(`${origin}/auth/callback?code=ok`, {
+        headers: { cookie: `ak_login=${cookieValue(login.headers.getSetCookie(), 'ak_login')}` }, redirect: 'manual',
+      })
+      const session = cookieValue(callback.headers.getSetCookie(), 'ak_session')
+      const forged = { 'x-agent-runlab-runtime-unit': 'forged-unit', 'x-agent-runlab-ingress-secret': 'forged-secret',
+        'x-agent-runlab-organization-id': 'forged-org', 'x-agent-runlab-organization-role': 'owner',
+        'x-agent-runlab-principal': 'forged-principal' }
+      for (const path of ['/memo', '/user/session-tabs']) {
+        const before = received.length
+        expect((await fetch(origin + path, { headers: forged })).status).toBe(401)
+        expect(received).toHaveLength(before)
+        for (const method of ['GET', 'HEAD']) {
+          const response = await fetch(origin + path, { method, headers: { ...forged, cookie: `ak_session=${session}`, authorization: 'Bearer test-not-forwarded' } })
+          expect(response.status).toBe(200); await response.text()
+          expect(received.at(-1)).toEqual({ unit: access.organization.unitId, secret: 'gateway-secret',
+            organization: access.organization.id, role, principal: Buffer.from(`${identity.issuer}\0${identity.subject}`).toString('base64url'),
+            cookie: undefined, authorization: undefined })
+        }
+        const afterReads = received.length
+        for (const invalidOrigin of [undefined, 'https://evil.example.test']) {
+          expect((await fetch(origin + path, { method: 'PUT', headers: { cookie: `ak_session=${session}`,
+            'content-type': 'application/json', ...(invalidOrigin ? { origin: invalidOrigin } : {}) }, body: '{}' })).status).toBe(403)
+        }
+        expect(received).toHaveLength(afterReads)
+        const write = await fetch(origin + path, { method: 'PUT', headers: { ...forged, cookie: `ak_session=${session}`,
+          origin, 'content-type': 'application/json' }, body: '{}' })
+        expect(write.status).toBe(role === 'owner' ? 200 : 403); await write.text()
+        expect(received).toHaveLength(afterReads + (role === 'owner' ? 1 : 0))
+      }
+    }
+  })
   it('serves the versioned OpenAPI contract and envelopes method errors', async () => {
     const gateway = await createGateway('http://127.0.0.1:9')
     const openApi = await fetch(`http://127.0.0.1:${gateway.port}/api/v1/openapi.json`)
