@@ -490,10 +490,7 @@ export function App(): JSX.Element {
   const sessionRouteTickets = privateCloudMode && authSession.session?.authenticated === true
   const sessionScoped = runtimeDeployment.product === 'dedicated'
   const sessionInspectionTransport = useMemo(() => ({
-    host: hostEndpoint.url,
-    socket: controlSocket,
-    sessionScoped,
-    sessionRouteTickets,
+    host: hostEndpoint.url, socket: controlSocket, sessionScoped, sessionRouteTickets,
     ...(config.token !== undefined ? { token: config.token } : {}),
   }), [hostEndpoint.url, controlSocket, sessionScoped, sessionRouteTickets, config.token])
   const session = useSession({

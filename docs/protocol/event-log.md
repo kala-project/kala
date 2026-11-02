@@ -1,18 +1,23 @@
 # Event Log Format
 
 **Format**: JSONL (one JSON object per line, UTF-8, LF-terminated)
-**Storage**: `~/.kala/sessions/<iso-timestamp>_<sessionId>.jsonl`
-**Status**: Normative.
+**Legacy JSONL storage**: `~/.kala/sessions/<iso-timestamp>_<sessionId>.jsonl`
+**Status**: Normative entry representation; physical storage authority follows the [deployment SoT](../architecture/deployment-mode-contract.md).
 
-For Kernel sessions, the event log is the **canonical source of truth** and can
-be replayed by folding every `event` entry. Everything else — in-memory state,
-in-flight snapshots, dashboard timelines — can be reconstructed from the log.
-Nothing else is authoritative.
+For Kernel sessions, the durable event sequence and creation header in the selected
+Session authority reconstruct state by folding `event` entries. New SQLite/PG
+profiles persist that authority in their database, not a required local JSONL
+file; exports and projections are not a second writer. Existing legacy JSONL
+installations retain their original log authority without automatic migration.
+The file conventions below describe that legacy format and serialized exports,
+not a requirement to restore node-local file authority in cloud deployments.
 
 For external runtimes such as GitHub Copilot, the RunLab JSONL is a
 **projection log**, not a replay log. The external runtime owns its native
-conversation state; RunLab persists bounded snapshots, runtime metadata, and
-the stable mapping to the native Session. Online Host paths MUST NOT fully scan
+conversation semantics; Kala persists bounded projections, runtime metadata,
+the stable native Session mapping. New SQLite/PG profiles bind durable native
+SessionFs state to that selected Unit authority; disposable SDK scratch is not
+authority. Online Host paths MUST NOT fully scan
 or fold an external-runtime JSONL. They must use the header, the latest snapshot,
 sidecar context snapshots, and bounded reverse metadata lookups. Full reads of
 external-runtime logs are allowed only for explicit offline export/audit code
@@ -67,6 +72,7 @@ type HeaderEntry = {
   sessionId: string
   parentSessionId?: string            // present iff this session is a fork or a child agent session
   parentCursor?: number               // fork point in the parent session's log
+  delegationDepth?: number            // non-negative safe integer; authority depth, not ancestry length
   workspaceId?: string                // routing key: the workspace (a machine) this session is bound to. Written once at create time; Host uses it to route `tool:call` to the executor announcing the same id. Undefined for legacy logs predating the field — treated as "unassigned".
   workspaceName?: string              // display label captured at create time. Not authoritative — the live executor's `workspaceName` is what the dashboard shows when an executor is attached.
   organizationId?: string             // ingress tenant attribution. Required by commercial SaaS quota/isolation enforcement for tenant-scoped sessions.
@@ -80,7 +86,9 @@ type HeaderEntry = {
 }
 ```
 
-The header captures everything needed to reconstruct the session's initial conditions. `config` is written here (not in every event line) because it never changes. Child sessions created by the host-side `agent` tool reuse the fork/lineage fields (`parentSessionId`, `parentCursor`) — the agent tool is not a separate log kind.
+The header captures the session's initial conditions; its captured `config` is not rewritten for every event. Current Runtime implementations may update while delegated tools remain bounded by their durable creation manifest. Child sessions created by the host-side `agent` tool reuse the ancestry fields (`parentSessionId`, `parentCursor`) — the agent tool is not a separate log kind.
+
+New roots persist `delegationDepth: 0`; an agent-created child persists its parent's effective depth plus one. A supported Fork inherits the source depth, including zero, without resetting delegated tool ceilings. The same value governs agent admission and Runtime tool-scope reload in both cached and cold records. Absence denotes legacy data: parent/agent provenance without an explicit depth remains conservatively scoped at depth at least one; a legacy root without such provenance is depth zero. This optional version-1 field does not migrate old installations or infer authority by walking process-local ancestor caches.
 
 ### 2.2 Event (kind: 'event')
 

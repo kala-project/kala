@@ -1229,7 +1229,7 @@ Sent 15 min after a task's `endedAt`. Dashboard drops the task from its map. Lat
 
 Runs alongside the `agent` builtin tool (`packages/host/src/extensions/agent-tool.ts`). The tool is how the *parent LLM* starts a child session and receives its final assistant text back as a wrapped envelope in `tool_result.content`. The events + RPCs here are how the *dashboard operator* observes and interrupts the child inline while it runs — otherwise the parent's chat panel would show a spinner for the full duration of the child's inner loop. See `docs/host/sub-agent-design.md`.
 
-Routed by `sessionId`. Push events fan into the parent's `session:<parentSessionId>` room; the dashboard uses `childSessionId` from `sub_agent_started` to open a subscription on the child's own room (using the existing `subscribe` verb) and render its `event:appended` stream inline.
+Routed by `sessionId`. Push events fan into the parent's `session:<parentSessionId>` room. Under the [deployment SoT](../architecture/deployment-mode-contract.md), Dedicated/Private Cloud transcript inspection uses the child's own authorized owner/scoped connection, never a subscription through the parent's narrow capability. Portable may retain shared-control child-room subscriptions. The child's authoritative projection supplies the inline history. `parentSessionId` is conversation ancestry shared by Fork and delegation, not a delegation-depth counter: supported root Forks remain depth zero, agent-created children add a level, and Forks of delegated Sessions retain their existing depth and tool ceiling.
 
 #### Envelope in `tool_result.content`
 

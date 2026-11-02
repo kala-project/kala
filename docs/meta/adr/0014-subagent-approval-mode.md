@@ -3,6 +3,12 @@
 Status: accepted
 Date: 2026-07-06
 
+## Current scope (2026-10-25)
+
+The [deployment-mode contract](../../architecture/deployment-mode-contract.md), especially Unit isolation/delegation, is the target SoT. This ADR preserves the headless approval-FSM decision, **not** its original implication of unrestricted descendant authority. Current children use the same Unit Session authority (JSONL is a legacy implementation detail), inherit the authorized Workspace/CWD, and receive only parent/role/explicit-allowlist-intersected tools. Research/review are read-only; implementation/test retain their respective policies. `allow_all` suppresses human approval waits, not server authorization, owner/device fences, role limits or sandbox constraints. Explicit smaller positive budgets must not be expanded by role defaults. Child history needs its own scoped/owner-routed transport in Dedicated/Private Cloud, not a broader parent ticket.
+
+The statements below about the same tool set and implicit authorization of every descendant tool describe the original v1 tradeoff and are superseded by this scope. They are not a separate current security contract. Parent-proxied per-tool approval remains a possible future UX, not a reason to disable role or tenancy checks today.
+
 ## Context
 
 The host-side `agent` builtin spawns a **child session** under the same workspace. The child runs the same kernel loop, the same tool set, and the same executor as its parent — but crucially, **no dashboard is attached to it**. Dashboards subscribe to a specific `sessionId` on the `/dashboard` Socket.IO namespace; a headless child session is never subscribed by any client.

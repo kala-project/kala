@@ -186,6 +186,8 @@ describe('SqliteSessionAuthority', () => {
     expect(child.state.cursor).toBe(1)
     expect(child.parentSessionId).toBe(parent.sessionId)
     expect(child.parentCursor).toBe(1)
+    expect(child.delegationDepth).toBe(0)
+    await expect(sqlite.load(child.sessionId)).resolves.toMatchObject({ delegationDepth: 0 })
     await expect(store.fork({ sourceSessionId: parent.sessionId, cursor: 3, sessionId: 'invalid-child' }))
       .rejects.toThrow('Invalid fork cursor 3')
     await expect(sqlite.load('invalid-child')).resolves.toBeUndefined()
