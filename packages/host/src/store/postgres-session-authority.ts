@@ -102,6 +102,7 @@ export class PostgresSessionAuthority implements SessionAuthority {
   readonly #prepareSessionOwner?: (sessionId: string) => Promise<void>
   readonly #ownerUnitId?: TenantRuntimeUnitId
   readonly messageQueue: PostgresMessageQueueStore
+  readonly currentOwnerCacheKey?: (sessionId: string) => string | undefined
 
   constructor(
     readonly hotState: PostgresHotStateStore,
@@ -144,6 +145,14 @@ export class PostgresSessionAuthority implements SessionAuthority {
     this.#resourceOwnerForSession = options.resourceOwnerForSession
     this.#prepareSessionOwner = options.prepareSessionOwner
     this.#ownerUnitId = options.unitId ? parseTenantRuntimeUnitId(options.unitId) : undefined
+    if (this.#resourceOwnerForSession) {
+      this.currentOwnerCacheKey = (sessionId) => {
+        try { return this.#currentOwner(sessionId)?.ownerToken } catch (error) {
+          if (error instanceof RuntimeResourceOwnershipFencedError) return undefined
+          throw error
+        }
+      }
+    }
     this.messageQueue = new PostgresMessageQueueStore(hotState.database, tenantId, {
       schema: schemaName,
       schemaManagement: this.#schemaManagement,

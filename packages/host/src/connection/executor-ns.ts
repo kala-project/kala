@@ -81,8 +81,74 @@ export type TenantExecutorQuotaEnforcer = {
 export function configureExecutorNamespace(
   ns: ExecutorNs,
   deps: ExecutorDeps,
-): void {
+): (socket: Parameters<ExecutorDeps['executors']['attach']>[0]) => Promise<boolean> {
   const executorIdentities = new WeakMap<object, ExecutorIdentity>()
+  type ExecutorSocket = Parameters<ExecutorDeps['executors']['attach']>[0]
+  const validations = new WeakMap<ExecutorSocket, Promise<boolean>>()
+  const validatedAt = new WeakMap<ExecutorSocket, number>()
+  const invalidated = new WeakSet<ExecutorSocket>()
+  const validationTimers = new WeakMap<ExecutorSocket, NodeJS.Timeout>()
+  const rejectBinding = (socket: ExecutorSocket, permanent: boolean): false => {
+    if (invalidated.has(socket)) return false
+    invalidated.add(socket)
+    deps.executors.revoke(socket, permanent ? 'credential_revoked' : 'identity_authority_unavailable')
+    deps.audit?.log({ action: 'executor.credential_recheck', actor: { kind: 'system' }, outcome: 'denied', error: permanent ? 'credential_revoked' : 'identity_authority_unavailable' })
+    if (permanent) {
+      socket.emit('executor:host_reject', { code: 'auth_failed', message: 'executor credential is no longer valid' })
+      socket.disconnect(true)
+    } else {
+      // A database outage is retryable transport loss, not permanent auth failure.
+      socket.conn.close()
+    }
+    return false
+  }
+  async function bounded<T>(operation: Promise<T>): Promise<T> {
+    let timer: NodeJS.Timeout | undefined
+    try {
+      return await Promise.race([operation, new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('executor identity authority timed out')), 5_000)
+        timer.unref()
+      })])
+    } finally { if (timer) clearTimeout(timer) }
+  }
+  const authorizeSocket = (socket: ExecutorSocket): Promise<boolean> => {
+    if (!socket.connected || invalidated.has(socket)) return Promise.resolve(false)
+    if (!deps.auth?.executorIdentityStore) return Promise.resolve(true)
+    const pending = validations.get(socket)
+    if (pending) return pending
+    const identity = executorIdentities.get(socket)
+    if (!identity?.token) return Promise.resolve(rejectBinding(socket, true))
+    const operation = Promise.resolve().then(async () => {
+      try {
+        // Never reuse the enrollment invite as fallback after credential revoke.
+        const current = await bounded(authenticateExecutorToken({ role: 'executor', clientVersion: socket.handshake.auth.clientVersion, token: identity.token }, deps.auth))
+        if (!socket.connected || executorIdentities.get(socket) !== identity) return false
+        if (!current.accepted || current.workspaceId !== identity.workspaceId || current.installId !== identity.installId) return rejectBinding(socket, true)
+        validatedAt.set(socket, performance.now())
+        return true
+      } catch { return rejectBinding(socket, false) }
+    })
+    validations.set(socket, operation)
+    const forget = (): void => { if (validations.get(socket) === operation) validations.delete(socket) }
+    void operation.then(forget, forget)
+    return operation
+  }
+  const authorizeNotification = (socket: ExecutorSocket): Promise<boolean> => {
+    // Terminal output/progress can be high-volume. Reuse only the bounded
+    // per-binding read/notification decision; outgoing effects always refresh.
+    const checked = validatedAt.get(socket)
+    if (socket.connected && !invalidated.has(socket) && checked !== undefined && performance.now() - checked < 15_000) return Promise.resolve(true)
+    return authorizeSocket(socket)
+  }
+  const monitor = (socket: ExecutorSocket): void => {
+    if (!deps.auth?.executorIdentityStore || validationTimers.has(socket) || !socket.connected) return
+    const timer = setTimeout(() => {
+      validationTimers.delete(socket)
+      void authorizeSocket(socket).then((valid) => { if (valid) monitor(socket) })
+    }, 12_000 + Math.floor(Math.random() * 3_000))
+    timer.unref()
+    validationTimers.set(socket, timer)
+  }
   const executorAnnouncements = new WeakMap<object, ExecutorAnnounce>()
   const executorTenantRuntime = new WeakMap<object, { organizationId: string; workspaceId: string; executorId: string; startedAt: number; installId?: string }>()
   ns.use((socket, nextFn) => {
@@ -95,7 +161,7 @@ export function configureExecutorNamespace(
       nextFn(new Error('version_incompatible'))
       return
     }
-    void authenticateExecutorToken(auth, deps.auth).then((identity) => {
+    void bounded(authenticateExecutorToken(auth, deps.auth)).then((identity) => {
       if (!identity.accepted) {
         deps.audit?.log({ action: 'executor.socket_reject', actor: { kind: 'anonymous' }, outcome: 'denied', error: identity.reason ?? 'auth_failed' })
         nextFn(new Error(identity.reason ?? 'auth_failed'))
@@ -109,7 +175,7 @@ export function configureExecutorNamespace(
       nextFn()
     }).catch((error: unknown) => {
       deps.audit?.log({ action: 'executor.socket_reject', actor: { kind: 'anonymous' }, outcome: 'denied', error: error instanceof Error ? error.message : String(error) })
-      nextFn(new Error('auth_failed'))
+      nextFn(new Error('executor_identity_unavailable'))
     })
   })
 
@@ -164,6 +230,7 @@ export function configureExecutorNamespace(
         socket.data.executorIdentity = publicExecutorIdentity(nextIdentity)
         deps.audit?.log({ action: 'executor.invite_bound', actor: { kind: 'executor', executorId: payload.executorId, workspaceId: payload.workspaceId }, target: { workspaceId: payload.workspaceId }, outcome: 'ok' })
       } else if (identity?.token) {
+        if (!await authorizeSocket(socket)) return
         await deps.auth?.executorIdentityStore?.markSeen(identity.token)
       }
       const installId = payload.installId ?? auth.installId
@@ -199,7 +266,7 @@ export function configureExecutorNamespace(
           ...(installId ? { installId } : {}),
         })
       }
-      if (!socket.connected) return
+      if (!await authorizeSocket(socket)) return
       const connectionMeta = executorAnnouncedConnectionMeta({
         current: socket.data.connectionMeta as ConnectionMeta | undefined,
         announcement: payload,
@@ -209,6 +276,7 @@ export function configureExecutorNamespace(
       deps.audit?.log({ action: 'executor.announce_accept', actor: { kind: 'executor', executorId: payload.executorId, workspaceId: payload.workspaceId, ...(identity?.label ? { label: identity.label } : {}) }, target: { workspaceId: payload.workspaceId }, outcome: 'ok', metadata: { ...auditConnectionMeta(connectionMeta), workspaceName: payload.workspaceName } })
       executorAnnouncements.set(socket, payload)
       deps.executors.attach(socket, payload, auth.clientVersion)
+      monitor(socket)
       if (trustedInstallId && identity?.token) {
         const completed = await deps.installations?.markOnline(trustedInstallId, payload.workspaceId, {
           executorId: payload.executorId,
@@ -219,14 +287,13 @@ export function configureExecutorNamespace(
         if (!completed) deps.broadcastError(payload.workspaceId, 'host', `Executor connected, but installation ${trustedInstallId} could not be marked complete. Re-open Add Workspace or reinstall this Executor.`)
       }
       }).catch((error: unknown) => {
-        deps.audit?.log({ action: 'executor.announce_error', actor: { kind: 'anonymous' }, outcome: 'error', error: error instanceof Error ? error.message : String(error) })
-        socket.emit('executor:host_reject', { code: 'auth_failed', message: error instanceof Error ? error.message : String(error) })
-        socket.disconnect(true)
+        deps.audit?.log({ action: 'executor.announce_error', actor: { kind: 'anonymous' }, outcome: 'error', error: error instanceof Error ? error.name : 'unknown' })
+        rejectBinding(socket, false)
       })
     })
     socket.on('executor:network_audit', async (payload, ack) => {
       const announcement = executorAnnouncements.get(socket)
-      if (!announcement || !await acceptsExecutorSessionPayload(socket, deps.store, executorAnnouncements, undefined, payload.sessionId)) { ack({ accepted: false }); return }
+      if (!announcement || !await authorizeNotification(socket) || !await acceptsExecutorSessionPayload(socket, deps.store, executorAnnouncements, undefined, payload.sessionId)) { ack({ accepted: false }); return }
       deps.audit?.log({
         action: payload.event,
         actor: { kind: 'executor', executorId: announcement.executorId, workspaceId: announcement.workspaceId },
@@ -242,7 +309,7 @@ export function configureExecutorNamespace(
         channel: 'executor:bg_task_updated',
         peer: socket.id,
       })
-      if (!payload || !await acceptsExecutorSessionPayload(socket, deps.store, executorAnnouncements, payload.workspaceId, payload.sessionId)) return
+      if (!payload || !await authorizeNotification(socket) || !await acceptsExecutorSessionPayload(socket, deps.store, executorAnnouncements, payload.workspaceId, payload.sessionId)) return
       const room = sessionRoom(payload.sessionId)
       deps.dashboardNs.to(room).emit('server:control_update', {
         kind: 'bg_task_updated',
@@ -254,7 +321,7 @@ export function configureExecutorNamespace(
         channel: 'executor:tool_progress',
         peer: socket.id,
       })
-      if (!payload || !await acceptsExecutorSessionPayload(socket, deps.store, executorAnnouncements, undefined, payload.sessionId)) return
+      if (!payload || !await authorizeNotification(socket) || !await acceptsExecutorSessionPayload(socket, deps.store, executorAnnouncements, undefined, payload.sessionId)) return
       deps.dashboardNs
         .to(sessionRoom(payload.sessionId))
         .emit('server:control_update', {
@@ -267,7 +334,7 @@ export function configureExecutorNamespace(
         channel: 'executor:bg_task_evicted',
         peer: socket.id,
       })
-      if (!payload || !await acceptsExecutorSessionPayload(socket, deps.store, executorAnnouncements, payload.workspaceId, payload.sessionId)) return
+      if (!payload || !await authorizeNotification(socket) || !await acceptsExecutorSessionPayload(socket, deps.store, executorAnnouncements, payload.workspaceId, payload.sessionId)) return
       const room = sessionRoom(payload.sessionId)
       deps.dashboardNs.to(room).emit('server:control_update', {
         kind: 'bg_task_evicted',
@@ -282,7 +349,7 @@ export function configureExecutorNamespace(
       if (!payload) return
       const ownerSessionId = terminalOwnerSessionId(payload.sessionId)
       const room = terminalSessionRoom(payload.sessionId)
-      if (!ownerSessionId || !room || !await acceptsExecutorSessionPayload(socket, deps.store, executorAnnouncements, payload.workspaceId, ownerSessionId)) return
+      if (!ownerSessionId || !room || !await authorizeNotification(socket) || !await acceptsExecutorSessionPayload(socket, deps.store, executorAnnouncements, payload.workspaceId, ownerSessionId)) return
       deps.dashboardNs.to(room).emit('server:terminal_output', payload)
     })
     socket.on('executor:terminal_exit', async (rawPayload: ServerTerminalExit) => {
@@ -293,10 +360,13 @@ export function configureExecutorNamespace(
       if (!payload) return
       const ownerSessionId = terminalOwnerSessionId(payload.sessionId)
       const room = terminalSessionRoom(payload.sessionId)
-      if (!ownerSessionId || !room || !await acceptsExecutorSessionPayload(socket, deps.store, executorAnnouncements, payload.workspaceId, ownerSessionId)) return
+      if (!ownerSessionId || !room || !await authorizeNotification(socket) || !await acceptsExecutorSessionPayload(socket, deps.store, executorAnnouncements, payload.workspaceId, ownerSessionId)) return
       deps.dashboardNs.to(room).emit('server:terminal_exit', payload)
     })
     socket.on('disconnect', () => {
+      const timer = validationTimers.get(socket)
+      if (timer) clearTimeout(timer)
+      validationTimers.delete(socket)
       deps.executors.detach(socket)
       const runtime = executorTenantRuntime.get(socket)
       if (runtime && deps.executorQuota?.recordExecutorRuntime) {
@@ -313,6 +383,7 @@ export function configureExecutorNamespace(
       }
     })
   })
+  return authorizeSocket
 }
 
 async function acceptsExecutorSessionPayload(

@@ -73,6 +73,15 @@ integrationDescribe('PostgresRuntimeUnitMaterializationStore isolated PostgreSQL
     expect(finalRestart.get(parseTenantRuntimeUnitId('unit-a'))).toMatchObject({
       organizationId: 'org-a', generation: 3, desiredState: 'deleted', lastOperationId: 'delete-3',
     })
+
+    // Reconciliation discovers remote entries and lifecycle changes in bounded
+    // authority pages, even when this node's startup cache predates both.
+    const peerId = parseTenantRuntimeUnitId('unit-b')
+    await restarted.apply({ ...entry(1, 'peer-provision-1'), unitId: peerId })
+    expect(first.get(peerId)).toBeUndefined()
+    expect(await first.scan(undefined, 1)).toEqual([expect.objectContaining({ unitId: 'unit-a', generation: 3, desiredState: 'deleted' })])
+    expect(await first.scan(parseTenantRuntimeUnitId('unit-a'), 1)).toEqual([expect.objectContaining({ unitId: peerId, generation: 1, desiredState: 'ready' })])
+    expect(await first.scan(peerId, 1)).toEqual([])
   })
 
   function createStore(node: string): PostgresRuntimeUnitMaterializationStore {

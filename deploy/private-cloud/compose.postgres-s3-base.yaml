@@ -134,6 +134,7 @@ services:
     environment:
       KALA_INGRESS_PORT: 13001
       KALA_INGRESS_LISTEN_HOST: 0.0.0.0
+      KALA_DEPLOYMENT_CONFIG: /etc/kala/deployment.json
       KALA_PUBLIC_URLS: ${KALA_PUBLIC_URLS:-http://localhost:13001}
       KALA_RUNTIME_HOST_ORIGIN: https://runtime-host:13002
       KALA_INGRESS_RUNTIME_TLS_CA_FILE: /run/kala-secrets/internal_ca.pem
@@ -156,6 +157,7 @@ services:
       OIDC_CLIENT_SECRET_FILE: /run/kala-secrets/oidc_client_secret
     volumes:
       - gateway-secrets:/run/kala-secrets:ro
+      - ${KALA_DEPLOYMENT_CONFIG_FILE:-./deployment.json}:/etc/kala/deployment.json:ro
     networks:
       edge: { gw_priority: 1 }
       runtime: {}

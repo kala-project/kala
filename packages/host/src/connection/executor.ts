@@ -133,6 +133,8 @@ export type ExecutorLookup = {
   publishLocalImage(payload: PublishLocalImageRequest & { workspaceId: string }): Promise<PublishLocalImageResponse>
 }
 
+type ExecutorInvalidationReason = 'credential_revoked' | 'identity_authority_unavailable'
+
 export type ExecutorRegistry = ToolDispatcher & ExecutorLookup & {
   attach(
     socket: Socket<
@@ -147,6 +149,14 @@ export type ExecutorRegistry = ToolDispatcher & ExecutorLookup & {
       ExecutorClientToServerEvents,
       ExecutorServerToClientEvents
     >,
+  ): void
+  /** Immediately evict one unauthorized socket without reconnect grace. */
+  revoke(
+    socket: Socket<
+      ExecutorClientToServerEvents,
+      ExecutorServerToClientEvents
+    >,
+    reason?: ExecutorInvalidationReason,
   ): void
   activeSessions(): string[]
   snapshot(): AttachedExecutor[]
@@ -166,6 +176,9 @@ export function createExecutorRegistry(
   toolAckTimeoutMs = DEFAULT_TOOL_ACK_TIMEOUT_MS,
   audit?: AuditLogger,
   detachGraceMs = DETACH_GRACE_MS,
+  authorizeSocket?: (
+    socket: Socket<ExecutorClientToServerEvents, ExecutorServerToClientEvents>,
+  ) => Promise<boolean>,
 ): ExecutorRegistry {
   type Bind = {
     socket: Socket<
@@ -180,6 +193,7 @@ export function createExecutorRegistry(
   }
   const byExecutor = new Map<string, Bind>()
   const terminalCreates = new WeakMap<Bind, ReturnType<typeof createTerminalRequestManager>>()
+  const terminalQueues = new WeakMap<Bind, Promise<void>>()
   const socketToExecutor = new Map<string, string>()
   const listeners = new Set<ExecutorChangeListener>()
   // Retain names after removal so active Session snapshots fail before dispatch.
@@ -232,6 +246,50 @@ export function createExecutorRegistry(
     bind.pending.clear()
   }
 
+  function synthesizeRevocation(bind: Bind, reason: ExecutorInvalidationReason): void {
+    for (const p of bind.pending.values()) {
+      clearTimeout(p.timer)
+      p.resolve({
+        ok: false,
+        content: reason === 'credential_revoked'
+          ? 'executor credential revoked while tool call outcome was unknown'
+          : 'executor identity authority unavailable while tool call outcome was unknown',
+        failure: { code: reason === 'credential_revoked' ? 'executor_credential_revoked' : 'executor_identity_unavailable', category: 'infrastructure', outcome: 'indeterminate', retryable: true, responsibility: 'system' },
+      })
+    }
+    bind.pending.clear()
+  }
+
+  function isCurrent(bind: Bind): boolean {
+    return byExecutor.get(bind.announcement.executorId) === bind && bind.socket.connected
+  }
+
+  /** Keep the no-validator path synchronous for portable callers and existing ordering. */
+  function authorizeCurrent(bind: Bind): boolean | Promise<boolean> {
+    if (!isCurrent(bind)) return false
+    if (!authorizeSocket) return true
+    return authorizeSocket(bind.socket).then(
+      (authorized) => authorized && isCurrent(bind),
+      () => false,
+    )
+  }
+
+  function enqueueTerminal<T>(bind: Bind, operation: () => T | Promise<T>): Promise<T> {
+    const previous = terminalQueues.get(bind) ?? Promise.resolve()
+    const current = previous.then(operation, operation)
+    terminalQueues.set(bind, current.then(() => undefined, () => undefined))
+    return current
+  }
+
+  function runTerminalOperation<T>(bind: Bind, onDenied: () => T, operation: () => T): T | Promise<T> {
+    if (!authorizeSocket) return isCurrent(bind) ? operation() : onDenied()
+    return enqueueTerminal(bind, async () => await authorizeCurrent(bind) ? operation() : onDenied())
+  }
+
+  function ignoreAsync(result: unknown): void {
+    if (result instanceof Promise) void result.catch(() => {})
+  }
+
   /**
    * Move outstanding pending calls from the old bind to the new one and
    * re-emit `tool:call` over the fresh socket. Timers are recreated so the
@@ -275,24 +333,41 @@ export function createExecutorRegistry(
         timer,
         deadlineAt: p.deadlineAt,
       })
-      newBind.socket.emit(
-        'tool:call',
-        {
-          sessionId: p.sessionId,
-          callId: p.callId,
-          name: p.name,
-          input: p.input,
-          ...(p.cwd !== undefined ? { cwd: p.cwd } : {}),
-          ackTimeoutMs,
-        },
-        (ack: ToolResultAck) => {
-          const pending = newBind.pending.get(ack.callId)
-          if (!pending) return
+      const emit = (authorized: boolean): void => {
+        const pending = newBind.pending.get(p.callId)
+        if (!pending) return
+        if (!authorized) {
           clearTimeout(pending.timer)
-          newBind.pending.delete(ack.callId)
-          pending.resolve({ ok: ack.ok, content: ack.content, ...(ack.failure ? { failure: ack.failure } : {}) })
-        },
-      )
+          newBind.pending.delete(p.callId)
+          pending.resolve({
+            ok: false,
+            content: 'executor unavailable before reconnect dispatch; previous outcome unknown',
+            failure: { code: 'executor_reconnect_unavailable', category: 'infrastructure', outcome: 'indeterminate', retryable: true, responsibility: 'system' },
+          })
+          return
+        }
+        newBind.socket.emit(
+          'tool:call',
+          {
+            sessionId: p.sessionId,
+            callId: p.callId,
+            name: p.name,
+            input: p.input,
+            ...(p.cwd !== undefined ? { cwd: p.cwd } : {}),
+            ackTimeoutMs,
+          },
+          (ack: ToolResultAck) => {
+            const acknowledged = newBind.pending.get(ack.callId)
+            if (!acknowledged) return
+            clearTimeout(acknowledged.timer)
+            newBind.pending.delete(ack.callId)
+            acknowledged.resolve({ ok: ack.ok, content: ack.content, ...(ack.failure ? { failure: ack.failure } : {}) })
+          },
+        )
+      }
+      const authorization = authorizeCurrent(newBind)
+      if (typeof authorization === 'boolean') emit(authorization)
+      else void authorization.then(emit)
     }
     oldBind.pending.clear()
   }
@@ -366,13 +441,16 @@ export function createExecutorRegistry(
    * executor runs the tool identically to a kernel-initiated call, while host
    * keeps the result out of the kernel FSM and returns it to the caller.
    */
-  function callInternalTool<T>(
+  async function callInternalTool<T>(
     bind: Bind,
     workspaceId: string,
     name: string,
     input: Record<string, unknown>,
     onError: (msg: string) => T,
   ): Promise<T> {
+    const authorization = authorizeCurrent(bind)
+    const authorized = typeof authorization === 'boolean' ? authorization : await authorization
+    if (!authorized) return onError(`${name} unavailable`)
     return new Promise<T>((resolve) => {
       const callId = `direct-${Math.random().toString(36).slice(2, 10)}`
       const timer = setTimeout(() => {
@@ -412,12 +490,15 @@ export function createExecutorRegistry(
     })
   }
 
-  function emitMcpManagement<T>(
+  async function emitMcpManagement<T>(
     bind: Bind,
     event: 'executor:mcp_configure' | 'executor:mcp_config_status',
     payload: ExecutorMcpConfigureRequest | { requestId: string },
     onUnavailable: () => T,
   ): Promise<T> {
+    const authorization = authorizeCurrent(bind)
+    const authorized = typeof authorization === 'boolean' ? authorization : await authorization
+    if (!authorized) return onUnavailable()
     return new Promise<T>((resolve) => {
       let settled = false
       const finish = (value: T): void => {
@@ -450,6 +531,9 @@ export function createExecutorRegistry(
     async measureLatency(workspaceId) {
       const bind = findBindByWorkspace(workspaceId)
       if (!bind) return { error: 'workspace offline' }
+      const authorization = authorizeCurrent(bind)
+      const authorized = typeof authorization === 'boolean' ? authorization : await authorization
+      if (!authorized) return { error: 'workspace offline' }
       return await new Promise((resolve) => {
         const started = performance.now()
         let settled = false
@@ -501,9 +585,9 @@ export function createExecutorRegistry(
       const existingSame = byExecutor.get(executorId)
       if (existingSame) {
         socketToExecutor.delete(existingSame.socket.id)
-        redispatchPending(existingSame, newBind)
         byExecutor.set(executorId, newBind)
         socketToExecutor.set(socket.id, executorId)
+        redispatchPending(existingSame, newBind)
         emitChange({
           change: 'updated',
           executorId,
@@ -523,9 +607,9 @@ export function createExecutorRegistry(
       if (pendingDetach) {
         clearTimeout(pendingDetach.timer)
         detaching.delete(workspaceId)
-        redispatchPending(pendingDetach.bind, newBind)
         byExecutor.set(executorId, newBind)
         socketToExecutor.set(socket.id, executorId)
+        redispatchPending(pendingDetach.bind, newBind)
         emitChange({
           change: 'updated',
           executorId,
@@ -613,10 +697,33 @@ export function createExecutorRegistry(
       }, detachGraceMs)
       detaching.set(workspaceId, { bind, timer })
     },
+    revoke(socket, reason = 'credential_revoked') {
+      const executorId = socketToExecutor.get(socket.id)
+      const active = executorId ? byExecutor.get(executorId) : undefined
+      if (active?.socket === socket) {
+        byExecutor.delete(executorId!)
+        socketToExecutor.delete(socket.id)
+        synthesizeRevocation(active, reason)
+        emitChange({ change: 'detached', executorId: active.announcement.executorId })
+        return
+      }
+      for (const [workspaceId, entry] of detaching) {
+        if (entry.bind.socket !== socket) continue
+        clearTimeout(entry.timer)
+        detaching.delete(workspaceId)
+        socketToExecutor.delete(socket.id)
+        synthesizeRevocation(entry.bind, reason)
+        emitChange({ change: 'detached', executorId: entry.bind.announcement.executorId })
+        return
+      }
+    },
     async callTool(sessionId, eff: CallToolEffect, turnId?: string) {
       const picked = pickBindFor(sessionId)
       if (!picked.ok) return { ok: false, content: picked.reason, failure: { code: 'workspace_offline', category: 'precondition', outcome: 'blocked', retryable: true, responsibility: 'workspace' } }
       const bind = picked.bind
+      const authorization = authorizeCurrent(bind)
+      const authorized = typeof authorization === 'boolean' ? authorization : await authorization
+      if (!authorized) return { ok: false, content: 'executor unavailable' }
       if (isUnavailableMcpTool(bind.announcement, eff.name, knownMcpToolNames, resolver.mcpSchemaHashFor?.(sessionId, eff.name))) {
         return {
           ok: false,
@@ -691,10 +798,15 @@ export function createExecutorRegistry(
       for (const bind of allPendingBinds()) {
         for (const p of [...bind.pending.values()]) {
           if (p.sessionId !== sessionId) continue
-          bind.socket.emit('tool:cancel', { sessionId, callId: p.callId })
           clearTimeout(p.timer)
           bind.pending.delete(p.callId)
           p.resolve({ ok: false, content: 'cancelled by user' })
+          const authorization = authorizeCurrent(bind)
+          const emitCancel = (authorized: boolean): void => {
+            if (authorized) bind.socket.emit('tool:cancel', { sessionId, callId: p.callId })
+          }
+          if (typeof authorization === 'boolean') emitCancel(authorization)
+          else void authorization.then(emitCancel)
         }
       }
     },
@@ -917,28 +1029,28 @@ export function createExecutorRegistry(
       )
     },
     async createTerminal(payload, signal) {
+      const unavailable = { requestId: payload.requestId, workspaceId: payload.workspaceId, sessionId: payload.sessionId, error: 'workspace offline' }
       const bind = findBindByWorkspace(payload.workspaceId)
-      if (!bind) {
-        return {
-          requestId: payload.requestId,
-          workspaceId: payload.workspaceId,
-          sessionId: payload.sessionId,
-          error: 'workspace offline',
-        }
-      }
-      let requests = terminalCreates.get(bind)
-      if (!requests) {
-        requests = createTerminalRequestManager({
-          timeoutMs: TERMINAL_CREATE_ACK_TIMEOUT_MS,
-          emit: (body, ack) => { bind.socket.emit('terminal:create', body, ack) },
-          dispose: (body, result) => {
-            bind.socket.emit('terminal:kill', { requestId: body.requestId, workspaceId: body.workspaceId, sessionId: body.sessionId, terminalId: result.terminalId! }, () => {})
-          },
-        })
-        terminalCreates.set(bind, requests)
-      }
+      if (!bind) return unavailable
       if (signal?.aborted) return { requestId: payload.requestId, workspaceId: payload.workspaceId, sessionId: payload.sessionId, error: 'terminal create cancelled' }
-      const request = requests.request(payload)
+      const started = runTerminalOperation(bind, () => undefined, () => {
+        let requests = terminalCreates.get(bind)
+        if (!requests) {
+          requests = createTerminalRequestManager({
+            timeoutMs: TERMINAL_CREATE_ACK_TIMEOUT_MS,
+            emit: (body, ack) => { bind.socket.emit('terminal:create', body, ack) },
+            dispose: (body, result) => {
+              ignoreAsync(runTerminalOperation(bind, () => undefined, () => {
+                bind.socket.emit('terminal:kill', { requestId: body.requestId, workspaceId: body.workspaceId, sessionId: body.sessionId, terminalId: result.terminalId! }, () => {})
+              }))
+            },
+          })
+          terminalCreates.set(bind, requests)
+        }
+        return requests.request(payload)
+      })
+      const request = started instanceof Promise ? await started : started
+      if (!request) return unavailable
       const onAbort = (): void => request.cancel()
       signal?.addEventListener('abort', onAbort, { once: true })
       try {
@@ -951,41 +1063,44 @@ export function createExecutorRegistry(
     },
     inputTerminal(payload) {
       const bind = findBindByWorkspace(payload.workspaceId)
-      bind?.socket.emit('terminal:input', payload)
+      if (bind) ignoreAsync(runTerminalOperation(bind, () => undefined, () => { bind.socket.emit('terminal:input', payload) }))
     },
     resizeTerminal(payload) {
       const bind = findBindByWorkspace(payload.workspaceId)
-      bind?.socket.emit('terminal:resize', payload)
+      if (bind) ignoreAsync(runTerminalOperation(bind, () => undefined, () => { bind.socket.emit('terminal:resize', payload) }))
     },
     async killTerminal(payload) {
-      const bind = findBindByWorkspace(payload.workspaceId)
-      if (!bind) {
-        return {
-          requestId: payload.requestId,
-          workspaceId: payload.workspaceId,
-          sessionId: payload.sessionId,
-          terminalId: payload.terminalId,
-          killed: false,
-          error: 'workspace offline',
-        }
+      const unavailable: TerminalKillResult = {
+        requestId: payload.requestId,
+        workspaceId: payload.workspaceId,
+        sessionId: payload.sessionId,
+        terminalId: payload.terminalId,
+        killed: false,
+        error: 'workspace offline',
       }
-      return await new Promise<TerminalKillResult>((resolve) => {
-        let settled = false
-        const timer = setTimeout(() => {
-          settled = true
-          resolve({ requestId: payload.requestId, workspaceId: payload.workspaceId, sessionId: payload.sessionId, terminalId: payload.terminalId, killed: false, error: 'terminal kill acknowledgement timed out' })
-        }, TERMINAL_ACK_TIMEOUT_MS)
-        bind.socket.emit('terminal:kill', payload, (result) => {
-          if (settled) return
-          settled = true
-          clearTimeout(timer)
-          resolve(result)
-        })
-      })
+      const bind = findBindByWorkspace(payload.workspaceId)
+      if (!bind) return unavailable
+      const started = runTerminalOperation(bind, () => undefined, () => ({
+        result: new Promise<TerminalKillResult>((resolve) => {
+          let settled = false
+          const timer = setTimeout(() => {
+            settled = true
+            resolve({ requestId: payload.requestId, workspaceId: payload.workspaceId, sessionId: payload.sessionId, terminalId: payload.terminalId, killed: false, error: 'terminal kill acknowledgement timed out' })
+          }, TERMINAL_ACK_TIMEOUT_MS)
+          bind.socket.emit('terminal:kill', payload, (result) => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            resolve(result)
+          })
+        }),
+      }))
+      const request = started instanceof Promise ? await started : started
+      return request ? await request.result : unavailable
     },
     closeSessionTerminals(payload) {
       const bind = findBindByWorkspace(payload.workspaceId)
-      bind?.socket.emit('terminal:close_session', payload)
+      if (bind) ignoreAsync(runTerminalOperation(bind, () => undefined, () => { bind.socket.emit('terminal:close_session', payload) }))
     },
     async computerRequest(payload, owner) {
       const fail = (message: string): ComputerResponse => ({ requestId: payload.requestId, error: { code: 'unavailable', message } })

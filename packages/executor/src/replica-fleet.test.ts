@@ -67,6 +67,73 @@ describe('Executor replica discovery', () => {
     }
   })
 
+  it('promotes a routed exclusive connection after draining, preserving enrollment and execution receipts without downgrade', async () => {
+    vi.useFakeTimers()
+    const sockets: ReturnType<typeof makeSocket>[] = []
+    function makeSocket() {
+      const events = new EventEmitter()
+      const socket = {
+        connected: true, auth: {} as unknown, io: new EventEmitter(),
+        on(event: string, handler: (...args: never[]) => void) { events.on(event, handler) },
+        emit() { return true }, disconnect() { socket.connected = false },
+        trigger(event: string, ...args: unknown[]) { events.emit(event, ...args) },
+      }
+      return socket
+    }
+    const factory = vi.fn(() => { const socket = makeSocket(); sockets.push(socket); return socket })
+    let replicas: readonly string[] | undefined
+    let finish!: () => void
+    const effect = new Promise<void>((resolve) => { finish = resolve })
+    const run = vi.fn(async () => { await effect; return 'one effect' })
+    const savedToken = vi.fn()
+    const fleet = startExecutorReplicaFleet({
+      host: 'https://gateway.example', invite: 'ak_invite_test', routeHint: 'a'.repeat(43),
+      workspaceId: 'workspace', workspaceName: 'workspace', executorId: 'executor',
+      tools: [{ name: 'probe', run }], receiptStorePath: false, ioFactory: factory as never,
+      refreshReplicaIds: async () => replicas, refreshIntervalMs: 100, onToken: savedToken,
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(100)
+      expect(sockets).toHaveLength(1)
+      expect(fleet.connected()).toBe(true)
+      replicas = ['runtime-x', 'runtime-y']
+      await vi.advanceTimersByTimeAsync(100)
+      expect(sockets).toHaveLength(1) // Enrollment must finish before invite fanout.
+      sockets[0]!.trigger('executor:welcome', { token: 'ak_exec_enrolled' })
+      expect(savedToken).toHaveBeenCalledWith('ak_exec_enrolled')
+      const request = { sessionId: 'session', callId: 'once', name: 'probe', input: {} }
+      const firstAck = vi.fn()
+      sockets[0]!.trigger('tool:call', request, firstAck)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(run).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(100)
+      expect(sockets).toHaveLength(1)
+      expect(sockets[0]!.connected).toBe(true)
+      finish()
+      await vi.advanceTimersByTimeAsync(100)
+      expect(firstAck).toHaveBeenCalledWith(expect.objectContaining({ ok: true, content: 'one effect' }))
+      expect(sockets).toHaveLength(3)
+      expect(sockets[0]!.connected).toBe(false)
+      expect(fleet.replicaIds()).toEqual(['runtime-x', 'runtime-y'])
+      const connection = factory.mock.calls as unknown as Array<[string, { auth: Record<string, unknown>; extraHeaders: Record<string, string> }]>
+      expect(connection[1]![1].auth).toMatchObject({ token: 'ak_exec_enrolled' })
+      expect(connection[1]![1].auth).not.toHaveProperty('invite')
+      const duplicateAck = vi.fn()
+      sockets[1]!.trigger('tool:call', request, duplicateAck)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(duplicateAck).toHaveBeenCalledWith(expect.objectContaining({ ok: true, content: 'one effect' }))
+      expect(run).toHaveBeenCalledTimes(1)
+      replicas = undefined
+      await vi.advanceTimersByTimeAsync(100)
+      expect(fleet.connected()).toBe(false)
+      expect(sockets).toHaveLength(3)
+    } finally {
+      finish()
+      await fleet.close()
+      vi.useRealTimers()
+    }
+  })
+
   it('fails closed for malformed or duplicate membership', async () => {
     for (const replicas of [['runtime-x', 'runtime-x'], ['runtime-x', 'bad replica']]) {
       await expect(discoverExecutorReplicas({

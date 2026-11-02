@@ -69,6 +69,7 @@ export async function startLoopbackHostRuntimeUnit(
   }
   state = 'ready'
   let closed = false
+  let interruptDrain: (() => void) | undefined
   return {
     id,
     get state() { return state },
@@ -81,15 +82,23 @@ export async function startLoopbackHostRuntimeUnit(
       state = 'draining'
       server.loop.beginDrain('checkpoint')
       const sessions = server.store.list()
-      await Promise.all(sessions.map(async (session) => {
-        const snapshot = server.loop.drainSnapshot(session.sessionId)
-        if (!snapshot.safe) await server.loop.waitForCheckpoint(session.sessionId)
-      }))
+      const interrupted = new Promise<never>((_resolve, reject) => {
+        interruptDrain = () => reject(new Error(`Runtime Unit ${id} closed before drain checkpoint`))
+      })
+      try {
+        await Promise.race([interrupted, Promise.all(sessions.map(async (session) => {
+          const snapshot = server.loop.drainSnapshot(session.sessionId)
+          if (!snapshot.safe) await server.loop.waitForCheckpoint(session.sessionId)
+        }))])
+      } finally { interruptDrain = undefined }
     },
     async close() {
       if (closed) return
       closed = true
       state = 'draining'
+      // Lease-loss close wins over graceful checkpoint waiting. Do not report
+      // an unfinished checkpoint as success or wait on stores being disposed.
+      interruptDrain?.()
       executor?.close()
       try {
         await server.close()

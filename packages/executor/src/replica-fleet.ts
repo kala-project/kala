@@ -45,14 +45,14 @@ export type ExecutorReplicaFleet = {
   close(): Promise<void>
 }
 
-export function startExecutorReplicaFleet(options: Omit<ExecutorOptions, 'invite' | 'replicaId' | 'sharedExecution'> & {
-  token: string
+export function startExecutorReplicaFleet(options: Omit<ExecutorOptions, 'replicaId' | 'sharedExecution'> & {
   routeHint: string
-  replicaIds: readonly string[]
+  /** Undefined starts on the exclusive route and keeps discovering promotion. */
+  replicaIds?: readonly string[]
   refreshReplicaIds?: () => Promise<readonly string[] | undefined>
   refreshIntervalMs?: number
 }): ExecutorReplicaFleet {
-  if (options.replicaIds.length === 0 || options.replicaIds.some((id) => !REPLICA_ID.test(id))) {
+  if (options.replicaIds && (options.replicaIds.length === 0 || options.replicaIds.some((id) => !REPLICA_ID.test(id)))) {
     throw new Error('Executor replica fleet requires valid replica ids')
   }
   const workspaceRoot = options.sandboxRoots?.[0] ?? process.cwd()
@@ -62,11 +62,21 @@ export function startExecutorReplicaFleet(options: Omit<ExecutorOptions, 'invite
   const handles = new Map<string, ExecutorHandle>()
   let closed = false
   let draining = false
+  let parallel = options.replicaIds !== undefined
+  let token = options.token
+  let reconciling = false
   let permanentErrorResolver: ((error: PermanentError) => void) | undefined
   const permanentError = new Promise<PermanentError>((resolve) => { permanentErrorResolver = resolve })
 
   const attach = (replicaId: string): ExecutorHandle => {
-    const handle = startExecutor({ ...options, replicaId, sharedExecution })
+    const { invite, token: _initialToken, ...connection } = options
+    const handle = startExecutor({
+      ...connection,
+      ...(token ? { token } : invite ? { invite } : {}),
+      ...(replicaId ? { replicaId } : {}),
+      sharedExecution,
+      onToken(nextToken) { token = nextToken; options.onToken?.(nextToken) },
+    })
     handles.set(replicaId, handle)
     if (draining) handle.beginDrain()
     void handle.permanentError.then((error) => {
@@ -77,7 +87,8 @@ export function startExecutorReplicaFleet(options: Omit<ExecutorOptions, 'invite
     return handle
   }
 
-  const initial = [...new Set(options.replicaIds)].sort().map(attach)
+  // The empty internal key denotes the exclusive Gateway route, never a replica ID.
+  const initial = [...new Set(options.replicaIds ?? [''])].sort().map(attach)
   const disconnectMissing = async (desired: ReadonlySet<string>): Promise<void> => {
     for (const [replicaId, handle] of handles) {
       if (desired.has(replicaId)) continue
@@ -86,23 +97,43 @@ export function startExecutorReplicaFleet(options: Omit<ExecutorOptions, 'invite
     }
   }
   const reconcile = async (): Promise<void> => {
-    if (closed || !options.refreshReplicaIds) return
-    let discovered: readonly string[] | undefined
+    if (closed || reconciling || !options.refreshReplicaIds) return
+    reconciling = true
     try {
-      discovered = await options.refreshReplicaIds()
-    } catch {
-      // Membership cannot be revalidated. Disconnect every route and keep
-      // polling; retaining an established socket could execute on a stale owner.
-      await disconnectMissing(new Set())
-      return
+      let discovered: readonly string[] | undefined
+      try {
+        discovered = await options.refreshReplicaIds()
+      } catch {
+        // Membership cannot be revalidated. Disconnect every route and keep
+        // polling; retaining an established socket could execute on a stale owner.
+        await disconnectMissing(new Set())
+        return
+      }
+      if (closed) return
+      if (discovered?.some((id) => !REPLICA_ID.test(id)) || (discovered && new Set(discovered).size !== discovered.length)) {
+        await disconnectMissing(new Set())
+        return
+      }
+      if (discovered !== undefined) parallel = true
+      // Once parallel membership has been observed, 404 must never downgrade to
+      // an unscoped route. Before promotion it is the normal exclusive contract.
+      const desired = new Set(discovered ?? (parallel ? [] : ['']))
+      const exclusive = handles.get('')
+      if (parallel && exclusive) {
+        // A promotion racing first enrollment must not redeem one invite on
+        // multiple replica sockets. Finish the existing welcome/token exchange.
+        if (!token) return
+        // Closing a socket aborts its local tools/terminals. Drain before replacing
+        // the exclusive route, and reuse the same receipts across every new socket.
+        exclusive.beginDrain()
+        if (exclusive.activeToolCount() > 0 || exclusive.activeTerminalCount() > 0) return
+      }
+      await disconnectMissing(desired)
+      if (closed) return
+      for (const replicaId of [...desired].sort()) if (!handles.has(replicaId)) attach(replicaId)
+    } finally {
+      reconciling = false
     }
-    if (!discovered || discovered.some((id) => !REPLICA_ID.test(id))) {
-      await disconnectMissing(new Set())
-      return
-    }
-    const desired = new Set(discovered)
-    await disconnectMissing(desired)
-    for (const replicaId of [...desired].sort()) if (!handles.has(replicaId)) attach(replicaId)
   }
   const timer = options.refreshReplicaIds
     ? setInterval(() => { void reconcile() }, options.refreshIntervalMs ?? 5_000)
@@ -112,7 +143,7 @@ export function startExecutorReplicaFleet(options: Omit<ExecutorOptions, 'invite
   return {
     ready: Promise.all(initial.map((handle) => handle.ready)).then(() => undefined),
     permanentError,
-    replicaIds: () => [...handles.keys()].sort(),
+    replicaIds: () => [...handles.keys()].filter(Boolean).sort(),
     connected: () => handles.size > 0 && [...handles.values()].every((handle) => handle.socket.connected),
     activeToolCount: () => [...handles.values()].reduce((sum, handle) => sum + handle.activeToolCount(), 0),
     activeTerminalCount: () => [...handles.values()].reduce((sum, handle) => sum + handle.activeTerminalCount(), 0),

@@ -653,8 +653,10 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
       unsubscribeBg()
       terminals.closeAll()
       for (const key of localInFlight) {
+        // Cancellation is not completion: an external effect can ignore abort
+        // or settle much later. Other replica sockets must still coalesce this
+        // call until its handler persists the result and releases the barrier.
         inFlight.get(key)?.abort()
-        inFlight.delete(key)
       }
       localInFlight.clear()
       socket.disconnect()

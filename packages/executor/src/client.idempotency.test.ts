@@ -211,7 +211,7 @@ describe('executor idempotency', () => {
     expect(runs).toHaveBeenCalledTimes(1) // never re-ran
   })
 
-  it('coalesces the same durable call across two Runtime replica sockets', async () => {
+  it('coalesces the same durable call across replica sockets even after its dispatch socket closes', async () => {
     let finish!: (value: string) => void
     const runs = vi.fn(() => new Promise<string>((resolve) => { finish = resolve }))
     const first = makeMockSocket()
@@ -222,8 +222,8 @@ describe('executor idempotency', () => {
       host: 'http://localhost', workspaceId: 'ws-replicas', workspaceName: 'replicas', executorId: 'executor-one',
       tools: [{ name: 'effect', run: runs } satisfies Tool], sharedExecution,
     }
-    startExecutor({ ...common, replicaId: 'runtime-x', ioFactory: (() => first) as never })
-    startExecutor({ ...common, replicaId: 'runtime-y', ioFactory: (() => second) as never })
+    const firstHandle = startExecutor({ ...common, replicaId: 'runtime-x', ioFactory: (() => first) as never })
+    const secondHandle = startExecutor({ ...common, replicaId: 'runtime-y', ioFactory: (() => second) as never })
     first.__trigger('connect')
     second.__trigger('connect')
 
@@ -231,8 +231,15 @@ describe('executor idempotency', () => {
     const ackY = vi.fn()
     const call = { sessionId: 'session-takeover', callId: 'same-call', name: 'effect', input: {} }
     first.__trigger('tool:call', call, ackX)
-    second.__trigger('tool:call', call, ackY)
     await vi.waitFor(() => expect(runs).toHaveBeenCalledTimes(1))
+    await firstHandle.close()
+    // Abort is only a request: an external effect may ignore it or settle later.
+    // Keep the shared execution barrier until its result/receipt is committed.
+    expect(sharedExecution.inFlight.size).toBe(1)
+    second.__trigger('tool:call', call, ackY)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(runs).toHaveBeenCalledTimes(1)
+    expect(ackY).not.toHaveBeenCalled()
     finish('one-effect')
     await vi.waitFor(() => expect(ackY).toHaveBeenCalled())
 
@@ -245,6 +252,8 @@ describe('executor idempotency', () => {
     await vi.waitFor(() => expect(replay).toHaveBeenCalled())
     expect(runs).toHaveBeenCalledTimes(1)
     await sharedExecution.receiptStore?.flush()
+    expect(sharedExecution.inFlight.size).toBe(0)
+    await secondHandle.close()
   })
 
   it('resolves permanentError on executor:host_reject', async () => {

@@ -641,6 +641,16 @@ restoring the Session and S3 attachment. A separate Docker network-partition
 drill keeps A's process alive, disconnects it from PG, lets B take over, then
 reconnects A and verifies that its stale Session write RPC is rejected. In
 both drills the successor is the only live registered replica for this Unit.
+These historical drills prove successor recovery and stale-write rejection, not
+that the original still-running process safely tears down and automatically
+rejoins after connectivity returns. The target in the deployment-mode SoT
+requires a fresh authoritative desired-state check and a new activation after
+completed teardown; membership generations must not be confused with operator
+lifecycle generations. Before the current reconciliation work, the service
+activated catalog entries once at startup and lease-loss only withdrew them,
+so a healthy process could retain permanently unavailable Units. Record the
+new bounded real re-entry evidence in the three-mode ledger rather than
+retroactively extending these earlier results.
 The opt-in, versioned-schema variant has also passed graceful, SIGKILL and
 network-partition drills with a real Session owner: the owner generation moves
 from A's replica to B's, and the Session and S3 attachment recover. These

@@ -92,6 +92,15 @@ describe('PostgresRuntimeUnitPlacementOwnership', () => {
     store.lookupError = new Error('postgres unavailable')
     expect(await ownership.isCurrent(unitId)).toBe(false)
     expect(lost).toHaveBeenCalledTimes(2)
+
+    // Host teardown releases placement as well. Notification from activate must
+    // run outside the per-Unit operation chain, or this re-entry deadlocks.
+    store.lookupError = undefined
+    lost.mockImplementation(async () => await ownership.release(unitId))
+    await ownership.activate(unitId, scope.organizationId)
+    store.lease = { ...store.lease!, origin: 'https://runtime-b.example', generation: 3n }
+    await expect(ownership.activate(unitId, scope.organizationId)).rejects.toThrow('no longer owns')
+    expect(lost).toHaveBeenCalledTimes(3)
   })
 
   it('treats a hanging PostgreSQL lookup as unavailable instead of using the local lease cache', async () => {

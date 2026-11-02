@@ -37,6 +37,33 @@ describe('SqliteSessionAuthority', () => {
     return value
   }
 
+  it('reloads a read-only projection before a new owner activation can write it', async () => {
+    const { root, databasePath, sessionsDir } = fixture()
+    const writer = new SessionStore(sessionsDir, { authority: authority(databasePath) })
+    const record = await writer.create({ sessionId: 'owner-cache', agentRuntime: 'copilot', config })
+    await writer.recordRuntimeProjection(record.sessionId, { ...record.state, cursor: 1, status: 'done' }, 'copilot.seed', {})
+    let ownerKey: string | undefined
+    const observerAuthority = Object.assign(authority(databasePath), { currentOwnerCacheKey: () => ownerKey })
+    const observer = new SessionStore(join(root, 'observer'), { authority: observerAuthority })
+    const snapshot = await observer.load(record.sessionId, { recoverDangling: false })
+    expect(snapshot.state.cursor).toBe(1)
+    expect(observer.get(record.sessionId)).toBeUndefined()
+    await writer.recordRuntimeProjection(record.sessionId, {
+      ...record.state, cursor: 2, status: 'done',
+      messages: [...record.state.messages, { role: 'assistant', content: [{ type: 'text', text: 'latest durable reply' }] }],
+    }, 'copilot.reply', {})
+    ownerKey = 'new-owner-activation'
+    const recovered = await observer.load(record.sessionId)
+    expect(recovered.state.cursor).toBe(2)
+    expect(JSON.stringify(recovered.state.messages)).toContain('latest durable reply')
+    expect(observer.get(record.sessionId)).toBe(recovered)
+    await observer.recordRuntimeProjection(record.sessionId, { ...recovered.state, cursor: 3 }, 'copilot.next', {})
+    expect((await observerAuthority.load(record.sessionId))?.state.cursor).toBe(3)
+    ownerKey = 'subsequent-owner-activation'
+    expect(observer.get(record.sessionId)).toBeUndefined()
+    expect((await observer.load(record.sessionId)).state.cursor).toBe(3)
+  })
+
   it('persists authoritative state and ordered cursor history across restart without JSONL', async () => {
     const { databasePath, sessionsDir } = fixture()
     const firstAuthority = authority(databasePath)

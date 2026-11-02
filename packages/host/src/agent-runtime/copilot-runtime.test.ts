@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -24,7 +24,7 @@ type CapturedTool = {
 }
 
 const sdk = vi.hoisted(() => ({
-  clientOptions: [] as Array<{ connection?: { kind: string; args?: readonly string[]; path?: string } }>,
+  clientOptions: [] as Array<{ baseDirectory?: string; connection?: { kind: string; args?: readonly string[]; path?: string } }>,
   startError: undefined as Error | undefined,
   configs: [] as Array<{
     tools: CapturedTool[]
@@ -364,13 +364,19 @@ describe('Copilot runtime custom tools', () => {
       await discovered.close()
 
       process.env.COPILOT_CLI_PATH = '/opt/copilot/bin/copilot'
+      const unitRoot = join(dir, 'new-pg-unit')
+      const baseDirectory = join(unitRoot, 'copilot-runtime')
+      expect(existsSync(unitRoot)).toBe(false)
       const overridden = new CopilotAgentRuntime({
         store,
         tools: { async callTool() { return { ok: true, content: '' } }, cancelPending() {} },
         broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError() {} },
-      }, { enabled: true, sessionsDir: dir })
+      }, { enabled: true, sessionsDir: join(unitRoot, 'sessions') })
       await overridden.start()
       expect(sdk.clientOptions.at(-1)?.connection?.path).toBe('/opt/copilot/bin/copilot')
+      expect(sdk.clientOptions.at(-1)?.baseDirectory).toBe(baseDirectory)
+      expect(readdirSync(baseDirectory)).toEqual([])
+      if (process.platform !== 'win32') expect(statSync(baseDirectory).mode & 0o777).toBe(0o700)
       await overridden.close()
     } finally {
       if (previous === undefined) delete process.env.COPILOT_CLI_PATH
@@ -401,6 +407,28 @@ describe('Copilot runtime custom tools', () => {
     expect(materialized).toBe(join(dir, 'state', 'copilot-runtime', `sdk-1.0.14-${target}`, 'copilot-runtime'))
     expect(existsSync(materialized!)).toBe(true)
     expect(readFileSync(join(dirname(materialized!), 'runtime.node'), 'utf8')).toBe('runtime-library')
+    await runtime.close()
+  })
+
+  it('stops only the local turn when even its asynchronous error projection is rejected', async () => {
+    const onError = vi.fn()
+    const runtime = new CopilotAgentRuntime({
+      store, tools: { async callTool() { return { ok: true, content: '' } }, cancelPending() {} },
+      broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError },
+    }, { enabled: true, sessionsDir: dir })
+    const record = await store.create({ sessionId: 'projection-failure', agentRuntime: 'copilot', config: createConfig({ tools: [] }) })
+    const original = store.recordRuntimeProjection.bind(store)
+    vi.spyOn(store, 'recordRuntimeProjection').mockImplementation(async (...args) => {
+      if (args[2] === 'copilot.session_error') throw new Error('storage rejected error projection')
+      await original(...args)
+    })
+    sdk.responses.push(new Error('provider turn failed'))
+    await runtime.start()
+    await runtime.send(record, { text: 'one accepted input', operationId: 'accepted-before-projection-failure' })
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(record.sessionId, expect.stringContaining('without replay')))
+    expect(record.state.cursor).toBe(1)
+    expect(record.state.status).toBe('thinking')
+    expect(sdk.abort).toHaveBeenCalled()
     await runtime.close()
   })
 

@@ -276,6 +276,45 @@ describe('ExecutorRegistry', () => {
     await expect(p).resolves.toEqual({ ok: true, content: 'redone' })
   })
 
+  it.each([
+    ['credential_revoked', 'executor_credential_revoked'],
+    ['identity_authority_unavailable', 'executor_identity_unavailable'],
+  ] as const)('invalidates pending work for %s without replay or a late-authorized stale emit', async (reason, code) => {
+    let check = 0
+    let releaseLateCheck!: (authorized: boolean) => void
+    const lateCheck = new Promise<boolean>((resolve) => { releaseLateCheck = resolve })
+    const reg = createExecutorRegistry(
+      fakeIo() as never,
+      makeResolver({ session: 'ws-revoked' }),
+      5_000,
+      undefined,
+      500,
+      async () => ++check === 1 ? true : await lateCheck,
+    )
+    const revoked = makeFakeSocket('revoked')
+    reg.attach(revoked as never, announceOf('e-revoked', 'ws-revoked'))
+
+    const inFlight = reg.callTool('session', callEffect('already-sent'))
+    await vi.waitFor(() => expect(revoked.emitted).toHaveLength(1))
+
+    const staleDispatch = reg.callTool('session', callEffect('must-not-send'))
+    reg.revoke(revoked as never, reason)
+    const replacement = makeFakeSocket('replacement')
+    reg.attach(replacement as never, announceOf('e-replacement', 'ws-revoked'))
+    releaseLateCheck(true)
+
+    await expect(inFlight).resolves.toMatchObject({
+      ok: false,
+      failure: { code, outcome: 'indeterminate', retryable: true },
+      content: reason === 'credential_revoked'
+        ? 'executor credential revoked while tool call outcome was unknown'
+        : 'executor identity authority unavailable while tool call outcome was unknown',
+    })
+    await expect(staleDispatch).resolves.toEqual({ ok: false, content: 'executor unavailable' })
+    expect(revoked.emitted.map((call) => (call.payload as ToolCallMessage).callId)).toEqual(['already-sent'])
+    expect(replacement.emitted).toHaveLength(0)
+  })
+
   it('supersede-then-disconnect only fails calls still pending on the new socket', async () => {
     const reg = createExecutorRegistry(
       fakeIo() as never,

@@ -70,29 +70,42 @@ export class PostgresRuntimeUnitPlacementOwnership implements RuntimeUnitPlaceme
   async activate(rawUnitId: string, organizationId: string): Promise<RuntimeUnitPlacementLease> {
     const unitId = parseTenantRuntimeUnitId(rawUnitId)
     const scope = { unitId, organizationId: validateOrganizationId(organizationId) }
-    await this.#serialize(unitId, async () => {
-      const active = this.#leases.get(unitId)
-      if (active) {
-        if (active.lease.organizationId !== scope.organizationId || !await this.#lookupMatches(active.lease)) {
-          await this.#failClosed(unitId, active)
+    let lost = false
+    try {
+      await this.#serialize(unitId, async () => {
+        const active = this.#leases.get(unitId)
+        if (active) {
+          try {
+            if (active.lease.organizationId === scope.organizationId && await this.#lookupMatches(active.lease)) return
+          } catch {
+            // Lookup failure is ownership loss, not permission to retain a cached lease.
+          }
+          if (this.#leases.get(unitId) === active) {
+            this.#forget(unitId, active)
+            lost = true
+          }
           throw new Error(`Runtime Unit ${unitId} no longer owns its placement lease`)
         }
-        return
-      }
-      const lease = await withTimeout(
-        this.store.acquire({
-          ...scope,
-          nodeId: this.#nodeId,
-          ownerToken: randomBytes(32).toString('base64url'),
-          origin: this.#origin,
-        }, this.#ttlMs),
-        this.#operationTimeoutMs,
-        'Runtime Unit placement acquire timed out',
-      )
-      const activation = { lease } satisfies ActiveLease
-      this.#leases.set(unitId, activation)
-      this.#scheduleRenewal(unitId, activation)
-    })
+        const lease = await withTimeout(
+          this.store.acquire({
+            ...scope,
+            nodeId: this.#nodeId,
+            ownerToken: randomBytes(32).toString('base64url'),
+            origin: this.#origin,
+          }, this.#ttlMs),
+          this.#operationTimeoutMs,
+          'Runtime Unit placement acquire timed out',
+        )
+        const activation = { lease } satisfies ActiveLease
+        this.#leases.set(unitId, activation)
+        this.#scheduleRenewal(unitId, activation)
+      })
+    } catch (error) {
+      // The Host's teardown releases placement too; never call it while holding
+      // the same Unit's operation chain (otherwise recovery deadlocks).
+      if (lost) await this.#leaseLost(unitId)
+      throw error
+    }
     return this.activeLease(unitId, scope.organizationId)
   }
 

@@ -424,6 +424,7 @@ const SESSION_ARTIFACT_KINDS = [
 
 export class SessionStore {
   private readonly records = new Map<string, SessionRecord>()
+  private readonly recordOwnerCacheKeys = new Map<string, string>()
   private readonly summaryCache = new Map<string, CachedSessionSummary>()
   private readonly summaryLoads = new Map<string, {
     mtimeMs: number
@@ -700,6 +701,7 @@ export class SessionStore {
         this.summaryLoads.delete(record.logPath)
       }
       this.records.delete(sessionId)
+      this.recordOwnerCacheKeys.delete(sessionId)
       this.inFlight.delete(sessionId)
       this.runtimeRecoveries.delete(sessionId)
       this.locallyProjectedExternalSessions.delete(sessionId)
@@ -804,6 +806,8 @@ export class SessionStore {
         authorityFenceSessionId ? { fenceSessionId: authorityFenceSessionId } : {},
       )
       const record = restoreSessionRecord(persisted, logPath, params.memoryPolicy)
+      const ownerKey = this.options.authority.currentOwnerCacheKey?.(sessionId)
+      if (ownerKey !== undefined) this.recordOwnerCacheKeys.set(sessionId, ownerKey)
       this.records.set(sessionId, record)
       this.notifyStorageChanged(sessionId)
       return record
@@ -941,7 +945,11 @@ export class SessionStore {
   }
 
   get(sessionId: string): SessionRecord | undefined {
-    return this.records.get(sessionId)
+    const record = this.records.get(sessionId)
+    const ownerKeyForSession = this.options.authority?.currentOwnerCacheKey
+    if (!record || !ownerKeyForSession) return record
+    const ownerKey = this.options.authority!.currentOwnerCacheKey!(sessionId)
+    return ownerKey !== undefined && this.recordOwnerCacheKeys.get(sessionId) === ownerKey ? record : undefined
   }
 
   recordsSnapshot(): readonly SessionRecord[] {
@@ -1007,7 +1015,7 @@ export class SessionStore {
 
   private async loadUnlocked(sessionId: string, options: { recoverDangling?: boolean; runtimeConfig?: AgentConfig }): Promise<SessionRecord> {
     const recoverDangling = options.recoverDangling !== false
-    const cached = this.records.get(sessionId)
+    const cached = this.get(sessionId)
     if (cached) {
       if (recoverDangling) await this.recoverCachedExternalRuntime(cached)
       this.applyRuntimeConfig(cached, this.resolveRuntimeConfig(options.runtimeConfig, cached.executionMode))
@@ -1079,8 +1087,20 @@ export class SessionStore {
     const path = this.pathFor(sessionId)
     if (this.options.authority) {
       await this.authorityReady
+      const ownerKey = this.options.authority.currentOwnerCacheKey?.(sessionId)
       const persisted = await this.options.authority.load(sessionId)
       if (!persisted) throw new SessionNotFoundError(sessionId)
+      // A read-only snapshot, or one loaded under a former activation, is not a
+      // writable cache for a newly acquired owner. Re-read after ownership is
+      // prepared; never repair stale cursors by overwriting idempotency history.
+      if (this.options.authority.currentOwnerCacheKey) {
+        if (ownerKey === undefined || this.recordOwnerCacheKeys.get(sessionId) !== ownerKey) {
+          this.locallyProjectedExternalSessions.delete(sessionId)
+        }
+        if (ownerKey !== undefined && ownerKey === this.options.authority.currentOwnerCacheKey(sessionId)) {
+          this.recordOwnerCacheKeys.set(sessionId, ownerKey)
+        } else this.recordOwnerCacheKeys.delete(sessionId)
+      }
       const record = restoreSessionRecord(persisted, path)
       this.applyRuntimeConfig(record, this.resolveRuntimeConfig(options.runtimeConfig, record.executionMode))
       this.records.set(sessionId, record)
@@ -1771,6 +1791,7 @@ export class SessionStore {
     // that no subsequent retention scan can attribute to a Session.
     for (const path of paths) await rm(path, { force: true })
     this.records.delete(sessionId)
+    this.recordOwnerCacheKeys.delete(sessionId)
     this.inFlight.delete(sessionId)
     this.runtimeRecoveries.delete(sessionId)
     this.locallyProjectedExternalSessions.delete(sessionId)
@@ -1792,6 +1813,7 @@ export class SessionStore {
       this.summaryLoads.delete(record.logPath)
     }
     this.records.delete(sessionId)
+    this.recordOwnerCacheKeys.delete(sessionId)
     this.inFlight.delete(sessionId)
     this.runtimeRecoveries.delete(sessionId)
     this.locallyProjectedExternalSessions.delete(sessionId)

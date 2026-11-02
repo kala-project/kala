@@ -26,6 +26,8 @@ export interface RuntimeUnitMaterializationCatalog {
   get(id: TenantRuntimeUnitId): RuntimeUnitMaterialization | undefined
   /** Refresh one entry from the authoritative backend before an authorization or lifecycle decision. */
   refresh(id: TenantRuntimeUnitId): Promise<RuntimeUnitMaterialization | undefined>
+  /** Bounded authoritative discovery; refresh again before activation. */
+  scan(after: TenantRuntimeUnitId | undefined, limit: number): Promise<readonly RuntimeUnitMaterialization[]>
   list(): readonly RuntimeUnitMaterialization[]
   apply(entry: RuntimeUnitMaterialization): Promise<RuntimeUnitMaterialization>
   tombstone(entry: RuntimeUnitMaterialization): Promise<RuntimeUnitMaterialization>
@@ -61,6 +63,12 @@ export class RuntimeUnitMaterializationStore implements RuntimeUnitMaterializati
 
   list(): readonly RuntimeUnitMaterialization[] {
     return [...this.entries.values()]
+  }
+
+  async scan(after: TenantRuntimeUnitId | undefined, limit: number): Promise<readonly RuntimeUnitMaterialization[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 256) throw new Error('invalid Runtime catalog scan limit')
+    return this.list().filter((entry) => !after || entry.unitId > after)
+      .sort((left, right) => left.unitId < right.unitId ? -1 : left.unitId > right.unitId ? 1 : 0).slice(0, limit)
   }
 
   async apply(entry: RuntimeUnitMaterialization): Promise<RuntimeUnitMaterialization> {

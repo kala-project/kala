@@ -637,12 +637,15 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
     if ('error' in enrollmentResult) throw new Error(`Executor enrollment failed: ${enrollmentResult.error.message}`)
     fleetToken = enrollmentResult.token
   }
-  const handle = replicas?.length && fleetToken && routeHint
+  // A routed Executor may outlive single -> parallel promotion. Keep discovery
+  // active even when the first response is the exclusive-mode 404 contract.
+  const handle = routeHint
     ? startExecutorReplicaFleet({
         ...commonOptions,
-        token: fleetToken,
+        ...(fleetToken ? { token: fleetToken } : invite ? { invite } : {}),
         routeHint,
         replicaIds: replicas,
+        onToken: saveToken,
         refreshReplicaIds: () => discoverExecutorReplicas({ host, routeHint }),
       })
     : startExecutor({

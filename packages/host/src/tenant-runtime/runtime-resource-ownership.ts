@@ -115,11 +115,12 @@ export class RuntimeResourceOwnershipManager {
   }
 
   /** Releases every lease that is active when shutdown starts, even if some releases fail. */
-  async releaseAll(): Promise<void> {
+  async releaseAll(options: { waitForLossCallbacks?: boolean } = {}): Promise<void> {
     const releases = [...this.#leases.values()].map(async (active) => await this.#release(active))
     const settled = await Promise.allSettled(releases)
-    // A loss callback may have started while releases were being marked unhealthy.
-    await Promise.allSettled([...this.#lossCallbacks])
+    // Standalone shutdown may wait for notifications. Unit disposal must not:
+    // a notification can itself be awaiting that exact Unit teardown barrier.
+    if (options.waitForLossCallbacks !== false) await Promise.allSettled([...this.#lossCallbacks])
     const failures = settled
       .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
       .map((result) => result.reason)

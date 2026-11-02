@@ -3393,6 +3393,81 @@ describe('wire protocol', () => {
     executor.close()
   })
 
+  it('enforces shared device revoke/rotation on two live Hosts and treats authority outages as transient', async () => {
+    await server.close()
+    const identities = new ExecutorIdentityStore(join(dir, 'shared-device-authority.json'))
+    identities.load()
+    const token = identities.provisionWorkspace('ws-shared-revoked')
+    const controlToken = identities.provisionWorkspace('ws-unaffected')
+    server = await startHostServer({ port: 0, sessionsDir: join(dir, 'host-a'), llm: scriptedLlm(), defaultConfig: config, auth: { executorIdentityStore: identities } })
+    url = `http://localhost:${server.port}`
+    const peer = await startHostServer({ port: 0, sessionsDir: join(dir, 'host-b'), llm: scriptedLlm(), defaultConfig: config, auth: { executorIdentityStore: identities } })
+    const sockets: Array<ReturnType<typeof clientIO>> = []
+    const calls = new Map<string, number>()
+    const rejections: string[] = []
+    async function dashboard(origin: string) {
+      const socket = clientIO(`${origin}/dashboard`, { transports: ['websocket'], reconnection: false, forceNew: true, auth: { role: 'dashboard', clientVersion: PROTOCOL_VERSION, sessionId: `auth-${sockets.length}` } })
+      sockets.push(socket)
+      await new Promise<void>((resolve, reject) => { const timer = setTimeout(() => reject(new Error('dashboard ready timeout')), 5_000); socket.once('session:ready', () => { clearTimeout(timer); resolve() }); socket.once('connect_error', (error) => { clearTimeout(timer); reject(error) }) })
+      return socket
+    }
+    async function device(host: HostServer, id: string, workspaceId: string, credential: string) {
+      const socket = clientIO(`http://localhost:${host.port}/executor`, { transports: ['websocket'], reconnection: false, forceNew: true, auth: { role: 'executor', clientVersion: PROTOCOL_VERSION, token: credential } })
+      sockets.push(socket)
+      socket.on('executor:host_reject', (value) => rejections.push(`${id}:${value.code}`))
+      socket.on('tool:call', (payload, ack) => {
+        calls.set(id, (calls.get(id) ?? 0) + 1)
+        const input = payload.input as { requestId: string }
+        ack({ callId: payload.callId, ok: true, content: JSON.stringify({ requestId: input.requestId, workspaceId, path: '/', roots: ['/'], entries: [{ name: 'proof', path: '/proof' }] }) })
+      })
+      await new Promise<void>((resolve, reject) => { socket.once('connect', resolve); socket.once('connect_error', reject) })
+      socket.emit('executor:announce', { executorId: id, workspaceId, workspaceName: id, tools: ['write'], runtime: 'node', runtimeVersion: 'test' })
+      await vi.waitFor(() => expect(host.executorsSnapshot().some((entry) => entry.executorId === id)).toBe(true))
+      return socket
+    }
+    const list = (socket: ReturnType<typeof clientIO>, workspaceId: string): Promise<DirListResult> => new Promise((resolve, reject) => socket.timeout(5_000).emit('client:list_dirs', { requestId: `check-${Math.random()}`, workspaceId, path: '/' }, (error: Error | null, result: DirListResult) => error ? reject(new Error(`directory RPC timed out for ${workspaceId}`)) : resolve(result)))
+    try {
+      const a = await dashboard(url), b = await dashboard(`http://localhost:${peer.port}`)
+      const first = await device(server, 'shared-a', 'ws-shared-revoked', token)
+      const second = await device(peer, 'shared-b', 'ws-shared-revoked', token)
+      const control = await device(peer, 'control', 'ws-unaffected', controlToken)
+      expect((await list(a, 'ws-shared-revoked')).entries).toHaveLength(1)
+      expect((await list(b, 'ws-shared-revoked')).entries).toHaveLength(1)
+      const revoked = await fetch(`${url}/auth/executor-identities?workspaceId=ws-shared-revoked`, { method: 'DELETE' })
+      expect(revoked.ok).toBe(true)
+      expect((await list(a, 'ws-shared-revoked')).error).toBeTruthy()
+      expect((await list(b, 'ws-shared-revoked')).error).toBeTruthy()
+      await vi.waitFor(() => { expect(first.connected).toBe(false); expect(second.connected).toBe(false) })
+      expect(calls.get('shared-a')).toBe(1)
+      expect(calls.get('shared-b')).toBe(1)
+      expect((await list(b, 'ws-unaffected')).entries).toHaveLength(1)
+      expect(control.connected).toBe(true)
+
+      const old = identities.provisionWorkspace('ws-rotated')
+      const idle = await device(server, 'rotated-idle', 'ws-rotated', old)
+      await device(peer, 'rotated-old', 'ws-rotated', old)
+      const current = identities.rotateWorkspaceCredential('ws-rotated')
+      expect((await list(b, 'ws-rotated')).error).toBeTruthy()
+      await device(peer, 'rotated-new', 'ws-rotated', current)
+      expect((await list(b, 'ws-rotated')).entries).toHaveLength(1)
+      // A has no traffic: periodic authority validation must close its stale socket.
+      await vi.waitFor(() => expect(idle.connected).toBe(false), { timeout: 20_000, interval: 100 })
+      expect(calls.get('rotated-old')).toBeUndefined()
+      expect(calls.get('rotated-idle')).toBeUndefined()
+
+      const lookup = vi.spyOn(identities, 'resolveToken').mockImplementationOnce(() => { throw new Error('authority temporarily offline') })
+      expect((await list(b, 'ws-unaffected')).error).toBeTruthy()
+      await vi.waitFor(() => expect(control.connected).toBe(false))
+      expect(rejections).not.toContain('control:auth_failed')
+      lookup.mockRestore()
+      await device(peer, 'control-reconnected', 'ws-unaffected', controlToken)
+      expect((await list(b, 'ws-unaffected')).entries).toHaveLength(1)
+    } finally {
+      for (const socket of sockets) socket.close()
+      await peer.close()
+    }
+  }, 30_000)
+
   it('revoking an executor invite also removes the saved reconnect identity', async () => {
     await server.close()
     const identityPath = join(dir, 'executor-identities.json')
@@ -7076,6 +7151,58 @@ describe('wire protocol', () => {
     expect(seenPrompts).toEqual(['first', 'first|third edited', 'first|third edited|second'])
 
     dashboard.close()
+  })
+
+  it('isolates a rejected queued projection without replaying it or crashing other Sessions', async () => {
+    const previousSecret = process.env.KALA_INGRESS_HANDOFF_SECRET
+    process.env.KALA_INGRESS_HANDOFF_SECRET = 'isolated-queue-dispatch-test-secret'
+    let dashboard: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> | undefined
+    try {
+      await server.close()
+      server = await startHostServer({
+        port: 0, sessionsDir: dir, defaultConfig: config, copilot: { enabled: true },
+        llm: { name: 'unaffected-session', async call() { return { message: { role: 'assistant', content: [{ type: 'text', text: 'other Session still works' }] } } } },
+      })
+      url = `http://localhost:${server.port}`
+      const sessionId = 'rejected-projection'
+      const operationId = 'accepted-but-not-projected'
+      const record = await server.store.create({ sessionId, agentRuntime: 'copilot', config })
+      const original = server.store.recordRuntimeProjection.bind(server.store)
+      const projection = vi.spyOn(server.store, 'recordRuntimeProjection').mockImplementation(async (...args) => {
+        if (args[0] === sessionId && args[2] === 'copilot.user_message') throw new Error('projection conflict')
+        await original(...args)
+      })
+      const nativeSession = vi.fn()
+      copilotSdk.createSession = nativeSession
+      dashboard = clientIO(`${url}/dashboard`, { transports: ['websocket'], auth: { sessionId, role: 'dashboard', clientVersion: PROTOCOL_VERSION }, reconnection: false })
+      await new Promise<SessionReadyEvent>((resolve) => dashboard!.once('session:ready', resolve))
+      const suspended = new Promise<{ scope: string; message: string }>((resolve) => dashboard!.once('session:error', resolve))
+      const admit = async (id: string, op: string) => await fetch(`${url}/internal/runtime/admission/commit`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-agent-runlab-ingress-handoff': 'isolated-queue-dispatch-test-secret' },
+        body: JSON.stringify({ sessionId: id, operationId: op, text: 'accepted input', intent: 'text', mode: 'queue' }),
+      }).then((response) => response.json())
+      await expect(admit(sessionId, operationId)).resolves.toMatchObject({ accepted: true })
+      await expect(suspended).resolves.toMatchObject({ scope: 'host', message: expect.stringContaining('retained') })
+      expect((await loadPersistedMessageQueueState(server.store, sessionId)).items.map((item) => item.operationId)).toEqual([operationId])
+      expect(record.state.cursor).toBe(0)
+      await server.store.create({ sessionId: 'unaffected', config: createConfig({ tools: [] }) })
+      await expect(admit('unaffected', 'unaffected-op')).resolves.toMatchObject({ accepted: true })
+      await vi.waitFor(() => expect(JSON.stringify(server.store.get('unaffected')?.state.messages)).toContain('other Session still works'))
+      expect(projection.mock.calls.filter((args) => args[0] === sessionId && args[2] === 'copilot.user_message')).toHaveLength(1)
+      expect(nativeSession).not.toHaveBeenCalled()
+      const stopped = await new Promise<RpcAck>((resolve) => dashboard!.emit('client:cancel', { sessionId, operationId: 'explicit-stop' }, resolve))
+      expect(stopped).toEqual({ ok: true })
+      const queue = await loadPersistedMessageQueueState(server.store, sessionId)
+      expect(queue.items).toEqual([])
+      expect(queue.cancelledOperationIds).toContain(operationId)
+      await expect(admit(sessionId, 'new-op-after-explicit-stop')).resolves.toMatchObject({ accepted: true })
+      await vi.waitFor(() => expect(projection.mock.calls.filter((args) => args[0] === sessionId && args[2] === 'copilot.user_message')).toHaveLength(2))
+      expect(nativeSession).not.toHaveBeenCalled()
+    } finally {
+      dashboard?.close()
+      if (previousSecret === undefined) delete process.env.KALA_INGRESS_HANDOFF_SECRET
+      else process.env.KALA_INGRESS_HANDOFF_SECRET = previousSecret
+    }
   })
 
   it.each(['kernel', 'copilot'] as const)('lets Stop tombstone a %s queue item during the post-claim barrier', async (agentRuntime) => {

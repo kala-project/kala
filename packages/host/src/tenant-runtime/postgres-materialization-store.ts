@@ -68,6 +68,22 @@ export class PostgresRuntimeUnitMaterializationStore implements RuntimeUnitMater
     return [...this.#entries.values()]
   }
 
+  async scan(after: TenantRuntimeUnitId | undefined, limit: number): Promise<readonly RuntimeUnitMaterialization[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 256) throw new Error('invalid Runtime catalog scan limit')
+    const result = await this.database.query<MaterializationRow>(
+      `SELECT * FROM ${this.#table} WHERE ($1::text IS NULL OR unit_id > $1) ORDER BY unit_id LIMIT $2`,
+      [after ?? null, limit],
+    )
+    return result.rows.map((row) => {
+      const entry = materialization(row)
+      const cached = this.#entries.get(entry.unitId)
+      // A local lifecycle mutation may have committed after this SELECT's snapshot.
+      if (cached && cached.generation > entry.generation) return cached
+      this.#entries.set(entry.unitId, entry)
+      return entry
+    })
+  }
+
   async apply(entry: RuntimeUnitMaterialization): Promise<RuntimeUnitMaterialization> {
     return this.#mutate(entry, false)
   }
@@ -172,6 +188,7 @@ export function createPostgresRuntimeUnitMaterializationStore(options: {
     application_name: options.applicationName ?? 'kala-runtime-unit-materializations',
     max: options.maxConnections ?? 5,
     statement_timeout: options.statementTimeoutMs ?? 15_000,
+    query_timeout: options.statementTimeoutMs ?? 15_000,
     connectionTimeoutMillis: 5_000,
     idleTimeoutMillis: 30_000,
     ...(options.ssl !== undefined ? { ssl: options.ssl } : {}),

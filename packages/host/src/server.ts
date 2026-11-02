@@ -553,6 +553,7 @@ export async function startHostServer(
   // the same state.
   const lastSessionStatus = new Map<string, string>()
 
+  let authorizeExecutorSocket: Parameters<typeof createExecutorRegistry>[5] = async () => false
   const executors = createExecutorRegistry(
     io,
     {
@@ -562,6 +563,7 @@ export async function startHostServer(
     options.toolTimeoutMs ?? DEFAULT_TOOL_ACK_TIMEOUT_MS,
     audit,
     options.detachGraceMs,
+    auth?.executorIdentityStore ? (socket) => authorizeExecutorSocket!(socket) : undefined,
   )
   attachMcpSettingsRoutes(http, {
     installations: executorInstallations,
@@ -988,6 +990,9 @@ export async function startHostServer(
   const queueClaimTtlMs = options.queueClaimTtlMs ?? 30_000
   const drainingQueues = new Set<string>()
   const requestedQueueDrains = new Set<string>()
+  // A failed accepted operation is not an invitation to retry model/tool I/O.
+  // Only a successfully persisted Stop clears the local suspension.
+  const failedQueueDrains = new Map<string, string>()
   const queueLoads = new Map<string, Promise<PersistedMessageQueueState>>()
   const queueMutations = new Map<string, Promise<void>>()
 
@@ -1517,6 +1522,7 @@ export async function startHostServer(
         await persistQueue(sessionId, [], cancelled)
         changed = queue.length > 0
       })
+      failedQueueDrains.delete(sessionId)
       if (changed) emitQueueUpdate(sessionId)
     },
     pending(sessionId) {
@@ -1524,17 +1530,21 @@ export async function startHostServer(
     },
     snapshot: queueSnapshot,
     async drain(sessionId) {
-      if (closed || loop.isDraining()) return
+      if (closed || loop.isDraining() || failedQueueDrains.has(sessionId)) return
       if (drainingQueues.has(sessionId)) {
         requestedQueueDrains.add(sessionId)
         return
       }
       drainingQueues.add(sessionId)
+      let activeOperationId = ''
       try {
         while (!closed) {
           if (loop.isDraining()) return
           await loadQueue(sessionId)
-          if ((queuedMessages.get(sessionId)?.length ?? 0) === 0) return
+          const head = queuedMessages.get(sessionId)?.[0]
+          if (!head) return
+          activeOperationId = head.operationId
+          await options.assertSessionEffectOwner?.(sessionId)
           let record = store.get(sessionId)
           if (!record) {
             try {
@@ -1560,6 +1570,7 @@ export async function startHostServer(
               await releaseQueueClaim(sessionId, next.id)
               return
             }
+            let dispatchCompleted = false
             try {
               await withQueueClaimHeartbeat(sessionId, async () => {
                 await options.queueDispatchBarrier?.({ sessionId, operationId: next.operationId, runtime: runtimeRecord.agentRuntime })
@@ -1582,9 +1593,11 @@ export async function startHostServer(
                 }
                 await dequeueClaimedQueueHead(sessionId, next)
               })
+              dispatchCompleted = true
             } finally {
               if (resourceGovernor && resourceUnitId) resourceGovernor.finishTurn(resourceUnitId)
-              await releaseQueueClaim(sessionId, next.id)
+              if (dispatchCompleted) await releaseQueueClaim(sessionId, next.id)
+              else { persistentQueueClaims.delete(sessionId); claimedQueueOperations.delete(sessionId) }
               for (const queuedSessionId of queuedMessages.keys()) void messageQueues.drain(queuedSessionId)
             }
             continue
@@ -1621,6 +1634,7 @@ export async function startHostServer(
           const dequeueCommitted = async (): Promise<void> => {
             await dequeueClaimedQueueHead(sessionId, next)
           }
+          let dispatchCompleted = false
           try {
             await withQueueClaimHeartbeat(sessionId, async () => {
               await options.queueDispatchBarrier?.({ sessionId, operationId: next.operationId, runtime: record.agentRuntime })
@@ -1640,20 +1654,27 @@ export async function startHostServer(
                 await dequeueCommitted()
               }
             })
+            dispatchCompleted = true
           } finally {
             if (resourceGovernor && resourceUnitId) resourceGovernor.finishTurn(resourceUnitId)
-            await releaseQueueClaim(sessionId, next.id)
+            if (dispatchCompleted) await releaseQueueClaim(sessionId, next.id)
+            else { persistentQueueClaims.delete(sessionId); claimedQueueOperations.delete(sessionId) }
             for (const queuedSessionId of queuedMessages.keys()) void messageQueues.drain(queuedSessionId)
           }
         }
       } catch (error) {
-        // An already-admitted drain can reach dispatch after a distributed
-        // owner-loss close. Leave its durable queue claim for the successor;
-        // do not leak a rejected fire-and-forget drain into the process.
-        if (!closed || !options.assertSessionEffectOwner) throw error
+        // The durable item/claim is evidence, not a successful dispatch. Leave
+        // the PG claim to expire (running shell -> execution_unknown), block
+        // this exact head, and isolate the failure from other Sessions/Units.
+        const operationId = activeOperationId || queuedMessages.get(sessionId)?.[0]?.operationId || ''
+        failedQueueDrains.set(sessionId, operationId)
+        if (!closed) {
+          console.warn('[queue] Session dispatch suspended', { sessionId, operationId, error: error instanceof Error ? error.name : 'unknown' })
+          broadcastError(sessionId, 'host', 'Session dispatch was suspended. The accepted operation is retained and will not be replayed automatically; inspect it or Stop before submitting a new operation.')
+        }
       } finally {
         drainingQueues.delete(sessionId)
-        if (requestedQueueDrains.delete(sessionId) && !closed && !loop.isDraining()) {
+        if (requestedQueueDrains.delete(sessionId) && !failedQueueDrains.has(sessionId) && !closed && !loop.isDraining()) {
           void messageQueues.drain(sessionId)
         }
       }
@@ -2498,7 +2519,7 @@ export async function startHostServer(
     onSessionCreated: (record) => extensions.sessionCreated({ deps: loopDeps, record }),
     onSessionDeleted: (record) => extensions.sessionDeleted({ deps: loopDeps, record }),
   })
-  configureExecutorNamespace(executorNs, {
+  authorizeExecutorSocket = configureExecutorNamespace(executorNs, {
     store,
     executors,
     defaultConfig: getDefaultConfig,

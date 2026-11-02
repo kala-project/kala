@@ -132,11 +132,15 @@ export class CopilotAgentRuntime implements AgentRuntime {
       // not prevent the entire Host from starting before it can report why.
       const { CopilotClient, RuntimeConnection } = this.sdk = await import('@github/copilot-sdk')
       const configuredCliPath = process.env.COPILOT_CLI_PATH?.trim()
+      const baseDirectory = join(this.options.sessionsDir, '..', 'copilot-runtime')
+      // PG-backed Units may have no local tree at all. A shared image CLI skips
+      // materialization, so scratch creation must not depend on copying code.
+      mkdirSync(baseDirectory, { recursive: true, mode: 0o700 })
       const packagedCliPath = configuredCliPath
         ? undefined
         : materializePackagedCopilotRuntime(
             this.options.runtimeEntryPath ?? process.argv[1] ?? process.execPath,
-            join(this.options.sessionsDir, '..', 'copilot-runtime'),
+            baseDirectory,
           )
       this.client = new CopilotClient({
         mode: 'empty',
@@ -144,7 +148,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
           args: ['--no-remote-export'],
           ...(configuredCliPath || packagedCliPath ? { path: configuredCliPath ?? packagedCliPath } : {}),
         }),
-        baseDirectory: join(this.options.sessionsDir, '..', 'copilot-runtime'),
+        baseDirectory,
         ...(this.context.store.usesExternalAuthority ? {
           sessionFs: { initialCwd: '/workspace', sessionStatePath: '/session-state', conventions: 'posix' as const },
         } : {}),
@@ -239,7 +243,16 @@ export class CopilotAgentRuntime implements AgentRuntime {
       const session = await this.ensureSession(record, input.model, canCreateNativeSession)
       if (input.model) await session.setModel(input.model)
       if (!this.isCurrentTurn(record.sessionId, generation)) return
-      void this.runTurn(record, session, input, generation, requestId)
+      void this.runTurn(record, session, input, generation, requestId).catch(() => {
+        // Even the error projection can be fenced/rejected. Stop this local
+        // generation without fabricating a durable completion or escaping into
+        // a process-wide unhandled rejection; recovery owns unknown effects.
+        if (!this.isCurrentTurn(record.sessionId, generation)) return
+        this.turnGenerations.set(record.sessionId, generation + 1)
+        void Promise.resolve().then(() => session.abort()).catch(() => undefined)
+        void Promise.resolve().then(() => this.context.tools.cancelPending(record.sessionId)).catch(() => undefined)
+        this.context.broadcast.onError(record.sessionId, 'Session persistence failed; the turn was stopped without replay. Inspect durable state before continuing.')
+      })
     } catch (error) {
       if (!this.isCurrentTurn(record.sessionId, generation)) return
       const message = error instanceof Error ? error.message : String(error)

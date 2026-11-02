@@ -15,6 +15,7 @@ import { startTenantRuntimeService, type TenantRuntimeService } from './service.
 import type { RuntimeUnitPlacementOwnership } from './runtime-unit-placement-ownership.js'
 import type { RuntimeReplicaMembership } from './runtime-replica-membership.js'
 import type { TenantRuntimeUnitId } from './unit.js'
+import { RuntimeUnitMaterializationStore, type RuntimeUnitMaterialization } from './materialization-store.js'
 
 const roots: string[] = []
 const sockets: Socket[] = []
@@ -156,6 +157,7 @@ describe('multi-tenant Host composition', () => {
     const membership: RuntimeReplicaMembership = {
       activate: vi.fn(async () => undefined), release: vi.fn(async () => undefined),
       releaseAll: vi.fn(async () => undefined), setLeaseLostHandler(handler) { membershipLost = handler },
+      activeLease: vi.fn(() => ({ unitId, organizationId: 'org-a', replicaId: 'replica-a', origin: 'https://runtime-a.example', membershipToken: 'fixture-membership', generation: 1n, expiresAt: new Date(Date.now() + 15_000) })),
     }
     const unitId = 'shadow-membership' as TenantRuntimeUnitId
     const close = vi.fn(async () => undefined)
@@ -205,6 +207,86 @@ describe('multi-tenant Host composition', () => {
     expect((await fetch(`http://127.0.0.1:${host.port}/runtime/capabilities`)).status).toBe(404)
   })
 
+  it('reconciles live loss after teardown without blocking peers or overriding remote lifecycle changes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tenant-reconcile-')); roots.push(root)
+    const unitId = 'rejoining-unit' as TenantRuntimeUnitId
+    const peerId = 'independent-unit' as TenantRuntimeUnitId
+    const entry = (id: TenantRuntimeUnitId): RuntimeUnitMaterialization => ({
+      schemaVersion: 1, unitId: id, organizationId: 'org-a', routingKeyDigest: 'fixture', routingKeyVersion: 1,
+      generation: 1, desiredState: 'ready', dataRoot: root, capabilities: AGENT_RUNTIME_CAPABILITIES,
+      lastOperationId: `provision-${id}`, updatedAt: new Date().toISOString(),
+    })
+    let authority = [entry(unitId)]
+    const catalog = new RuntimeUnitMaterializationStore(join(root, 'unused-cached-catalog.json'))
+    vi.spyOn(catalog, 'scan').mockImplementation(async () => [...authority])
+    vi.spyOn(catalog, 'refresh').mockImplementation(async (id) => authority.find((item) => item.unitId === id))
+    let lost: ((id: TenantRuntimeUnitId) => Promise<void>) | undefined
+    let finishClose: (() => void) | undefined
+    let finishActivation: (() => void) | undefined
+    let blockClose = false
+    let blockActivation = false
+    const placement: RuntimeUnitPlacementOwnership = {
+      activate: vi.fn(async (id) => {
+        if (id === unitId && blockActivation) await new Promise<void>((resolve) => { finishActivation = resolve })
+      }),
+      isCurrent: vi.fn(async () => true), release: vi.fn(async () => undefined), releaseAll: vi.fn(async () => undefined),
+      setLeaseLostHandler(handler) { lost = handler },
+    }
+    const factory = vi.fn(async (id: TenantRuntimeUnitId) => ({
+      id, state: 'ready' as const, origin: 'http://127.0.0.1:9', drain: async () => undefined,
+      close: async () => {
+        if (blockClose) { blockClose = false; await new Promise<void>((resolve) => { finishClose = resolve }) }
+      },
+    }))
+    host = await startTenantRuntimeService({ port: 0, requireProvisioning: true, catalog, placementOwnership: placement, resolveUnitId: () => unitId, factory })
+    const activationCount = (): number => vi.mocked(placement.activate).mock.calls.filter(([id]) => id === unitId).length
+    const routeStatus = async (): Promise<number> => (await fetch(`http://127.0.0.1:${host!.port}/runtime/capabilities`)).status
+    await host.reconcile()
+    // 502 means the Unit was admitted but its fixture upstream is unavailable.
+    await vi.waitFor(async () => expect(await routeStatus()).toBe(502))
+    expect(factory).toHaveBeenCalledTimes(1)
+    const old = host.units.get(unitId)
+
+    blockClose = true
+    const withdrawn = lost!(unitId)
+    await vi.waitFor(() => expect(finishClose).toBeDefined())
+    authority.push(entry(peerId))
+    await Promise.all([host.reconcile(), host.reconcile()])
+    await vi.waitFor(() => expect(placement.activate).toHaveBeenCalledWith(peerId, 'org-a'))
+    expect(activationCount()).toBe(1)
+    expect(await routeStatus()).toBe(404)
+    finishClose!()
+    await withdrawn
+    await vi.waitFor(async () => expect(await routeStatus()).toBe(502))
+    expect(activationCount()).toBe(2)
+    expect(host.units.get(unitId)).not.toBe(old)
+    expect(factory).toHaveBeenCalledTimes(2)
+    expect(authority[0]!.generation).toBe(1) // recovery is not an operator resume
+
+    await host.suspendUnit(unitId)
+    blockActivation = true
+    const refused = expect(host.markRoutable(unitId, 'org-a')).rejects.toThrow('lifecycle changed')
+    await vi.waitFor(() => expect(finishActivation).toBeDefined())
+    authority[0] = { ...authority[0]!, generation: 2, desiredState: 'suspended' }
+    await host.reconcile()
+    finishActivation!()
+    await refused
+    await host.reconcile()
+    expect(await routeStatus()).toBe(404)
+    expect(activationCount()).toBe(3)
+
+    blockActivation = false
+    authority[0] = { ...authority[0]!, generation: 3, desiredState: 'ready' }
+    await host.reconcile()
+    await vi.waitFor(async () => expect(await routeStatus()).toBe(502))
+    expect(activationCount()).toBe(4)
+    expect(authority[0]!.generation).toBe(3)
+    await host.drain()
+    await host.reconcile()
+    await expect(host.markRoutable(unitId, 'org-a')).rejects.toThrow('not accepting activations')
+    expect(activationCount()).toBe(4)
+  })
+
   it('leaves an explicitly exempt public Unit outside placement and organization binding', async () => {
     const ownership: RuntimeUnitPlacementOwnership = {
       activate: vi.fn(async () => undefined), isCurrent: vi.fn(async () => false),
@@ -221,7 +303,7 @@ describe('multi-tenant Host composition', () => {
     expect(ownership.isCurrent).not.toHaveBeenCalled()
   })
 
-  it('closes an owned Unit resource exactly once on normal close', async () => {
+  it('interrupts unfinished checkpoints on Unit close and disposes its resource exactly once', async () => {
     const root = await mkdtemp(join(tmpdir(), 'tenant-unit-resource-')); roots.push(root)
     let closeCount = 0
     const unit = await startLoopbackHostRuntimeUnit('resource-unit', {
@@ -230,7 +312,13 @@ describe('multi-tenant Host composition', () => {
       capabilities: AGENT_RUNTIME_CAPABILITIES,
       closeResource: async () => { closeCount += 1 },
     })
+    const snapshot = unit.server.loop.drainSnapshot('draining-session')
+    vi.spyOn(unit.server.store, 'list').mockReturnValueOnce([{ sessionId: 'draining-session' }])
+    vi.spyOn(unit.server.loop, 'drainSnapshot').mockReturnValueOnce({ ...snapshot, safe: false })
+    vi.spyOn(unit.server.loop, 'waitForCheckpoint').mockImplementationOnce(async () => await new Promise(() => undefined))
+    const interrupted = expect(unit.drain()).rejects.toThrow('closed before drain checkpoint')
     await unit.close()
+    await interrupted
     await unit.close()
     expect(closeCount).toBe(1)
   })

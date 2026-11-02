@@ -33,6 +33,7 @@ export type TenantRuntimeUnitFactory = (id: TenantRuntimeUnitId) => Promise<Tena
 export class TenantRuntimeUnitRegistry {
   private readonly units = new Map<TenantRuntimeUnitId, TenantRuntimeUnit>()
   private readonly loading = new Map<TenantRuntimeUnitId, Promise<TenantRuntimeUnit>>()
+  private readonly closing = new Map<TenantRuntimeUnitId, Promise<void>>()
   private draining = false
 
   constructor(private readonly factory: TenantRuntimeUnitFactory, private readonly maxLoadedUnits = Number.POSITIVE_INFINITY) {}
@@ -46,6 +47,8 @@ export class TenantRuntimeUnitRegistry {
   }
 
   async getOrLoad(id: TenantRuntimeUnitId): Promise<TenantRuntimeUnit> {
+    const closing = this.closing.get(id)
+    if (closing) await closing
     const loaded = this.units.get(id)
     if (loaded) return loaded
     if (this.draining) throw new Error('TenantRuntimeUnitRegistry is draining')
@@ -61,12 +64,21 @@ export class TenantRuntimeUnitRegistry {
     return creation
   }
 
-  async close(id: TenantRuntimeUnitId): Promise<void> {
-    const pending = this.loading.get(id)
-    const unit = this.units.get(id) ?? (pending ? await pending : undefined)
-    if (!unit) return
-    this.units.delete(id)
-    await unit.close()
+  close(id: TenantRuntimeUnitId): Promise<void> {
+    const existing = this.closing.get(id)
+    if (existing) return existing
+    const teardown = Promise.resolve().then(async () => {
+      const pending = this.loading.get(id)
+      const unit = this.units.get(id) ?? (pending ? await pending : undefined)
+      if (!unit) return
+      await unit.close()
+      this.units.delete(id)
+    })
+    this.closing.set(id, teardown)
+    void teardown.then(() => {
+      if (this.closing.get(id) === teardown) this.closing.delete(id)
+    }, () => {})
+    return teardown
   }
 
   async drainAll(): Promise<void> {
@@ -77,9 +89,9 @@ export class TenantRuntimeUnitRegistry {
 
   async closeAll(): Promise<void> {
     this.draining = true
-    await Promise.all([...this.loading.values()].map((pending) => pending.catch(() => undefined)))
-    const units = [...this.units.values()]
-    this.units.clear()
-    await Promise.all(units.map((unit) => unit.close()))
+    const ids = new Set([...this.closing.keys(), ...this.loading.keys(), ...this.units.keys()])
+    const results = await Promise.allSettled([...ids].map((id) => this.close(id)))
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (failed) throw failed.reason
   }
 }

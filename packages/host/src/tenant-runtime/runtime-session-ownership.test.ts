@@ -33,11 +33,16 @@ describe('RuntimeSessionOwnership', () => {
   it('immediately withdraws Session access and closes its Unit after owner renewal fails', async () => {
     vi.useFakeTimers()
     const { ownership, lost, renewResourceOwner } = fixture()
+    let teardownDone = false
+    // Production onLost closes the whole Unit, whose resource disposer closes
+    // this same Session-owner manager. It must not wait for its own callback.
+    lost.mockImplementation(async () => { await ownership.close(); teardownDone = true })
     await ownership.ensure('session-a')
     renewResourceOwner.mockRejectedValueOnce(new Error('fenced by another replica'))
     await vi.advanceTimersByTimeAsync(5_000)
     expect(ownership.activeLease('session-a')).toBeUndefined()
     expect(lost).toHaveBeenCalledTimes(1)
+    expect(teardownDone).toBe(true)
     await expect(ownership.ensure('session-a')).rejects.toHaveProperty('code', 'RUNTIME_RESOURCE_OWNERSHIP_FENCED')
     await ownership.close()
   })

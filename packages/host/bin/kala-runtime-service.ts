@@ -191,6 +191,7 @@ async function main(): Promise<void> {
     ingressSecret,
     requireProvisioning: true,
     maxLoadedUnits: product === 'dedicated' ? 1 : Number(process.env.KALA_RUNTIME_HOST_MAX_LOADED_UNITS ?? 100),
+    ...(experimentalStorage ? { catalog } : {}),
     ...(placementOwnership ? {
       placementOwnership,
       replicaMembership,
@@ -325,23 +326,39 @@ async function main(): Promise<void> {
       })
     },
   })
-  for (const entry of catalog.list()) {
-    if (entry.desiredState !== 'ready') continue
-    try {
-      await host.markRoutable(entry.unitId, placementOwnership ? await trustedOrganizationId(catalog, entry.unitId) : undefined)
-    } catch (error) {
-      if (!(error instanceof RuntimeUnitPlacementHeldError)) throw error
-      process.stderr.write(`${JSON.stringify({ event: 'tenant_runtime_unit_placement_held', unitId: entry.unitId, currentNodeId: error.currentNodeId })}\n`)
+  if (experimentalStorage) {
+    // Node readiness is not tenant availability. Recover eligible Units from
+    // bounded authoritative pages continuously, including after live lease loss.
+    await host.reconcile()
+  } else {
+    for (const entry of catalog.list()) {
+      if (entry.desiredState !== 'ready') continue
+      try {
+        await host.markRoutable(entry.unitId, placementOwnership ? await trustedOrganizationId(catalog, entry.unitId) : undefined)
+      } catch (error) {
+        if (!(error instanceof RuntimeUnitPlacementHeldError)) throw error
+        process.stderr.write(`${JSON.stringify({ event: 'tenant_runtime_unit_placement_held', unitId: entry.unitId, currentNodeId: error.currentNodeId })}\n`)
+      }
     }
   }
   if (releaseAssetsDir) await host.markRoutable(publicInstallerUnitId)
   attachTenantRuntimeControlApi({ http: host.http, serviceSecret: ingressSecret, service: host, store: catalog, dataRoot, capabilities })
   process.stdout.write(`${JSON.stringify({ event: 'tenant_runtime_service_ready', port: host.port, dataRoot })}\n`)
-  const shutdown = async (): Promise<void> => {
-    try { await host.drain(); await host.close() } finally {
-      await Promise.allSettled([catalog.close(), placementStore?.close() ?? Promise.resolve(), replicaStore?.close() ?? Promise.resolve()])
-    }
-    process.exit(0)
+  let shuttingDown: Promise<void> | undefined
+  const shutdown = (): Promise<void> => {
+    shuttingDown ??= (async () => {
+      let exitCode = 0
+      try {
+        try { await host.drain() } finally { await host.close() }
+      } catch (error) {
+        exitCode = 1
+        process.stderr.write(`${JSON.stringify({ event: 'tenant_runtime_shutdown_failed', reason: error instanceof Error ? error.name : 'unknown' })}\n`)
+      } finally {
+        await Promise.allSettled([catalog.close(), placementStore?.close() ?? Promise.resolve(), replicaStore?.close() ?? Promise.resolve()])
+      }
+      process.exit(exitCode)
+    })()
+    return shuttingDown
   }
   process.on('SIGTERM', () => { void shutdown() }); process.on('SIGINT', () => { void shutdown() })
 }

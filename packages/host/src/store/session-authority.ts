@@ -22,6 +22,10 @@ export type SessionAuthorityMutation = {
 /** Durable Session authority consumed by SessionStore, independent of its storage backend. */
 export interface SessionAuthority {
   initialize(): Promise<void>
+  /** Internal cache epoch for the current live owner, never client routing authority.
+   * Undefined means this replica has no writable cache. SQL fences remain mandatory.
+   * Authorities without distributed ownership omit this hook. */
+  currentOwnerCacheKey?(sessionId: string): string | undefined
   /** Native SDK files are independent rows/chunks, never Session document snapshots. */
   nativeSessionFs?(sessionId: string): SessionFsProvider
   load(sessionId: string): Promise<PersistedSessionDocument | undefined>

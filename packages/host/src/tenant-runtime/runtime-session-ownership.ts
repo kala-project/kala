@@ -53,7 +53,10 @@ export class RuntimeSessionOwnership {
     this.#closing = (async () => {
       await Promise.allSettled([...this.#pending.values()])
       this.#handles.clear()
-      await this.manager.releaseAll()
+      // An onLost notification can be waiting for Host.suspendUnit(), whose
+      // disposer is this close(). Wait for capabilities/releases, not the
+      // notification that will finish immediately after teardown returns.
+      await this.manager.releaseAll({ waitForLossCallbacks: false })
     })()
     return await this.#closing
   }
