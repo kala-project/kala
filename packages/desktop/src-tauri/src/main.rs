@@ -9,6 +9,9 @@ mod desktop;
 mod placement;
 mod connection;
 mod media_permissions;
+mod debug_forwarder;
+mod debug_profile;
+mod application_debug;
 
 const DESKTOP_INIT: &str = include_str!("desktop-init.js");
 struct ConnectionOrigin(std::sync::Mutex<String>);
@@ -227,6 +230,7 @@ fn connect_dashboard(app: tauri::AppHandle, window: tauri::WebviewWindow, endpoi
             return Ok(origin);
         }
     }
+    application_debug::reset(&app, "Dashboard target changed. Debug forwarding stopped.");
     *app.state::<ConnectionOrigin>().0.lock().map_err(|e| e.to_string())? = origin.clone();
     connection::begin(&app, &origin);
     if let Some(previous) = app.get_webview_window("dashboard") {
@@ -256,6 +260,7 @@ fn connect_dashboard(app: tauri::AppHandle, window: tauri::WebviewWindow, endpoi
             }
         })
         .on_navigation(move |url| {
+            application_debug::reset(&navigation_app, "Dashboard navigation stopped debugging. Explicitly restart after authentication.");
             navigation_app.state::<ConnectionOrigin>().0.lock()
                 .map(|origin| navigation_allowed(url, &origin)).unwrap_or(false)
         })
@@ -319,7 +324,8 @@ fn main() {
         .manage(desktop::State::default())
         .manage(connection::State::default())
         .manage(media_permissions::State::default())
-        .invoke_handler(tauri::generate_handler![connect, desktop_window, desktop_clipboard_image, desktop_force_refresh, connection::launcher_bootstrap, desktop::desktop_ui, desktop::desktop_status, desktop::desktop_notify, desktop::desktop_connection_ready])
+        .manage(application_debug::State::default())
+        .invoke_handler(tauri::generate_handler![application_debug::application_debug_begin, application_debug::application_debug, connect, desktop_window, desktop_clipboard_image, desktop_force_refresh, connection::launcher_bootstrap, desktop::desktop_ui, desktop::desktop_status, desktop::desktop_notify, desktop::desktop_connection_ready])
         .setup(|app| {
             if let Some(launcher) = app.get_webview_window("launcher") {
                 install_shortcuts(&launcher)?;

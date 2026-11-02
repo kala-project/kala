@@ -11,6 +11,7 @@ export function registerAppDebugDashboard(
   socket: Socket<DashboardClientToServerEvents, DashboardServerToClientEvents>,
   options: {
     executors: ExecutorRegistry
+    captureCurrent?(sessionId: string): (() => boolean) | undefined
     resolveContext(sessionId: string): Promise<AppDebugContext | { error: string }>
   },
 ): void {
@@ -36,25 +37,32 @@ export function registerAppDebugDashboard(
         return { ok: true }
       }
       if (request.op === 'renew') return relay.renew(socket.id, request.grantId)
-      const context = await options.resolveContext(request.sessionId)
-      if ('error' in context) return appDebugFailure(context.error)
-      if (!socket.connected) return appDebugFailure('Dashboard disconnected while checking the selected Workspace. Reconnect before starting forwarding.')
-      if (request.op === 'context') return { ok: true, context }
-      if (context.executorId !== request.executorId) return appDebugFailure('Selected Executor changed. Reopen desktop settings to review the target; forwarding was not started.')
-      return relay.start({
-        owner: socket.id, workspaceId: context.workspaceId, executorId: context.executorId, ports: request.ports,
-        authorize: async () => {
-          if (!socket.connected) return 'Dashboard disconnected. Forwarding authorization was revoked.'
-          const current = await options.resolveContext(request.sessionId)
-          if ('error' in current) return current.error
-          return current.principalKey === context.principalKey && current.workspaceId === context.workspaceId && current.executorId === context.executorId
-            ? undefined : 'Account, Workspace or Executor changed. Review the target and explicitly restart forwarding.'
-        },
-        deliver: (frame) => socket.connected
-          ? socket.timeout(APP_DEBUG_ACK_MS).emitWithAck('app_debug:frame', frame)
-          : Promise.resolve(appDebugFailure('Dashboard disconnected; application bytes were not replayed.')),
-        closed: (event) => { if (socket.connected) socket.emit('app_debug:closed', event) },
-      })
+      const admission = request.op === 'start' ? relay.beginStart(socket.id) : undefined
+      try {
+        const context = await options.resolveContext(request.sessionId)
+        if (admission && !admission.current()) return appDebugFailure('Debug Start was cancelled, superseded or interrupted by Runtime drain while authorization was pending. No group was started; explicitly start again after checking readiness.')
+        if ('error' in context) return appDebugFailure(context.error)
+        if (!socket.connected) return appDebugFailure('Dashboard disconnected while checking the selected Workspace. Reconnect before starting forwarding.')
+        if (request.op === 'context') return { ok: true, context }
+        if (context.executorId !== request.executorId) return appDebugFailure('Selected Executor changed. Reopen desktop settings to review the target; forwarding was not started.')
+        const current = options.captureCurrent?.(request.sessionId)
+        if (options.captureCurrent && !current) return appDebugFailure('No healthy local Session owner fence is available. Update the Runtime or wait for its owner to recover, then explicitly restart; no forwarding was enabled.')
+        return await relay.start({
+          ...(current ? { current } : {}),
+          owner: socket.id, workspaceId: context.workspaceId, executorId: context.executorId, ports: request.ports,
+          authorize: async () => {
+            if (!socket.connected) return 'Dashboard disconnected. Forwarding authorization was revoked.'
+            const current = await options.resolveContext(request.sessionId)
+            if ('error' in current) return current.error
+            return current.principalKey === context.principalKey && current.workspaceId === context.workspaceId && current.executorId === context.executorId
+              ? undefined : 'Account, Workspace or Executor changed. Review the target and explicitly restart forwarding.'
+          },
+          deliver: (frame) => socket.connected
+            ? socket.timeout(APP_DEBUG_ACK_MS).emitWithAck('app_debug:frame', frame)
+            : Promise.resolve(appDebugFailure('Dashboard disconnected; application bytes were not replayed.')),
+          closed: (event) => { if (socket.connected) socket.emit('app_debug:closed', event) },
+        })
+      } finally { admission?.release() }
     }
     void execute().then(ack, () => ack(appDebugFailure('Could not establish application debugging. Verify the selected Session, access and connectivity, then try again.')))
   })

@@ -573,14 +573,23 @@ export function configureDashboardNamespace(
     // per-frame audit persistence. Register cleanup before any awaited load.
     registerAppDebugDashboard(socket, {
       executors: deps.executors,
+      captureCurrent: (targetSessionId) => {
+        const owner = deps.loopDeps.captureSessionEffectOwner?.(targetSessionId)
+        if ((deps.loopDeps.assertSessionEffectOwner || deps.loopDeps.captureSessionEffectOwner) && !owner) return undefined
+        const workspaceId = deps.store.get(targetSessionId)?.workspaceId
+        return () => socket.connected && socket.data.readOnly !== true
+          && (multiplexed ? subscribedSessions.has(targetSessionId) && !!workspaceId && subscribedWorkspaces.has(workspaceId) : targetSessionId === sessionId)
+          && (owner?.() ?? true)
+      },
       resolveContext: async (targetSessionId) => {
-        if (!mutableRuntimeReady()) return { error: 'Runtime is not ready for application debugging. Wait until it is available, then retry.' }
+        if (deps.loop.isDraining() || !mutableRuntimeReady()) return { error: 'Runtime is not ready for application debugging. Wait until it is available, then retry.' }
         const freshAuth = authenticateDashboardHandshake(socket.handshake.auth as HandshakeAuth, socket.request, deps.auth)
         if (!freshAuth.ok || operationPrincipal(freshAuth.actor) !== operationPrincipal(socket.data.dashboardActor as DashboardActor | undefined) || (freshAuth.actor.kind === 'ingress' && freshAuth.actor.role === 'viewer')) return { error: 'Application debugging authorization expired or requires runtime:write. Sign in again with an authorized account before restarting forwarding.' }
         const record = deps.store.get(targetSessionId) ?? await deps.store.load(targetSessionId, { recoverDangling: false }).catch(() => undefined)
         if (!record?.workspaceId) return { error: 'Select an existing Session bound to an online Workspace before opening application debugging.' }
         const accessError = await validateBgSessionAccess(targetSessionId, record.workspaceId) ?? await validateEffectOwner(targetSessionId)
         if (accessError) return { error: `Application debugging denied: ${accessError}. Select a subscribed Session you are authorized to modify, then retry.` }
+        if (deps.loopDeps.assertSessionEffectOwner && !deps.loopDeps.captureSessionEffectOwner) return { error: 'This Runtime does not provide a local Session owner fence for application debugging. Update the Runtime before starting forwarding.' }
         const target = deps.executors.appDebugTarget?.(record.workspaceId)
         if (!target) return { error: 'The selected Workspace is offline or its Executor does not support application debugging v1. Connect or update that Executor before retrying.' }
         return { principalKey: createHash('sha256').update(operationPrincipal(freshAuth.actor)).digest('hex'), workspaceId: record.workspaceId, executorId: target.executorId }

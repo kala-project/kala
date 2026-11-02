@@ -286,6 +286,8 @@ continuation and admission reconciliation followed by route commit. If
 verification fails, the Supervisor restarts and verifies the predecessor
 before restoring its route.
 
+User-started desktop application-debugging streams follow the [desktop feature contract](./desktop/application-debugging.md), not the durable admission/Agent checkpoint protocol. Actual cutover reservation/drain closes these ephemeral streams before checkpoint waits; releasing the reservation never replays their bytes or restores a grant. Reading quiescence and staging a release are side-effect-free with respect to debug connections. They do not prevent an otherwise safe cutover. The current Dedicated Stable Ingress uses the fixed logical `local` Unit route, not Private Cloud Gateway Session tickets; the two ingress acceptance paths must not be conflated.
+
 ### 7.5 Receipts and idempotency
 
 Every deployment request and transition is persisted. A receipt includes:

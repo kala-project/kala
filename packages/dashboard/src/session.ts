@@ -167,7 +167,8 @@ import { createPrototypeDashboardSocket } from './prototype/mock-dashboard-socke
 
 function openDashboardSocket(url: string, options: Parameters<typeof socketIo>[1]): DashboardSocket {
   if (import.meta.env.VITE_KALA_PROTOTYPE === '1') return createPrototypeDashboardSocket() as DashboardSocket
-  return socketIo(url, options) as DashboardSocket
+  // TCP debug frames must never inherit acknowledgement retry/replay policy.
+  return socketIo(url, { ...options, retries: 0 }) as DashboardSocket
 }
 
 export type SessionRouteTicketResult =

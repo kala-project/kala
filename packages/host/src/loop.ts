@@ -377,6 +377,7 @@ export function runHostLoop(deps: HostLoopDeps): LoopHandle {
     },
     beginDrain(mode) {
       drainMode = mode
+      deps.onDrain?.()
       for (const record of deps.store.recordsSnapshot()) notifyCheckpoint(record.sessionId)
     },
     isDraining() {

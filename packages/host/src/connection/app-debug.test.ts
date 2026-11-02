@@ -86,6 +86,41 @@ describe('Host grant fencing and bounded relay', () => {
     expect((await f.relay.renew('desktop', grantId)).ok).toBe(true)
     expect(f.authorize).toHaveBeenCalledTimes(3)
   })
+  it.each(['start', 'open', 'renew'] as const)('cannot dispatch %s when local authority changes during its awaited check', async (op) => {
+    const f = fixture(); let current = true
+    f.relay.setAvailability(() => current)
+    const grantId = op === 'start' ? undefined : await f.start()
+    let release!: () => void
+    f.authorize.mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve(undefined) }))
+    const pending = op === 'start'
+      ? f.relay.start({ owner: 'desktop', workspaceId: 'workspace', executorId: 'exec', ports: [5173], authorize: f.authorize, deliver: f.deliver, closed: f.closed })
+      : op === 'open' ? f.relay.frame('desktop', { op: 'open', grantId, streamId: 'race', port: 5173 })
+        : f.relay.renew('desktop', grantId!)
+    await tick(); f.request.mockClear(); current = false; release()
+    expect((await pending).ok).toBe(false)
+    expect(f.relay.activeGrants()).toBe(0)
+    expect(f.request.mock.calls.every(([request]) => request.op === 'stop')).toBe(true)
+  })
+  it('fences both directions even between data admission and queued dispatch, without async authority', async () => {
+    const f = fixture(); let current = true
+    f.relay.setAvailability(() => current)
+    for (const direction of ['input', 'output'] as const) {
+      current = true
+      const grantId = await f.start()
+      expect((await f.relay.frame('desktop', { op: 'open', grantId, streamId: 'race', port: 5173 })).ok).toBe(true)
+      f.request.mockClear(); f.deliver.mockClear(); f.authorize.mockClear()
+      const frame = { op: 'data', grantId, streamId: 'race', seq: 0, data: 'YQ==' }
+      const pending = direction === 'input' ? f.relay.frame('desktop', frame) : f.relay.executorFrame('connection-1', frame)
+      current = false // appDebugWait has not run its queued operation yet.
+      expect((await pending).ok).toBe(false)
+      expect(f.request.mock.calls.every(([request]) => request.op === 'stop')).toBe(true)
+      expect(f.deliver).not.toHaveBeenCalled()
+      expect(f.authorize).not.toHaveBeenCalled()
+      expect(f.relay.activeGrants()).toBe(0)
+    }
+    current = true; f.relay.close()
+    expect((await f.relay.start({ owner: 'desktop', workspaceId: 'workspace', executorId: 'exec', ports: [5173], authorize: f.authorize, deliver: f.deliver, closed: f.closed })).ok).toBe(false)
+  })
   it('closes on superseding connection and never replays to the replacement', async () => {
     const f = fixture(); const grantId = await f.start(); const replacement = vi.fn(async () => appDebugOk)
     f.replace({ executorId: 'exec', connectionId: 'connection-2', request: replacement }); f.relay.targetsChanged()

@@ -74,6 +74,10 @@ No lower layer may silently create a missing higher-layer resource. In enterpris
 5. RuntimeHost resolves the trusted route to exactly one ready Unit generation.
 6. A WebSocket/Engine.IO connection is pinned to that Unit for its lifetime.
 
+For explicitly resource-routed transports, connection pinning includes the selected Session owner activation (replica, owner generation and exact origin). Explicit Executor replica routes pin the replica membership activation, not merely a reusable replica id or URL. The Gateway must keep validating these server-derived bindings for the lifetime of the connection; healthy lease renewal preserves the binding, whereas expired/replaced ownership or membership, deleting/missing Session state, revoked authority, or uncertain lookup closes **both** client and upstream. It never migrates a live connection, reuses the handshake ticket as a perpetual authority, or replays commands/bytes. Ticket expiry bounds the handshake capability, not the lifetime of an otherwise healthy already-established connection.
+
+Detection and closure are bounded by the Gateway's configured monitoring interval plus its authority deadline (the current implementation defaults to 15 s + 5 s), with at most one check in flight per connection; this is cleanup, not the authoritative fencing boundary. Runtime transaction/effect fencing remains mandatory during that observation window. No per-byte SQL or application-payload inspection is introduced. A resolver that can only choose an origin cannot safely admit an explicitly activation-pinned transport; it must provide the local server-side binding capability or fail closed. Unscoped Unit/control routes must not compare two least-loaded selections as though they were activation identity. Dedicated Stable Ingress's published slot changes and actual drain remain governed by its separate contract.
+
 Unknown, suspended, stale-generation, duplicated, or unplaced routes fail closed. Public clients cannot invoke the private lifecycle API.
 
 ## 5. TenantRuntimeUnit contract

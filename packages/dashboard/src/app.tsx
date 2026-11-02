@@ -215,6 +215,7 @@ import { createDurableSessionViewCache, sessionCacheNamespace } from './durable-
 import { KERNEL_AGENT_RUNTIME_CAPABILITIES, PROTOCOL_VERSION } from '@agent-kernel/shared'
 import { useInterventionDesktopNotifications } from './lib/desktop-notifications.js'
 import { useNativeDesktop } from './lib/use-native-desktop.js'
+import { useApplicationDebugging } from './lib/use-application-debugging.js'
 import { isDesktopClient } from './lib/desktop.js'
 import { AccountCenter } from './features/account/AccountCenter.js'
 import { AdminCenter } from './features/admin/AdminCenter.js'
@@ -1705,6 +1706,11 @@ export function App(): JSX.Element {
       queuedCount: Math.max(summary.queuedCount ?? 0, session.queuedMessages.length),
     }
   }), [control.sessions, activeSessionId, sessionHydrated, selectedSessionActivity.derived.isRunning, pendingApprovalsCount, session.state?.approvalMode, session.state?.status, session.lastError, session.queuedMessages.length])
+  useApplicationDebugging({
+    socket: session.socket,
+    sessionId: activeSessionId,
+    ready: productAccessReady && sessionHydrated && sessionWorkspaceOnline,
+  })
   useNativeDesktop({
     sessions: nativeSessions,
     activeSessionId,

@@ -849,7 +849,14 @@ current placement and lease state. All Engine.IO polling requests and the
 WebSocket upgrade for one live connection remain sticky to the selected Runtime
 holder; an existing Engine.IO session is not transparently moved between Pods.
 The Gateway must reject stale route generations and must not keep forwarding to
-a replica after its ownership is superseded.
+a replica after its ownership is superseded. The explicit Session/Executor
+replica connection-lifetime rules, monitoring bound and distinction between
+handshake-ticket expiry and healthy lease renewal are normative in the
+[enterprise trust contract](./private-cloud-enterprise-architecture-contract.md#4-routing-and-service-trust).
+A Unit-wide loss shutdown is still the current conservative Runtime mechanism,
+not completion of the scalable per-resource isolation target. Gateway route loss
+must independently withdraw the affected transport without globally draining
+healthy routes in the same Unit.
 
 On planned drain, the old holder stops admitting new work, commits recoverable
 progress, and closes connections with a bounded retry signal. On process, Pod,
@@ -861,6 +868,14 @@ Gateway returns an explicit retryable unavailable/relocating response rather
 than routing to two holders or presenting an infinite loading state. Suspension,
 revocation, deletion, or non-recoverable Session failure is terminal and must
 not be presented as retryable failover.
+
+**Local-source lifecycle evidence (2026-11-01):** the Gateway now captures and
+periodically revalidates explicit resource/replica route activations, closes both
+TCP halves (including a pending upgrade) on failure, and keeps a renewed owner
+connected beyond the handshake ticket TTL. The [status addendum](./private-cloud-design-status.md)
+records the real formal-migration PostgreSQL gate and its fixture limitations.
+This does not complete Runtime per-resource fault isolation or certify Agent
+continuation, customer device failover or multi-node availability.
 
 Autoscaling is therefore safe only when placement, lease acquisition, Gateway
 route convergence, cursor resume, backpressure, and stale-writer rejection are

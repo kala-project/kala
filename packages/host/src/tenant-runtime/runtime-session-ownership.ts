@@ -30,6 +30,19 @@ export class RuntimeSessionOwnership {
     return !this.#closed && member && owner && sameMember(owner, member) ? owner : undefined
   }
 
+  /** Pin a live activation for an opaque external stream without SQL in its byte path. */
+  captureEffectFence(sessionId: string): (() => boolean) | undefined {
+    const lease = this.activeLease(sessionId)
+    if (!lease) return undefined
+    const { ownerToken, generation, replicaId, membershipToken, membershipGeneration } = lease
+    return () => {
+      const current = this.activeLease(sessionId)
+      return !!current && current.ownerToken === ownerToken && current.generation === generation
+        && current.replicaId === replicaId && current.membershipToken === membershipToken
+        && current.membershipGeneration === membershipGeneration
+    }
+  }
+
   /** Coalesce concurrent Host requests; all PG writes must still check this lease in their transaction. */
   async ensure(sessionId: string): Promise<RuntimeResourceOwnership> {
     if (!sessionId || sessionId.trim() !== sessionId) throw new TypeError('invalid sessionId')

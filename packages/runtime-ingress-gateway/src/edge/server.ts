@@ -1,4 +1,5 @@
 import { createHmac, randomBytes } from 'node:crypto'
+import { Socket } from 'node:net'
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http'
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https'
 import { Readable, type Duplex } from 'node:stream'
@@ -20,7 +21,7 @@ import { ServiceAccountInputError, type ServiceAccountService, type ServiceAccou
 import { enterpriseManagementOpenApi } from '../api/openapi.js'
 import type { RateLimiter } from '../governance/rate-limit.js'
 import { isOwnerBootstrapToken, ownerBootstrapHash, type OwnerBootstrapGateway } from '../organizations/owner-bootstrap.js'
-import type { RuntimeOriginResolver } from '../runtime-origin/postgres-runtime-origin-resolver.js'
+import type { RuntimeConnectionRoute, RuntimeOriginResolver } from '../runtime-origin/postgres-runtime-origin-resolver.js'
 import type { RuntimeRoutingTicketResolver } from '../runtime-origin/runtime-routing-ticket-resolver.js'
 import type { DedicatedOwnerAuthenticator } from '../auth/dedicated-owner.js'
 import { loadOperatorObservability } from './observability.js'
@@ -43,6 +44,18 @@ export type GatewayAuthentication =
       owner: DedicatedOwnerAuthenticator
       loginRateLimiter: RateLimiter
     }
+
+/** Match Runtime ingress teardown: discard queued TCP output and do not leave a half-open upstream. */
+function closeUpgradeTransport(socket: Duplex): void {
+  if (socket.destroyed) return
+  if (socket instanceof Socket && !socket.connecting) {
+    try { socket.resetAndDestroy(); return } catch (error) {
+      // Wrapped TLS handles cannot use Node's TCP reset operation.
+      if ((error as NodeJS.ErrnoException).code !== 'ERR_INVALID_HANDLE_TYPE') throw error
+    }
+  }
+  socket.destroy()
+}
 
 class RuntimeOriginUnavailableError extends Error {
   constructor() { super('runtime_origin_unavailable') }
@@ -277,17 +290,18 @@ export async function startRuntimeIngressGateway(options: {
   }
   const closeSockets = (predicate: (entry: { sessionId: string; identity: AuthenticatedIdentity }) => boolean) => {
     for (const [socket, entry] of browserSockets) if (predicate(entry)) {
-      entry.upstream?.destroy()
-      socket.destroy()
+      if (entry.upstream) closeUpgradeTransport(entry.upstream)
+      closeUpgradeTransport(socket)
     }
   }
   const closeSocketsForIdentity = (identity: AuthenticatedIdentity) => closeSockets((entry) =>
     entry.identity.issuer === identity.issuer && entry.identity.subject === identity.subject)
   const closeExecutorSocket = (socket: Duplex) => {
-    executorSockets.get(socket)?.upstream?.destroy()
-    socket.destroy()
+    const upstream = executorSockets.get(socket)?.upstream
+    if (upstream) closeUpgradeTransport(upstream)
+    closeUpgradeTransport(socket)
   }
-  const monitorBrowserSocket = (socket: Duplex, session: BrowserSession, access: OrganizationAccess) => {
+  const monitorBrowserSocket = (socket: Duplex, session: BrowserSession, access: OrganizationAccess, routeCurrent?: RuntimeConnectionRoute['current']) => {
     const entry: { sessionId: string; identity: AuthenticatedIdentity; upstream?: Duplex; timer?: ReturnType<typeof setTimeout> } = { sessionId: session.id, identity: session.identity }
     browserSockets.set(socket, entry)
     socket.once('close', () => { if (entry.timer) clearTimeout(entry.timer); browserSockets.delete(socket) })
@@ -305,13 +319,14 @@ export async function startRuntimeIngressGateway(options: {
           && latest.organization.status === 'active'
           && latest.membership.role === access.membership.role
           && permits(latest.membership.role, 'runtime:write')
+          && (routeCurrent ? await routeCurrent() : true)
       })
       if (!valid) closeSockets((candidate) => candidate === entry)
       if (!socket.destroyed) schedule()
     }
     schedule()
   }
-  const monitorExecutorSocket = (socket: Duplex, routeHash: string, unitId: string) => {
+  const monitorExecutorSocket = (socket: Duplex, routeHash: string, unitId: string, routeCurrent?: RuntimeConnectionRoute['current']) => {
     const entry: { routeHash: string; unitId: string; upstream?: Duplex; timer?: ReturnType<typeof setTimeout> } = { routeHash, unitId }
     executorSockets.set(socket, entry)
     socket.once('close', () => { if (entry.timer) clearTimeout(entry.timer); executorSockets.delete(socket) })
@@ -321,7 +336,8 @@ export async function startRuntimeIngressGateway(options: {
     }
     const recheck = async () => {
       const valid = await authorizationStillValid(async () =>
-        (await options.directory.findUnitByExecutorRouteHint(entry.routeHash)) === entry.unitId)
+        (await options.directory.findUnitByExecutorRouteHint(entry.routeHash)) === entry.unitId
+          && (routeCurrent ? await routeCurrent() : true))
       if (!valid) closeExecutorSocket(socket)
       if (!socket.destroyed) schedule()
     }
@@ -349,12 +365,20 @@ export async function startRuntimeIngressGateway(options: {
   // connection order (which can differ under concurrent tenant handshakes).
   proxy.on('proxyReqWs', (proxyRequest, _request, incomingSocket) => {
     if (!browserSockets.has(incomingSocket) && !executorSockets.has(incomingSocket)) return
+    if (incomingSocket.destroyed) { proxyRequest.destroy(); return }
+    const transportEnds = ['end', 'finish', 'error', 'close'] as const
+    const cancelUpgrade = () => { if (proxyRequest.socket) closeUpgradeTransport(proxyRequest.socket); proxyRequest.destroy() }
+    for (const event of transportEnds) incomingSocket.once(event, cancelUpgrade)
     proxyRequest.once('upgrade', (_response, upstreamSocket) => {
+      for (const event of transportEnds) incomingSocket.removeListener(event, cancelUpgrade)
       const entry = browserSockets.get(incomingSocket) ?? executorSockets.get(incomingSocket)
-      if (!entry || incomingSocket.destroyed) { upstreamSocket.destroy(); return }
+      if (!entry || incomingSocket.destroyed) { closeUpgradeTransport(upstreamSocket); return }
       entry.upstream = upstreamSocket
-      incomingSocket.once('close', () => upstreamSocket.destroy())
-      upstreamSocket.once('close', () => incomingSocket.destroy())
+      const closePair = () => { closeUpgradeTransport(incomingSocket); closeUpgradeTransport(upstreamSocket) }
+      for (const event of transportEnds) {
+        incomingSocket.once(event, closePair)
+        upstreamSocket.once(event, closePair)
+      }
     })
   })
   dashboardProxy?.on('error', () => {})
@@ -1245,6 +1269,7 @@ export async function startRuntimeIngressGateway(options: {
     if (!unitId || (organizationAccess && requiredPermission && !permits(organizationAccess.membership.role, requiredPermission)) || (assignment && (!identity || identity.issuer !== assignment.identity.issuer || identity.subject !== assignment.identity.subject))) { socket.destroy(); return }
     let runtimeOrigin: string
     let routeSessionId: string | undefined
+    let routeCurrent: RuntimeConnectionRoute['current'] | undefined
     if (runtimeRouteTickets.length > 0) {
       // Explicit resource routing is browser-only and never falls back to a Unit
       // origin. The organization and Unit come from current cookie authority, not
@@ -1252,10 +1277,10 @@ export async function startRuntimeIngressGateway(options: {
       if (runtimeRouteTickets.length !== 1 || !options.runtimeRoutingTicketResolver || !session || !organizationAccess
         || !assignment || request.headers['x-kala-executor-invite'] !== undefined || request.headers['x-kala-executor-route'] !== undefined || executorEnrollment
         || !permits(organizationAccess.membership.role, 'runtime:write')) { socket.destroy(); return }
-      let resolved: { origin: string; sessionId: string } | undefined
+      let resolved: (RuntimeConnectionRoute & { sessionId: string }) | undefined
       try {
         const principalId = Buffer.from(`${identity!.issuer}\0${identity!.subject}`, 'utf8').toString('base64url')
-        resolved = await options.runtimeRoutingTicketResolver.resolveSessionBindingForOrganization(runtimeRouteTickets[0], {
+        resolved = await options.runtimeRoutingTicketResolver.resolveSessionConnectionForOrganization(runtimeRouteTickets[0], {
           principalId,
           organizationId: organizationAccess.organization.id,
           unitId: organizationAccess.organization.unitId,
@@ -1267,6 +1292,7 @@ export async function startRuntimeIngressGateway(options: {
         if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) throw new Error('invalid origin')
         runtimeOrigin = parsed.origin
         routeSessionId = resolved.sessionId
+        routeCurrent = resolved.current.bind(resolved)
       } catch { socket.destroy(); return }
       requestUrl.searchParams.delete('runtimeRouteTicket')
       request.url = `${requestUrl.pathname}${requestUrl.search}`
@@ -1274,10 +1300,15 @@ export async function startRuntimeIngressGateway(options: {
       // Replica ids are opaque selectors. The route capability fixes the Unit,
       // and current PostgreSQL membership must resolve the exact member; stale
       // ids never fall back to the Unit's least-loaded control origin.
-      if (!executorEnrollment || !options.runtimeOriginResolver?.resolveReplica) { socket.destroy(); return }
-      const resolved = await options.runtimeOriginResolver.resolveReplica(unitId, executorReplica)
+      if (!executorEnrollment || !options.runtimeOriginResolver?.resolveReplicaConnection) { socket.destroy(); return }
+      const resolved = await options.runtimeOriginResolver.resolveReplicaConnection(unitId, executorReplica)
       if (!resolved) { socket.destroy(); return }
-      runtimeOrigin = resolved
+      try {
+        const parsed = new URL(resolved.origin)
+        if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) throw new Error('invalid origin')
+        runtimeOrigin = parsed.origin
+      } catch { socket.destroy(); return }
+      routeCurrent = resolved.current.bind(resolved)
     } else {
       runtimeOrigin = await resolveRuntimeOrigin(unitId)
     }
@@ -1300,8 +1331,8 @@ export async function startRuntimeIngressGateway(options: {
       request.headers['x-agent-runlab-organization-role'] = organizationAccess.membership.role
       request.headers['x-agent-runlab-principal'] = Buffer.from(`${identity!.issuer}\0${identity!.subject}`, 'utf8').toString('base64url')
     }
-    if (session && organizationAccess && !executorEnrollment) monitorBrowserSocket(socket, session, organizationAccess)
-    else if (executorEnrollment) monitorExecutorSocket(socket, executorInvite ? inviteKey(executorInvite) : routeHint!, unitId)
+    if (session && organizationAccess && !executorEnrollment) monitorBrowserSocket(socket, session, organizationAccess, routeCurrent)
+    else if (executorEnrollment) monitorExecutorSocket(socket, executorInvite ? inviteKey(executorInvite) : routeHint!, unitId, routeCurrent)
     proxy.ws(request, socket, head, { target: runtimeOrigin }, () => socket.destroy())
   })().catch(() => socket.destroy()) })
   await new Promise<void>((resolve) => http.listen(options.port, options.listenHost ?? '127.0.0.1', resolve))

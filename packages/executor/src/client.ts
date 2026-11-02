@@ -252,6 +252,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
   const factory = options.ioFactory ?? clientIO
   const socket = factory(`${options.host}/executor`, {
     transports: ['websocket'],
+    retries: 0, // Acknowledgement loss must not replay opaque TCP/application effects.
     auth: {
       role: 'executor',
       clientVersion: PROTOCOL_VERSION,

@@ -6,6 +6,9 @@ import type { ControlPlaneDatabase, SqlExecutor } from '../persistence/postgres.
 
 const { Pool } = pg
 
+/** Gateway-only capability; activation tokens never leave the resolver closure. */
+export type RuntimeConnectionRoute = { origin: string; current(): Promise<boolean> }
+
 export interface RuntimeOriginResolver {
   /** Resolve one trusted Runtime Unit to an authoritative control upstream origin. */
   resolve(unitId: string): Promise<string | undefined>
@@ -13,6 +16,8 @@ export interface RuntimeOriginResolver {
   listReplicas?(unitId: string): Promise<readonly string[] | undefined>
   /** Resolve one exact active replica without falling back to another member. */
   resolveReplica?(unitId: string, replicaId: string): Promise<string | undefined>
+  /** Admit an explicit transport only when its exact membership activation can be revalidated. */
+  resolveReplicaConnection?(unitId: string, replicaId: string): Promise<RuntimeConnectionRoute | undefined>
 }
 
 /** Control-plane-only resolver used while a Host is acquiring a Unit lease. */
@@ -87,6 +92,48 @@ export class PostgresRuntimeOriginResolver implements RuntimeOriginResolver {
     if (!replicaId) return undefined
     const parallel = await this.resolveParallelReplicasForUnit(unitId)
     return parallel?.find((replica) => replica.replicaId === replicaId)?.origin
+  }
+
+  async resolveReplicaConnection(unitId: string, replicaId: string): Promise<RuntimeConnectionRoute | undefined> {
+    const replica = await this.resolveReplicaActivation(unitId, replicaId)
+    if (!replica) return undefined
+    const { origin, token, generation, organizationId } = replica
+    return { origin, current: async () => {
+      const current = await this.resolveReplicaActivation(unitId, replicaId)
+      return !!current && current.organizationId === organizationId && current.origin === origin
+        && current.token === token && current.generation === generation
+    } }
+  }
+
+  /** A connection health probe is an exact indexed activation lookup, never a least-loaded selection/count of every owner. */
+  private async resolveReplicaActivation(unitId: string, replicaId: string): Promise<{ origin: string; token: string; generation: string; organizationId: string } | undefined> {
+    if (!unitId || !replicaId) return undefined
+    const authority = await this.controlPlane.query<ControlPlacementRow>(`SELECT o.id AS organization_id,p.organization_id AS placement_organization_id
+      FROM organizations o JOIN runtime_unit_placements p ON p.runtime_unit_id=o.runtime_unit_id
+      WHERE o.runtime_unit_id=$1`, [unitId])
+    const control = authority.rows[0]
+    if (authority.rowCount !== 1 || !control || control.organization_id !== control.placement_organization_id) return undefined
+    type ActivationRow = Omit<ParallelControlRow, 'owner_count'> & { replica_generation: string; replica_token: string }
+    const result = await this.placements.query<ActivationRow>(`SELECT
+        gate.feature_version,gate.barrier_generation,
+        placement.node_id,placement.owner_token,placement.origin,placement.generation,
+        replica.replica_id,replica.origin AS replica_origin,
+        replica.generation::text AS replica_generation,replica.membership_token AS replica_token
+      FROM tenant_runtime_unit_protocol_gates AS gate
+      JOIN tenant_runtime_unit_placement_leases AS placement
+        ON placement.organization_id=gate.organization_id AND placement.unit_id=gate.unit_id
+      JOIN tenant_runtime_unit_replica_memberships AS replica
+        ON replica.organization_id=gate.organization_id AND replica.unit_id=gate.unit_id
+      WHERE gate.unit_id=$1 AND gate.organization_id=$2 AND replica.replica_id=$3
+        AND placement.expires_at > clock_timestamp() AND replica.expires_at > clock_timestamp()`,
+    [unitId, control.organization_id, replicaId])
+    const row = result.rows[0]
+    if (result.rowCount !== 1 || !row || Number(row.feature_version) !== PARALLEL_FEATURE_VERSION
+      || row.node_id !== PARALLEL_PLACEMENT_BARRIER || row.owner_token !== PARALLEL_PLACEMENT_BARRIER
+      || row.origin !== PARALLEL_PLACEMENT_BARRIER_ORIGIN || !sameGeneration(row.generation, row.barrier_generation)
+      || !row.replica_token || !/^[1-9][0-9]*$/u.test(row.replica_generation)) return undefined
+    const origin = row.replica_origin ? safeRuntimeOrigin(row.replica_origin) : undefined
+    return origin && this.allowedOrigins.has(origin) ? { origin, token: row.replica_token, generation: row.replica_generation, organizationId: control.organization_id } : undefined
   }
 
   private async resolveTrustedOrigin(unitId: string, allowBootstrap: boolean): Promise<string | undefined> {
@@ -314,6 +361,7 @@ export function createPostgresRuntimeOriginResolver(options: {
     resolve: (unitId) => resolver.resolve(unitId),
     listReplicas: (unitId) => resolver.listReplicas(unitId),
     resolveReplica: (unitId, replicaId) => resolver.resolveReplica(unitId, replicaId),
+    resolveReplicaConnection: (unitId, replicaId) => resolver.resolveReplicaConnection(unitId, replicaId),
     resolveProvisioningOrigin: (unitId) => resolver.resolveProvisioningOrigin(unitId),
     close: () => pool.end(),
   }

@@ -11,6 +11,7 @@ type Stream = { inputSeq: number; outputSeq: number; inputEnded: boolean; output
 type Grant = {
   id: string; owner: string; workspaceId: string; target: AppDebugTarget; ports: Set<number>; streams: Map<string, Stream>
   abort: AbortController; timer?: ReturnType<typeof setTimeout>; starting: boolean; renewing: boolean
+  current?(): boolean
   authorize(): Promise<string | undefined>
   deliver(frame: AppDebugFrame): Promise<AppDebugReply>
   closed(event: AppDebugClosed): void
@@ -20,14 +21,45 @@ const inactive = () => appDebugFailure('Debug grant is not active for this conne
 /** In-memory control/data plane. No payload logging, tools, Session events or DB access. */
 export class AppDebugRelay {
   private readonly grants = new Map<string, Grant>()
+  private readonly pendingStarts = new Map<string, object>()
+  private available = (): boolean => true
+  private closed = false
+  /** Local-only state; never an async authorization/database check. */
+  setAvailability(check: () => boolean): void { this.available = check }
+  private accepting(): boolean {
+    try { return !this.closed && this.available() } catch { return false }
+  }
   constructor(private readonly targetFor: (workspaceId: string) => AppDebugTarget | undefined) {}
   activeGrants(): number { return this.grants.size }
   activeStreams(): number { return [...this.grants.values()].reduce((sum, grant) => sum + grant.streams.size, 0) }
-  private live(grant: Grant): boolean {
-    const current = this.targetFor(grant.workspaceId)
-    return this.grants.get(grant.id) === grant && current?.connectionId === grant.target.connectionId && current.executorId === grant.target.executorId
+  /** Track starts before their first async context check has created a Grant. */
+  beginStart(owner: string): { current(): boolean; release(): void } {
+    const token = this.accepting() ? {} : undefined
+    if (token) this.pendingStarts.set(owner, token)
+    return {
+      current: () => !!token && this.accepting() && this.pendingStarts.get(owner) === token,
+      release: () => { if (token && this.pendingStarts.get(owner) === token) this.pendingStarts.delete(owner) },
+    }
   }
-  close(): void { for (const grant of this.grants.values()) this.stop(grant, 'Debug relay closed. No application bytes will be replayed.') }
+  private live(grant: Grant): boolean {
+    if (this.grants.get(grant.id) !== grant) return false
+    let currentAuthority = false
+    try { currentAuthority = this.accepting() && (grant.current?.() ?? true) } catch { /* fail closed */ }
+    if (!currentAuthority) {
+      this.stop(grant, 'Runtime drained, Session subscription ended or its owner activation was lost. Forwarding stopped; inspect application state and explicitly restart after authorization recovers.')
+      return false
+    }
+    const current = this.targetFor(grant.workspaceId)
+    if (current?.connectionId === grant.target.connectionId && current.executorId === grant.target.executorId) return true
+    this.stop(grant, 'Executor disconnected or was replaced. Restart forwarding explicitly after checking the application state.')
+    return false
+  }
+  revoke(reason: string): void { this.pendingStarts.clear(); for (const grant of this.grants.values()) this.stop(grant, reason) }
+  close(): void { this.closed = true; this.revoke('Runtime closed. Debug forwarding stopped before shutdown waits; application requests may already have executed and will not be replayed.') }
+  private forward(grant: Grant, operation: () => Promise<AppDebugReply>, signal = grant.abort.signal): Promise<AppDebugReply> {
+    // appDebugWait queues dispatch: recheck inside that microtask too, not only before it.
+    return appDebugWait(() => this.live(grant) ? operation() : Promise.resolve(inactive()), signal)
+  }
   private async authority(grant: Grant): Promise<string | undefined> {
     const reply = await appDebugWait(async () => {
       const error = await grant.authorize()
@@ -64,16 +96,17 @@ export class AppDebugRelay {
   private owned(owner: string, grantId: string): Grant | undefined {
     const grant = this.grants.get(grantId)
     if (!grant || grant.owner !== owner) return undefined
-    if (!this.live(grant)) { this.stop(grant, 'Executor connection changed. Forwarding was stopped rather than switching machines or replaying requests.'); return undefined }
+    if (!this.live(grant)) return undefined
     return grant
   }
   targetsChanged(): void {
-    for (const grant of this.grants.values()) if (!this.live(grant)) this.stop(grant, 'Executor disconnected or was replaced. Restart forwarding explicitly after checking the application state.')
+    for (const grant of this.grants.values()) this.live(grant)
   }
   closeExecutor(connectionId: string): void {
     for (const grant of this.grants.values()) if (grant.target.connectionId === connectionId) this.stop(grant, 'Executor disconnected. Application requests may already have executed; check them before retrying.')
   }
   closeOwner(owner: string, reason = 'Dashboard connection closed. Restart forwarding explicitly after reconnecting; no bytes were replayed.'): void {
+    this.pendingStarts.delete(owner)
     for (const grant of this.grants.values()) if (grant.owner === owner) this.stop(grant, reason)
   }
   stopOwnerGrant(owner: string, grantId: string): AppDebugReply {
@@ -84,10 +117,12 @@ export class AppDebugRelay {
   }
   async start(input: {
     owner: string; workspaceId: string; executorId: string; ports: number[]
+    current?(): boolean
     authorize(): Promise<string | undefined>
     deliver(frame: AppDebugFrame): Promise<AppDebugReply>
     closed(event: AppDebugClosed): void
   }): Promise<AppDebugReply> {
+    if (!this.accepting()) return appDebugFailure('Runtime is draining, unavailable or closed. Wait for readiness and explicitly start a new debug group; old requests are not replayed.')
     if (!AppDebugPortsSchema.safeParse(input.ports).success) return appDebugFailure('Enter 1–8 unique ports between 1024 and 65535. No debug group was started.')
     const target = this.targetFor(input.workspaceId)
     if (!target || target.executorId !== input.executorId) return appDebugFailure('Selected Executor is offline, changed, or does not support application debugging v1. Check the selection and update it before restarting.')
@@ -100,7 +135,7 @@ export class AppDebugRelay {
       this.stop(grant, error ?? 'Executor changed while authorization was being checked. No application request was replayed.')
       return error ? appDebugFailure(error) : inactive()
     }
-    const reply = await appDebugWait(() => target.request({ op: 'start', grantId: grant.id, ports: input.ports }), grant.abort.signal)
+    const reply = await this.forward(grant, () => target.request({ op: 'start', grantId: grant.id, ports: input.ports }))
     if (!reply.ok || !this.live(grant)) { this.stop(grant, reply.ok ? 'Executor changed during start.' : reply.error); return reply.ok ? inactive() : reply }
     grant.starting = false
     this.lease(grant)
@@ -112,7 +147,7 @@ export class AppDebugRelay {
     grant.renewing = true
     const error = await this.authority(grant)
     if (error || !this.live(grant)) { this.stop(grant, error ?? 'Executor changed during authorization.'); return error ? appDebugFailure(error) : inactive() }
-    const reply = await appDebugWait(() => grant.target.request({ op: 'renew', grantId }), grant.abort.signal)
+    const reply = await this.forward(grant, () => grant.target.request({ op: 'renew', grantId }))
     grant.renewing = false
     if (!reply.ok || !this.live(grant)) { this.stop(grant, reply.ok ? 'Executor changed during renewal.' : reply.error); return reply.ok ? inactive() : reply }
     this.lease(grant)
@@ -139,7 +174,7 @@ export class AppDebugRelay {
       }
       stream.incoming = true
     }
-    const reply = await appDebugWait(() => grant.target.request(frame), stream.abort.signal)
+    const reply = await this.forward(grant, () => grant.target.request(frame), stream.abort.signal)
     stream.incoming = false
     if (!reply.ok || !this.live(grant)) { this.closeStream(grant, frame.streamId); return reply.ok ? inactive() : reply }
     if (frame.op !== 'open') stream.inputSeq += 1
@@ -160,7 +195,7 @@ export class AppDebugRelay {
       return appDebugFailure('Invalid or out-of-order Executor stream. It was closed rather than replaying bytes.')
     }
     stream.outgoing = true
-    const reply = await appDebugWait(() => grant.deliver(frame), stream.abort.signal)
+    const reply = await this.forward(grant, () => grant.deliver(frame), stream.abort.signal)
     stream.outgoing = false
     if (!reply.ok || !this.live(grant)) { this.closeStream(grant, frame.streamId); return reply.ok ? inactive() : reply }
     stream.outputSeq += 1

@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-application-debug"
+description = "Selected authenticated Dashboard may attach a bounded debug transport, relay frames and stop. No remote start, bind, connect, profile or filesystem operation."
+commands.allow = ["application_debug_begin", "application_debug"]

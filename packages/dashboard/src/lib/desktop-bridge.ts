@@ -1,5 +1,24 @@
 import { useCallback, useState, useSyncExternalStore } from 'react'
 import { isDesktopClient } from './desktop.js'
+import type { AppDebugContext, AppDebugFrame, AppDebugReply } from '@agent-kernel/shared'
+
+export type NativeDebugContext = AppDebugContext & { sessionId: string }
+export type NativeDebugEvent = {
+  generation: number; run: number; id: number
+  request: { op: 'start'; ports: number[] } | { op: 'frame'; frame: AppDebugFrame } | { op: 'stop'; grantId?: string }
+}
+export interface ApplicationDebugBridge {
+  version: 1
+  begin(listener: (event: NativeDebugEvent) => void): Promise<number>
+  setContext(generation: number, context: NativeDebugContext): Promise<void>
+  reply(generation: number, id: number, result: AppDebugReply): Promise<void>
+  receive(generation: number, frame: AppDebugFrame): Promise<void>
+  touch(generation: number, grantId: string): Promise<void>
+  abort(generation: number, run: number, error: string): Promise<void>
+  detach(generation: number): Promise<void>
+  unavailable(generation: number, error: string): Promise<void>
+  show(): Promise<void>
+}
 
 export type DesktopWindowState = { focused: boolean; visible: boolean }
 export type DesktopInfo = DesktopWindowState & { version: string; notificationsAvailable?: boolean; trayAvailable?: boolean }
@@ -10,6 +29,7 @@ export type DesktopActivity = { status: 'idle' | 'running' | 'attention' | 'comp
 export type DesktopNotification = { id: string; sessionId: string; title: string; body: string; silent: boolean }
 export interface DesktopBridge {
   version: 1
+  applicationDebugging?: ApplicationDebugBridge
   getInfo(): Promise<DesktopInfo>
   confirmConnection?(): Promise<void>
   setActivity(activity: DesktopActivity): Promise<void>

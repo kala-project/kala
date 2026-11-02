@@ -27,13 +27,16 @@ Object.defineProperty(window, '__KALA_DESKTOP__', { value: true, writable: false
     writable: false, configurable: false,
   })
   const installWindowControls = () => {
+    const controlsWidth = nativeIntegration ? 204 : 168
     if (document.getElementById('kala-desktop-window-controls')) return
     const host = document.createElement('div')
     host.id = 'kala-desktop-window-controls'
-    host.style.cssText = 'position:fixed;top:2px;right:4px;width:168px;height:32px;z-index:2147483647'
+    host.style.cssText = `position:fixed;top:2px;right:4px;width:${controlsWidth}px;height:32px;z-index:2147483647`
     const root = host.attachShadow({ mode: 'closed' })
-    root.innerHTML = `<style>:host{font:13px system-ui;color:#cbd5e1;user-select:none}.controls{box-sizing:border-box;display:flex;width:100%;height:32px;overflow:hidden;border:1px solid color-mix(in srgb,currentColor 22%,transparent);border-radius:8px;background:color-mix(in srgb,#111827 88%,transparent);box-shadow:0 1px 4px #0004;backdrop-filter:blur(12px)}:host([data-docked="true"]){color:inherit}:host([data-docked="true"]) .controls{border-color:transparent;border-radius:6px;background:transparent;box-shadow:none;backdrop-filter:none}.drag{width:24px;flex:none;cursor:grab;background:radial-gradient(circle,currentColor 1px,transparent 1.5px) 6px 5px/6px 6px;opacity:.55}.drag:active{cursor:grabbing}button{width:36px;border:0;background:transparent;color:inherit;font:16px system-ui;cursor:pointer;border-radius:5px}button:hover{background:color-mix(in srgb,currentColor 14%,transparent)}.recover{font-size:18px}.recover[aria-busy="true"]{animation:spin .8s linear infinite}:host([data-recovery="true"]) .recover{background:#b45309;color:#fff}.close:hover{background:#dc2626;color:#fff}button:focus-visible{outline:2px solid #60a5fa;outline-offset:-3px}@keyframes spin{to{transform:rotate(360deg)}}</style><div class="controls" aria-label="Window controls"><div class="drag" aria-hidden="true"></div><button class="recover" aria-label="Clear cached interface and reload" title="Force refresh (Ctrl+Shift+R)">↻</button><button data-action="minimize" aria-label="Minimize">−</button><button data-action="toggle-maximize" aria-label="Maximize or restore">□</button><button class="close" data-action="close" aria-label="Close">×</button></div>`
+    root.innerHTML = `<style>:host{font:13px system-ui;color:#cbd5e1;user-select:none}.controls{box-sizing:border-box;display:flex;width:100%;height:32px;overflow:hidden;border:1px solid color-mix(in srgb,currentColor 22%,transparent);border-radius:8px;background:color-mix(in srgb,#111827 88%,transparent);box-shadow:0 1px 4px #0004;backdrop-filter:blur(12px)}:host([data-docked="true"]){color:inherit}:host([data-docked="true"]) .controls{border-color:transparent;border-radius:6px;background:transparent;box-shadow:none;backdrop-filter:none}.drag{width:24px;flex:none;cursor:grab;background:radial-gradient(circle,currentColor 1px,transparent 1.5px) 6px 5px/6px 6px;opacity:.55}.drag:active{cursor:grabbing}button{width:36px;border:0;background:transparent;color:inherit;font:16px system-ui;cursor:pointer;border-radius:5px}button:hover{background:color-mix(in srgb,currentColor 14%,transparent)}.recover{font-size:18px}.recover[aria-busy="true"]{animation:spin .8s linear infinite}:host([data-recovery="true"]) .recover{background:#b45309;color:#fff}.close:hover{background:#dc2626;color:#fff}button:focus-visible{outline:2px solid #60a5fa;outline-offset:-3px}@keyframes spin{to{transform:rotate(360deg)}}</style><div class="controls" aria-label="Window controls"><div class="drag" aria-hidden="true"></div><button class="debug" aria-label="Application debugging" title="Application debugging — manual ports">↔</button><button class="recover" aria-label="Clear cached interface and reload" title="Force refresh (Ctrl+Shift+R)">↻</button><button data-action="minimize" aria-label="Minimize">−</button><button data-action="toggle-maximize" aria-label="Maximize or restore">□</button><button class="close" data-action="close" aria-label="Close">×</button></div>`
     root.querySelectorAll('button[data-action]').forEach((button) => button.addEventListener('click', () => void invoke('desktop_window', { action: button.dataset.action })))
+    if (!nativeIntegration) root.querySelector('.debug').remove()
+    root.querySelector('.debug')?.addEventListener('click', () => void invoke('application_debug', { request: { op: 'show' } }).catch(() => {}))
     const recover = root.querySelector('.recover')
     recover.addEventListener('click', () => {
       recover.setAttribute('aria-busy', 'true')
@@ -47,12 +50,13 @@ Object.defineProperty(window, '__KALA_DESKTOP__', { value: true, writable: false
       const slots = [...document.querySelectorAll('[data-kala-desktop-window-controls-slot="true"]')]
       const slot = slots.find((candidate) => candidate.getClientRects().length > 0) ?? slots[0]
       if (slot) {
+        slot.style.width = `${controlsWidth}px`
         host.dataset.docked = 'true'
-        host.style.cssText = 'position:relative;inset:auto;width:168px;height:32px;display:block;flex:0 0 168px;z-index:10'
+        host.style.cssText = `position:relative;inset:auto;width:${controlsWidth}px;height:32px;display:block;flex:0 0 ${controlsWidth}px;z-index:10`
         if (host.parentNode !== slot) slot.appendChild(host)
       } else if (host.parentNode !== document.body) {
         delete host.dataset.docked
-        host.style.cssText = 'position:fixed;top:2px;right:4px;width:168px;height:32px;z-index:2147483647'
+        host.style.cssText = `position:fixed;top:2px;right:4px;width:${controlsWidth}px;height:32px;z-index:2147483647`
         document.body.appendChild(host)
       }
     }
@@ -92,6 +96,23 @@ Object.defineProperty(window, '__KALA_DESKTOP__', { value: true, writable: false
   if (nativeIntegration) Object.defineProperty(window, '__KALA_DESKTOP_BRIDGE__', {
     value: Object.freeze({
       version: 1,
+      applicationDebugging: Object.freeze({
+        version: 1,
+        begin: (listener) => {
+          if (typeof listener !== 'function') throw new TypeError('Debug transport requires a listener')
+          const channel = new window.__TAURI__.core.Channel()
+          channel.onmessage = listener
+          return invoke('application_debug_begin', { channel })
+        },
+        setContext: (generation, context) => invoke('application_debug', { request: { op: 'context', generation, context } }),
+        reply: (generation, id, result) => invoke('application_debug', { request: { op: 'reply', generation, id, result } }),
+        receive: (generation, frame) => invoke('application_debug', { request: { op: 'receive', generation, frame } }),
+        touch: (generation, grantId) => invoke('application_debug', { request: { op: 'touch', generation, grantId } }),
+        abort: (generation, run, error) => invoke('application_debug', { request: { op: 'abort', generation, run, error } }),
+        detach: (generation) => invoke('application_debug', { request: { op: 'detach', generation } }),
+        unavailable: (generation, error) => invoke('application_debug', { request: { op: 'unavailable', generation, error } }),
+        show: () => invoke('application_debug', { request: { op: 'show' } }),
+      }),
       getInfo: () => invoke('desktop_status'),
       confirmConnection: () => invoke('desktop_connection_ready'),
       setActivity: (state) => invoke('desktop_ui', { state }),

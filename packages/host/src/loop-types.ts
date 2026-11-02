@@ -191,6 +191,10 @@ export type HostLoopDeps = {
   tools: ToolDispatcher
   /** Optional fail-closed check immediately before each model or tool effect. */
   assertSessionEffectOwner?: (sessionId: string) => Promise<void | { ownerGeneration: string }>
+  /** Capture one healthy local owner activation; the returned predicate must never acquire/query SQL. */
+  captureSessionEffectOwner?: (sessionId: string) => (() => boolean) | undefined
+  /** Revoke ephemeral external channels synchronously before checkpoint waits. */
+  onDrain?: () => void
   llmQuota?: LlmQuotaEnforcer
   modelPolicy?: TenantModelPolicyEnforcer
   broadcast: LoopBroadcast

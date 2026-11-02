@@ -244,7 +244,7 @@ pub fn prepare_origin(app: &tauri::AppHandle, origin: &str) -> Result<(), String
         let capability = tauri::ipc::CapabilityBuilder::new(format!("desktop-ui-{}", origins.len()))
             .local(false).window("dashboard").remote(format!("{origin}/*"));
         let capability = if crate::native_integration_allowed(&url) {
-            capability.permission("allow-desktop-ui")
+            capability.permission("allow-desktop-ui").permission("allow-application-debug")
         } else {
             capability.permission("allow-window-control").permission("allow-connection-ready")
         };

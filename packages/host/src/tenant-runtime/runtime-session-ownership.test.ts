@@ -32,15 +32,23 @@ afterEach(() => { vi.useRealTimers() })
 describe('RuntimeSessionOwnership', () => {
   it('immediately withdraws Session access and closes its Unit after owner renewal fails', async () => {
     vi.useFakeTimers()
-    const { ownership, lost, renewResourceOwner } = fixture()
+    const { ownership, lost, renewResourceOwner, acquireResourceOwner } = fixture()
     let teardownDone = false
     // Production onLost closes the whole Unit, whose resource disposer closes
     // this same Session-owner manager. It must not wait for its own callback.
     lost.mockImplementation(async () => { await ownership.close(); teardownDone = true })
+    expect(ownership.captureEffectFence('session-a')).toBeUndefined()
+    expect(acquireResourceOwner).not.toHaveBeenCalled()
     await ownership.ensure('session-a')
+    const fence = ownership.captureEffectFence('session-a')!
+    expect(fence()).toBe(true)
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(fence()).toBe(true) // Same activation, renewed expiry.
+    expect(acquireResourceOwner).toHaveBeenCalledTimes(1)
     renewResourceOwner.mockRejectedValueOnce(new Error('fenced by another replica'))
     await vi.advanceTimersByTimeAsync(5_000)
     expect(ownership.activeLease('session-a')).toBeUndefined()
+    expect(fence()).toBe(false)
     expect(lost).toHaveBeenCalledTimes(1)
     expect(teardownDone).toBe(true)
     await expect(ownership.ensure('session-a')).rejects.toHaveProperty('code', 'RUNTIME_RESOURCE_OWNERSHIP_FENCED')
@@ -65,8 +73,11 @@ describe('RuntimeSessionOwnership', () => {
   it('refuses a stale membership instead of silently acquiring another owner', async () => {
     const { ownership, member, setMember, acquireResourceOwner } = fixture()
     await ownership.ensure('session-a')
+    const fence = ownership.captureEffectFence('session-a')!
+    expect(fence()).toBe(true)
     setMember({ ...member, generation: 2n, membershipToken: 'member-b' })
     expect(ownership.activeLease('session-a')).toBeUndefined()
+    expect(fence()).toBe(false)
     await expect(ownership.ensure('session-a')).rejects.toHaveProperty('code', 'RUNTIME_RESOURCE_OWNERSHIP_FENCED')
     expect(acquireResourceOwner).toHaveBeenCalledTimes(1)
     await ownership.close()

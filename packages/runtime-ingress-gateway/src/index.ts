@@ -23,3 +23,4 @@ export type {
   RuntimeRoutingTicketResolverOptions,
   SessionRoutingTicketResult,
 } from './runtime-origin/runtime-routing-ticket-resolver.js'
+export type { RuntimeConnectionRoute, RuntimeOriginResolver } from './runtime-origin/postgres-runtime-origin-resolver.js'

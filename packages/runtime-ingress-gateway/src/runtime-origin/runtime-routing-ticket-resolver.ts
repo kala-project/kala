@@ -1,5 +1,6 @@
 import { issueRuntimeRoutingTicket, verifyRuntimeRoutingTicket } from '@agent-kernel/shared'
 
+import type { RuntimeConnectionRoute } from './postgres-runtime-origin-resolver.js'
 import type { RuntimeResourceOwnerBindingResolver, RuntimeSessionRouteState } from './postgres-runtime-resource-owner-resolver.js'
 
 export type RuntimeRoutingTicketResolverOptions = {
@@ -99,11 +100,24 @@ export class RuntimeRoutingTicketResolver {
     return resolved ? { origin: resolved.origin, sessionId: resolved.resourceId } : undefined
   }
 
+  /** Ticket TTL admits the handshake; subsequent checks pin the healthy owner activation, not the ticket clock. */
+  async resolveSessionConnectionForOrganization(ticket: unknown, organization: RuntimeRoutingTicketOrganization): Promise<(RuntimeConnectionRoute & { sessionId: string }) | undefined> {
+    const scope = { ...organization }
+    const resolved = await this.#resolveTicket(ticket, scope, 'session')
+    if (!resolved) return undefined
+    const { origin, resourceId, replicaId, generation } = resolved
+    return { origin, sessionId: resourceId, current: async () => {
+      const state = await this.resolveSessionOwnerForOrganization(resourceId, scope)
+      return state.status === 'live' && state.binding.origin === origin
+        && state.binding.replicaId === replicaId && state.binding.generation === generation
+    } }
+  }
+
   async #resolveTicket(
     ticket: unknown,
     organization?: RuntimeRoutingTicketOrganization,
     requiredResourceKind?: 'session' | 'task',
-  ): Promise<{ origin: string; resourceId: string } | undefined> {
+  ): Promise<{ origin: string; resourceId: string; replicaId: string; generation: bigint } | undefined> {
     const claims = verifyRuntimeRoutingTicket(ticket, {
       key: this.#key,
       audience: this.#audience,
@@ -123,6 +137,6 @@ export class RuntimeRoutingTicketResolver {
     })
     if (!owner || owner.replicaId !== claims.ownerReplicaId
       || owner.generation.toString(10) !== claims.ownerGeneration) return undefined
-    return { origin: owner.origin, resourceId: claims.resourceId }
+    return { origin: owner.origin, resourceId: claims.resourceId, replicaId: owner.replicaId, generation: owner.generation }
   }
 }

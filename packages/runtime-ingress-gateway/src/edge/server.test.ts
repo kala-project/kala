@@ -19,6 +19,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
 
+function expectTransportReset(socket: Duplex): void {
+  socket.on('error', (error: NodeJS.ErrnoException) => { if (error.code !== 'ECONNRESET') throw error })
+}
+
 class MemoryLoginStates implements LoginStateStore {
   private readonly values = new Map<string, LoginState>()
   async put(nonce: string, state: LoginState): Promise<void> { this.values.set(nonce, state) }
@@ -622,6 +626,7 @@ describe('Private Cloud edge request path', () => {
     const upgrades: Array<Record<string, string | string[] | undefined>> = []
     const upstream = createServer()
     upstream.on('upgrade', (request, socket) => {
+      expectTransportReset(socket)
       upgrades.push(request.headers)
       socket.end('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
     })
@@ -773,6 +778,7 @@ describe('Private Cloud edge request path', () => {
     const startRuntime = async (pod: string) => {
       const runtime = createServer()
       runtime.on('upgrade', (request, socket) => {
+        expectTransportReset(socket)
         upgrades.push({ pod, replicaHeader: request.headers['x-kala-executor-replica'] as string | undefined })
         socket.end('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
       })
@@ -790,6 +796,10 @@ describe('Private Cloud edge request path', () => {
       async resolveReplica(unitId, replicaId) {
         if (unitId !== 'tenant_executor') return undefined
         return replicaId === 'runtime-x' ? originX : replicaId === 'runtime-y' ? originY : undefined
+      },
+      async resolveReplicaConnection(unitId, replicaId) {
+        const origin = await this.resolveReplica!(unitId, replicaId)
+        return origin ? { origin, current: async () => await this.resolveReplica!(unitId, replicaId) === origin } : undefined
       },
     }
     const gateway = await createGateway('http://127.0.0.1:9', undefined, { directory, runtimeOriginResolver })
@@ -818,6 +828,7 @@ describe('Private Cloud edge request path', () => {
         response.end(request.url === '/auth/executor-invites' ? JSON.stringify({ inviteToken: 'issued-executor-invite' }) : JSON.stringify({ pod }))
       })
       runtime.on('upgrade', (request, socket) => {
+        expectTransportReset(socket)
         upgrades.push({ pod, unit: request.headers['x-agent-runlab-runtime-unit'] as string | undefined })
         socket.end('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
       })
@@ -902,6 +913,7 @@ describe('Private Cloud edge request path', () => {
         })()
       })
       runtime.on('upgrade', (request, socket) => {
+        expectTransportReset(socket)
         upgrades.push({
           target,
           path: request.url ?? '',
@@ -1517,6 +1529,7 @@ async function heldWebSocketUpstream(): Promise<{ origin: string; active(): numb
   const upstream = createServer()
   upstream.on('upgrade', (_request, socket) => {
     sockets.add(socket)
+    socket.on('error', () => {}) // Revocation resets both TCP halves, not only a graceful FIN.
     socket.once('close', () => sockets.delete(socket))
     // A real Socket.IO server tears down the upgrade on inbound EOF; do not
     // leave a half-open raw test socket that only closes during afterEach.
@@ -1537,7 +1550,7 @@ async function heldWebSocketUpstream(): Promise<{ origin: string; active(): numb
 function keepWebSocket(port: number, headers: Record<string, string>): Promise<Duplex> {
   return new Promise((resolve, reject) => {
     const request = httpRequest({ host: '127.0.0.1', port, path: '/socket.io/?EIO=4&transport=websocket', headers: { connection: 'Upgrade', upgrade: 'websocket', ...headers } })
-    request.once('upgrade', (_response, socket) => resolve(socket))
+    request.once('upgrade', (_response, socket) => { expectTransportReset(socket); resolve(socket) })
     request.once('response', (response) => { response.resume(); reject(new Error(`upgrade rejected with HTTP ${response.statusCode ?? 0}`)) })
     request.once('error', reject)
     request.end()
@@ -1552,7 +1565,7 @@ function openWebSocket(port: number, headers: Record<string, string>, path = '/s
       path,
       headers: { connection: 'Upgrade', upgrade: 'websocket', ...headers },
     })
-    request.once('upgrade', (_response, socket) => { socket.destroy(); resolve() })
+    request.once('upgrade', (_response, socket) => { expectTransportReset(socket); socket.destroy(); resolve() })
     request.once('response', (response) => { response.resume(); reject(new Error(`upgrade rejected with HTTP ${response.statusCode ?? 0}`)) })
     request.once('error', reject)
     request.end()

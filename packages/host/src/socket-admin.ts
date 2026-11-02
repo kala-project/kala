@@ -2,6 +2,26 @@ import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
 import type { SocketAdminRecord } from './socket-admin-store.js'
+import type { Namespace } from 'socket.io'
+
+/**
+ * Admin UI development mode copies incoming/outgoing arguments verbatim.
+ * Sanitize its public event boundary before instrumentation is installed: this
+ * also covers in-flight bytes and avoids patching third-party/private listeners.
+ * Keep ordinary diagnostics and debug event names, never opaque TCP payloads.
+ */
+export function redactApplicationDebugAdminEvents(namespace: Namespace): void {
+  const emit = namespace.emit
+  namespace.emit = function (event: string, ...args: unknown[]) {
+    if ((event === 'event_received' || event === 'event_sent') && Array.isArray(args[2])) {
+      const name: unknown = args[2][0]
+      if (typeof name === 'string' && (name.startsWith('app_debug:') || name.startsWith('executor:app_debug_'))) {
+        args[2] = [name, { redacted: true, reason: 'Opaque application debugging traffic is excluded from event inspection.' }]
+      }
+    }
+    return emit.call(this, event, ...args)
+  }
+}
 
 export type SocketAdminMode = 'development' | 'production'
 

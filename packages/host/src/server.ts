@@ -36,6 +36,7 @@ import { ulid } from 'ulid'
 import type { LLMAdapter } from './llm/adapter.js'
 import type { HostLoopDeps, LlmQuotaEnforcer, LoopBroadcast, LoopHandle, TenantModelPolicyEnforcer } from './loop.js'
 import { runHostLoop } from './loop.js'
+import { appDebugRelayFor, type AppDebugRelay } from './connection/app-debug.js'
 import type { HookConfig, HookRunner } from './extensions/hooks.js'
 import { createBuiltinExtensionRegistry } from './extensions/builtin-registry.js'
 import type { HostExtension } from './extensions/registry.js'
@@ -96,7 +97,7 @@ import { setWireValidationLogger } from './wire-validation.js'
 import type { RuntimeLogger } from './logger.js'
 import { AGENT_RUNTIME_CAPABILITIES, FULL_RUNTIME_CAPABILITIES, PORTABLE_DEPLOYMENT, effectiveTenancy, productVariant, type ProductDeploymentConfig, type RuntimeCapabilities } from '@agent-kernel/shared'
 import { SOCKET_MAX_HTTP_BUFFER_BYTES } from '@agent-kernel/shared'
-import type { SocketAdminConfig } from './socket-admin.js'
+import { redactApplicationDebugAdminEvents, type SocketAdminConfig } from './socket-admin.js'
 import { defaultRestartStatePath, RestartCoordinator } from './restart-coordinator.js'
 import { inspectUnitQuiescence } from './tenant-runtime/quiescence.js'
 import { socketConnectionAuditSnapshot } from './connection/socket-audit.js'
@@ -147,6 +148,8 @@ export type HostServerOptions = {
   messageQueueAuthority?: MessageQueueAuthority
   /** Optional SQL-checked Session owner gate before external model and tool effects. */
   assertSessionEffectOwner?: (sessionId: string) => Promise<void | { ownerGeneration: string }>
+  /** Capture a healthy local Session owner activation; no SQL/acquisition in the returned predicate. */
+  captureSessionEffectOwner?: HostLoopDeps['captureSessionEffectOwner']
   /** Workspace alias authority. Omit to retain workspace-aliases.json. */
   workspaceAliasStore?: WorkspaceAliasStorage
   /** Executor installation authority. Omit to retain executor-installations.json. */
@@ -379,6 +382,7 @@ export async function startHostServer(
     }
   }
   let closed = false
+  let appDebug: AppDebugRelay | undefined
   let agentRuntimes: AgentRuntimeRegistry | undefined
   let dagOrchestrator: DagOrchestrator | undefined
   let storageInventory: StorageInventory | undefined
@@ -392,6 +396,7 @@ export async function startHostServer(
   const closeServer = async (): Promise<void> => {
     if (closed) return
     closed = true
+    appDebug?.close()
     // Fencing PG writes alone cannot stop an already-started model/tool effect.
     // Abort cancellable effects before waiting for scheduler and queue shutdown.
     // Default single-process shutdown still drains already accepted queue work.
@@ -443,6 +448,7 @@ export async function startHostServer(
   let activeSocketAdmin: SocketAdminConfig | undefined
   const activateSocketAdmin = (config: SocketAdminConfig): void => {
     if (activeSocketAdmin) return
+    redactApplicationDebugAdminEvents(io.of('/admin'))
     instrument(io, {
       auth: {
         type: 'basic',
@@ -618,6 +624,8 @@ export async function startHostServer(
     options.detachGraceMs,
     auth?.executorIdentityStore ? (socket) => authorizeExecutorSocket!(socket) : undefined,
   )
+  appDebug = appDebugRelayFor(executors)
+  appDebug.setAvailability(() => !closed && !loop?.isDraining() && options.mutableReady?.() !== false)
   attachMcpSettingsRoutes(http, {
     installations: executorInstallations,
     executors,
@@ -2076,6 +2084,8 @@ export async function startHostServer(
 
   const extensions = createBuiltinExtensionRegistry(options.extensions)
   const loopDeps: HostLoopDeps = {
+    onDrain: () => appDebug?.revoke('Runtime entered drain. Debug forwarding stopped before checkpoint waits; releasing drain requires an explicit new Start and never replays requests.'),
+    ...(options.captureSessionEffectOwner ? { captureSessionEffectOwner: options.captureSessionEffectOwner } : {}),
     store,
     llm: options.llm,
     ...(options.llmQuota !== undefined ? { llmQuota: options.llmQuota } : {}),
@@ -2657,7 +2667,7 @@ export async function startHostServer(
       executors.renameWorkspace(workspaceId, applied)
       return applied
     },
-    ...(options.mutableReady ? { mutableReady: options.mutableReady } : {}),
+    mutableReady: () => !closed && options.mutableReady?.() !== false,
     onSessionCreated: (record) => extensions.sessionCreated({ deps: loopDeps, record }),
     onSessionDeleted: (record) => extensions.sessionDeleted({ deps: loopDeps, record }),
   })

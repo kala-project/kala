@@ -57,7 +57,13 @@ export function createAppDebugEndpoint(options: {
     grant.streams.set(streamId, stream)
     socket.setTimeout(APP_DEBUG_IDLE_MS, () => closeStream(grantId, streamId, true))
     socket.on('error', () => closeStream(grantId, streamId, true))
-    socket.on('close', () => closeStream(grantId, streamId, true))
+    socket.on('close', (hadError) => {
+      // TCP may auto-close after both FINs while the final data/EOF is still
+      // awaiting a relay ACK. Keep protocol state until that ACK drains; an
+      // eager close here truncates responses on a real asynchronous transport.
+      if (!hadError && stream.eof && socket.writableEnded) return
+      closeStream(grantId, streamId, true)
+    })
     const pump = async (): Promise<void> => {
       if (stream.closed || stream.pumping) return
       stream.pumping = true

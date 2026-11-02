@@ -360,6 +360,7 @@ async function main(): Promise<void> {
           sessionAuthority: persistentStorage.sessionAuthority,
           ...(persistentStorage.assertSessionEffectOwner ? {
             assertSessionEffectOwner: persistentStorage.assertSessionEffectOwner,
+            captureSessionEffectOwner: persistentStorage.captureSessionEffectOwner,
           } : {}),
           objectStorage: persistentStorage.objectStorage,
           memoStore: persistentStorage.memoStore,
@@ -648,6 +649,7 @@ async function createExperimentalUnitStorage(
         } : {}),
       }),
       ...(sessionOwnership ? {
+        captureSessionEffectOwner: (sessionId: string) => sessionOwnership.captureEffectFence(sessionId),
         assertSessionEffectOwner: async (sessionId: string) => {
           const owner = await sessionOwnership.ensure(sessionId)
           await hotState.database.transaction(async (transaction) => {
