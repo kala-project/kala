@@ -57,6 +57,19 @@ test('Private Cloud runtime image receives an exact-tag sealed Windows Executor 
   assert.match(dockerfile, /COPY --from=build --chown=65532:65532 \/app\/release\/ \/app\/release\//u)
 })
 
+test('Platform images keep the matched Copilot executable outside noexec tenant scratch', () => {
+  for (const path of ['deploy/private-cloud/images/Dockerfile.runtime-service', 'deploy/aspire/Dockerfile.runtime-linux-e2e']) {
+    const dockerfile = readFileSync(join(import.meta.dirname, '../..', path), 'utf8')
+    assert.match(dockerfile, /COPY --from=build --chown=root:root --chmod=0555 \/app\/release\/kala-copilot-runtime-linux-x64 \/app\/copilot-runtime\/copilot-runtime/u)
+    assert.match(dockerfile, /COPY --from=build --chown=root:root --chmod=0444 \/app\/release\/kala-copilot-runtime-node-linux-x64\.node \/app\/copilot-runtime\/runtime\.node/u)
+    assert.match(dockerfile, /^ENV COPILOT_CLI_PATH=\/app\/copilot-runtime\/copilot-runtime$/mu)
+  }
+  for (const path of ['compose.storage-postgres-s3.yaml', 'compose.storage-postgres-s3.parallel.yaml']) {
+    const compose = readFileSync(join(import.meta.dirname, '../../deploy/private-cloud', path), 'utf8')
+    assert.match(compose, /\/var\/lib\/kala:rw,noexec,nosuid,size=256m/u)
+  }
+})
+
 test('Private Cloud image and bundle jobs use exactly the tag revision even on manual dispatch', () => {
   const workflow = readFileSync(join(import.meta.dirname, '../../.github/workflows/private-cloud-release.yml'), 'utf8')
   for (const [name, next] of [

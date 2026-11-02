@@ -72,6 +72,27 @@ describe('SqliteSessionAuthority', () => {
     database.close()
   })
 
+  it('recovers a dispatched external tool as execution-unknown, never as a confirmed failure or success', async () => {
+    const { databasePath, sessionsDir } = fixture()
+    const firstAuthority = authority(databasePath)
+    const first = new SessionStore(sessionsDir, { authority: firstAuthority })
+    const record = await first.create({ sessionId: 'unknown-effect', agentRuntime: 'copilot', config })
+    await first.recordRuntimeProjection(record.sessionId, {
+      ...record.state, cursor: 1, status: 'executing_tools',
+      pendingCalls: [{ callId: 'effect-call', name: 'shell', input: { command: 'test-only' }, status: 'dispatched' }],
+    }, 'copilot.tool_call', { callId: 'effect-call' })
+    await firstAuthority.close()
+    const second = new SessionStore(sessionsDir, { authority: authority(databasePath) })
+    const recovered = await second.load(record.sessionId)
+    expect(recovered.state).toMatchObject({ status: 'error', pendingCalls: [], error: expect.stringContaining('outcome is unknown') })
+    expect(JSON.stringify(recovered.state.messages)).toContain('execution_unknown')
+    expect(JSON.stringify(recovered.state.messages)).toContain('Do not automatically retry')
+    const entry = await second.findLatestRuntimeMetadata(record.sessionId, 'copilot.recovered_interrupted_turn')
+    expect(entry?.payload).toMatchObject({ unknownEffects: [{ callId: 'effect-call', name: 'shell', outcome: 'execution_unknown' }] })
+    const cursor = recovered.state.cursor
+    expect((await second.load(record.sessionId)).state.cursor).toBe(cursor)
+  })
+
   it('rolls back the audit append when projection update fails', async () => {
     const { databasePath } = fixture()
     const first = authority(databasePath)

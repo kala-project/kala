@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 
+import { nativeFsSchemaStatements, type NativeFsTables } from './store/native-session-fs.js'
+
 export type PostgresSchemaManagement = 'initialize' | 'external'
 
 export type PostgresMigrationExecutor = {
@@ -74,6 +76,11 @@ const migrations: readonly PostgresMigration[] = [
     version: 6,
     name: 'leased_object_upload_intents',
     statements: leasedObjectUploadIntentStatements,
+  },
+  {
+    version: 7,
+    name: 'native_copilot_session_filesystem',
+    statements: nativeSessionFsStatements,
   },
 ]
 
@@ -276,7 +283,9 @@ function postgresRuntimeTables(): string[] {
   for (const migration of migrations) {
     for (const statement of migration.statements(schema)) {
       if (!statement.startsWith(`CREATE TABLE IF NOT EXISTS ${schema}.`)) continue
-      const table = statement.slice(`CREATE TABLE IF NOT EXISTS ${schema}.`.length).match(/^[A-Za-z_][A-Za-z0-9_]*/u)?.[0]
+      const tableToken = statement.slice(`CREATE TABLE IF NOT EXISTS ${schema}.`.length)
+        .match(/^(?:"([A-Za-z_][A-Za-z0-9_]*)"|([A-Za-z_][A-Za-z0-9_]*))/u)
+      const table = tableToken?.[1] ?? tableToken?.[2]
       if (!table) throw new Error(`cannot determine Runtime table for migration ${migration.version}`)
       tables.add(table)
     }
@@ -622,6 +631,15 @@ function runtimeUnitProtocolGateStatements(schema: string): readonly string[] {
       BEFORE TRUNCATE ON ${schema}.tenant_runtime_unit_protocol_gates
       FOR EACH STATEMENT EXECUTE FUNCTION ${schema}.kala_deny_parallel_protocol_truncate()`,
   ]
+}
+
+function nativeSessionFsStatements(schema: string): readonly string[] {
+  const tables: NativeFsTables = {
+    usage: `${schema}."tenant_session_native_fs_usage"`,
+    nodes: `${schema}."tenant_session_native_fs_nodes"`,
+    chunks: `${schema}."tenant_session_native_fs_chunks"`,
+  }
+  return nativeFsSchemaStatements(tables)
 }
 
 function leasedObjectUploadIntentStatements(schema: string): readonly string[] {

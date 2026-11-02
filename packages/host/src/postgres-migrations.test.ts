@@ -60,7 +60,7 @@ describe('PostgreSQL migrations', () => {
   it('applies the initial migration once under an advisory lock and is idempotent', async () => {
     const client = new FakeClient()
     const first = await runPostgresMigrations(pool(client))
-    expect(first).toEqual({ previousVersion: 0, currentVersion: 6, appliedVersions: [1, 2, 3, 4, 5, 6] })
+    expect(first).toEqual({ previousVersion: 0, currentVersion: 7, appliedVersions: [1, 2, 3, 4, 5, 6, 7] })
     expect(client.statements[0]).toContain('pg_advisory_lock')
     expect(client.statements).toContain('BEGIN')
     expect(client.statements).toContain('COMMIT')
@@ -71,10 +71,11 @@ describe('PostgreSQL migrations', () => {
     expect(client.statements.some((statement) => statement.includes('tenant_runtime_resource_ownerships'))).toBe(true)
     expect(client.statements.some((statement) => statement.includes('tenant_runtime_resource_ownerships_global_resource_uidx'))).toBe(true)
     expect(client.statements.some((statement) => statement.includes('tenant_runtime_unit_protocol_gates'))).toBe(true)
+    expect(client.statements.some((statement) => statement.includes('tenant_session_native_fs_chunks'))).toBe(true)
 
     client.statements.length = 0
     const second = await runPostgresMigrations(pool(client))
-    expect(second).toEqual({ previousVersion: 6, currentVersion: 6, appliedVersions: [] })
+    expect(second).toEqual({ previousVersion: 7, currentVersion: 7, appliedVersions: [] })
     expect(client.statements).not.toContain('BEGIN')
     expect(client.releaseCount).toBe(2)
   })
@@ -101,8 +102,11 @@ describe('PostgreSQL migrations', () => {
     expect(grants).toContain('GRANT SELECT ON TABLE "public"."kala_schema_migrations" TO "kala_runtime"')
     expect(grants).toContain('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "public"."tenant_runtime_resource_ownerships" TO "kala_runtime"')
     expect(grants).toContain('GRANT SELECT ON TABLE "public"."tenant_runtime_unit_protocol_gates" TO "kala_runtime"')
+    expect(grants).toContain('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "public"."tenant_session_native_fs_usage" TO "kala_runtime"')
+    expect(grants).toContain('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "public"."tenant_session_native_fs_nodes" TO "kala_runtime"')
+    expect(grants).toContain('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "public"."tenant_session_native_fs_chunks" TO "kala_runtime"')
     expect(grants.some((statement) => statement.includes('ALL TABLES'))).toBe(false)
-    expect(grants.filter((statement) => statement.includes('SELECT, INSERT, UPDATE, DELETE'))).toHaveLength(21)
+    expect(grants.filter((statement) => statement.includes('SELECT, INSERT, UPDATE, DELETE'))).toHaveLength(24)
     expect(client.statements.at(-1)).toBe('COMMIT')
     await expect(grantPostgresRuntimePrivileges(pool(client), { runtimeRole: 'invalid;role' })).rejects.toThrow('identifier')
   })
@@ -140,6 +144,7 @@ describe('PostgreSQL migrations', () => {
       'GRANT SELECT ON TABLE "public"."tenant_session_latest_projection" TO "kala_gateway_reader"',
     ])
     expect(grants.some((statement) => statement.includes('kala_schema_migrations'))).toBe(false)
+    expect(grants.some((statement) => statement.includes('native_fs'))).toBe(false)
     expect(grants.some((statement) => /INSERT|UPDATE|DELETE|ALL TABLES/u.test(statement))).toBe(false)
 
     client.privilegeOverrides.forbidden_dml = true

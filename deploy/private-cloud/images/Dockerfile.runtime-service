@@ -77,5 +77,10 @@ WORKDIR /app
 COPY --from=build --chown=65532:65532 /out/host/ /app/packages/host/
 COPY --from=build --chown=65532:65532 /app/docs/ /app/docs/
 COPY --from=build --chown=65532:65532 /app/release/ /app/release/
+# Share only immutable SDK code. Tenant scratch stays isolated and noexec;
+# materializing a private executable copy there cannot work on that mount.
+COPY --from=build --chown=root:root --chmod=0555 /app/release/kala-copilot-runtime-linux-x64 /app/copilot-runtime/copilot-runtime
+COPY --from=build --chown=root:root --chmod=0444 /app/release/kala-copilot-runtime-node-linux-x64.node /app/copilot-runtime/runtime.node
+ENV COPILOT_CLI_PATH=/app/copilot-runtime/copilot-runtime
 USER 65532:65532
 CMD ["packages/host/dist/bin/kala-runtime-service.js"]

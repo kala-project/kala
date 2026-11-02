@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import { assertPostgresSchemaCurrent, grantPostgresGatewayRuntimeReader, grantPostgresRuntimeDml, migratePostgres } from './postgres-migrations.js'
 import { createPostgresHotStateStore, type PostgresHotStateStore } from './tenant-runtime/postgres-hot-state.js'
+import { PostgresSessionAuthority } from './store/postgres-session-authority.js'
 import { PostgresTenantStateStore } from './tenant-runtime/postgres-state.js'
 
 const execFileAsync = promisify(execFile)
@@ -55,24 +56,27 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
   it('migrates from zero idempotently, then supports core DML while rejecting Runtime DDL', async () => {
     await expect(migratePostgres({ connectionString: adminUrl })).resolves.toMatchObject({
       previousVersion: 0,
-      currentVersion: 6,
-      appliedVersions: [1, 2, 3, 4, 5, 6],
+      currentVersion: 7,
+      appliedVersions: [1, 2, 3, 4, 5, 6, 7],
     })
     await expect(migratePostgres({ connectionString: adminUrl })).resolves.toMatchObject({
-      previousVersion: 6,
-      currentVersion: 6,
+      previousVersion: 7,
+      currentVersion: 7,
       appliedVersions: [],
     })
 
     const admin = new Pool({ connectionString: adminUrl })
     const tables = await admin.query("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")
-    expect(tables.rows.map((row) => row.tablename)).toHaveLength(23)
+    expect(tables.rows.map((row) => row.tablename)).toHaveLength(26)
     expect(tables.rows.map((row) => row.tablename)).toEqual(expect.arrayContaining([
       'tenant_object_capacity_accounts',
       'tenant_object_capacity_allocations',
       'tenant_runtime_unit_replica_memberships',
       'tenant_runtime_resource_ownerships',
       'tenant_runtime_unit_protocol_gates',
+      'tenant_session_native_fs_usage',
+      'tenant_session_native_fs_nodes',
+      'tenant_session_native_fs_chunks',
     ]))
     await admin.query(`CREATE ROLE kala_runtime LOGIN PASSWORD '${runtimePassword.replaceAll("'", "''")}'`)
     await admin.query(`CREATE ROLE kala_gateway_reader LOGIN PASSWORD '${readerPassword.replaceAll("'", "''")}'`)
@@ -98,13 +102,14 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
       await expect(reader.query(`SELECT 1 FROM ${table} LIMIT 0`)).resolves.toMatchObject({ rowCount: 0 })
       await expect(reader.query(`DELETE FROM ${table} WHERE false`)).rejects.toMatchObject({ code: '42501' })
     }
+    await expect(reader.query('SELECT * FROM tenant_session_native_fs_chunks')).rejects.toMatchObject({ code: '42501' })
     await expect(reader.query('SELECT * FROM private_control_marker')).rejects.toMatchObject({ code: '42501' })
     await expect(reader.query('SELECT * FROM kala_schema_migrations')).rejects.toMatchObject({ code: '42501' })
     await expect(reader.query('CREATE TABLE gateway_must_not_create_tables (id integer)')).rejects.toMatchObject({ code: '42501' })
     await reader.end()
 
     const runtime = new Pool({ connectionString: runtimeUrl })
-    await expect(assertPostgresSchemaCurrent(runtime)).resolves.toBe(6)
+    await expect(assertPostgresSchemaCurrent(runtime)).resolves.toBe(7)
     await expect(runtime.query('SELECT * FROM tenant_runtime_unit_protocol_gates')).resolves.toMatchObject({ rowCount: 0 })
     await expect(runtime.query(`INSERT INTO tenant_runtime_unit_protocol_gates
       (organization_id, unit_id, feature_version, barrier_generation) VALUES ('org', 'unit', 1, 1)`))
@@ -119,6 +124,15 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
     const lease = await hotState.acquireLease(scope, 'runtime-test', 10_000)
     await hotState.appendEvent(lease, { idempotencyKey: 'event-1', eventType: 'test', payload: { ok: true } })
     await expect(hotState.replay(scope)).resolves.toHaveLength(1)
+
+    const nativeAuthority = new PostgresSessionAuthority(hotState, 'org_native', { schemaManagement: 'external' })
+    await nativeAuthority.create({ sessionId: 'native_dml', state: { cursor: 0 } })
+    const native = nativeAuthority.nativeSessionFs('native_dml')
+    await native.writeFile('/session-state/events.jsonl', 'operator-migrated native DML\n')
+    await native.appendFile('/session-state/events.jsonl', 'append without DDL\n')
+    await expect(native.readFile('/session-state/events.jsonl')).resolves.toBe('operator-migrated native DML\nappend without DDL\n')
+    await nativeAuthority.requestDeletion('native_dml')
+    await nativeAuthority.delete('native_dml')
 
     const state = new PostgresTenantStateStore(hotState.database, 'org_test', new Uint8Array(32).fill(7))
     await state.writeMemo('user', { content: 'migrated schema DML works' })

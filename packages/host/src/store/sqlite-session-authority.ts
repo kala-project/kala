@@ -1,3 +1,4 @@
+import type { SessionFsProvider } from '@github/copilot-sdk'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
@@ -6,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite'
 import type { EventEntry, RuntimeMetadataEntry } from '@agent-kernel/shared'
 
 import type { ParsedHistory, SessionOperationMatch } from './log.js'
+import { createNativeSessionFsProvider, nativeFsPlan, nativeFsSchemaStatements, type NativeFsTables } from './native-session-fs.js'
 import {
   SessionDeletingError,
   type PersistedSessionDocument,
@@ -14,6 +16,10 @@ import {
 } from './session-authority.js'
 
 const SESSION_DELETION_FIELD = '__kalaSessionDeletion'
+const NATIVE_FS_TABLES: NativeFsTables = {
+  usage: 'portable_native_fs_usage', nodes: 'portable_native_fs_nodes', chunks: 'portable_native_fs_chunks',
+}
+
 
 type SessionDeletionTombstone = {
   requestId: string
@@ -76,11 +82,50 @@ export class SqliteSessionAuthority implements SessionAuthority {
         CREATE INDEX IF NOT EXISTS portable_session_events_session_sequence_idx
           ON portable_session_events(session_id, sequence);
       `)
+      for (const statement of nativeFsSchemaStatements(NATIVE_FS_TABLES)) database.exec(statement)
       this.#database = database
     } catch (error) {
       database.close()
       throw error
     }
+  }
+
+  nativeSessionFs(sessionId: string): SessionFsProvider {
+    validateSessionId(sessionId)
+    return createNativeSessionFsProvider(async (request) => {
+      // No await inside this synchronous transaction: DatabaseSync must not
+      // block the event loop waiting for another suspended SQLite writer.
+      const database = this.#db()
+      database.exec('BEGIN IMMEDIATE')
+      try {
+        const document = this.#loadIncludingDeleting(sessionId)
+        if (!document || sessionDeletion(document)) throw new SessionDeletingError(sessionId)
+        const previous = document.__kalaCopilotSessionFsV1
+        if (previous && (typeof previous !== 'object' || Object.keys(previous).length > 0)) {
+          throw new Error('Unsupported nonempty native filesystem V1 snapshot; automatic migration is not supported')
+        }
+        database.prepare(`INSERT INTO ${NATIVE_FS_TABLES.usage} (tenant_id, session_id, total_bytes, total_nodes)
+          VALUES ('', ?, 0, 0) ON CONFLICT (tenant_id, session_id) DO NOTHING`).run(sessionId)
+        const plan = nativeFsPlan(request, NATIVE_FS_TABLES, '', sessionId)
+        let next = plan.next()
+        while (!next.done) {
+          const statement = database.prepare(next.value.sql)
+          const reader = /^\s*SELECT\b/iu.test(next.value.sql)
+          if (reader) {
+            const rows = statement.all(...next.value.values) as Record<string, unknown>[]
+            next = plan.next({ rows, rowCount: rows.length })
+          } else {
+            const result = statement.run(...next.value.values)
+            next = plan.next({ rows: [], rowCount: Number(result.changes) })
+          }
+        }
+        database.exec('COMMIT')
+        return next.value
+      } catch (error) {
+        database.exec('ROLLBACK')
+        throw error
+      }
+    })
   }
 
   async load(sessionId: string): Promise<PersistedSessionDocument | undefined> {
@@ -177,6 +222,7 @@ export class SqliteSessionAuthority implements SessionAuthority {
             updated_at = excluded.updated_at
         `).run(sessionId, version, JSON.stringify(next), sessionDeletion(next) ? 1 : 0, new Date().toISOString())
       } else {
+        database.prepare(`DELETE FROM ${NATIVE_FS_TABLES.usage} WHERE tenant_id = '' AND session_id = ?`).run(sessionId)
         database.prepare('DELETE FROM portable_sessions WHERE session_id = ?').run(sessionId)
       }
       database.exec('COMMIT')

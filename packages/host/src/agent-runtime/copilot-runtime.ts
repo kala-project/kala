@@ -145,6 +145,9 @@ export class CopilotAgentRuntime implements AgentRuntime {
           ...(configuredCliPath || packagedCliPath ? { path: configuredCliPath ?? packagedCliPath } : {}),
         }),
         baseDirectory: join(this.options.sessionsDir, '..', 'copilot-runtime'),
+        ...(this.context.store.usesExternalAuthority ? {
+          sessionFs: { initialCwd: '/workspace', sessionStatePath: '/session-state', conventions: 'posix' as const },
+        } : {}),
         ...(this.options.gitHubToken ? { gitHubToken: this.options.gitHubToken, useLoggedInUser: false } : {}),
       })
       await this.client.start()
@@ -202,8 +205,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
     // Capture before ensureSession yields: a concurrent durable replacement must
     // fence every event from the SDK Session configured with this prompt.
     const turnSystemPrompt = record.config.systemPrompt ?? 'You are an AI coding agent.'
-    const session = await this.ensureSession(record, input.model)
-    if (input.model) await session.setModel(input.model)
+    const canCreateNativeSession = !record.state.messages.some((message) => message.role !== 'system')
     const generation = (this.turnGenerations.get(record.sessionId) ?? 0) + 1
     const requestId = randomUUID()
     const timing = {
@@ -233,7 +235,20 @@ export class CopilotAgentRuntime implements AgentRuntime {
       pendingCalls: [],
       error: undefined,
     }))
-    void this.runTurn(record, session, input, generation, requestId)
+    try {
+      const session = await this.ensureSession(record, input.model, canCreateNativeSession)
+      if (input.model) await session.setModel(input.model)
+      if (!this.isCurrentTurn(record.sessionId, generation)) return
+      void this.runTurn(record, session, input, generation, requestId)
+    } catch (error) {
+      if (!this.isCurrentTurn(record.sessionId, generation)) return
+      const message = error instanceof Error ? error.message : String(error)
+      await this.project(record, 'copilot.session_error', { message }, (state) => ({
+        ...state, status: 'error', error: message, pendingCalls: [],
+        messages: completeTemporalTurn(state.messages, timing, 'failed'),
+      }))
+      this.context.broadcast.onError(record.sessionId, message)
+    }
   }
 
   async cancel(record: SessionRecord): Promise<void> {
@@ -434,7 +449,10 @@ export class CopilotAgentRuntime implements AgentRuntime {
     this.client = undefined
   }
 
-  private async ensureSession(record: SessionRecord, model?: string): Promise<CopilotSession> {
+  private async ensureSession(
+    record: SessionRecord, model?: string,
+    canCreateNativeSession = !record.state.messages.some((message) => message.role !== 'system'),
+  ): Promise<CopilotSession> {
     const effectivePrompt = record.config.systemPrompt ?? 'You are an AI coding agent.'
     const existing = this.sessions.get(record.sessionId)
     if (existing && this.sessionSystemPrompts.get(record.sessionId) === effectivePrompt) return existing
@@ -455,7 +473,12 @@ export class CopilotAgentRuntime implements AgentRuntime {
         ...config,
         continuePendingWork: false,
       })
-    } catch {
+    } catch (error) {
+      // Never replace an existing durable conversation with an empty SDK Session.
+      // Unmarked local installations keep their historical SDK storage behavior.
+      if (this.context.store.usesExternalAuthority && !canCreateNativeSession) {
+        throw new Error('Copilot native continuation could not be resumed; refusing to replace persisted conversation with an empty SDK session', { cause: error })
+      }
       session = await this.client.createSession({
         ...config,
         sessionId: record.externalSessionId ?? record.sessionId,
@@ -487,6 +510,9 @@ export class CopilotAgentRuntime implements AgentRuntime {
     const workingDirectory = join(this.options.sessionsDir, '..')
     return {
       clientName: 'agent-runlab',
+      ...(this.context.store.usesExternalAuthority ? {
+        createSessionFsProvider: () => this.context.store.copilotSessionFs(record.sessionId),
+      } : {}),
       ...(model ? { model } : {}),
       // The SDK defaults this to false. Without it, only the terminal
       // assistant.message event is emitted and the Dashboard stays on

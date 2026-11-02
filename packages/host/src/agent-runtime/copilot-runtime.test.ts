@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ToolDispatcher } from '../loop-types.js'
 import { SessionStore } from '../store/session.js'
+import { SqliteSessionAuthority } from '../store/sqlite-session-authority.js'
 import { findSessionOperation, readSessionLog, snapshotSidecarPath } from '../store/log.js'
 import { messageOperationFingerprint } from '../message-operation-fingerprint.js'
 import { CopilotAgentRuntime } from './copilot-runtime.js'
@@ -72,6 +73,7 @@ const sdk = vi.hoisted(() => ({
     enableSkills?: boolean
   }>,
   resumeSucceeds: false,
+  resumeBarrier: undefined as Promise<void> | undefined,
   listeners: [] as Array<(event: unknown) => void>,
   historyEvents: [] as Array<unknown>,
   getEvents: vi.fn(async () => sdk.historyEvents),
@@ -134,6 +136,7 @@ vi.mock('@github/copilot-sdk', () => ({
     }
     async resumeSession(_sessionId: string, config: { tools: CapturedTool[]; streaming?: boolean; workingDirectory?: string; remoteSession?: string }) {
       sdk.resumeConfigs.push(config)
+      await sdk.resumeBarrier
       if (!sdk.resumeSucceeds) throw new Error('not found')
       return this.session()
     }
@@ -183,6 +186,7 @@ describe('Copilot runtime custom tools', () => {
     sdk.clientOptions.length = 0
     sdk.resumeConfigs.length = 0
     sdk.resumeSucceeds = false
+    sdk.resumeBarrier = undefined
     sdk.startError = undefined
     sdk.listeners.length = 0
     sdk.historyEvents.length = 0
@@ -198,6 +202,66 @@ describe('Copilot runtime custom tools', () => {
     sdk.getEvents.mockImplementation(async () => sdk.historyEvents)
     dir = mkdtempSync(join(tmpdir(), 'copilot-runtime-tools-'))
     store = new SessionStore(dir)
+  })
+
+  it('uses native SessionFs for durable authority and preserves the user request when native resume fails', async () => {
+    store = new SessionStore(join(dir, 'sessions'), { authority: new SqliteSessionAuthority(join(dir, 'state.sqlite')) })
+    await store.initialize()
+    const onError = vi.fn()
+    const runtime = new CopilotAgentRuntime({
+      store,
+      tools: { async callTool() { return { ok: true, content: 'unused' } }, cancelPending() {} },
+      broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError },
+    }, { enabled: true, sessionsDir: join(dir, 'sessions') })
+    const record = await store.create({ sessionId: 'native-sdk', agentRuntime: 'copilot', config: createConfig({ tools: [] }) })
+    await runtime.start()
+    expect(sdk.clientOptions[0]).toMatchObject({ sessionFs: { sessionStatePath: '/session-state', conventions: 'posix' } })
+    sdk.responses.push({ type: 'assistant.message', id: 'native-one', data: { content: 'first answer' } })
+    await runtime.send(record, { text: 'keep this conversation', operationId: 'native-first' })
+    await vi.waitFor(() => expect(record.state.status).toBe('done'))
+    expect(sdk.configs[0]).toHaveProperty('createSessionFsProvider')
+    expect(sdk.configs[0]?.workingDirectory).toBe(dir)
+    await runtime.close()
+    const created = sdk.configs.length
+    const sent = sdk.sentMessages.length
+    await runtime.start()
+    await runtime.send(record, { text: 'continue safely', operationId: 'native-retry' })
+    expect(record.state.status).toBe('error')
+    expect(record.state.messages.some((message) => message.role === 'user' && JSON.stringify(message).includes('continue safely'))).toBe(true)
+    expect(sdk.configs).toHaveLength(created)
+    expect(sdk.sentMessages).toHaveLength(sent)
+    expect(onError).toHaveBeenCalledWith(record.sessionId, expect.stringContaining('refusing to replace'))
+    const persisted = await new SqliteSessionAuthority(join(dir, 'state.sqlite'))
+    await persisted.initialize()
+    expect((await persisted.load(record.sessionId))?.state).toMatchObject({ status: 'error' })
+    await runtime.close()
+  })
+
+  it('does not overwrite cancellation when native Session setup subsequently fails', async () => {
+    const onError = vi.fn()
+    store = new SessionStore(join(dir, 'sessions'), { authority: new SqliteSessionAuthority(join(dir, 'state.sqlite')) })
+    await store.initialize()
+    const runtime = new CopilotAgentRuntime({
+      store, tools: { async callTool() { return { ok: true, content: 'unused' } }, cancelPending() {} },
+      broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError },
+    }, { enabled: true, sessionsDir: join(dir, 'sessions') })
+    const record = await store.create({ sessionId: 'native-cancel', agentRuntime: 'copilot', config: createConfig({ tools: [] }) })
+    await store.recordRuntimeProjection(record.sessionId, {
+      ...record.state, cursor: 1,
+      messages: [...record.state.messages, { role: 'user', content: [{ type: 'text', text: 'existing conversation' }] }],
+    }, 'copilot.user_message', { text: 'existing conversation' })
+    await runtime.start()
+    let release!: () => void
+    sdk.resumeBarrier = new Promise<void>((resolve) => { release = resolve })
+    const sending = runtime.send(record, { text: 'cancel before setup', operationId: 'native-cancel-turn' })
+    await vi.waitFor(() => expect(sdk.resumeConfigs).toHaveLength(1))
+    await runtime.cancel(record)
+    release()
+    await sending
+    expect(record.state.status).toBe('done')
+    expect(onError).not.toHaveBeenCalled()
+    expect(sdk.sentMessages).toHaveLength(0)
+    await runtime.close()
   })
 
   it('publishes and configures effective low thresholds for inexpensive compaction tests', async () => {

@@ -57,6 +57,7 @@ import { step } from '@agent-kernel/kernel'
 import { toolLockFor } from '../tool-version.js'
 import { writeJsonFile } from '../tenant-runtime/atomic-json-file.js'
 import type { PersistedSessionDocument, SessionAuthority } from './session-authority.js'
+import type { SessionFsProvider } from '@github/copilot-sdk'
 
 export type SessionRecord = {
   readonly sessionId: string
@@ -469,6 +470,24 @@ export class SessionStore {
   }
 
   get usesExternalAuthority(): boolean { return Boolean(this.options.authority) }
+
+  /** Native SDK files use independent row/chunk authority with Session fences. */
+  copilotSessionFs(sessionId: string): SessionFsProvider {
+    const provider = this.options.authority?.nativeSessionFs?.(sessionId)
+    if (!provider) throw new Error('Durable Copilot native file authority is unavailable')
+    // Guard local cleanup leases as well as the backend's deletion/owner fence.
+    return new Proxy(provider, {
+      get: (target, property) => {
+        const value: unknown = Reflect.get(target, property)
+        if (typeof value !== 'function') return value
+        return async (...args: unknown[]) => {
+          await this.authorityReady
+          this.assertStorageWritable(sessionId)
+          return Reflect.apply(value, target, args)
+        }
+      },
+    })
+  }
 
   /** Commit the owner-fenced, globally visible boundary before cleanup side effects. */
   async requestDeletion(sessionId: string): Promise<boolean> {
@@ -1010,9 +1029,10 @@ export class SessionStore {
   private async recoverCachedExternalRuntime(record: SessionRecord): Promise<void> {
     if (this.locallyProjectedExternalSessions.has(record.sessionId)) return
     if (this.options.authority) {
-      const next = interruptedExternalRuntimeState(record.agentRuntime, record.state)
+      const next = interruptedExternalRuntimeState(record.agentRuntime, record.state, true)
       if (next) await this.recordRuntimeProjection(record.sessionId, next, 'copilot.recovered_interrupted_turn', {
         pendingCallCount: record.state.pendingCalls.length,
+        unknownEffects: record.state.pendingCalls.filter((call) => call.status === 'dispatched').map((call) => ({ callId: call.callId, name: call.name, outcome: 'execution_unknown' })),
       })
       return
     }
@@ -1065,9 +1085,10 @@ export class SessionStore {
       this.applyRuntimeConfig(record, this.resolveRuntimeConfig(options.runtimeConfig, record.executionMode))
       this.records.set(sessionId, record)
       if (options.recoverDangling && record.agentRuntime !== 'kernel') {
-        const recovered = interruptedExternalRuntimeState(record.agentRuntime, record.state)
+        const recovered = interruptedExternalRuntimeState(record.agentRuntime, record.state, true)
         if (recovered) await this.recordRuntimeProjection(record.sessionId, recovered, 'copilot.recovered_interrupted_turn', {
           pendingCallCount: record.state.pendingCalls.length,
+          unknownEffects: record.state.pendingCalls.filter((call) => call.status === 'dispatched').map((call) => ({ callId: call.callId, name: call.name, outcome: 'execution_unknown' })),
         })
       }
       return record
@@ -2693,8 +2714,10 @@ function needsExternalRuntimeRecovery(
 function interruptedExternalRuntimeState(
   agentRuntime: AgentRuntimeId,
   state: AgentState,
+  durable = false,
 ): AgentState | undefined {
   if (!needsExternalRuntimeRecovery(agentRuntime, state)) return undefined
+  const unknownEffects = durable && state.pendingCalls.some((call) => call.status === 'dispatched')
   return {
     ...state,
     cursor: state.cursor + 1,
@@ -2708,11 +2731,15 @@ function interruptedExternalRuntimeState(
           type: 'tool_result' as const,
           callId: call.callId,
           ok: false,
-          content: 'host restarted while call was pending',
+          content: durable && call.status === 'dispatched'
+            ? JSON.stringify({ outcome: 'execution_unknown', callId: call.callId, tool: call.name, message: 'Host restarted after dispatch. External effects may already have occurred; this is not a confirmed tool failure or rollback. Do not automatically retry. Reconcile the external target before authorizing another attempt.' })
+            : 'host restarted while call was pending',
         }],
       })),
     ],
-    error: 'Copilot turn was interrupted by a host restart',
+    error: unknownEffects
+      ? 'Copilot turn interrupted: external tool outcome is unknown; reconcile effects before retrying'
+      : 'Copilot turn was interrupted by a host restart',
   }
 }
 

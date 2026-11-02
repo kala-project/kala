@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 
 import type { EventEntry, RuntimeMetadataEntry } from '@agent-kernel/shared'
+import type { SessionFsProvider } from '@github/copilot-sdk'
 
 import {
   IdempotencyConflictError,
@@ -25,11 +26,19 @@ import {
   type SessionAuthority,
   type SessionAuthorityMutation,
 } from './session-authority.js'
+import {
+  createNativeSessionFsProvider,
+  nativeFsPlan,
+  nativeFsSchemaStatements,
+  type NativeFsQuery,
+  type NativeFsTables,
+} from './native-session-fs.js'
 
 export { SessionDeletingError } from './session-authority.js'
 export type { PersistedSessionDocument, SessionAuthorityMutation } from './session-authority.js'
 
 const SESSION_DELETION_FIELD = '__kalaSessionDeletion'
+const LEGACY_NATIVE_FS_FIELD = '__kalaCopilotSessionFsV1'
 
 type SessionDeletionTombstone = {
   requestId: string
@@ -87,6 +96,7 @@ export class PostgresSessionAuthority implements SessionAuthority {
   readonly #ownerIdPrefix: string
   readonly #eventsTable: string
   readonly #projectionTable: string
+  readonly #nativeFsTables: NativeFsTables
   readonly #schemaManagement: PostgresSchemaManagement
   readonly #resourceOwnerForSession?: (sessionId: string) => RuntimeResourceOwnership | undefined
   readonly #prepareSessionOwner?: (sessionId: string) => Promise<void>
@@ -116,6 +126,11 @@ export class PostgresSessionAuthority implements SessionAuthority {
     this.#ownerIdPrefix = options.ownerId ?? 'session-store'
     this.#eventsTable = `${schema}.tenant_runtime_hot_events`
     this.#projectionTable = `${schema}.tenant_session_latest_projection`
+    this.#nativeFsTables = {
+      usage: `${schema}."tenant_session_native_fs_usage"`,
+      nodes: `${schema}."tenant_session_native_fs_nodes"`,
+      chunks: `${schema}."tenant_session_native_fs_chunks"`,
+    }
     this.#schemaManagement = options.schemaManagement ?? 'initialize'
     if (options.resourceOwnerForSession && !options.unitId) {
       throw new TypeError('Session owner fencing requires a trusted Unit ID')
@@ -158,22 +173,63 @@ export class PostgresSessionAuthority implements SessionAuthority {
   async initialize(): Promise<void> {
     if (this.#schemaManagement === 'external') return
     await this.hotState.initialize()
-    await Promise.all([
-      this.messageQueue.initialize(),
-      this.hotState.database.query(`CREATE TABLE IF NOT EXISTS ${this.#projectionTable} (
-        tenant_id text NOT NULL,
-        session_id text NOT NULL,
-        version bigint NOT NULL CHECK (version > 0),
-        document jsonb,
-        updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-        PRIMARY KEY (tenant_id, session_id)
-      )`),
-    ])
+    await this.messageQueue.initialize()
+    await this.hotState.database.query(`CREATE TABLE IF NOT EXISTS ${this.#projectionTable} (
+      tenant_id text NOT NULL,
+      session_id text NOT NULL,
+      version bigint NOT NULL CHECK (version > 0),
+      document jsonb,
+      updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+      PRIMARY KEY (tenant_id, session_id)
+    )`)
+    for (const statement of nativeFsSchemaStatements(this.#nativeFsTables)) {
+      await this.hotState.database.query(statement)
+    }
   }
 
   async load(sessionId: string): Promise<PersistedSessionDocument | undefined> {
     const document = await this.#loadIncludingDeleting(sessionId)
     return document && !sessionDeletion(document) ? document : undefined
+  }
+
+  nativeSessionFs(sessionId: string): SessionFsProvider {
+    validateSessionId(sessionId)
+    return createNativeSessionFsProvider(async (request) => {
+      await this.#prepareSessionOwner?.(sessionId)
+      const owner = this.#currentOwner(sessionId)
+      return this.hotState.database.transaction(async (transaction) => {
+        if (owner) await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(sessionId), owner)
+
+        // Hold a projection lock for the complete plan. It proves that the
+        // Session is live and conflicts with tombstone/final-delete updates.
+        const projected = await transaction.query<{ document: PersistedSessionDocument | null }>(`SELECT document
+          FROM ${this.#projectionTable}
+          WHERE tenant_id = $1 AND session_id = $2
+          FOR SHARE`, [this.tenantId, sessionId])
+        const document = projected.rows[0]?.document
+        if (!document) throw new Error(`Session not found: ${sessionId}`)
+        if (sessionDeletion(document)) throw new SessionDeletingError(sessionId)
+        if (hasNonemptyLegacyNativeFs(document[LEGACY_NATIVE_FS_FIELD])) {
+          throw new Error(`Session ${sessionId} has unsupported nonempty ${LEGACY_NATIVE_FS_FIELD} data; automatic native filesystem migration is not supported`)
+        }
+
+        await transaction.query(`INSERT INTO ${this.#nativeFsTables.usage}
+          (tenant_id, session_id, total_bytes, total_nodes)
+          VALUES ($1, $2, 0, 0)
+          ON CONFLICT (tenant_id, session_id) DO NOTHING`, [this.tenantId, sessionId])
+        await transaction.query(`SELECT total_bytes, total_nodes FROM ${this.#nativeFsTables.usage}
+          WHERE tenant_id = $1 AND session_id = $2 FOR UPDATE`, [this.tenantId, sessionId])
+
+        const plan = nativeFsPlan(request, this.#nativeFsTables, this.tenantId, sessionId)
+        let step = plan.next()
+        while (!step.done) {
+          const query = step.value as NativeFsQuery
+          const result = await transaction.query(translateNativeFsPlaceholders(query.sql), query.values)
+          step = plan.next({ rows: result.rows, rowCount: result.rowCount ?? 0 })
+        }
+        return step.value
+      })
+    })
   }
 
   async mutate(sessionId: string, mutation: SessionAuthorityMutation): Promise<PersistedSessionDocument | undefined> {
@@ -271,6 +327,10 @@ export class PostgresSessionAuthority implements SessionAuthority {
             this.tenantId, sessionId, event.sequence, JSON.stringify(next ?? null), expectedVersion,
           ])
           if (updated.rowCount !== 1) throw new ProjectionConflictError()
+          if (mutation.eventType === 'session.deleted' && next === undefined) {
+            await transaction.query(`DELETE FROM ${this.#nativeFsTables.usage}
+              WHERE tenant_id = $1 AND session_id = $2`, [this.tenantId, sessionId])
+          }
         }, this.#currentOwner(sessionId))
         return next
       } catch (error) {
@@ -597,6 +657,16 @@ function sessionDeletion(document: PersistedSessionDocument): SessionDeletionTom
 
 function validateSessionId(sessionId: string): void {
   if (!sessionId) throw new TypeError('sessionId must be a non-empty string')
+}
+
+function hasNonemptyLegacyNativeFs(value: unknown): boolean {
+  if (value === undefined || value === null) return false
+  return typeof value !== 'object' || Object.keys(value).length > 0
+}
+
+function translateNativeFsPlaceholders(sql: string): string {
+  let parameter = 0
+  return sql.replaceAll('?', () => `$${++parameter}`)
 }
 
 function quoteIdentifier(identifier: string): string {

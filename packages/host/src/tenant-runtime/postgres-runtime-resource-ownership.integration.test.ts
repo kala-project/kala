@@ -8,7 +8,7 @@ import { migratePostgres } from '../postgres-migrations.js'
 import type { ArtifactObjectStore } from '../artifacts/object-store.js'
 import { PostgresObjectMetadataLog } from '../artifacts/postgres-object-metadata.js'
 import { PostgresObjectCapacityLedger } from '../artifacts/postgres-object-capacity.js'
-import { PostgresSessionAuthority } from '../store/postgres-session-authority.js'
+import { PostgresSessionAuthority, SessionDeletingError } from '../store/postgres-session-authority.js'
 import { createPostgresHotStateStore, type HotStateSqlExecutor } from './postgres-hot-state.js'
 import {
   createPostgresRuntimeResourceOwnershipStore,
@@ -171,6 +171,39 @@ integrationDescribe('PostgresRuntimeResourceOwnershipStore isolated PostgreSQL i
       expect(accepted.sequence).toBe(2n)
       expect(await hotState.replay({ tenantId: organizationId, scopeType: 'session', scopeId: scope.resourceId })).toHaveLength(2)
     } finally { await hotState.close() }
+  })
+
+  it('fences native SDK chunks across owner takeover, tenant isolation and Session final deletion', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID()), sessionId = randomUUID()
+    const memberA = await first.registerReplica({ organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://native-a.example' }, 60_000)
+    const memberB = await second.registerReplica({ organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://native-b.example' }, 60_000)
+    const scope = { organizationId, unitId, resourceType: 'session' as const, resourceId: sessionId }
+    const ownerA = await first.acquireResourceOwner(scope, memberA, randomUUID(), 60_000)
+    const hot = createPostgresHotStateStore({ connectionString, applicationName: `${project}-native-chunks` })
+    const authority = (owner: typeof ownerA, tenantId = organizationId) => new PostgresSessionAuthority(hot, tenantId, {
+      schemaManagement: 'external', unitId, resourceOwnerForSession: () => owner,
+    })
+    try {
+      const old = authority(ownerA), oldFs = old.nativeSessionFs(sessionId)
+      await old.create({ sessionId, state: { cursor: 0 } })
+      await oldFs.writeFile('/session-state/events.jsonl', 'native-before-takeover\n')
+      const auditBefore = await hot.database.query('SELECT count(*)::integer AS n FROM tenant_runtime_hot_events WHERE tenant_id = $1', [organizationId])
+      await first.releaseResourceOwner(ownerA)
+      const ownerB = await second.acquireResourceOwner(scope, memberB, randomUUID(), 60_000)
+      const live = authority(ownerB), fs = live.nativeSessionFs(sessionId)
+      await expect(oldFs.readFile('/session-state/events.jsonl')).rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+      await expect(oldFs.appendFile('/session-state/events.jsonl', 'stale')).rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+      await expect(authority(ownerB, randomUUID()).nativeSessionFs(sessionId).readFile('/session-state/events.jsonl')).rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+      await fs.appendFile('/session-state/events.jsonl', 'native-after-takeover\n')
+      expect(await fs.readFile('/session-state/events.jsonl')).toBe('native-before-takeover\nnative-after-takeover\n')
+      const auditAfter = await hot.database.query('SELECT count(*)::integer AS n FROM tenant_runtime_hot_events WHERE tenant_id = $1', [organizationId])
+      expect(auditAfter.rows).toEqual(auditBefore.rows)
+      await live.requestDeletion(sessionId)
+      await expect(fs.appendFile('/session-state/events.jsonl', 'after tombstone')).rejects.toBeInstanceOf(SessionDeletingError)
+      await live.delete(sessionId)
+      const chunks = await hot.database.query('SELECT count(*)::integer AS n FROM tenant_session_native_fs_chunks WHERE tenant_id = $1 AND session_id = $2', [organizationId, sessionId])
+      expect(chunks.rows[0]?.n).toBe(0)
+    } finally { await hot.close() }
   })
 
   it('fences object intents and idempotent metadata writes when a Session owner moves to another replica', async () => {
