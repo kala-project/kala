@@ -51,7 +51,8 @@ class LifecycleArchiveTests(unittest.TestCase):
         return roots
 
     def metadata(self):
-        return {"sourceVolumeProvenance": {
+        return {"ingressMode": "bundled-caddy", "ingressIdentityCustody": "included-in-app-backup",
+                "sourceVolumeProvenance": {
             "caddy-data": {"project": "fixture", "logicalName": "caddy-data", "volumeName": "fixture-caddy-data", "target": "/data", "driver": "local"},
             "caddy-config": {"project": "fixture", "logicalName": "caddy-config", "volumeName": "fixture-caddy-config", "target": "/config", "driver": "local"},
         }}
@@ -79,6 +80,15 @@ class LifecycleArchiveTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(destinations["caddy-data"].stat().st_mode), 0o755)
         file_record = next(item for item in manifest["entries"] if item["name"] == "silo/versions/object-v2")
         self.assertEqual(file_record["sha256"], hashlib.sha256(b"new").hexdigest())
+
+    def test_nonprivate_backup_parent_is_rejected_before_stopping_services(self):
+        parent = self.root / "public-backup-parent"
+        parent.mkdir(mode=0o755)
+        os.chmod(parent, 0o755)
+        with mock.patch.object(op, "cold_stop") as stop:
+            with self.assertRaises(op.OperatorError):
+                op.perform_backup(argparse.Namespace(artifact=str(parent / "artifact")))
+            stop.assert_not_called()
 
     def test_existing_artifact_or_incomplete_is_never_overwritten(self):
         roots = self.roots()
@@ -167,7 +177,8 @@ class LifecycleIntegrationBoundaryTests(unittest.TestCase):
             roots = {"postgres": original}
             for name in ("silo", "recovery", "caddy-data", "caddy-config"):
                 roots[name] = parent / name; roots[name].mkdir(mode=0o700)
-            metadata = {"sourceVolumeProvenance": {
+            metadata = {"ingressMode": "bundled-caddy", "ingressIdentityCustody": "included-in-app-backup",
+                        "sourceVolumeProvenance": {
                 "caddy-data": {"project": "fixture", "logicalName": "data", "volumeName": "fixture-data", "target": "/data", "driver": "local"},
                 "caddy-config": {"project": "fixture", "logicalName": "config", "volumeName": "fixture-config", "target": "/config", "driver": "local"}}}
             manifest = op.create_artifact(parent / "artifact", roots, metadata)
@@ -179,6 +190,106 @@ class LifecycleIntegrationBoundaryTests(unittest.TestCase):
             op.extract_archive(parent / "artifact/payload.tar", destinations, records)
             self.assertEqual((restored.stat().st_uid, restored.stat().st_gid), (70, 1000))
             self.assertEqual((restored / "data").read_bytes(), b"persistent-data")
+
+
+class ExternalIngressContractTests(unittest.TestCase):
+    def config(self, mode="external", observability=False):
+        names = set(op.EXTERNAL_SERVICES if mode == "external" else op.SERVICES)
+        if observability:
+            names |= op.OBSERVABILITY
+        services = {name: {"volumes": []} for name in names}
+        services["gateway"]["environment"] = {
+            "KALA_DEDICATED_INGRESS_MODE": mode if mode == "external" else "bundled-caddy"
+        }
+        return {"services": services}
+
+    def test_graph_and_marker_jointly_determine_mode_for_all_four_shapes(self):
+        self.assertEqual(op.ingress_mode(self.config("bundled-caddy")), "bundled-caddy")
+        self.assertEqual(op.ingress_mode(self.config("bundled-caddy", True)), "bundled-caddy")
+        self.assertEqual(op.ingress_mode(self.config("external")), "external")
+        self.assertEqual(op.ingress_mode(self.config("external", True)), "external")
+        inconsistent = self.config("external")
+        inconsistent["services"]["gateway"]["environment"].clear()
+        with self.assertRaisesRegex(op.OperatorError, "requires KALA_DEDICATED_INGRESS_MODE=external"):
+            op.ingress_mode(inconsistent)
+
+    def test_external_rejects_any_named_application_volume(self):
+        config = self.config("external")
+        config["volumes"] = {"unexpected": {}}
+        with self.assertRaisesRegex(op.OperatorError, "may not declare"):
+            op.ingress_mode(config)
+        config = self.config("external")
+        config["services"]["runtime"]["volumes"] = [{"type": "volume", "source": "x", "target": "/x"}]
+        with self.assertRaisesRegex(op.OperatorError, "may not mount"):
+            op.ingress_mode(config)
+
+    def test_external_v3_has_exact_three_roots_and_no_tls_identity_claim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            os.chmod(parent, 0o700)
+            roots = {}
+            for name in op.EXTERNAL_ARCHIVE_ROOTS:
+                roots[name] = parent / name
+                roots[name].mkdir(mode=0o700)
+            manifest = op.create_artifact(parent / "artifact", roots, {
+                "ingressMode": "external", "ingressIdentityCustody": "external-not-in-app-backup"
+            })
+            self.assertEqual(manifest["schemaVersion"], 3)
+            self.assertEqual(set(manifest["sourceRoots"]), op.EXTERNAL_ARCHIVE_ROOTS)
+            self.assertNotIn("sourceVolumeProvenance", manifest)
+            self.assertEqual(manifest["ingressIdentityCustody"], "external-not-in-app-backup")
+            op.validate_archive(manifest, parent / "artifact" / "payload.tar")
+
+    def test_external_mutation_ack_is_checked_before_stop_or_volume_io(self):
+        args = argparse.Namespace(acknowledge_external_ingress_fenced=False)
+        with mock.patch.object(op, "assert_inactive") as inactive, \
+             mock.patch.object(op, "require_local_docker") as docker:
+            with self.assertRaisesRegex(op.OperatorError, "acknowledge-external-ingress-fenced"):
+                op.require_external_fence("external", args)
+        inactive.assert_not_called()
+        docker.assert_not_called()
+
+    def test_restore_rejects_cross_mode_and_external_caddy_creation_flag(self):
+        with self.assertRaisesRegex(op.OperatorError, "cross-mode"):
+            op.require_matching_ingress_modes("external", "external", "bundled-caddy")
+        args = argparse.Namespace(
+            acknowledge_source_fenced=True, acknowledge_ingress_identity_reissue=False,
+            acknowledge_external_ingress_fenced=True, create_fresh_caddy_volumes=True,
+            source_compose="source", source_env="source-env", target_compose="target", target_env="target-env",
+            artifact="artifact", policy="policy")
+        manifest = {"schemaVersion": 3, "ingressMode": "external",
+                    "ingressIdentityCustody": "external-not-in-app-backup"}
+        config = self.config("external")
+        patches = lambda: (
+            mock.patch.object(op, "private_regular", side_effect=lambda path, _label: path),
+            mock.patch.object(op, "read_artifact", return_value=(manifest, Path("payload"))),
+            mock.patch.object(op, "load_policy", return_value={}),
+            mock.patch.object(op, "compose_config", return_value=config),
+            mock.patch.object(op, "assert_inactive"),
+        )
+        args.acknowledge_external_ingress_fenced = False
+        args.create_fresh_caddy_volumes = False
+        private, artifact, policy, compose, inactive_patch = patches()
+        with private, artifact, policy, compose, inactive_patch as inactive:
+            with self.assertRaisesRegex(op.OperatorError, "acknowledge-external-ingress-fenced"):
+                op.restore(args)
+        inactive.assert_not_called()
+        args.acknowledge_external_ingress_fenced = True
+        args.create_fresh_caddy_volumes = True
+        private, artifact, policy, compose, inactive_patch = patches()
+        with private, artifact, policy, compose, inactive_patch as inactive:
+            with self.assertRaisesRegex(op.OperatorError, "rejects --create-fresh-caddy-volumes"):
+                op.restore(args)
+        inactive.assert_not_called()
+
+    def test_external_cold_stop_never_targets_ingress(self):
+        commands = []
+        with mock.patch.object(op, "run", side_effect=lambda command, **kw: commands.append(command)), \
+             mock.patch.object(op, "assert_inactive"), \
+             mock.patch.object(op, "container_ids", return_value={"postgres": "p", "silo": "s"}), \
+             mock.patch.object(op, "verify_clean_data_stop"):
+            op.cold_stop(Path("/compose"), Path("/env"), 30, op.EXTERNAL_SERVICES)
+        self.assertFalse(any(command[-1:] == ["ingress"] for command in commands))
 
 
 class LifecyclePolicyAndStopTests(unittest.TestCase):

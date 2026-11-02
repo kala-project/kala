@@ -1,0 +1,32 @@
+# Merged with otel-collector.yaml only for bundled-caddy telemetry publication.
+# External mode has no owned ingress server and must not load this file.
+receivers:
+  prometheus/ingress:
+    config:
+      scrape_configs:
+        - job_name: ingress
+          scrape_interval: 30s
+          scrape_timeout: 5s
+          sample_limit: 256
+          label_limit: 12
+          metrics_path: /metrics
+          static_configs:
+            - targets: [ingress:8082]
+          metric_relabel_configs:
+            - source_labels: [__name__]
+              action: keep
+              regex: 'caddy_http_(requests_total|requests_in_flight|request_duration_seconds(_bucket|_sum|_count)?|request_size_bytes(_bucket|_sum|_count)?|response_size_bytes(_bucket|_sum|_count)?)'
+            - action: labelkeep
+              regex: '__name__|method|code|le|handler|server'
+processors:
+  resource/ingress:
+    attributes:
+      - key: service.name
+        value: ingress
+        action: upsert
+service:
+  pipelines:
+    metrics/ingress:
+      receivers: [prometheus/ingress]
+      processors: [memory_limiter, resource/ingress, batch]
+      exporters: [otlphttp/aspire]

@@ -1,0 +1,188 @@
+{
+  "schemaVersion": 1,
+  "kind": "real-online-client-and-ingress-observation",
+  "date": "2026-10-29",
+  "passedForBoundedObservationSlice": true,
+  "applicationSourceRevision": "e2a789769390eceb8e80117cd9911db438b3a1a1",
+  "images": {
+    "runtime": {
+      "image": "kala-dedicated-dependency-runtime@sha256:444322e4fa29e3c3f9ddd22cb8fb41a75b897e5832734481bb1c5712c03a3cae",
+      "ociDigest": "sha256:444322e4fa29e3c3f9ddd22cb8fb41a75b897e5832734481bb1c5712c03a3cae",
+      "id": "sha256:444322e4fa29e3c3f9ddd22cb8fb41a75b897e5832734481bb1c5712c03a3cae"
+    },
+    "gateway": {
+      "image": "kala-dedicated-dependency-gateway@sha256:81b2f1572c3c98b71bcf00eaff8c151e7def1c183127a2562115f0feb235abbd",
+      "ociDigest": "sha256:81b2f1572c3c98b71bcf00eaff8c151e7def1c183127a2562115f0feb235abbd",
+      "id": "sha256:81b2f1572c3c98b71bcf00eaff8c151e7def1c183127a2562115f0feb235abbd"
+    }
+  },
+  "clientPackagedProof": {
+    "passed": true,
+    "proofs": [
+      {
+        "passed": true,
+        "mode": "runtime",
+        "actualPackagedClients": true,
+        "realHttpParentIsolation": true,
+        "realPostgresTransactionsAndRollback": true,
+        "realS3PutGetDeleteAndMissingObject": true,
+        "clientSpans": 13,
+        "traceIds": [
+          "662fb990aee9e19d5df28a801da7aedf",
+          "b73196159ac284606e8ac8afa7c57fb3"
+        ],
+        "noPrivateInputsInOtlpPayload": true,
+        "noSessionOrModelCreated": true,
+        "protectedAspireParentChildArrival": true
+      },
+      {
+        "passed": true,
+        "mode": "gateway",
+        "actualPackagedClients": true,
+        "realHttpParentIsolation": true,
+        "realPostgresTransactionsAndRollback": true,
+        "realS3PutGetDeleteAndMissingObject": false,
+        "clientSpans": 7,
+        "traceIds": [
+          "13baff9e2871a2e9886c635cfb9094fc",
+          "70cb868757cbbe004057097f8c560ed1"
+        ],
+        "noPrivateInputsInOtlpPayload": true,
+        "noSessionOrModelCreated": true,
+        "protectedAspireParentChildArrival": true
+      }
+    ]
+  },
+  "productionProof": {
+    "passed": true,
+    "actualPublicOwnerRequestHasPostgresClientChildren": true,
+    "productionGatewayClientSpanCount": 3,
+    "productionGatewayTraceId": "4dd24377e24c985ddb3b6f0f6341c36f",
+    "runtimeCapabilitiesTraceId": "a63188bcf011651bd4c9305a8deee85b",
+    "sixFreshMetricResources": [
+      "dashboard",
+      "ingress",
+      "kala-gateway",
+      "kala-runtime",
+      "postgres",
+      "silo"
+    ],
+    "images": {
+      "runtime": "kala-dedicated-dependency-runtime@sha256:444322e4fa29e3c3f9ddd22cb8fb41a75b897e5832734481bb1c5712c03a3cae",
+      "gateway": "kala-dedicated-dependency-gateway@sha256:81b2f1572c3c98b71bcf00eaff8c151e7def1c183127a2562115f0feb235abbd"
+    },
+    "modelConfigured": false,
+    "verifiedTlsOwnerLogin": true,
+    "formalColdBackupUpgrade": true,
+    "sourceRevision": "e2a78976",
+    "readOnlyPublicSessionListAttempt": {
+      "status": 401,
+      "runtimeClientParentVerifiedViaThatRoute": false,
+      "reason": "Dedicated single-tenant public API rejects ingress actor; no tenancy bypass applied"
+    },
+    "readOnlyMemoAttempt": {
+      "status": 404,
+      "runtimeClientParentVerifiedViaThatRoute": false
+    }
+  },
+  "ingressProof": {
+    "passed": true,
+    "realCaddyRequestsGenerated": 7,
+    "counterBefore": 36.0,
+    "counterAfter": 44.0,
+    "realMetricNamesVerified": [
+      "caddy_http_requests_total",
+      "caddy_http_request_duration_seconds_bucket"
+    ],
+    "privateListenerUnpublished": true,
+    "dashboardIngressHasMetrics": true,
+    "noHostPathQueryUserClientLabels": true,
+    "caddyAdminStillDisabled": true,
+    "observedMetricResources": [
+      "dashboard",
+      "ingress",
+      "kala-gateway",
+      "kala-runtime",
+      "postgres",
+      "silo"
+    ]
+  },
+  "coldBackupProof": {
+    "passed": true,
+    "schemaVersion": 3,
+    "rootCount": 5,
+    "entryCount": 1966,
+    "payloadAndEveryEntryVerified": true,
+    "monitoringConfigurationIncluded": true,
+    "restoreAttempted": false
+  },
+  "ownedS3VersionCleanup": {
+    "passed": true,
+    "ownedSyntheticObjects": 1,
+    "removedVersionsAndDeleteMarkers": 2,
+    "ownershipVerifiedByEveryVersionContent": true,
+    "applicationPolicyUnchanged": true
+  },
+  "actualAspireFourPublications": {
+    "root": ".tmp/dedicated-ingress-publish-9287fc3c",
+    "kind": "actual-Aspire-four-ingress-profile-publications",
+    "passed": true,
+    "cases": [
+      {
+        "mode": "bundled-caddy",
+        "telemetry": false,
+        "resources": 6,
+        "composeSha256": "ca5af1b65de603bea314ee8d100f1582370a9b695d0601a13a495392579718d2",
+        "passed": true
+      },
+      {
+        "mode": "bundled-caddy",
+        "telemetry": true,
+        "resources": 9,
+        "composeSha256": "3f7f5e531ef4f0fc9908321e19da7d2435e7a34b1303bbcf7bd06b8982c3666d",
+        "passed": true
+      },
+      {
+        "mode": "external",
+        "telemetry": false,
+        "resources": 5,
+        "composeSha256": "8ffe5871dc8bf260b3d2e3e649bf99fffd8d3e61b9a7e1a4958eacd07e2b8d4e",
+        "passed": true
+      },
+      {
+        "mode": "external",
+        "telemetry": true,
+        "resources": 8,
+        "composeSha256": "7eed1dcdb86ab2f674fef9c89b4586d5ffd3db0085be004f18ba784e3abf88d1",
+        "passed": true
+      }
+    ],
+    "programSha256": "265c1189a9723c18896d08f0e281a89179e3db624845c01c24224ba46946ff03"
+  },
+  "rootPythonTestsPassed": 38,
+  "independentFocusedTypeScriptTestsPassed": 14,
+  "implementationRelatedRegressionTestsPassed": 103,
+  "sharedHostGatewayTypecheck": "passed",
+  "modelConfigured": false,
+  "coldRestoreVerified": false,
+  "nativeRemoteSdkExecutorEndToEndVerified": false,
+  "completeResourceLifecycleFeedImplemented": false,
+  "durableHistoryAlertsImplemented": false,
+  "failuresNotRelabeled": {
+    "firstUpgradeAttempt": "non-private backup parent rejected after services stopped; private parent correction then successful reviewed upgrade",
+    "preventableBackupStopFixedAndRegressionTested": true,
+    "dashboardExitDuringMaintenance": 137,
+    "initialLocalAddonFilePermissions": "nonroot collector could not read mode0600 addon; chmod0644 then merged validate passed",
+    "dedicatedPublicSessionListStatus": 401,
+    "dedicatedUserTabsStatus": 404
+  },
+  "operatorSourceSha256": {
+    "deploy/aspire/Program.cs": "265c1189a9723c18896d08f0e281a89179e3db624845c01c24224ba46946ff03",
+    "deploy/aspire/Caddyfile": "8abfe9861c53ab7ab7f417f2c914460eb5346dcfdf37df56f366df93258fff89",
+    "deploy/aspire/verify-published-compose.py": "75a0060e35311df933646e37fd74b89e3deca313987a87fefd3bcd5522c68ac9",
+    "deploy/aspire/lifecycle_operator.py": "edb3eee9adf818375e7ac4108650a8e080f3ea2edb2e15647f998823aa76707c",
+    "deploy/aspire/telemetry/otel-collector.yaml": "23b01a1621f10a2efaf7e8e3c55fb5faa395ae723e2f757717e1f2fd538386ca",
+    "deploy/aspire/telemetry/otel-collector-caddy.yaml": "508ddb83dd382022e4a448d36d4d23e898affbbf7074739f07c9375b658c0539",
+    "deploy/aspire/telemetry/prove-native-clients.mjs": "10787b9b36f8aafec5552f20382ff3e4c63701089ad08349bd724b3270443478"
+  }
+}

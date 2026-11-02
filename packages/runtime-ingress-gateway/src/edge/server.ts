@@ -5,7 +5,7 @@ import { Readable, type Duplex } from 'node:stream'
 
 import httpProxy from 'http-proxy'
 import { parsePublicUrls, validatePublicRequest, type PublicUrlPattern } from '@agent-kernel/shared'
-import { createOnlineTelemetryFromEnv } from '@agent-kernel/shared/node-telemetry'
+import { createOnlineTelemetryFromEnv, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
 
 import type { LoginStateStore } from '../auth/login-state-store.js'
 import type { OidcClient } from '../auth/oidc-client.js'
@@ -189,6 +189,7 @@ function ownerBootstrapResultPage(result: { bootstrapId: string; confirmationCod
 
 export async function startRuntimeIngressGateway(options: {
   port: number
+  telemetry?: OnlineTelemetry
   authentication: GatewayAuthentication
   directory: RuntimeAssignmentStore
   organizations?: OrganizationStore
@@ -214,7 +215,8 @@ export async function startRuntimeIngressGateway(options: {
   backgroundAuthority?: BackgroundAuthority
   provision?(unitId: string): Promise<void>
 }): Promise<RuntimeIngressGateway> {
-  const telemetry = createOnlineTelemetryFromEnv('kala-gateway')
+  const telemetry = options.telemetry ?? createOnlineTelemetryFromEnv('kala-gateway')
+  const ownsTelemetry = options.telemetry === undefined
   const recheckMs = options.socketRecheckMs ?? 15_000
   if (!Number.isSafeInteger(recheckMs) || recheckMs < 1) throw new Error('socketRecheckMs must be positive')
   const browserSockets = new Map<Duplex, { sessionId: string; identity: AuthenticatedIdentity; upstream?: Duplex; timer?: ReturnType<typeof setTimeout> }>()
@@ -1056,6 +1058,9 @@ export async function startRuntimeIngressGateway(options: {
     // Socket.IO polling and upgrades are long-lived transports, not short commands.
     const span = pathname.startsWith('/socket.io/') ? undefined : telemetry?.startHttpSpan(request.method, telemetryRoute(pathname), request.headers.traceparent)
     if (span) {
+      // The context is request-owned and invalidated on finish/close. Upgrade and
+      // Socket.IO paths never activate it, preventing websocket context retention.
+      span.activate()
       request.headers.traceparent = span.traceparent
       response.setHeader('x-request-id', span.correlationId)
       response.once('finish', () => span.end(response.statusCode))
@@ -1180,7 +1185,7 @@ export async function startRuntimeIngressGateway(options: {
     for (const socket of executorSockets.keys()) closeExecutorSocket(socket)
     proxy.close(); dashboardProxy?.close()
     await new Promise<void>((resolve) => http.close(() => resolve()))
-    void telemetry?.close()
+    if (ownsTelemetry) void telemetry?.close()
   } }
 }
 

@@ -1,5 +1,7 @@
 # Dedicated local candidate acceptance — 2026-10-29
 
+> Historical bundled candidate. For the newer `069e6172` images and external five-service/v3 recovery proof, see [external-ingress acceptance](./external-ingress-acceptance.md). The newer proof does not retroactively change this record's nine-resource/v2 scope.
+
 **Passed: frozen Runtime/Gateway source `1e6fd5bd`, actual Aspire nine-resource deployment, packaged Owner lifecycle, and trust-preserving artifact-v2 cold recovery.**
 
 This is bounded local integration evidence, **not** a supported/signed production release. The exact nine image references, source revision, operator and generated-Compose hashes are in [current-image-acceptance.json](./current-image-acceptance.json).

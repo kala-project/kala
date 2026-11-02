@@ -1,0 +1,157 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-29",
+  "kind": "real-dedicated-infrastructure-metrics",
+  "passed": true,
+  "applicationSourceRevision": "069e617228d439a7fb3f1c57bafaeac9047b9f8c",
+  "applicationImagesRebuilt": false,
+  "collectorImage": "otel/opentelemetry-collector-contrib@sha256:faf125d656fa47cea568b2f3b4494efd2525083bc75c1e96038bc23f05cd68fd",
+  "aspireDashboardImage": "mcr.microsoft.com/dotnet/aspire-dashboard@sha256:e4220c55fa3c3e40ad2d733ef07973392299b420e9bde6924e8f6a1e71ff01a8",
+  "dashboardProof": {
+    "passed": true,
+    "freshDashboardAfterRestart": true,
+    "observedResources": [
+      {
+        "name": "dashboard",
+        "displayName": "dashboard",
+        "hasLogs": false,
+        "hasTraces": false,
+        "hasMetrics": true
+      },
+      {
+        "name": "kala-gateway",
+        "displayName": "kala-gateway",
+        "hasLogs": false,
+        "hasTraces": true,
+        "hasMetrics": true
+      },
+      {
+        "name": "kala-runtime",
+        "displayName": "kala-runtime",
+        "hasLogs": false,
+        "hasTraces": true,
+        "hasMetrics": true
+      },
+      {
+        "name": "postgres",
+        "displayName": "postgres",
+        "hasLogs": false,
+        "hasTraces": false,
+        "hasMetrics": true
+      },
+      {
+        "name": "silo",
+        "instanceId": "silo:9000",
+        "displayName": "silo-silo:9000",
+        "hasLogs": false,
+        "hasTraces": false,
+        "hasMetrics": true
+      }
+    ],
+    "collectorConfigSha256": "23b01a1621f10a2efaf7e8e3c55fb5faa395ae723e2f757717e1f2fd538386ca",
+    "applicationContainersRestarted": false,
+    "modelConfigured": false
+  },
+  "receiverNumericProof": {
+    "passed": true,
+    "realMetricNamesVerified": [
+      "postgresql.backends",
+      "postgresql.commits",
+      "postgresql.connection.max",
+      "postgresql.database.count",
+      "minio_cluster_capacity_raw_total_bytes",
+      "minio_s3_requests_total",
+      "httpcheck.status"
+    ],
+    "serviceIdentities": [
+      "postgres",
+      "silo",
+      "dashboard"
+    ],
+    "syntheticMetricInputs": false,
+    "fixedDatabasesVerified": [
+      "postgres",
+      "runlab_control",
+      "kala_runtime"
+    ],
+    "numericMeasurementsVerified": true,
+    "scrapeIntervalSeconds": 30,
+    "proofSamplingIntervalSeconds": 10,
+    "noSqlSamplesOrPlans": true,
+    "noCredentialsInTelemetry": true
+  },
+  "freshProvisioningProof": {
+    "passed": true,
+    "freshProvisioning": true,
+    "monitoringOnlyRequiresExistingInstallation": true,
+    "monitoringOnlyRetry": true,
+    "noSuperuserCreateRoleDbReplicationBypassRls": true,
+    "pgMonitorMembership": true,
+    "applicationTableReadWriteDenied": true,
+    "syntheticIsolatedAuthorities": true
+  },
+  "offlineCredentialPreparationProof": {
+    "passed": true,
+    "freshOfflineOfficialTokenGeneration": true,
+    "retryPreservesEveryCredentialByte": true,
+    "noServerRequired": true
+  },
+  "businessRoleCredentialFingerprintsUnchanged": true,
+  "liveBusinessTableReadWriteGrantsForObserver": 0,
+  "collectorHasDockerSocket": false,
+  "collectorHasProviderRootCredentials": false,
+  "verification": {
+    "rootPythonCasesPassed": 37,
+    "dotnetAppHostBuild": "passed; known ASPIRE010 retained",
+    "realTransportRegression": "passed",
+    "shellAndNodeSyntax": "passed",
+    "realAspirePublications": [
+      {
+        "mode": "bundled-caddy",
+        "telemetry": false,
+        "resources": 6,
+        "composeSha256": "661404b7a11c25d97680715e0ae832043c2ada0adba625ce251a683a44f377e6",
+        "passed": true
+      },
+      {
+        "mode": "bundled-caddy",
+        "telemetry": true,
+        "resources": 9,
+        "composeSha256": "1f4de917f6ed100801e36328638836f4e3801a530906e80b2abc97cd75e3e768",
+        "passed": true
+      },
+      {
+        "mode": "external",
+        "telemetry": false,
+        "resources": 5,
+        "composeSha256": "9750ce377ff66ee2a9273fedb4908a7f8130e4336b86ef7ffb58446cf4e92ece",
+        "passed": true
+      },
+      {
+        "mode": "external",
+        "telemetry": true,
+        "resources": 8,
+        "composeSha256": "e0035e9ea62394c513b48bb4dbe225a59adac5fb28d02536c28211f900f810b8",
+        "passed": true
+      }
+    ]
+  },
+  "boundaries": {
+    "monitoringColdRestoreVerified": false,
+    "nativeDbS3ClientTracingImplemented": false,
+    "dockerLifecycleResourceFeedImplemented": false,
+    "hostCaddyMetricsImplemented": false,
+    "durableHistoryAlertsImplemented": false,
+    "realModelSdkExecutorVerified": false
+  },
+  "operatorSourceSha256": {
+    "Program.cs": "61ed91e83c201a87a076eb7b87b2f08697a1891cb31945e61b46c8906f8f3e3d",
+    "initialize-postgres.mjs": "52feb18387ac80b23bf3fae37ee351e876cd39071ceea2b66f9f88ca91f9893d",
+    "initialize.sh": "0dc76991ee384c00488ece6fd2048c15327790f99871207a95af8efac42d77e9",
+    "lifecycle_operator.py": "741379d599670e97fd08425e3894039eaf5a531161a87dca5bac207a0e258052",
+    "validate-initialization-config.py": "91d870c128a334d180a6da0515875cc1c816f5c28c89ffbef84e77c22af96da3",
+    "verify-published-compose.py": "9d0eeb0103df71e573f6761d7a28bc712bb010d6556a2755c76410c590bd0653",
+    "prepare-observability-secrets.py": "965fe4b44a747468d5a5a91b4de8b3aa59b4bd785328f7d9d331486b5473b4fb",
+    "telemetry/otel-collector.yaml": "23b01a1621f10a2efaf7e8e3c55fb5faa395ae723e2f757717e1f2fd538386ca"
+  }
+}

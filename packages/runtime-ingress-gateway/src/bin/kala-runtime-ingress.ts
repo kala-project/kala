@@ -4,6 +4,7 @@ import process from 'node:process'
 import { readFile } from 'node:fs/promises'
 
 import { parsePublicUrls } from '@agent-kernel/shared'
+import { createOnlineTelemetryFromEnv } from '@agent-kernel/shared/node-telemetry'
 import { Pool } from 'pg'
 
 import { JsonOrganizationStore } from '../organizations/json-store.js'
@@ -65,6 +66,7 @@ async function assertPostgresInstallationClaim(connectionString: string, install
 async function main(): Promise<void> {
   const deployment = await loadGatewayProductDeployment(process.env.KALA_DEPLOYMENT_CONFIG)
   const dedicated = deployment.variant === 'dedicated'
+  const telemetry = createOnlineTelemetryFromEnv('kala-gateway')
   const port = Number(process.env.KALA_INGRESS_PORT ?? 13001)
   if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('KALA_INGRESS_PORT must be a valid port')
   const publicUrlValues = requiredPublicUrls()
@@ -78,7 +80,7 @@ async function main(): Promise<void> {
   const controlPlane = await resolveRuntimeIngressControlPlaneMode(process.env, readRequiredSecretEnv)
   if (dedicated && controlPlane.kind !== 'postgres') throw new Error('Dedicated Gateway requires the PostgreSQL control plane')
   const organizations = controlPlane.kind === 'postgres'
-    ? new PostgresOrganizationStore(database = createPostgresControlPlaneDatabase({ connectionString: controlPlane.databaseUrl }))
+    ? new PostgresOrganizationStore(database = createPostgresControlPlaneDatabase({ connectionString: controlPlane.databaseUrl, telemetry }))
     : new JsonOrganizationStore(resolve(controlPlane.directoryPath))
   if (organizations instanceof JsonOrganizationStore) await organizations.load()
   else await assertControlPlaneSchema(database!, await readControlPlaneMigrations(resolve(process.env.KALA_INGRESS_MIGRATIONS_DIR ?? 'migrations')))
@@ -174,6 +176,7 @@ async function main(): Promise<void> {
         allowedOrigins: runtimePlacementConfig.allowedOrigins,
         ...(runtimePlacementConfig.bootstrapOrigin ? { bootstrapOrigin: runtimePlacementConfig.bootstrapOrigin } : {}),
         controlPlane: database!,
+        telemetry,
       })
     : undefined
   let runtimeResourceOwnerResolver: ReturnType<typeof createPostgresRuntimeResourceOwnerResolver> | undefined
@@ -190,6 +193,7 @@ async function main(): Promise<void> {
       connectionString: runtimeReader!.connectionString,
       allowedOrigins: runtimePlacementConfig!.allowedOrigins,
       controlPlane: database!,
+      telemetry,
     })
     runtimeRoutingTicketResolver = new RuntimeRoutingTicketResolver({
       key,
@@ -229,6 +233,7 @@ async function main(): Promise<void> {
   const postgresProvisioner = database ? new RuntimeUnitProvisioner(database, requestHostProvisioning) : undefined
   const gateway = await startRuntimeIngressGateway({
     port,
+    telemetry,
     listenHost: process.env.KALA_INGRESS_LISTEN_HOST ?? '127.0.0.1',
     authentication,
     organizations,
@@ -281,7 +286,7 @@ async function main(): Promise<void> {
   }) : undefined
   if (database && !retentionScheduler) process.stdout.write(`${JSON.stringify({ event: 'retention_scheduler_disabled' })}\n`)
   process.stdout.write(`${JSON.stringify({ event: `${deployment.variant}_gateway_ready`, port: gateway.port })}\n`)
-  const close = async (): Promise<void> => { retentionScheduler?.stop(); await gateway.close(); await runtimeResourceOwnerResolver?.close(); await runtimeOriginResolver?.close(); await database?.close(); process.exit(0) }
+  const close = async (): Promise<void> => { retentionScheduler?.stop(); await gateway.close(); await runtimeResourceOwnerResolver?.close(); await runtimeOriginResolver?.close(); await database?.close(); await telemetry?.close(); process.exit(0) }
   process.on('SIGTERM', () => { void close() }); process.on('SIGINT', () => { void close() })
 }
 

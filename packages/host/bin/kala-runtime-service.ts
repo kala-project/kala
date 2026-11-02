@@ -6,6 +6,7 @@ import process from 'node:process'
 
 import { AGENT_RUNTIME_CAPABILITIES, FULL_RUNTIME_CAPABILITIES, productVariant } from '@agent-kernel/shared'
 import { createConfiguredSecretResolver } from '@agent-kernel/shared/secret-resolver'
+import { createOnlineTelemetryFromEnv, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
 
 import { createScheduledPrincipalAuthorizer } from '../src/scheduled-tasks/authorization.js'
 import { startLoopbackHostRuntimeUnit } from '../src/tenant-runtime/loopback-host-unit.js'
@@ -106,6 +107,9 @@ async function main(): Promise<void> {
     throw new Error('Dedicated Runtime requires operator-migrated PostgreSQL/S3 and a verified installation claim')
   }
   const capabilities = deployment.runtimeProfile === 'full' ? FULL_RUNTIME_CAPABILITIES : AGENT_RUNTIME_CAPABILITIES
+  // Created after installation/recovery bootstrap checks: this instance covers
+  // online Runtime PG/S3 traffic, while bootstrap clients remain intentionally separate.
+  const telemetry = createOnlineTelemetryFromEnv('kala-runtime')
   const port = Number(process.env.KALA_RUNTIME_KALA_PORT ?? 13002)
   if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('KALA_RUNTIME_KALA_PORT must be a valid port')
   const ingressSecret = await readRequiredSecretEnv('KALA_INGRESS_SHARED_SECRET')
@@ -117,6 +121,7 @@ async function main(): Promise<void> {
         connectionString: experimentalStorage.connectionString,
         applicationName: 'kala-runtime-experimental-materializations',
         schemaManagement: experimentalStorage.schemaManagement,
+        telemetry,
       })
     : new RuntimeUnitMaterializationStore(join(dataRoot, 'host', 'runtime-unit-catalog.json'))
   await catalog.load()
@@ -127,6 +132,7 @@ async function main(): Promise<void> {
     ? createPostgresRuntimeUnitPlacementStore({
         connectionString: experimentalStorage.connectionString,
         applicationName: `kala-runtime-placement-${experimentalStorage.nodeId}`,
+        telemetry,
       })
     : undefined
   if (experimentalStorage?.schemaManagement !== 'external') await placementStore?.initialize()
@@ -134,6 +140,7 @@ async function main(): Promise<void> {
     ? createPostgresRuntimeResourceOwnershipStore({
         connectionString: experimentalStorage.connectionString,
         applicationName: `kala-runtime-replica-${experimentalStorage.nodeId}`,
+        telemetry,
       })
     : undefined
   if (replicaStore && experimentalStorage?.schemaManagement !== 'external') {
@@ -261,7 +268,7 @@ async function main(): Promise<void> {
       }
       const persistentStorage = experimentalStorage && experimentalStateMasterKey && organizationId && placementLease
         ? await createExperimentalUnitStorage(experimentalStorage, organizationId, id, experimentalStateMasterKey,
-            placementLease, maxArtifactBytes, sessionOwnership)
+            placementLease, maxArtifactBytes, telemetry, sessionOwnership)
         : undefined
       const resourceArtifactUsage = persistentStorage
         ? persistentStorage.objectStorage.resourceArtifactUsage
@@ -274,6 +281,7 @@ async function main(): Promise<void> {
       const webSearchCredentialStore = persistentStorage?.webSearchCredentialStore ?? localWebSearchCredentialStore
       const speechCredentialStore = persistentStorage?.speechCredentialStore ?? localSpeechCredentialStore
       return startLoopbackHostRuntimeUnit(id, {
+        telemetry,
         authorizeScheduledPrincipal: createScheduledPrincipalAuthorizer({
           origin: process.env.KALA_RUNTIME_AUTHORITY_ORIGIN,
           serviceSecret: ingressSecret,
@@ -363,6 +371,7 @@ async function main(): Promise<void> {
         process.stderr.write(`${JSON.stringify({ event: 'tenant_runtime_shutdown_failed', reason: error instanceof Error ? error.name : 'unknown' })}\n`)
       } finally {
         await Promise.allSettled([catalog.close(), placementStore?.close() ?? Promise.resolve(), replicaStore?.close() ?? Promise.resolve()])
+        await telemetry?.close()
       }
       process.exit(exitCode)
     })()
@@ -464,12 +473,14 @@ async function createExperimentalUnitStorage(
   stateMasterKey: Uint8Array,
   placementLease: RuntimeUnitPlacementLease,
   maxArtifactBytes: number,
+  telemetry: OnlineTelemetry | undefined,
   sessionOwnership?: RuntimeSessionOwnership,
 ) {
   const hotState = createPostgresHotStateStore({
     connectionString: config.connectionString,
     applicationName: `kala-runtime-experimental-${organizationId}`,
     placementLease,
+    telemetry,
   })
   let closed = false
   let orphanSweepTimer: NodeJS.Timeout | undefined
@@ -536,6 +547,7 @@ async function createExperimentalUnitStorage(
       forcePathStyle: config.forcePathStyle,
       hotState,
       schemaManagement: config.schemaManagement,
+      telemetry,
       ...(sessionOwnership ? {
         prepareSessionOwner: async (sessionId: string) => { await sessionOwnership.ensure(sessionId) },
         resourceOwnerForSession: (sessionId: string) => sessionOwnership.activeLease(sessionId),

@@ -27,6 +27,10 @@ trap cleanup EXIT
 browser=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
 api_key=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
 ingest=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+# No PG/SILO authorities in this transport-only fixture. Their real metric
+# pipelines have separate live-server acceptance; do not claim it here.
+sed '/^    metrics\/postgres:/,$d' "$ROOT/deploy/aspire/telemetry/otel-collector.yaml" > "$TMP/collector.transport.yaml"
+chmod 644 "$TMP/collector.transport.yaml"
 "${DOCKER[@]}" network create "$NETWORK" >/dev/null
 "${DOCKER[@]}" run -d --name "$DASHBOARD" --network "$NETWORK" --network-alias observability-dashboard -p 127.0.0.1::18888 \
   -e ASPNETCORE_URLS=http://0.0.0.0:18888 \
@@ -37,7 +41,9 @@ ingest=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))
   -v "$ROOT/deploy/aspire/telemetry/dashboard.settings.json:/etc/kala-observability/dashboard.settings.json:ro" "$DASHBOARD_IMAGE" >/dev/null
 "${DOCKER[@]}" run -d --name "$COLLECTOR" --network "$NETWORK" --network-alias otel-collector -p 127.0.0.1::4318 \
   -e KALA_OTEL_INGEST_TOKEN="$ingest" -e KALA_ASPIRE_DASHBOARD_OTLP_API_KEY="$api_key" \
-  -v "$ROOT/deploy/aspire/telemetry/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro" "$COLLECTOR_IMAGE" \
+  -e KALA_OBSERVABILITY_POSTGRES_PASSWORD=unused-transport-proof-no-database \
+  -e KALA_OBSERVABILITY_SILO_METRICS_TOKEN=unused-transport-proof-no-silo \
+  -v "$TMP/collector.transport.yaml:/etc/otelcol-contrib/config.yaml:ro" "$COLLECTOR_IMAGE" \
   --config=/etc/otelcol-contrib/config.yaml >/dev/null
 
 # This is the exact finite native readiness command published by Program.cs.

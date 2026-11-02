@@ -2,6 +2,7 @@ using Aspire.Hosting.ApplicationModel;
 using Aspire.Hosting.Docker.Resources.ServiceNodes;
 using Aspire.Hosting.Docker.Resources.ServiceNodes.Swarm;
 using System.Text.RegularExpressions;
+using System.Text.Json;
 
 var builder = DistributedApplication.CreateBuilder(args);
 
@@ -10,15 +11,23 @@ var builder = DistributedApplication.CreateBuilder(args);
 // Production Compose must not expose the Aspire diagnostic dashboard.
 builder.AddDockerComposeEnvironment("compose").WithDashboard(enabled: false);
 
-var publicHostname = Required("KALA_PUBLIC_HOSTNAME");
-var publicOrigin = Required("KALA_PUBLIC_ORIGIN");
-var publicPort = PositivePort("KALA_PUBLIC_PORT", 443);
+var ingressMode = Environment.GetEnvironmentVariable("KALA_INGRESS_MODE")?.Trim() ?? "bundled-caddy";
+if (ingressMode is not ("bundled-caddy" or "external"))
+    throw new InvalidOperationException("KALA_INGRESS_MODE must be bundled-caddy or external.");
+var bundledIngress = ingressMode == "bundled-caddy";
+var publicHostname = bundledIngress ? Required("KALA_PUBLIC_HOSTNAME") : null;
+var publicOrigin = RequiredHttpsOrigin("KALA_PUBLIC_ORIGIN");
+var publicPort = bundledIngress ? PositivePort("KALA_PUBLIC_PORT", 443) : 443;
+var gatewayLoopbackPort = bundledIngress ? 13001 : PositivePort("KALA_GATEWAY_LOOPBACK_PORT", 13001);
+var deploymentConfigFile = ConfigurationFile("KALA_DEPLOYMENT_CONFIG_FILE", Path.Combine(builder.AppHostDirectory, "deployment.json"));
+ValidateDedicatedDescriptor(deploymentConfigFile);
+var caddyConfigFile = bundledIngress ? ConfigurationFile("KALA_CADDY_CONFIG_FILE", Path.Combine(builder.AppHostDirectory, "Caddyfile")) : null;
 var observabilityEnabled = Environment.GetEnvironmentVariable("KALA_ASPIRE_OBSERVABILITY")?.Trim() == "1";
 var observabilityManagementPort = PositivePort("KALA_ASPIRE_OBSERVABILITY_PORT", 18888);
 var runtimeLlmModel = Required("KALA_RUNTIME_LLM_MODEL");
 var runtimeLlmBaseUrl = Required("KALA_RUNTIME_LLM_BASE_URL");
 
-var edgeImage = RequiredDigestImage("KALA_EDGE_IMAGE");
+var edgeImage = bundledIngress ? RequiredDigestImage("KALA_EDGE_IMAGE") : null;
 var gatewayImage = RequiredDigestImage("KALA_GATEWAY_IMAGE");
 var runtimeImage = RequiredDigestImage("KALA_RUNTIME_IMAGE");
 var dashboardImage = RequiredDigestImage("KALA_DASHBOARD_IMAGE");
@@ -57,6 +66,8 @@ var llmApiKey = builder.AddParameter("llm-api-key", secret: true);
 var observabilityBrowserToken = observabilityEnabled ? builder.AddParameter("observability-browser-token", secret: true) : null;
 var observabilityOtlpApiKey = observabilityEnabled ? builder.AddParameter("observability-otlp-api-key", secret: true) : null;
 var observabilityIngestToken = observabilityEnabled ? builder.AddParameter("observability-ingest-token", secret: true) : null;
+var observabilityPostgresPassword = observabilityEnabled ? builder.AddParameter("observability-postgres-password", secret: true) : null;
+var observabilitySiloMetricsToken = observabilityEnabled ? builder.AddParameter("observability-silo-metrics-token", secret: true) : null;
 
 // Bootstrap only the PostgreSQL maintenance database and superuser. The
 // operator initialization flow creates independent control/Runtime databases
@@ -106,8 +117,13 @@ if (observabilityEnabled)
         .WithArgs("--config=/etc/otelcol-contrib/config.yaml")
         .WithEnvironment("KALA_OTEL_INGEST_TOKEN", observabilityIngestToken!)
         .WithEnvironment("KALA_ASPIRE_DASHBOARD_OTLP_API_KEY", observabilityOtlpApiKey!)
+        .WithEnvironment("KALA_OBSERVABILITY_POSTGRES_PASSWORD", observabilityPostgresPassword!)
+        .WithEnvironment("KALA_OBSERVABILITY_SILO_METRICS_TOKEN", observabilitySiloMetricsToken!)
         .WithBindMount(Path.Combine(builder.AppHostDirectory, "telemetry", "otel-collector.yaml"), "/etc/otelcol-contrib/config.yaml", isReadOnly: true)
         .WithImagePullPolicy(ImagePullPolicy.Missing);
+    if (bundledIngress)
+        otelCollector.WithArgs("--config=/etc/otelcol-contrib/caddy.yaml")
+            .WithBindMount(Path.Combine(builder.AppHostDirectory, "telemetry", "otel-collector-caddy.yaml"), "/etc/otelcol-contrib/caddy.yaml", isReadOnly: true);
     otelCollector.PublishAsDockerComposeService((_, service) => {
         service.Restart = "unless-stopped";
         service.Logging = new() { Driver = "json-file", Options = new() { ["max-size"] = "10m", ["max-file"] = "3" } };
@@ -159,7 +175,7 @@ var runtime = builder.AddContainer("runtime", runtimeImage)
     .WithEnvironment("KALA_RUNTIME_EXPERIMENTAL_S3_SECRET_ACCESS_KEY", runtimeS3SecretKey)
     .WithEnvironment("KALA_RUNTIME_EXPERIMENTAL_S3_FORCE_PATH_STYLE", "true")
     .WithEnvironment("KALA_RUNTIME_EXPERIMENTAL_STATE_MASTER_KEY_FILE", "/run/kala-secrets/runtime-state-master-key")
-    .WithBindMount(Path.Combine(builder.AppHostDirectory, "deployment.json"), "/etc/kala/deployment.json", isReadOnly: true)
+    .WithBindMount(deploymentConfigFile, "/etc/kala/deployment.json", isReadOnly: true)
     .WithBindMount(stateMasterKeyFile, "/run/kala-secrets/runtime-state-master-key", isReadOnly: true)
     .WithBindMount(installationIdFile, "/run/kala-secrets/installation-id", isReadOnly: true)
     .WaitFor(postgres)
@@ -175,6 +191,7 @@ if (otelCollector is not null && observabilityReadiness is not null)
 }
 
 var gateway = builder.AddContainer("gateway", gatewayImage)
+    .WithEnvironment("KALA_DEDICATED_INGRESS_MODE", ingressMode)
     .WithEnvironment("KALA_DEPLOYMENT_CONFIG", "/etc/kala/deployment.json")
     .WithEnvironment("KALA_INGRESS_PORT", "13001")
     .WithEnvironment("KALA_INGRESS_LISTEN_HOST", "0.0.0.0")
@@ -191,7 +208,7 @@ var gateway = builder.AddContainer("gateway", gatewayImage)
     .WithEnvironment("KALA_INSTALLATION_ID_FILE", "/run/kala-secrets/installation-id")
     .WithEnvironment("KALA_INGRESS_SESSION_SECRET", gatewaySessionSecret)
     .WithEnvironment("KALA_INGRESS_SHARED_SECRET", ingressSharedSecret)
-    .WithBindMount(Path.Combine(builder.AppHostDirectory, "deployment.json"), "/etc/kala/deployment.json", isReadOnly: true)
+    .WithBindMount(deploymentConfigFile, "/etc/kala/deployment.json", isReadOnly: true)
     .WithBindMount(installationIdFile, "/run/kala-secrets/installation-id", isReadOnly: true)
     .WaitFor(runtime)
     .WaitFor(dashboard)
@@ -205,19 +222,28 @@ if (otelCollector is not null && observabilityReadiness is not null)
         .WaitForCompletion(observabilityReadiness);
 }
 
-// Caddy remains the only public endpoint. The optional observability management
-// endpoint is explicitly host-loopback-only; OTLP ports are never published.
-// Gateway,
-// Runtime, Dashboard, PostgreSQL, and SILO stay on the Compose network.
-var ingress = builder.AddContainer("ingress", edgeImage)
-    .WithEnvironment("KALA_PUBLIC_HOSTNAME", publicHostname)
-    .WithBindMount(Path.Combine(builder.AppHostDirectory, "Caddyfile"), "/etc/caddy/Caddyfile", isReadOnly: true)
-    .WithVolume("kala-aspire-caddy-data", "/data")
-    .WithVolume("kala-aspire-caddy-config", "/config")
-    .WithEndpoint(port: publicPort, targetPort: 443, name: "https", scheme: "https", isProxied: false)
-    .WithExternalHttpEndpoints()
-    .WaitFor(gateway)
-    .WithImagePullPolicy(ImagePullPolicy.Missing);
+// Edge/TLS custody belongs to the deployer, not Runtime. Keep the existing
+// self-contained default, but an existing host proxy may use a loopback handoff
+// or a same-network proxy may reach the private Gateway directly.
+IResourceBuilder<ContainerResource>? ingress = null;
+if (bundledIngress)
+{
+    ingress = builder.AddContainer("ingress", edgeImage!)
+        .WithEnvironment("KALA_PUBLIC_HOSTNAME", publicHostname!)
+        .WithBindMount(caddyConfigFile!, "/etc/caddy/Caddyfile", isReadOnly: true)
+        .WithVolume("kala-aspire-caddy-data", "/data")
+        .WithVolume("kala-aspire-caddy-config", "/config")
+        .WithEndpoint(port: publicPort, targetPort: 443, name: "https", scheme: "https", isProxied: false)
+        .WithExternalHttpEndpoints()
+        .WaitFor(gateway)
+        .WithImagePullPolicy(ImagePullPolicy.Missing);
+}
+else
+{
+    gateway.PublishAsDockerComposeService((_, service) => {
+        service.Ports.Add($"127.0.0.1:{gatewayLoopbackPort}:13001");
+    });
+}
 
 // Publish actual Compose health checks; model WaitFor alone is not readiness.
 WithReadiness(postgres, "CMD", "pg_isready", "-U", "postgres", "-d", "postgres");
@@ -225,7 +251,8 @@ WithReadiness(silo, "CMD", "curl", "-fsS", "--max-time", "3", "http://127.0.0.1:
 WithReadiness(dashboard, "CMD", "/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:8080/healthz',{signal:AbortSignal.timeout(3000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))");
 WithReadiness(runtime, "CMD", "/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:13002/internal/health',{headers:{'x-agent-runlab-ingress-secret':process.env.KALA_INGRESS_SHARED_SECRET},signal:AbortSignal.timeout(3000)}).then(async r=>process.exit(r.ok&&(await r.json()).state==='ready'?0:1)).catch(()=>process.exit(1))");
 WithReadiness(gateway, "CMD", "/nodejs/bin/node", "-e", "const q=require('node:http').get('http://127.0.0.1:13001/healthz',{headers:{Host:new URL(process.env.KALA_PUBLIC_URLS).host},timeout:3000},r=>{r.resume();process.exit(r.statusCode===200?0:1)});q.on('error',()=>process.exit(1));q.on('timeout',()=>q.destroy())");
-WithReadiness(ingress, "CMD", "wget", "-q", "--spider", "-T", "3", "http://127.0.0.1:8081/healthz");
+if (ingress is not null)
+    WithReadiness(ingress, "CMD", "wget", "-q", "--spider", "-T", "3", "http://127.0.0.1:8081/healthz");
 builder.Build().Run();
 
 static void WithReadiness(IResourceBuilder<ContainerResource> resource, params string[] command)
@@ -242,6 +269,43 @@ static void WithResourceLimits(Aspire.Hosting.Docker.Resources.ComposeNodes.Serv
     service.Deploy = new Deploy {
         Resources = new Resources { Limits = new ResourceSpec { Cpus = cpus, Memory = memory } }
     };
+}
+
+static string RequiredHttpsOrigin(string name)
+{
+    var value = Required(name);
+    if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme != "https"
+        || string.IsNullOrEmpty(uri.Host) || !string.IsNullOrEmpty(uri.UserInfo)
+        || uri.AbsolutePath != "/" || !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment))
+        throw new InvalidOperationException($"{name} must be one HTTPS origin without user info, path, query or fragment.");
+    return value.TrimEnd('/');
+}
+
+static string ConfigurationFile(string name, string fallback)
+{
+    var value = Environment.GetEnvironmentVariable(name)?.Trim();
+    if (string.IsNullOrEmpty(value)) value = fallback;
+    if (!Path.IsPathFullyQualified(value) || !File.Exists(value) || new FileInfo(value).LinkTarget is not null)
+        throw new InvalidOperationException($"{name} must name an existing absolute non-symlink configuration file.");
+    return Path.GetFullPath(value);
+}
+
+static void ValidateDedicatedDescriptor(string path)
+{
+    try
+    {
+        using var document = JsonDocument.Parse(File.ReadAllText(path));
+        var root = document.RootElement;
+        if (root.GetProperty("schemaVersion").GetInt32() != 1
+            || root.GetProperty("architecture").GetString() != "platform"
+            || root.GetProperty("tenancy").GetString() != "single-tenant"
+            || root.GetProperty("runtimeProfile").GetString() != "full")
+            throw new InvalidOperationException();
+    }
+    catch (Exception error) when (error is JsonException or KeyNotFoundException or InvalidOperationException or FormatException)
+    {
+        throw new InvalidOperationException("Dedicated mode descriptor must retain schema 1, platform, single-tenant and full runtime profile; it cannot switch storage or tenancy authority.");
+    }
 }
 
 static string Required(string name)

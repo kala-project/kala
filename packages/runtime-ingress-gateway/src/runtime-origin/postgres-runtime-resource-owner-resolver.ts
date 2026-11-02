@@ -1,5 +1,7 @@
 import pg from 'pg'
 
+import { tracePostgresQuery, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
+
 import type { ControlPlaneDatabase, SqlExecutor } from '../persistence/postgres.js'
 import { safeRuntimeOrigin } from './postgres-runtime-origin-resolver.js'
 
@@ -185,6 +187,7 @@ export function createPostgresRuntimeResourceOwnerResolver(options: {
   controlPlane: ControlPlaneDatabase
   maxConnections?: number
   statementTimeoutMs?: number
+  telemetry?: OnlineTelemetry
 }): RuntimeResourceOwnerResolver & RuntimeResourceOwnerBindingResolver & { close(): Promise<void> } {
   const pool = new Pool({
     connectionString: options.connectionString,
@@ -195,7 +198,7 @@ export function createPostgresRuntimeResourceOwnerResolver(options: {
     idleTimeoutMillis: 30_000,
   })
   const resolver = new PostgresRuntimeResourceOwnerResolver(
-    { query: (text, values) => pool.query(text, values as unknown[] | undefined) },
+    { query: (text, values) => tracePostgresQuery(options.telemetry, () => pool.query(text, values as unknown[] | undefined)) },
     options.controlPlane,
     options.allowedOrigins,
   )

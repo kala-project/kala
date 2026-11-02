@@ -2,6 +2,7 @@
 """Validate resolved Compose against protected initialization files without printing secrets."""
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -27,6 +28,7 @@ def password(url_name: str) -> str:
 
 try:
     services = json.load(sys.stdin)['services']
+    observability = 'otel-collector' in services
     checks = {
         ('gateway', 'KALA_INGRESS_DATABASE_URL'): secret('gateway_database_url'),
         ('gateway', 'KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING'): secret('runtime_reader_database_url'),
@@ -37,12 +39,37 @@ try:
         ('silo', 'MINIO_ROOT_PASSWORD'): secret('silo_root_secret_key'),
         ('postgres', 'POSTGRES_PASSWORD'): password('postgres_admin_url'),
     }
+    if observability:
+        checks.update({
+            ('otel-collector', 'KALA_OBSERVABILITY_POSTGRES_PASSWORD'): secret('observability_postgres_password'),
+            ('otel-collector', 'KALA_OBSERVABILITY_SILO_METRICS_TOKEN'): secret('observability_silo_metrics_token'),
+        })
     for (service, name), expected in checks.items():
         if services.get(service, {}).get('environment', {}).get(name) != expected:
             raise ValueError(f'{service} {name} does not match its protected initialization file')
     if secret('silo_root_access_key') == secret('runtime_s3_access_key') \
             or secret('silo_root_secret_key') == secret('runtime_s3_secret_key'):
         raise ValueError('SILO root and Runtime credentials must be distinct')
+    if observability:
+        pg_password = secret('observability_postgres_password')
+        existing_passwords = [password(name) for name in (
+            'postgres_admin_url', 'control_owner_url', 'gateway_database_url',
+            'runtime_owner_url', 'runtime_database_url', 'runtime_reader_database_url')]
+        if len(pg_password.encode()) < 32 or pg_password in existing_passwords:
+            raise ValueError('observability PostgreSQL password must be at least 32 bytes and distinct from all role credentials')
+        collector = services['otel-collector']['environment']
+        silo_token = secret('observability_silo_metrics_token')
+        telemetry_credentials = [
+            pg_password, silo_token,
+            services['observability-dashboard']['environment'].get('Dashboard__Frontend__BrowserToken'),
+            services['observability-dashboard']['environment'].get('Dashboard__Otlp__PrimaryApiKey'),
+            collector.get('KALA_OTEL_INGEST_TOKEN'),
+        ]
+        if not re.fullmatch(r'[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', silo_token):
+            raise ValueError('observability SILO metrics token must be a signed JWT')
+        if any(not isinstance(value, str) or len(value.encode()) < 32 for value in telemetry_credentials) \
+                or len(set(telemetry_credentials)) != len(telemetry_credentials):
+            raise ValueError('all observability credentials must be strong and distinct')
     installation = secret('installation_id')
     configured = Path(services['runtime']['environment']['KALA_INSTALLATION_ID_FILE'])
     mounts = services['runtime'].get('volumes', [])

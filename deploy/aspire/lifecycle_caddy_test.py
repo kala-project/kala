@@ -92,8 +92,10 @@ class ArtifactCompatibilityTests(unittest.TestCase):
             for name in op.LEGACY_ARCHIVE_ROOTS:
                 roots[name] = parent / name
                 roots[name].mkdir()
-            with self.assertRaisesRegex(op.OperatorError, "exactly PostgreSQL"):
-                op.create_artifact(parent / "artifact", roots, {})
+            with self.assertRaisesRegex(op.OperatorError, "roots must exactly match"):
+                op.create_artifact(parent / "artifact", roots, {
+                    "ingressMode": "bundled-caddy", "ingressIdentityCustody": "included-in-app-backup"
+                })
 
     def test_legacy_v1_is_fail_closed_without_explicit_identity_reissue_ack(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -116,10 +118,43 @@ class ArtifactCompatibilityTests(unittest.TestCase):
                 loaded, _ = op.read_artifact(artifact, acknowledge_legacy=True)
                 self.assertEqual(loaded["schemaVersion"], 1)
 
-    def test_restore_requires_fresh_volume_creation_authorization_before_io(self):
-        args = type("Args", (), {"acknowledge_source_fenced": True, "create_fresh_caddy_volumes": False})()
-        with self.assertRaisesRegex(op.OperatorError, "create-fresh-caddy-volumes"):
-            op.restore(args)
+    def test_v2_is_still_read_as_bundled_caddy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact"
+            artifact.mkdir(mode=0o700)
+            payload = artifact / "payload.tar"
+            payload.write_bytes(b"v2-payload")
+            manifest = {"schemaVersion": 2, "kind": "kala-dedicated-cold-backup",
+                        "payloadSha256": hashlib.sha256(payload.read_bytes()).hexdigest()}
+            encoded = (json.dumps(manifest) + "\n").encode()
+            (artifact / "manifest.json").write_bytes(encoded)
+            (artifact / "COMPLETED").write_text(hashlib.sha256(encoded).hexdigest() + "\n")
+            for path in artifact.iterdir():
+                os.chmod(path, 0o600)
+            with mock.patch.object(op, "safe_root", return_value=artifact), \
+                 mock.patch.object(op, "private_regular", side_effect=lambda path, _label: path):
+                loaded, _ = op.read_artifact(artifact)
+            self.assertEqual(op.artifact_ingress_mode(loaded), "bundled-caddy")
+
+    def test_bundled_restore_requires_fresh_volume_authorization_before_mutation(self):
+        args = type("Args", (), {
+            "acknowledge_source_fenced": True, "acknowledge_ingress_identity_reissue": False,
+            "acknowledge_external_ingress_fenced": False, "create_fresh_caddy_volumes": False,
+            "source_compose": "source", "source_env": "source-env", "target_compose": "target",
+            "target_env": "target-env", "artifact": "artifact", "policy": "policy"})()
+        services = {name: {"volumes": []} for name in op.SERVICES}
+        services["gateway"]["environment"] = {"KALA_DEDICATED_INGRESS_MODE": "bundled-caddy"}
+        config = {"services": services}
+        manifest = {"schemaVersion": 3, "ingressMode": "bundled-caddy",
+                    "ingressIdentityCustody": "included-in-app-backup"}
+        with mock.patch.object(op, "private_regular", side_effect=lambda path, _label: path), \
+             mock.patch.object(op, "read_artifact", return_value=(manifest, Path("payload"))), \
+             mock.patch.object(op, "load_policy", return_value={}), \
+             mock.patch.object(op, "compose_config", return_value=config), \
+             mock.patch.object(op, "assert_inactive") as inactive:
+            with self.assertRaisesRegex(op.OperatorError, "create-fresh-caddy-volumes"):
+                op.restore(args)
+        inactive.assert_not_called()
 
 
 if __name__ == "__main__":

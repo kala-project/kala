@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { createOnlineTelemetryFromEnv, OnlineTelemetry } from './node-telemetry.js'
+import { createOnlineTelemetryFromEnv, OnlineTelemetry, tracePostgresQuery } from './node-telemetry.js'
 
 const TOKEN = 't'.repeat(32)
 
 describe('OnlineTelemetry', () => {
   it('is explicit opt-in and requires endpoint plus a protected token', () => {
     expect(createOnlineTelemetryFromEnv('kala-test', {})).toBeUndefined()
+    const original = Promise.resolve({ rows: [] })
+    expect(tracePostgresQuery(undefined, () => original)).toBe(original)
     expect(() => createOnlineTelemetryFromEnv('kala-test', { KALA_OTEL_ENABLED: '1' })).toThrow(/requires/u)
     expect(() => new OnlineTelemetry({ serviceName: 'kala-test', endpoint: 'http://localhost:4318?untrusted=1', authToken: TOKEN })).toThrow(/without credentials/u)
   })
@@ -80,6 +82,51 @@ describe('OnlineTelemetry', () => {
     expect(histogram.histogram.dataPoints[0]).toMatchObject({ count: '1', sum: 1250, min: 1250, max: 1250 })
     expect(JSON.stringify(requests)).not.toContain('session-sensitive')
     expect(JSON.stringify(requests)).not.toContain('turn-sensitive')
+  })
+
+  it('records real client calls with success, error, parent isolation, and no sensitive fields', async () => {
+    const requests: Array<{ url: string; body: string }> = []
+    const send = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), body: String(init?.body) })
+      return new Response('', { status: 200 })
+    }) as typeof fetch
+    const telemetry = new OnlineTelemetry({
+      serviceName: 'kala-test', endpoint: 'http://localhost:4318', authToken: TOKEN,
+      fetch: send, flushIntervalMs: 60_000,
+    })
+    const request = telemetry.startHttpSpan('POST', 'runtime.command')
+    request.activate()
+    const queryResult = { rows: [{ ok: true }] }
+    await expect(telemetry.traceClientCall({ provider: 'postgresql', operation: 'query' }, async () => {
+      // These values represent data used by the real client call, not telemetry attributes.
+      void 'SELECT secret FROM private_table WHERE password=$1'
+      void 'postgres://user:credential@db.example.invalid/private'
+      return queryResult
+    })).resolves.toBe(queryResult)
+    request.end(200)
+
+    const clientError = new Error('raw S3 failure for bucket-sensitive/key-sensitive')
+    await expect(telemetry.traceClientCall({ provider: 's3', operation: 'put' }, async () => {
+      throw clientError
+    })).rejects.toBe(clientError)
+    await telemetry.flush()
+    await telemetry.close()
+
+    const body = requests.find((entry) => entry.url.endsWith('/traces'))!.body
+    const spans = JSON.parse(body).resourceSpans[0].scopeSpans[0].spans
+    const pg = spans.find((span: { name: string }) => span.name === 'postgresql.query')
+    const s3 = spans.find((span: { name: string }) => span.name === 's3.put')
+    const requestSpan = spans.find((span: { name: string }) => span.name === 'http runtime.command')
+    expect(pg).toMatchObject({ traceId: requestSpan.traceId, parentSpanId: requestSpan.spanId, kind: 3, status: { code: 1 } })
+    expect(s3).toMatchObject({ kind: 3, status: { code: 2 } })
+    expect(s3).not.toHaveProperty('parentSpanId')
+    expect(s3.traceId).not.toBe(requestSpan.traceId)
+    expect(s3.attributes).toEqual(expect.arrayContaining([
+      { key: 'provider', value: { stringValue: 's3' } },
+      { key: 'operation', value: { stringValue: 'put' } },
+      { key: 'error.type', value: { stringValue: 'client_error' } },
+    ]))
+    expect(body).not.toMatch(/SELECT secret|private_table|password|credential|db\.internal|bucket-sensitive|key-sensitive|raw S3 failure/u)
   })
 
   it('rejects malformed explicit observations without throwing or enqueueing', async () => {

@@ -1,5 +1,7 @@
 import { createRequire } from 'node:module'
 
+import { tracePostgresQuery, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
+
 import {
   RuntimeUnitPlacementFencedError,
   type RuntimeUnitPlacementLease,
@@ -333,6 +335,7 @@ export function createPostgresHotStateStore(options: {
   statementTimeoutMs?: number
   ssl?: unknown
   placementLease?: RuntimeUnitPlacementLease
+  telemetry?: OnlineTelemetry
 }): PostgresHotStateStore {
   const pool = new Pool({
     connectionString: options.connectionString,
@@ -352,16 +355,16 @@ export function createPostgresHotStateStore(options: {
   const inTransaction = async <T>(operation: (transaction: HotStateSqlExecutor) => Promise<T>): Promise<T> => {
     const client = await pool.connect()
     try {
-      await client.query('BEGIN')
+      await tracePostgresQuery(options.telemetry, () => client.query('BEGIN'))
       const transaction: HotStateSqlExecutor = {
-        query: (text, values) => client.query(text, values as unknown[] | undefined),
+        query: (text, values) => tracePostgresQuery(options.telemetry, () => client.query(text, values as unknown[] | undefined)),
       }
       if (options.placementLease) await assertRuntimeUnitPlacement(transaction, placementTable, options.placementLease)
       const result = await operation(transaction)
-      await client.query('COMMIT')
+      await tracePostgresQuery(options.telemetry, () => client.query('COMMIT'))
       return result
     } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined)
+      await tracePostgresQuery(options.telemetry, () => client.query('ROLLBACK')).catch(() => undefined)
       throw error
     } finally {
       client.release()

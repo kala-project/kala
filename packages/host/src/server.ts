@@ -24,7 +24,7 @@ import type {
   SessionErrorScope,
 } from '@agent-kernel/shared'
 import { validatePublicRequest } from '@agent-kernel/shared'
-import { createOnlineTelemetryFromEnv } from '@agent-kernel/shared/node-telemetry'
+import { createOnlineTelemetryFromEnv, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
 import type {
   AgentConfig,
   RequestApprovalEffect,
@@ -134,6 +134,7 @@ import { occurrenceSessionId, UnitScheduler } from './scheduled-tasks/scheduler.
 import type { ScheduledTask, ScheduledTaskSnapshot } from './scheduled-tasks/types.js'
 
 export type HostServerOptions = {
+  telemetry?: OnlineTelemetry
   port: number
   listenHost?: string
   publicUrls?: readonly PublicUrlPattern[]
@@ -315,7 +316,8 @@ export async function startHostServer(
     throw new Error('Durable Session and message queue authorities must be configured together')
   }
   const tenancy = effectiveTenancy(deployment)
-  const telemetry = createOnlineTelemetryFromEnv('kala-runtime')
+  const telemetry = options.telemetry ?? createOnlineTelemetryFromEnv('kala-runtime')
+  const ownsTelemetry = options.telemetry === undefined
   const agentTelemetry = telemetry ? new AgentTelemetryBridge(telemetry, options.resourceUnitId ?? 'local') : undefined
   const metrics = new OperationalMetrics((name, value, labels) => telemetry?.counter(name, value, {
     ...(labels.component ? { component: labels.component } : {}),
@@ -333,6 +335,9 @@ export async function startHostServer(
     if (pathname.startsWith('/socket.io/')) return
     const span = telemetry?.startHttpSpan(request.method, telemetryRoute(pathname), request.headers.traceparent)
     if (!span) return
+    // This request-owned store is invalidated when the response ends; Socket.IO
+    // transports are excluded above, so long-lived websocket work cannot inherit it.
+    span.activate()
     if (!response.headersSent) response.setHeader('x-request-id', span.correlationId)
     response.once('finish', () => span.end(response.statusCode))
     response.once('close', () => { if (!response.writableFinished) span.end(499) })
@@ -426,7 +431,7 @@ export async function startHostServer(
     if (options.objectStorage?.messageAttachments instanceof SqliteMessageAttachmentStore) await options.objectStorage.messageAttachments.close()
     if (options.sessionAuthority instanceof SqliteSessionAuthority) await options.sessionAuthority.close()
     if (ownsStateStore) stateStore.close()
-    void telemetry?.close()
+    if (ownsTelemetry) void telemetry?.close()
   }
   let activeSocketAdmin: SocketAdminConfig | undefined
   const activateSocketAdmin = (config: SocketAdminConfig): void => {

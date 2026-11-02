@@ -1,4 +1,5 @@
 import { createHmac, randomBytes } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 
 export type SafeTelemetryAttributes = Readonly<Record<
   'component' | 'deployment.mode' | 'error.type' | 'http.request.method' | 'http.response.status_code' |
@@ -65,8 +66,14 @@ export type OnlineTelemetryOptions = {
 export type HttpSpan = {
   readonly traceparent: string
   readonly correlationId: string
+  /** Activate this short request context for subsequently dispatched handlers. */
+  activate(): void
   end(statusCode: number): void
 }
+
+export type ClientTelemetryOperation =
+  | { provider: 'postgresql'; operation: 'query' }
+  | { provider: 's3'; operation: 'put' | 'get' | 'delete' }
 
 export type ExplicitTelemetrySpan = {
   traceId: string
@@ -96,11 +103,13 @@ const EXPLICIT_SPAN_NAMES = new Set(['agent.turn', 'agent.llm', 'agent.tool', 'a
 const EXPLICIT_SPAN_STATUSES = new Set(['ok', 'error', 'unset'])
 const HISTOGRAM_BOUNDS_MS = [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000, 60_000, 300_000]
 const HISTOGRAM_BOUNDS_COUNT = [0, 1, 2, 5, 10, 25, 50, 100]
+type ActiveRequestTrace = { traceId: string; spanId: string; active: boolean }
+const activeRequestTrace = new AsyncLocalStorage<ActiveRequestTrace>()
 
 /**
  * A deliberately small, Node-only OTLP/HTTP JSON client for operational signals.
- * It has no ambient context: callers explicitly pass traceparent across each short
- * request boundary, so long-lived Socket.IO/WebSocket contexts cannot leak.
+ * Cross-service traceparent is explicit. Short HTTP request stores are invalidated
+ * on response completion; Socket.IO/WebSocket paths never activate a store.
  */
 export class OnlineTelemetry {
   private readonly endpoint: string
@@ -150,12 +159,15 @@ export class OnlineTelemetry {
     const startedAt = nowNano()
     const startedMono = process.hrtime.bigint()
     let ended = false
+    const context: ActiveRequestTrace = { traceId, spanId, active: true }
     return {
       traceparent: `00-${traceId}-${spanId}-01`,
       correlationId: traceId,
+      activate: () => activeRequestTrace.enterWith(context),
       end: (statusCode) => {
         if (ended) return
         ended = true
+        context.active = false
         const safeStatus = Number.isInteger(statusCode) && statusCode >= 100 && statusCode <= 599 ? statusCode : 500
         const statusClass = `${Math.floor(safeStatus / 100)}xx`
         const attributes = safeAttributes({
@@ -182,6 +194,45 @@ export class OnlineTelemetry {
           'http.request.method': normalizedMethod, 'http.route': normalizedRoute, 'status.class': statusClass,
         }, traceId, spanId)
       },
+    }
+  }
+
+  /**
+   * Times one real client operation. Only fixed provider/operation enums are
+   * accepted; SQL, parameters, object coordinates, URLs, and error details are
+   * never inputs to the telemetry path.
+   */
+  async traceClientCall<T>(client: ClientTelemetryOperation, call: () => Promise<T>): Promise<T> {
+    const parent = activeRequestTrace.getStore()
+    const traceId = parent?.active ? parent.traceId : randomHex(16)
+    const parentSpanId = parent?.active ? parent.spanId : undefined
+    const spanId = randomHex(8)
+    const startedAt = nowNano()
+    const startedMono = process.hrtime.bigint()
+    let status = 1
+    try {
+      return await call()
+    } catch (error) {
+      status = 2
+      throw error
+    } finally {
+      this.enqueue({ kind: 'span', value: {
+        traceId,
+        spanId,
+        ...(parentSpanId ? { parentSpanId } : {}),
+        name: client.provider === 'postgresql' ? 'postgresql.query' : `s3.${client.operation}`,
+        kind: 3,
+        startTimeUnixNano: startedAt,
+        endTimeUnixNano: (BigInt(startedAt) + (process.hrtime.bigint() - startedMono)).toString(),
+        attributes: safeAttributes({
+          component: client.provider === 'postgresql' ? 'database' : 'object-store',
+          provider: client.provider,
+          operation: client.operation,
+          outcome: status === 1 ? 'ok' : 'error',
+          ...(status === 2 ? { 'error.type': 'client_error' } : {}),
+        }),
+        status: { code: status },
+      } })
     }
   }
 
@@ -333,6 +384,10 @@ export class OnlineTelemetry {
       await new Promise<void>((resolve) => setTimeout(resolve, 50 * (attempt + 1)))
     }
   }
+}
+
+export function tracePostgresQuery<T>(telemetry: OnlineTelemetry | undefined, query: () => Promise<T>): Promise<T> {
+  return telemetry ? telemetry.traceClientCall({ provider: 'postgresql', operation: 'query' }, query) : query()
 }
 
 export function createOnlineTelemetryFromEnv(serviceName: string, env: NodeJS.ProcessEnv = process.env): OnlineTelemetry | undefined {

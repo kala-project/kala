@@ -4,6 +4,8 @@ import { basename, join } from 'node:path'
 
 import pg from 'pg'
 
+import { tracePostgresQuery, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
+
 const { Pool } = pg
 
 export type SqlQueryResult<Row extends pg.QueryResultRow = pg.QueryResultRow> = pg.QueryResult<Row>
@@ -24,6 +26,7 @@ export function createPostgresControlPlaneDatabase(options: {
   maxConnections?: number
   statementTimeoutMs?: number
   ssl?: pg.PoolConfig['ssl']
+  telemetry?: OnlineTelemetry
 }): ControlPlaneDatabase {
   const pool = new Pool({
     connectionString: options.connectionString,
@@ -35,23 +38,25 @@ export function createPostgresControlPlaneDatabase(options: {
     ...(options.ssl !== undefined ? { ssl: options.ssl } : {}),
   })
   return {
-    query: (text, values) => pool.query(text, values as unknown[] | undefined),
+    query: (text, values) => tracePostgresQuery(options.telemetry, () => pool.query(text, values as unknown[] | undefined)),
     async transaction(operation) {
       const client = await pool.connect()
       try {
-        await client.query('BEGIN')
-        const result = await operation({ query: (text, values) => client.query(text, values as unknown[] | undefined) })
-        await client.query('COMMIT')
+        await tracePostgresQuery(options.telemetry, () => client.query('BEGIN'))
+        const result = await operation({
+          query: (text, values) => tracePostgresQuery(options.telemetry, () => client.query(text, values as unknown[] | undefined)),
+        })
+        await tracePostgresQuery(options.telemetry, () => client.query('COMMIT'))
         return result
       } catch (error) {
-        await client.query('ROLLBACK').catch(() => undefined)
+        await tracePostgresQuery(options.telemetry, () => client.query('ROLLBACK')).catch(() => undefined)
         throw error
       } finally {
         client.release()
       }
     },
     async health() {
-      const result = await pool.query<{ version: number }>('SELECT COALESCE(MAX(version), 0)::integer AS version FROM control_plane_schema_migrations')
+      const result = await tracePostgresQuery(options.telemetry, () => pool.query<{ version: number }>('SELECT COALESCE(MAX(version), 0)::integer AS version FROM control_plane_schema_migrations'))
       return { ok: true, schemaVersion: result.rows[0]?.version ?? 0 }
     },
     close: () => pool.end(),

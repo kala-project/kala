@@ -1,5 +1,7 @@
 import { createRequire } from 'node:module'
 
+import { tracePostgresQuery, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
+
 import { parseTenantRuntimeUnitId, type TenantRuntimeUnitId } from './unit.js'
 
 type QueryResultRow = Record<string, unknown>
@@ -374,6 +376,7 @@ export function createPostgresRuntimeResourceOwnershipStore(options: {
   maxConnections?: number
   statementTimeoutMs?: number
   ssl?: unknown
+  telemetry?: OnlineTelemetry
 }): PostgresRuntimeResourceOwnershipStore {
   const pool = new Pool({
     connectionString: options.connectionString,
@@ -386,7 +389,18 @@ export function createPostgresRuntimeResourceOwnershipStore(options: {
   })
   // A partition can close an idle client before the owner renewal query runs.
   pool.on('error', () => undefined)
-  return new PostgresRuntimeResourceOwnershipStore(pool, { schema: options.schema })
+  const database: RuntimeResourceOwnershipDatabase = options.telemetry ? {
+    query: (text, values) => tracePostgresQuery(options.telemetry, () => pool.query(text, values)),
+    async connect() {
+      const client = await pool.connect()
+      return {
+        query: (text, values) => tracePostgresQuery(options.telemetry, () => client.query(text, values)),
+        release: () => client.release(),
+      }
+    },
+    end: () => pool.end(),
+  } : pool
+  return new PostgresRuntimeResourceOwnershipStore(database, { schema: options.schema })
 }
 
 /** Public-schema convenience for future PG stores already holding a SQL transaction. */

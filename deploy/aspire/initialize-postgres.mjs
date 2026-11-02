@@ -48,6 +48,12 @@ async function query(client, text, values) {
 
 const urls = {}
 for (const name of Object.keys(expected)) urls[name] = parseDatabaseUrl(name, await secret(name))
+const observabilityEnabled = process.env.KALA_ASPIRE_OBSERVABILITY === '1'
+const args = process.argv.slice(2)
+if (args.some(arg => arg !== '--monitoring-only') || args.length > 1) throw new Error('unsupported PostgreSQL operator option')
+const monitoringOnly = args.includes('--monitoring-only')
+if (monitoringOnly && !observabilityEnabled) throw new Error('monitoring-only mode requires explicit observability input')
+const observabilityPassword = observabilityEnabled ? await secret('observability_postgres_password') : null
 const installationId = await secret('installation_id')
 if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(installationId)) {
   throw new Error('installation_id must contain one canonical UUID')
@@ -56,6 +62,10 @@ const identities = Object.values(urls)
 if (new Set(identities.map(({ user }) => user)).size !== identities.length
   || new Set(identities.map(({ password }) => password)).size !== identities.length) {
   throw new Error('all PostgreSQL principals and passwords must be distinct')
+}
+if (observabilityEnabled && (Buffer.byteLength(observabilityPassword, 'utf8') < 32
+  || identities.some(({ password }) => password === observabilityPassword))) {
+  throw new Error('observability PostgreSQL password must be at least 32 bytes and distinct from every role credential')
 }
 
 let admin
@@ -74,6 +84,7 @@ try {
   await query(admin, "SELECT pg_advisory_lock(hashtextextended('kala-aspire-postgres-provision', 0))")
   const markerTable = await query(admin, "SELECT to_regclass('kala_aspire_provisioning.installation')::text AS name")
   if (!markerTable.rows[0]?.name) {
+    if (monitoringOnly) throw new Error('monitoring-only mode requires an existing matching provisioned installation')
     const markerSchema = await query(admin, "SELECT 1 FROM pg_namespace WHERE nspname='kala_aspire_provisioning'")
     const databases = await query(admin, "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate AND datname <> 'postgres'")
     const roles = await query(admin, "SELECT rolname FROM pg_roles WHERE rolcanlogin AND rolname <> 'postgres' AND rolname !~ '^pg_'")
@@ -92,7 +103,8 @@ try {
     }
   }
 
-  for (const role of identities.slice(1)) {
+  await query(admin, 'BEGIN')
+  for (const role of monitoringOnly ? [] : identities.slice(1)) {
     const present = await query(admin, `SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls
       FROM pg_roles WHERE rolname=$1`, [role.user])
     if (present.rowCount === 0) {
@@ -106,24 +118,62 @@ try {
       await query(admin, `ALTER ROLE ${identifier(role.user)} PASSWORD ${literal(role.password)}`)
     }
   }
-
-  for (const [database, owner] of [['runlab_control', 'kala_control_owner'], ['kala_runtime', 'kala_runtime_owner']]) {
-    const present = await query(admin, 'SELECT pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname=$1', [database])
+  if (observabilityEnabled) {
+    const user = 'kala_observer'
+    const present = await query(admin, `SELECT rolcanlogin, rolinherit, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls
+      FROM pg_roles WHERE rolname=$1`, [user])
     if (present.rowCount === 0) {
-      await query(admin, `CREATE DATABASE ${identifier(database)} OWNER ${identifier(owner)}`)
-    } else if (present.rowCount !== 1 || present.rows[0].owner !== owner) {
-      throw new Error(`existing database ${database} has an unexpected owner`)
+      await query(admin, `CREATE ROLE ${identifier(user)} LOGIN INHERIT PASSWORD ${literal(observabilityPassword)}
+        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`)
+    } else {
+      const value = present.rows[0]
+      if (!value.rolcanlogin || !value.rolinherit || value.rolsuper || value.rolcreatedb || value.rolcreaterole
+          || value.rolreplication || value.rolbypassrls) {
+        throw new Error(`existing role ${user} has unsafe attributes`)
+      }
+      const memberships = await query(admin, `SELECT parent.rolname FROM pg_auth_members membership
+        JOIN pg_roles parent ON parent.oid=membership.roleid
+        JOIN pg_roles member ON member.oid=membership.member WHERE member.rolname=$1`, [user])
+      if (memberships.rows.some(({ rolname }) => rolname !== 'pg_monitor')) {
+        throw new Error(`existing role ${user} has unauthorized role memberships`)
+      }
+      await query(admin, `ALTER ROLE ${identifier(user)} LOGIN INHERIT PASSWORD ${literal(observabilityPassword)}
+        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`)
     }
-    await query(admin, `REVOKE ALL ON DATABASE ${identifier(database)} FROM PUBLIC`)
+    await query(admin, `GRANT pg_monitor TO ${identifier(user)}`)
+    await query(admin, 'REVOKE ALL ON DATABASE postgres FROM PUBLIC')
+    await query(admin, `REVOKE ALL ON DATABASE postgres FROM ${identifier(user)}`)
+    await query(admin, `GRANT CONNECT ON DATABASE postgres TO ${identifier(user)}`)
+    await query(admin, 'REVOKE ALL ON SCHEMA public FROM PUBLIC')
+    await query(admin, `REVOKE ALL ON SCHEMA public FROM ${identifier(user)}`)
   }
-  await query(admin, 'GRANT CONNECT ON DATABASE runlab_control TO kala_control_owner, kala_gateway')
-  await query(admin, 'GRANT CONNECT ON DATABASE kala_runtime TO kala_runtime_owner, kala_runtime, kala_runtime_reader')
+  await query(admin, 'COMMIT')
+
+  if (!monitoringOnly) {
+    for (const [database, owner] of [['runlab_control', 'kala_control_owner'], ['kala_runtime', 'kala_runtime_owner']]) {
+      const present = await query(admin, 'SELECT pg_get_userbyid(datdba) AS owner FROM pg_database WHERE datname=$1', [database])
+      if (present.rowCount === 0) {
+        await query(admin, `CREATE DATABASE ${identifier(database)} OWNER ${identifier(owner)}`)
+      } else if (present.rowCount !== 1 || present.rows[0].owner !== owner) {
+        throw new Error(`existing database ${database} has an unexpected owner`)
+      }
+      await query(admin, `REVOKE ALL ON DATABASE ${identifier(database)} FROM PUBLIC`)
+    }
+    await query(admin, 'GRANT CONNECT ON DATABASE runlab_control TO kala_control_owner, kala_gateway')
+    await query(admin, 'GRANT CONNECT ON DATABASE kala_runtime TO kala_runtime_owner, kala_runtime, kala_runtime_reader')
+  }
+  if (observabilityEnabled) {
+    // CONNECT is needed for fixed per-database statistics, never application-table access.
+    await query(admin, 'GRANT CONNECT ON DATABASE runlab_control TO kala_observer')
+    await query(admin, 'GRANT CONNECT ON DATABASE kala_runtime TO kala_observer')
+  }
 } finally {
+  await admin.query('ROLLBACK').catch(() => undefined)
   await admin.query("SELECT pg_advisory_unlock(hashtextextended('kala-aspire-postgres-provision', 0))").catch(() => undefined)
   await admin.end()
 }
 
-for (const name of ['control_owner_url', 'runtime_owner_url']) {
+for (const name of monitoringOnly ? [] : ['control_owner_url', 'runtime_owner_url']) {
   const target = urls[name]
   const client = new Client({ connectionString: target.url, application_name: 'kala-aspire-postgres-hardener' })
   await client.connect()
@@ -134,4 +184,4 @@ for (const name of ['control_owner_url', 'runtime_owner_url']) {
     await client.end()
   }
 }
-process.stdout.write(`${JSON.stringify({ event: 'aspire_postgres_provisioned', installationId })}\n`)
+process.stdout.write(`${JSON.stringify({ event: monitoringOnly ? 'aspire_postgres_monitoring_configured' : 'aspire_postgres_provisioned', installationId })}\n`)

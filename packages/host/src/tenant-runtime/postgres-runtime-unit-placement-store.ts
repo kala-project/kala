@@ -1,5 +1,7 @@
 import { createRequire } from 'node:module'
 
+import { tracePostgresQuery, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
+
 import { parseTenantRuntimeUnitId, type TenantRuntimeUnitId } from './unit.js'
 
 type QueryResultRow = Record<string, unknown>
@@ -338,6 +340,7 @@ export function createPostgresRuntimeUnitPlacementStore(options: {
   maxConnections?: number
   statementTimeoutMs?: number
   ssl?: unknown
+  telemetry?: OnlineTelemetry
 }): PostgresRuntimeUnitPlacementStore {
   const pool = new Pool({
     connectionString: options.connectionString,
@@ -350,7 +353,18 @@ export function createPostgresRuntimeUnitPlacementStore(options: {
   })
   // Idle pg connections report partitions through EventEmitter, not query promises.
   pool.on('error', () => undefined)
-  return new PostgresRuntimeUnitPlacementStore(pool, { schema: options.schema })
+  const database: RuntimeUnitPlacementDatabase = options.telemetry ? {
+    query: (text, values) => tracePostgresQuery(options.telemetry, () => pool.query(text, values)),
+    async connect() {
+      const client = await pool.connect()
+      return {
+        query: (text, values) => tracePostgresQuery(options.telemetry, () => client.query(text, values)),
+        release: () => client.release(),
+      }
+    },
+    end: () => pool.end(),
+  } : pool
+  return new PostgresRuntimeUnitPlacementStore(database, { schema: options.schema })
 }
 
 async function throwLeaseFailure(

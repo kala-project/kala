@@ -24,17 +24,22 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 
 SERVICES = {"ingress", "gateway", "runtime", "dashboard", "postgres", "silo"}
+EXTERNAL_SERVICES = SERVICES - {"ingress"}
 OBSERVABILITY = {"observability-dashboard", "otel-collector", "observability-readiness"}
 ALL_SERVICES = SERVICES | OBSERVABILITY
-ACCEPTED_SHAPES = (SERVICES, ALL_SERVICES)
+EXTERNAL_ALL_SERVICES = EXTERNAL_SERVICES | OBSERVABILITY
+ACCEPTED_SHAPES = (SERVICES, ALL_SERVICES, EXTERNAL_SERVICES, EXTERNAL_ALL_SERVICES)
 APP_SERVICES = ("gateway", "runtime", "dashboard")
 IMAGE = re.compile(r"^[^\s]+@sha256:[0-9a-fA-F]{64}$")
 ACTIVE = {"running", "restarting", "paused"}
 POLICY_SCHEMA = 1
-ARTIFACT_SCHEMA = 2
+ARTIFACT_SCHEMA = 3
+BUNDLED_ARTIFACT_SCHEMA = 2
 LEGACY_ARTIFACT_SCHEMA = 1
-ARCHIVE_ROOTS = {"postgres", "silo", "recovery", "caddy-data", "caddy-config"}
-LEGACY_ARCHIVE_ROOTS = {"postgres", "silo", "recovery"}
+BUNDLED_ARCHIVE_ROOTS = {"postgres", "silo", "recovery", "caddy-data", "caddy-config"}
+EXTERNAL_ARCHIVE_ROOTS = {"postgres", "silo", "recovery"}
+ARCHIVE_ROOTS = BUNDLED_ARCHIVE_ROOTS
+LEGACY_ARCHIVE_ROOTS = EXTERNAL_ARCHIVE_ROOTS
 VOLUME_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
@@ -172,7 +177,54 @@ def compose_config(compose: Path, env: Path) -> dict[str, Any]:
     services = config.get("services")
     if not isinstance(services, dict) or set(services) not in ACCEPTED_SHAPES:
         fail("resolved Compose graph must match a reviewed Dedicated service shape")
+    ingress_mode(config)
     return config
+
+
+def ingress_mode(config: dict[str, Any]) -> str:
+    """Infer ingress custody from the reviewed graph and its mandatory external marker."""
+    services = config.get("services")
+    if not isinstance(services, dict) or set(services) not in ACCEPTED_SHAPES:
+        fail("resolved Compose graph must match a reviewed Dedicated service shape")
+    environment = services.get("gateway", {}).get("environment", {})
+    if not isinstance(environment, dict):
+        fail("gateway environment must be a resolved mapping")
+    marker = environment.get("KALA_DEDICATED_INGRESS_MODE")
+    graph_mode = "bundled-caddy" if "ingress" in services else "external"
+    if graph_mode == "external" and marker != "external":
+        fail("external ingress graph requires KALA_DEDICATED_INGRESS_MODE=external")
+    if graph_mode == "bundled-caddy" and marker not in (None, "bundled-caddy"):
+        fail("bundled ingress graph has an inconsistent dedicated ingress mode marker")
+    if graph_mode == "external":
+        if config.get("volumes") not in (None, {}):
+            fail("external ingress graph may not declare named application volumes")
+        if any(mount.get("type") == "volume" for service in services.values()
+               for mount in service.get("volumes", [])):
+            fail("external ingress graph may not mount named application volumes")
+    return graph_mode
+
+
+def require_external_fence(mode: str, args: argparse.Namespace) -> None:
+    if mode == "external" and not getattr(args, "acknowledge_external_ingress_fenced", False):
+        fail("external ingress lifecycle mutation requires explicit --acknowledge-external-ingress-fenced")
+
+
+def artifact_ingress_mode(manifest: dict[str, Any]) -> str:
+    schema = manifest.get("schemaVersion")
+    if schema == ARTIFACT_SCHEMA:
+        mode = manifest.get("ingressMode")
+        expected = {"bundled-caddy": "included-in-app-backup", "external": "external-not-in-app-backup"}
+        if mode not in expected or manifest.get("ingressIdentityCustody") != expected[mode]:
+            fail("artifact v3 has inconsistent ingress mode or identity custody")
+        return mode
+    if schema in (BUNDLED_ARTIFACT_SCHEMA, LEGACY_ARTIFACT_SCHEMA):
+        return "bundled-caddy"
+    fail("unsupported backup manifest")
+
+
+def require_matching_ingress_modes(archived: str, source: str, target: str) -> None:
+    if len({archived, source, target}) != 1:
+        fail("restore refuses cross-mode ingress custody; use a separate operator cutover and trust ceremony")
 
 
 def image_map(config: dict[str, Any]) -> dict[str, str]:
@@ -405,10 +457,14 @@ def verify_clean_data_stop(ids: dict[str, str]) -> None:
 
 def cold_stop(compose: Path, env: Path, timeout: int, services: set[str] = SERVICES) -> None:
     base = compose_command(compose, env)
-    run(base + ["stop", "-t", str(timeout), "ingress"], timeout=timeout + 30)
-    assert_inactive(compose, env, {"ingress"})
+    stopped: set[str] = set()
+    if "ingress" in services:
+        run(base + ["stop", "-t", str(timeout), "ingress"], timeout=timeout + 30)
+        assert_inactive(compose, env, {"ingress"})
+        stopped.add("ingress")
     run(base + ["stop", "-t", str(timeout), *APP_SERVICES], timeout=timeout + 30)
-    assert_inactive(compose, env, {"ingress", *APP_SERVICES})
+    stopped.update(APP_SERVICES)
+    assert_inactive(compose, env, stopped)
     observation = sorted(services & OBSERVABILITY)
     if observation:
         run(base + ["stop", "-t", str(timeout), *observation], timeout=timeout + 30)
@@ -499,11 +555,19 @@ def tar_tree(tar: tarfile.TarFile, root: Path, prefix: str, entries: list[dict[s
 
 
 def create_artifact(destination: Path, roots: dict[str, Path], metadata: dict[str, Any]) -> dict[str, Any]:
-    if set(roots) != ARCHIVE_ROOTS:
-        fail("artifact v2 requires exactly PostgreSQL, SILO, recovery, Caddy data and Caddy config roots")
+    mode = metadata.get("ingressMode")
+    expected_roots = (BUNDLED_ARCHIVE_ROOTS if mode == "bundled-caddy" else
+                      EXTERNAL_ARCHIVE_ROOTS if mode == "external" else None)
+    if expected_roots is None or set(roots) != expected_roots:
+        fail("artifact v3 roots must exactly match its declared ingress mode")
     provenance = metadata.get("sourceVolumeProvenance")
-    if not isinstance(provenance, dict) or set(provenance) != {"caddy-data", "caddy-config"}:
-        fail("artifact v2 requires provenance for both Caddy volumes")
+    if mode == "bundled-caddy" and (not isinstance(provenance, dict) or set(provenance) != {"caddy-data", "caddy-config"}):
+        fail("bundled artifact v3 requires provenance for both Caddy volumes")
+    if mode == "external" and provenance is not None:
+        fail("external artifact v3 must not claim Caddy volume provenance")
+    expected_custody = "included-in-app-backup" if mode == "bundled-caddy" else "external-not-in-app-backup"
+    if metadata.get("ingressIdentityCustody") != expected_custody:
+        fail("artifact v3 must explicitly describe ingress identity custody")
     metadata = {**metadata, "sourceRoots": {name: str(path) for name, path in roots.items()}}
     incomplete = destination.with_name(destination.name + ".incomplete")
     if destination.exists() or incomplete.exists():
@@ -549,7 +613,14 @@ AUTHORITY_ENV = {
 
 def authority_configuration_sha256(config: dict[str, Any]) -> str:
     values = {}
-    for service, keys in AUTHORITY_ENV.items():
+    authority_env = dict(AUTHORITY_ENV)
+    if "otel-collector" in config.get("services", {}):
+        # New telemetry lifecycle operations fail closed. Old non-telemetry
+        # records retain their original fingerprint; legacy telemetry graphs
+        # lacking these authorities must be explicitly republished first.
+        authority_env["otel-collector"] = ("KALA_OBSERVABILITY_POSTGRES_PASSWORD",
+                                            "KALA_OBSERVABILITY_SILO_METRICS_TOKEN")
+    for service, keys in authority_env.items():
         environment = config["services"][service].get("environment", {})
         if any(not isinstance(environment.get(key), str) or not environment[key] for key in keys):
             fail("authority credentials must use the reviewed explicit Dedicated configuration")
@@ -560,13 +631,16 @@ def authority_configuration_sha256(config: dict[str, Any]) -> str:
 def verify_deployed_configuration(compose: Path, env: Path, config: dict[str, Any]) -> None:
     """A staged .env is not proof of what actually wrote the archived authorities."""
     ids = container_ids(compose, env, tuple(sorted(config["services"])))
-    actual = {"services": {name: {"environment": {}} for name in AUTHORITY_ENV}}
+    fingerprinted_services = set(AUTHORITY_ENV)
+    if "otel-collector" in config["services"]:
+        fingerprinted_services.add("otel-collector")
+    actual = {"services": {name: {"environment": {}} for name in fingerprinted_services}}
     for name, container_id in ids.items():
         inspected = run(["docker", "inspect", "--format", '{"image":{{json .Config.Image}},"env":{{json .Config.Env}}}', container_id], timeout=30)
         document = json.loads(inspected.stdout)
         if document.get("image") != config["services"][name]["image"]:
             fail("deployed images differ from the reviewed backup configuration")
-        if name in AUTHORITY_ENV:
+        if name in fingerprinted_services:
             actual["services"][name]["environment"] = dict(item.split("=", 1) for item in document.get("env", []) if "=" in item)
     if authority_configuration_sha256(actual) != authority_configuration_sha256(config):
         fail("deployed authority credentials differ from the protected recovery configuration")
@@ -593,6 +667,9 @@ def validate_recovery_material(config: dict[str, Any], compose: Path, env: Path,
 
 
 def perform_backup(args: argparse.Namespace) -> dict[str, Any]:
+    # Reject preventable destination errors before fencing a running product.
+    # create_artifact rechecks permissions immediately before writing as well.
+    safe_root(Path(args.artifact).absolute().parent, "backup parent directory")
     compose = private_regular(Path(args.compose), "Compose file")
     env = private_regular(Path(args.env), "Compose parameter file")
     recovery = safe_root(Path(args.recovery_root), "recovery material root")
@@ -600,11 +677,16 @@ def perform_backup(args: argparse.Namespace) -> dict[str, Any]:
     state_key = safe_relative(recovery, args.state_key_relative, "state master key")
     verify_topology(compose, env)
     config = compose_config(compose, env)
+    mode = ingress_mode(config)
+    require_external_fence(mode, args)
     docker_root = require_local_docker()
     postgres, silo = data_roots(config)
     postgres = safe_root(postgres, "PostgreSQL data root", root_owned=False)
     silo = safe_root(silo, "SILO data root", root_owned=False)
-    caddy_roots, caddy_specs = source_caddy_roots(compose, env, config, docker_root)
+    caddy_roots: dict[str, Path] = {}
+    caddy_specs: dict[str, dict[str, str]] | None = None
+    if mode == "bundled-caddy":
+        caddy_roots, caddy_specs = source_caddy_roots(compose, env, config, docker_root)
     all_roots = {"postgres": postgres, "silo": silo, "recovery": recovery, **caddy_roots}
     disjoint(list(all_roots.values()), "data, Caddy and recovery roots")
     artifact = Path(args.artifact).absolute()
@@ -624,15 +706,20 @@ def perform_backup(args: argparse.Namespace) -> dict[str, Any]:
     validate_recovery_material(config, compose, env, recovery, installation, state_key)
     verify_deployed_configuration(compose, env, config)
     cold_stop(compose, env, args.stop_timeout, set(config["services"]))
-    return create_artifact(Path(args.artifact), all_roots, {
+    metadata: dict[str, Any] = {
         "images": image_map(config), "postgresMajor": pg_version,
+        "ingressMode": mode,
+        "ingressIdentityCustody": ("included-in-app-backup" if mode == "bundled-caddy" else
+                                   "external-not-in-app-backup"),
         "authorityConfigurationSha256": authority_configuration_sha256(config),
         "parameterFileRelative": env.relative_to(recovery).as_posix(),
         "parameterFileSha256": sha256_file(env),
         "installationIdSha256": sha256_file(installation), "stateMasterKeySha256": sha256_file(state_key),
         "sourceRoots": {name: str(path) for name, path in all_roots.items()},
-        "sourceVolumeProvenance": caddy_specs,
-    })
+    }
+    if caddy_specs is not None:
+        metadata["sourceVolumeProvenance"] = caddy_specs
+    return create_artifact(Path(args.artifact), all_roots, metadata)
 
 
 def backup(args: argparse.Namespace) -> dict[str, Any]:
@@ -655,11 +742,12 @@ def read_artifact(path: Path, acknowledge_legacy: bool = False) -> tuple[dict[st
     except json.JSONDecodeError:
         fail("backup manifest is invalid JSON")
     schema = manifest.get("schemaVersion")
-    if schema not in (ARTIFACT_SCHEMA, LEGACY_ARTIFACT_SCHEMA) \
+    if schema not in (ARTIFACT_SCHEMA, BUNDLED_ARTIFACT_SCHEMA, LEGACY_ARTIFACT_SCHEMA) \
             or manifest.get("kind") != "kala-dedicated-cold-backup":
         fail("unsupported backup manifest")
     if schema == LEGACY_ARTIFACT_SCHEMA and not acknowledge_legacy:
         fail("legacy artifact v1 omitted Caddy identity; use --acknowledge-ingress-identity-reissue only for an accepted trust reset")
+    artifact_ingress_mode(manifest)
     if manifest.get("payloadSha256") != sha256_file(payload):
         fail("backup payload checksum mismatch")
     return manifest, payload
@@ -697,14 +785,16 @@ def normalized_member(name: str) -> PurePosixPath:
 
 def validate_archive(manifest: dict[str, Any], payload: Path) -> tuple[list[tarfile.TarInfo], dict[str, dict[str, Any]]]:
     schema = manifest.get("schemaVersion")
-    expected_roots = ARCHIVE_ROOTS if schema == ARTIFACT_SCHEMA else LEGACY_ARCHIVE_ROOTS
+    mode = artifact_ingress_mode(manifest)
+    expected_roots = (EXTERNAL_ARCHIVE_ROOTS if schema == LEGACY_ARTIFACT_SCHEMA else
+                      BUNDLED_ARCHIVE_ROOTS if mode == "bundled-caddy" else EXTERNAL_ARCHIVE_ROOTS)
     source_roots = manifest.get("sourceRoots")
     if not isinstance(source_roots, dict) or set(source_roots) != expected_roots \
             or any(not isinstance(value, str) or not Path(value).is_absolute() or str(Path(value)) != value
                    for value in source_roots.values()):
         fail("backup source-root provenance does not exactly match its artifact schema")
     provenance = manifest.get("sourceVolumeProvenance")
-    if schema == ARTIFACT_SCHEMA:
+    if schema in (ARTIFACT_SCHEMA, BUNDLED_ARTIFACT_SCHEMA) and mode == "bundled-caddy":
         if not isinstance(provenance, dict) or set(provenance) != {"caddy-data", "caddy-config"}:
             fail("artifact v2 lacks complete Caddy source-volume provenance")
         for prefix, spec in provenance.items():
@@ -712,9 +802,9 @@ def validate_archive(manifest: dict[str, Any], payload: Path) -> tuple[list[tarf
                     or spec.get("driver") != "local" or spec.get("target") != ({"caddy-data": "/data", "caddy-config": "/config"})[prefix] \
                     or any(not isinstance(spec.get(key), str) or not VOLUME_NAME.fullmatch(spec[key])
                            for key in ("project", "logicalName", "volumeName")):
-                fail("artifact v2 Caddy source-volume provenance is malformed")
+                fail("bundled artifact Caddy source-volume provenance is malformed")
     elif provenance is not None:
-        fail("legacy artifact v1 has unexpected Caddy provenance")
+        fail("artifact without bundled Caddy state has unexpected volume provenance")
     records = manifest.get("entries")
     if not isinstance(records, list):
         fail("backup manifest has no entry inventory")
@@ -815,19 +905,26 @@ def create_fresh_caddy_volumes(specs: dict[str, dict[str, str]], docker_root: Pa
 def restore(args: argparse.Namespace) -> dict[str, Any]:
     if not args.acknowledge_source_fenced:
         fail("restore requires explicit --acknowledge-source-fenced")
-    if not getattr(args, "create_fresh_caddy_volumes", False):
-        fail("restore requires explicit --create-fresh-caddy-volumes")
     acknowledge_legacy = getattr(args, "acknowledge_ingress_identity_reissue", False)
     source_compose = private_regular(Path(args.source_compose), "source Compose file")
     source_env = private_regular(Path(args.source_env), "source Compose parameter file")
-    assert_inactive(source_compose, source_env, ALL_SERVICES)
     manifest, payload = read_artifact(Path(args.artifact), acknowledge_legacy)
     policy = load_policy(Path(args.policy))
     target_compose = private_regular(Path(args.target_compose), "restore target Compose file")
     target_env = private_regular(Path(args.target_env), "restore target Compose parameter file")
-    assert_inactive(target_compose, target_env, ALL_SERVICES)
+    source_config = compose_config(source_compose, source_env)
     target_config = compose_config(target_compose, target_env)
+    mode = artifact_ingress_mode(manifest)
+    require_matching_ingress_modes(mode, ingress_mode(source_config), ingress_mode(target_config))
+    require_external_fence(mode, args)
+    create_caddy = getattr(args, "create_fresh_caddy_volumes", False)
+    if mode == "bundled-caddy" and not create_caddy:
+        fail("bundled restore requires explicit --create-fresh-caddy-volumes")
+    if mode == "external" and create_caddy:
+        fail("external restore rejects --create-fresh-caddy-volumes because TLS identity is outside app custody")
     docker_root = require_local_docker()
+    assert_inactive(source_compose, source_env, set(source_config["services"]))
+    assert_inactive(target_compose, target_env, set(target_config["services"]))
     if manifest.get("images") != policy["predecessorImages"] or str(manifest.get("postgresMajor")) != str(policy["postgresMajor"]):
         fail("backup provenance is not an exact compatible predecessor in the reviewed policy")
     if image_map(target_config) != policy["targetImages"]:
@@ -856,17 +953,17 @@ def restore(args: argparse.Namespace) -> dict[str, Any]:
         for source in source_roots:
             if destination == source or destination in source.parents or source in destination.parents:
                 fail("restore destination must be disjoint from every old source root")
-    target_specs = caddy_volume_specs(target_config)
-    if manifest["schemaVersion"] == ARTIFACT_SCHEMA:
-        source_names = {item["volumeName"] for item in manifest["sourceVolumeProvenance"].values()}
-        if source_names & {item["volumeName"] for item in target_specs.values()}:
-            fail("restore target must use two new Caddy volume names, never a source volume")
-    for spec in target_specs.values():
-        if volume_exists(spec["volumeName"]):
-            fail("restore target Caddy volume already exists; only automatic fresh creation is authorized")
-    # Every non-mutating preflight above completes before either volume is created or any archive byte is extracted.
-    caddy_destinations = create_fresh_caddy_volumes(target_specs, docker_root)
-    destinations.update(caddy_destinations)
+    if mode == "bundled-caddy":
+        target_specs = caddy_volume_specs(target_config)
+        if manifest["schemaVersion"] in (ARTIFACT_SCHEMA, BUNDLED_ARTIFACT_SCHEMA):
+            source_names = {item["volumeName"] for item in manifest["sourceVolumeProvenance"].values()}
+            if source_names & {item["volumeName"] for item in target_specs.values()}:
+                fail("restore target must use two new Caddy volume names, never a source volume")
+        for spec in target_specs.values():
+            if volume_exists(spec["volumeName"]):
+                fail("restore target Caddy volume already exists; only automatic fresh creation is authorized")
+        # Every non-mutating preflight above completes before either volume is created or any archive byte is extracted.
+        destinations.update(create_fresh_caddy_volumes(target_specs, docker_root))
     disjoint(list(destinations.values()), "restore destinations")
     extract_archive(payload, destinations, records)
     if (destinations["postgres"] / "PG_VERSION").read_text().strip() != str(policy["postgresMajor"]):
@@ -882,9 +979,11 @@ def restore(args: argparse.Namespace) -> dict[str, Any]:
     if sha256_file(installation) != manifest.get("installationIdSha256") or sha256_file(state_key) != manifest.get("stateMasterKeySha256"):
         fail("restored data/secrets identity differs from the backup manifest")
     legacy = manifest["schemaVersion"] == LEGACY_ARTIFACT_SCHEMA
+    identity = ("external-not-restored" if mode == "external" else
+                "reissue-required-legacy-v1" if legacy else "preserved-from-artifact")
     return {"event": "cold_restore_completed_stopped", "reviewId": policy["reviewId"],
             "targetImages": policy["targetImages"], "externalEffects": "unknown-no-replay",
-            "ingressIdentity": "reissue-required-legacy-v1" if legacy else "preserved-from-artifact-v2",
+            "ingressIdentity": identity,
             "warning": ("legacy v1 restored without Caddy state; redistribute trust before start" if legacy else
                         "restored services were not started; keep old source fenced")}
 
@@ -899,7 +998,10 @@ def preflight_pair(current_compose: Path, current_env: Path, target_compose: Pat
         fail("upgrade cannot rotate PG/SILO/session/shared credentials; use a separately verified provider-specific ceremony")
     if data_roots(current) != data_roots(target):
         fail("in-place upgrade target must use the exact existing PostgreSQL and SILO roots")
-    if caddy_volume_specs(current) != caddy_volume_specs(target):
+    current_mode = ingress_mode(current)
+    if current_mode != ingress_mode(target):
+        fail("in-place upgrade refuses cross-mode ingress custody")
+    if current_mode == "bundled-caddy" and caddy_volume_specs(current) != caddy_volume_specs(target):
         fail("in-place upgrade target must retain the exact existing Caddy data and config volumes")
     pg_version = (data_roots(current)[0] / "PG_VERSION").read_text().strip()
     if pg_version != str(policy["postgresMajor"]):
@@ -931,12 +1033,14 @@ def upgrade(args: argparse.Namespace) -> dict[str, Any]:
     current_env = private_regular(Path(args.current_env), "current Compose parameter file")
     target_compose = private_regular(Path(args.target_compose), "target Compose file")
     target_env = private_regular(Path(args.target_env), "target Compose parameter file")
-    preflight_pair(current_compose, current_env, target_compose, target_env, policy)
+    current_config, target_config = preflight_pair(current_compose, current_env, target_compose, target_env, policy)
+    require_external_fence(ingress_mode(current_config), args)
     if current_compose.parent != target_compose.parent:
-        assert_inactive(target_compose, target_env, ALL_SERVICES)
+        assert_inactive(target_compose, target_env, set(target_config["services"]))
     backup_args = argparse.Namespace(compose=str(current_compose), env=str(current_env), recovery_root=args.recovery_root,
         installation_id_relative=args.installation_id_relative, state_key_relative=args.state_key_relative,
-        artifact=args.artifact, stop_timeout=args.stop_timeout)
+        artifact=args.artifact, stop_timeout=args.stop_timeout,
+        acknowledge_external_ingress_fenced=getattr(args, "acknowledge_external_ingress_fenced", False))
     manifest = perform_backup(backup_args)
     if manifest.get("images") != policy["predecessorImages"]:
         fail("completed maintenance backup provenance changed after preflight")
@@ -954,7 +1058,8 @@ def status(args: argparse.Namespace) -> dict[str, Any]:
     env = private_regular(Path(args.env), "Compose parameter file")
     config = compose_config(compose, env)
     rows = statuses(compose, env)
-    result: dict[str, Any] = {"event": "dedicated_lifecycle_status", "services": {}, "storage": {},
+    result: dict[str, Any] = {"event": "dedicated_lifecycle_status", "ingressMode": ingress_mode(config),
+        "services": {}, "storage": {},
         "warning": "point-in-time operator diagnostics, not continuous alerting or external-effect settlement"}
     for name in sorted(config["services"]):
         row = rows.get(name, {})
@@ -993,12 +1098,14 @@ def parser() -> argparse.ArgumentParser:
         item.add_argument("--recovery-root", required=True); item.add_argument("--installation-id-relative", required=True)
         item.add_argument("--state-key-relative", required=True); item.add_argument("--artifact", required=True)
         item.add_argument("--stop-timeout", type=int, default=120, choices=range(10, 901), metavar="10..900")
+        item.add_argument("--acknowledge-external-ingress-fenced", action="store_true")
     restore_parser = sub.add_parser("restore"); compose_args(restore_parser, "source-"); compose_args(restore_parser, "target-")
     restore_parser.add_argument("--artifact", required=True); restore_parser.add_argument("--policy", required=True)
     restore_parser.add_argument("--postgres-destination", required=True); restore_parser.add_argument("--silo-destination", required=True)
     restore_parser.add_argument("--recovery-destination", required=True); restore_parser.add_argument("--acknowledge-source-fenced", action="store_true")
     restore_parser.add_argument("--create-fresh-caddy-volumes", action="store_true")
     restore_parser.add_argument("--acknowledge-ingress-identity-reissue", action="store_true")
+    restore_parser.add_argument("--acknowledge-external-ingress-fenced", action="store_true")
     preflight = sub.add_parser("upgrade-preflight")
     upgrade_parser = sub.add_parser("upgrade")
     for item in (preflight, upgrade_parser):
@@ -1008,6 +1115,7 @@ def parser() -> argparse.ArgumentParser:
     upgrade_parser.add_argument("--stop-timeout", type=int, default=120, choices=range(10, 901), metavar="10..900")
     upgrade_parser.add_argument("--start-timeout", type=int, default=300, choices=range(10, 901), metavar="10..900")
     upgrade_parser.add_argument("--acknowledge-maintenance-and-unknown-effects", action="store_true")
+    upgrade_parser.add_argument("--acknowledge-external-ingress-fenced", action="store_true")
     return result
 
 

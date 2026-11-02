@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module'
 
 import type { RuntimeCapabilities } from '@agent-kernel/shared'
+import { tracePostgresQuery, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
 
 import type { PostgresSchemaManagement } from '../postgres-migrations.js'
 import type { RuntimeUnitMaterialization, RuntimeUnitMaterializationCatalog } from './materialization-store.js'
@@ -33,14 +34,20 @@ export class PostgresRuntimeUnitMaterializationStore implements RuntimeUnitMater
   readonly #schemaManagement: PostgresSchemaManagement
   #closed = false
 
-  constructor(readonly database: PgPool, options: { schema?: string; schemaManagement?: PostgresSchemaManagement } = {}) {
+  constructor(
+    readonly database: PgPool,
+    options: { schema?: string; schemaManagement?: PostgresSchemaManagement; telemetry?: OnlineTelemetry } = {},
+  ) {
     this.#table = `${quoteIdentifier(options.schema ?? 'public')}.tenant_runtime_unit_materializations`
     this.#schemaManagement = options.schemaManagement ?? 'initialize'
+    this.telemetry = options.telemetry
   }
+
+  private readonly telemetry?: OnlineTelemetry
 
   async load(): Promise<void> {
     await this.initialize()
-    const result = await this.database.query<MaterializationRow>(`SELECT * FROM ${this.#table}`)
+    const result = await tracePostgresQuery(this.telemetry, () => this.database.query<MaterializationRow>(`SELECT * FROM ${this.#table}`))
     this.#entries.clear()
     for (const row of result.rows) {
       const entry = materialization(row)
@@ -53,7 +60,7 @@ export class PostgresRuntimeUnitMaterializationStore implements RuntimeUnitMater
   }
 
   async refresh(id: TenantRuntimeUnitId): Promise<RuntimeUnitMaterialization | undefined> {
-    const result = await this.database.query<MaterializationRow>(`SELECT * FROM ${this.#table} WHERE unit_id = $1`, [id])
+    const result = await tracePostgresQuery(this.telemetry, () => this.database.query<MaterializationRow>(`SELECT * FROM ${this.#table} WHERE unit_id = $1`, [id]))
     const row = result.rows[0]
     if (!row) {
       this.#entries.delete(id)
@@ -70,10 +77,10 @@ export class PostgresRuntimeUnitMaterializationStore implements RuntimeUnitMater
 
   async scan(after: TenantRuntimeUnitId | undefined, limit: number): Promise<readonly RuntimeUnitMaterialization[]> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 256) throw new Error('invalid Runtime catalog scan limit')
-    const result = await this.database.query<MaterializationRow>(
+    const result = await tracePostgresQuery(this.telemetry, () => this.database.query<MaterializationRow>(
       `SELECT * FROM ${this.#table} WHERE ($1::text IS NULL OR unit_id > $1) ORDER BY unit_id LIMIT $2`,
       [after ?? null, limit],
-    )
+    ))
     return result.rows.map((row) => {
       const entry = materialization(row)
       const cached = this.#entries.get(entry.unitId)
@@ -115,7 +122,7 @@ export class PostgresRuntimeUnitMaterializationStore implements RuntimeUnitMater
 
   private async initialize(): Promise<void> {
     if (this.#schemaManagement === 'external') return
-    await this.database.query(`CREATE TABLE IF NOT EXISTS ${this.#table} (
+    await tracePostgresQuery(this.telemetry, () => this.database.query(`CREATE TABLE IF NOT EXISTS ${this.#table} (
       unit_id text PRIMARY KEY,
       organization_id text,
       routing_key_digest text NOT NULL,
@@ -126,7 +133,7 @@ export class PostgresRuntimeUnitMaterializationStore implements RuntimeUnitMater
       capabilities jsonb NOT NULL,
       operation_id text NOT NULL,
       updated_at timestamptz NOT NULL
-    )`)
+    )`))
   }
 
   async #mutate(entry: RuntimeUnitMaterialization, tombstone: boolean): Promise<RuntimeUnitMaterialization> {
@@ -161,12 +168,15 @@ export class PostgresRuntimeUnitMaterializationStore implements RuntimeUnitMater
   async #transaction<T>(operation: (transaction: PgExecutor) => Promise<T>): Promise<T> {
     const client = await this.database.connect()
     try {
-      await client.query('BEGIN')
-      const result = await operation(client)
-      await client.query('COMMIT')
+      await tracePostgresQuery(this.telemetry, () => client.query('BEGIN'))
+      const transaction: PgExecutor = {
+        query: (text, values) => tracePostgresQuery(this.telemetry, () => client.query(text, values)),
+      }
+      const result = await operation(transaction)
+      await tracePostgresQuery(this.telemetry, () => client.query('COMMIT'))
       return result
     } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined)
+      await tracePostgresQuery(this.telemetry, () => client.query('ROLLBACK')).catch(() => undefined)
       throw error
     } finally {
       client.release()
@@ -182,6 +192,7 @@ export function createPostgresRuntimeUnitMaterializationStore(options: {
   statementTimeoutMs?: number
   ssl?: unknown
   schemaManagement?: PostgresSchemaManagement
+  telemetry?: OnlineTelemetry
 }): PostgresRuntimeUnitMaterializationStore {
   const pool = new Pool({
     connectionString: options.connectionString,
@@ -198,6 +209,7 @@ export function createPostgresRuntimeUnitMaterializationStore(options: {
   return new PostgresRuntimeUnitMaterializationStore(pool, {
     schema: options.schema,
     schemaManagement: options.schemaManagement,
+    telemetry: options.telemetry,
   })
 }
 

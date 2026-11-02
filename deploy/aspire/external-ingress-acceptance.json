@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-29",
+  "sourceRevision": "069e617228d439a7fb3f1c57bafaeac9047b9f8c",
+  "images": {
+    "runtime": "kala-dedicated-ingress-runtime@sha256:d886d1a221f7869dd1db3a86a1646d74524cf5ec4c772b1cb51dfce0111e2e97",
+    "gateway": "kala-dedicated-ingress-gateway@sha256:ab447dabe0ec3b5f5cb9b4fb4aa0000933885a041dde578ffb3ad55d062bf0c8",
+    "dashboard": "kala-dedicated-lifecycle-dashboard@sha256:2a4ffff831fc37d620bbfc6c802246a930cd94c5f68565a8d7b9b7f11f35429c",
+    "postgres": "postgres@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36",
+    "silo": "pgsty/silo@sha256:2636fc4155d9a7e41ff58cdb65ddd13ba9304e67184e13c25bc5cb34016269d7"
+  },
+  "phases": [
+    "external_init_without_fence_refused_before_any_container",
+    "all_five_current_image_services_healthy_no_ingress",
+    "external_verified_tls_owner_cookie_and_authenticated_websocket",
+    "backup_missing_external_ack_refused_without_stopping_services",
+    "independent_tls_entry_actually_fenced",
+    "v3_actual_three_root_backup_no_external_tls_material",
+    "production_restore_three_fresh_roots_tls_explicitly_not_restored",
+    "same_external_trust_cookie_sql_s3_and_websocket_after_app_only_restore"
+  ],
+  "kind": "external-ingress-real-cold-recovery",
+  "passed": true,
+  "cookieSha256": "2ec46653d5f4770bdb575c16d5aca900193713c0fe093b56b1c062d5da9f63d8",
+  "sqlMarkerSha256": "e1cd903ccd2226782d5bd750c3ee62233365c38ad7cf43a96a234928544102b8",
+  "objectSha256": "a617addbeb3f5f61636d53042f693d1a1200152285c146acad8ad242151e54e6",
+  "externalCertificateSha256": "811015692372d1fc0e6caab09cd04bcbc7161d8621808f118a07cdc49ba89b9e",
+  "externalCertificateRestoredByApplication": false,
+  "proofBoundary": {
+    "publicationProfiles": [
+      6,
+      9,
+      5,
+      8
+    ],
+    "runningApplicationProfile": 5,
+    "externalTlsProxy": "independent synthetic operator process; HTTP and WebSocket",
+    "tlsValidationDisabled": false,
+    "externalCertificateInApplicationBackup": false,
+    "realModelSdkExecutorVerified": false,
+    "publicAcmeVerified": false,
+    "bundledV3RuntimeRestoreVerified": false,
+    "externalEightResourceRuntimeVerified": false
+  },
+  "frozenImageTelemetry": {
+    "passed": true,
+    "authoritativeFrozenIndeterminateReceipt": true,
+    "realCollectorAndAspireDashboard": true,
+    "syntheticTimingInputs": true,
+    "realModelBusinessProof": false
+  },
+  "verification": {
+    "rootPythonTestsPassed": 37,
+    "pythonTestsSkippedAsRoot": 0,
+    "shellSyntax": "passed",
+    "dotnetAppHostBuild": "passed; known ASPIRE010 retained"
+  },
+  "archive": {
+    "schemaVersion": 3,
+    "rootNames": [
+      "postgres",
+      "recovery",
+      "silo"
+    ],
+    "entryCount": 1964,
+    "ingressIdentityCustody": "external-not-in-app-backup"
+  },
+  "operatorSourceSha256": {
+    "initialize.sh": "d50cf50e700eae1ff1978b8cf45a2836d763e40964882255c3ca30f407205061",
+    "lifecycle_operator.py": "23813e8d375b4e5d378dbe8268bd6b8f60252cb7f5a0e24276d736fb0f4e6c3d",
+    "verify-published-compose.py": "ad41f4dfe417ddc66a5efce065c12958783a57f462eb048439576d0a663ea651",
+    "Program.cs": "5882cb800c65d734d1b0def1f83b66940ad4263473e599cf1e7ee79e7cb203cc"
+  },
+  "scopedCleanup": {
+    "ownedSecretFixtureAndSourceContextsRemoved": true,
+    "allocatedKiBRemoved": {
+      ".tmp/dedicated-lifecycle/proof-7d6613fe61c3": 191244,
+      ".tmp/dedicated-ingress-publish-ad0eaeb5": 228,
+      ".tmp/dedicated-ingress-images-069e6172/context": 61452
+    },
+    "fixtureContainersRemaining": 0,
+    "fixtureNamedVolumesRemaining": 0,
+    "kept": [
+      "small result logs",
+      "image/source manifests",
+      "toolchains",
+      "local images"
+    ],
+    "globalPrune": false
+  }
+}

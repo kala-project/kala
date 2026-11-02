@@ -1,5 +1,8 @@
 {
 	admin off
+	servers {
+		metrics
+	}
 }
 
 {$KALA_PUBLIC_HOSTNAME} {
@@ -10,4 +13,9 @@
 # Container-local liveness only; never published and never bypasses public TLS.
 http://127.0.0.1:8081 {
 	respond /healthz "ok" 200
+}
+
+# Private Compose network only; no host publication, admin API or per-host labels.
+http://:8082 {
+	metrics /metrics
 }

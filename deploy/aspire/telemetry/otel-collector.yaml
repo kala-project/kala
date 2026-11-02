@@ -12,6 +12,77 @@ receivers:
         auth:
           authenticator: bearertokenauth/ingest
 
+  # Cluster statistics only: no SQL samples, plans, row contents or table labels.
+  postgresql:
+    endpoint: postgres:5432
+    username: kala_observer
+    password: ${env:KALA_OBSERVABILITY_POSTGRES_PASSWORD}
+    databases:
+      - postgres
+      - runlab_control
+      - kala_runtime
+    collection_interval: 30s
+    timeout: 5s
+    tls:
+      insecure: true # private single-host Compose network, matching app DB transport
+    events:
+      db.server.query_sample:
+        enabled: false
+      db.server.top_query:
+        enabled: false
+    metrics:
+      postgresql.index.scans:
+        enabled: false
+      postgresql.index.size:
+        enabled: false
+      postgresql.operations:
+        enabled: false
+      postgresql.rows:
+        enabled: false
+      postgresql.blocks_read:
+        enabled: false
+      postgresql.table.count:
+        enabled: false
+      postgresql.table.size:
+        enabled: false
+      postgresql.table.vacuum.count:
+        enabled: false
+      postgresql.replication.data_delay:
+        enabled: false
+      postgresql.wal.age:
+        enabled: false
+      postgresql.wal.lag:
+        enabled: false
+      postgresql.deadlocks:
+        enabled: true
+  prometheus/silo:
+    config:
+      scrape_configs:
+        - job_name: silo
+          scrape_interval: 30s
+          scrape_timeout: 5s
+          sample_limit: 512
+          label_limit: 12
+          metrics_path: /minio/v2/metrics/cluster
+          authorization:
+            type: Bearer
+            credentials: ${env:KALA_OBSERVABILITY_SILO_METRICS_TOKEN}
+          static_configs:
+            - targets: [silo:9000]
+          metric_relabel_configs:
+            - source_labels: [__name__]
+              action: keep
+              regex: 'minio_(cluster_(capacity_(raw|usable)_(free|total)_bytes|drive_(offline|online|total)(_total)?|health_status|nodes_(offline|online)_total|usage_(object_total|total_bytes|version_total))|node_process_(cpu_total_seconds|resident_memory_bytes|uptime_seconds)|s3_(requests_(incoming_total|inflight_total|waiting_total|total|errors_total|rejected_(auth|header|invalid|timestamp)_total|ttfb_seconds_distribution(_bucket|_sum|_count)?)|traffic_(received|sent)_bytes))'
+            # This reviewed single-server graph has no per-node aggregation.
+            # Never export endpoint/server, bucket, object, client or user labels.
+            - action: labelkeep
+              regex: '__name__|api|le'
+  httpcheck/dashboard:
+    collection_interval: 30s
+    targets:
+      - endpoint: http://dashboard:8080/healthz
+        timeout: 3s
+
 processors:
   memory_limiter:
     check_interval: 1s
@@ -21,6 +92,22 @@ processors:
     timeout: 2s
     send_batch_size: 256
     send_batch_max_size: 512
+
+  resource/postgres:
+    attributes:
+      - key: service.name
+        value: postgres
+        action: upsert
+  resource/silo:
+    attributes:
+      - key: service.name
+        value: silo
+        action: upsert
+  resource/dashboard:
+    attributes:
+      - key: service.name
+        value: dashboard
+        action: upsert
 
 exporters:
   otlphttp/aspire:
@@ -60,4 +147,17 @@ service:
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]
+      exporters: [otlphttp/aspire]
+
+    metrics/postgres:
+      receivers: [postgresql]
+      processors: [memory_limiter, resource/postgres, batch]
+      exporters: [otlphttp/aspire]
+    metrics/silo:
+      receivers: [prometheus/silo]
+      processors: [memory_limiter, resource/silo, batch]
+      exporters: [otlphttp/aspire]
+    metrics/dashboard:
+      receivers: [httpcheck/dashboard]
+      processors: [memory_limiter, resource/dashboard, batch]
       exporters: [otlphttp/aspire]

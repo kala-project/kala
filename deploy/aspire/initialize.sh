@@ -3,11 +3,23 @@ set -Eeuo pipefail
 umask 077
 
 usage() {
-  echo "usage: $0 <docker-compose.yaml> <published.env> <protected-secrets-directory> [--initialize-only|--resume-initialized]" >&2
+  echo "usage: $0 <docker-compose.yaml> <published.env> <protected-secrets-directory> [--initialize-only|--resume-initialized] [--acknowledge-external-ingress-fenced]" >&2
   exit 2
 }
-[[ $# -eq 3 || $# -eq 4 ]] || usage
-[[ ${4:-} == "" || ${4:-} == "--initialize-only" || ${4:-} == "--resume-initialized" ]] || usage
+[[ $# -ge 3 && $# -le 5 ]] || usage
+operation_mode=
+acknowledge_external_ingress_fenced=0
+for flag in "${@:4}"; do
+  case $flag in
+    --initialize-only|--resume-initialized)
+      [[ -z $operation_mode ]] || usage
+      operation_mode=$flag ;;
+    --acknowledge-external-ingress-fenced)
+      (( acknowledge_external_ingress_fenced == 0 )) || usage
+      acknowledge_external_ingress_fenced=1 ;;
+    *) usage ;;
+  esac
+done
 (( EUID == 0 )) || { echo 'Run Dedicated initialization as the root operator; protected files are root-owned' >&2; exit 1; }
 # Serialize initialization with backup/restore/upgrade on this host. Root may
 # intentionally bypass this boundary; separate operators must not do so.
@@ -26,7 +38,6 @@ export KALA_ASPIRE_SECRETS_DIR
 KALA_ASPIRE_SECRETS_DIR=$(realpath "$3")
 export KALA_ASPIRE_INIT_DIR
 KALA_ASPIRE_INIT_DIR=$(cd "$(dirname "$0")" && pwd)
-operation_mode=${4:-}
 start_timeout=${KALA_ASPIRE_START_TIMEOUT_SECONDS:-180}
 [[ $start_timeout =~ ^[1-9][0-9]{0,2}$ ]] && (( start_timeout >= 1 && start_timeout <= 900 )) || {
   echo 'KALA_ASPIRE_START_TIMEOUT_SECONDS must be between 1 and 900' >&2; exit 2;
@@ -47,9 +58,25 @@ secret_directory_mode=$(stat -c '%a' "$KALA_ASPIRE_SECRETS_DIR")
   echo 'Protected initialization directory must not be accessible by group or other users' >&2; exit 1;
 }
 
+project_directory=$(dirname "$compose_file")
+compose=(docker compose --project-directory "$project_directory" --env-file "$env_file" -f "$compose_file")
+compose_init=(docker compose --project-directory "$project_directory" --env-file "$env_file" -f "$compose_file" -f "$KALA_ASPIRE_INIT_DIR/compose.initialize.yaml")
+python3 "$KALA_ASPIRE_INIT_DIR/verify-published-compose.py" "$compose_file" "$env_file"
+resolved_services=$("${compose[@]}" config --services)
+if grep -qx 'otel-collector' <<<"$resolved_services"; then
+  observability_enabled=1
+else
+  observability_enabled=0
+fi
+ingress_mode=external
+grep -qx 'ingress' <<<"$resolved_services" && ingress_mode=bundled-caddy
+
 required=(postgres_admin_url control_owner_url gateway_database_url runtime_owner_url runtime_database_url
   runtime_reader_database_url silo_root_access_key silo_root_secret_key runtime_s3_access_key runtime_s3_secret_key
   installation_id runtime_state_master_key owner_password)
+if (( observability_enabled == 1 )); then
+  required+=(observability_postgres_password observability_silo_metrics_token)
+fi
 for name in "${required[@]}"; do
   path=$KALA_ASPIRE_SECRETS_DIR/$name
   [[ -f $path && ! -L $path ]] || { echo "$name must be a regular non-symlink file" >&2; exit 1; }
@@ -60,13 +87,12 @@ for name in "${required[@]}"; do
   (( (8#$file_mode & 077) == 0 )) || { echo "$name must not be accessible by group or other users" >&2; exit 1; }
 done
 
-project_directory=$(dirname "$compose_file")
-compose=(docker compose --project-directory "$project_directory" --env-file "$env_file" -f "$compose_file")
-compose_init=(docker compose --project-directory "$project_directory" --env-file "$env_file" -f "$compose_file" -f "$KALA_ASPIRE_INIT_DIR/compose.initialize.yaml")
 secret_mount="$KALA_ASPIRE_SECRETS_DIR:/run/kala-init-secrets:ro"
 operator_mount="$KALA_ASPIRE_INIT_DIR:/operator:ro"
-
-python3 "$KALA_ASPIRE_INIT_DIR/verify-published-compose.py" "$compose_file" "$env_file"
+if [[ $ingress_mode == external && $acknowledge_external_ingress_fenced != 1 ]]; then
+  echo 'External ingress must be independently fenced before initialization; explicitly pass --acknowledge-external-ingress-fenced' >&2
+  exit 1
+fi
 "${compose[@]}" config --format json | python3 "$KALA_ASPIRE_INIT_DIR/validate-initialization-config.py"
 # Inspection failure is not proof that writers are stopped. Restarting/paused
 # containers also retain a possible writer and must be stopped explicitly.
@@ -84,6 +110,7 @@ done
 if [[ $operation_mode != --resume-initialized ]]; then
 "${compose[@]}" run --rm --no-deps --user 0:0 \
   -v "$secret_mount" -v "$operator_mount" \
+  -e "KALA_ASPIRE_OBSERVABILITY=$observability_enabled" \
   runtime /operator/initialize-postgres.mjs
 
 # mc root authority exists only in this disposable provisioning container. The

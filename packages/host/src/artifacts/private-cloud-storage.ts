@@ -1,3 +1,5 @@
+import type { OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
+
 import type { PostgresHotStateStore } from '../tenant-runtime/postgres-hot-state.js'
 import { S3MessageAttachmentStore } from '../message-attachments/s3-message-attachment-store.js'
 import type { PostgresSchemaManagement } from '../postgres-migrations.js'
@@ -24,6 +26,7 @@ export type PrivateCloudObjectStorageOptions = {
   schemaManagement?: PostgresSchemaManagement
   orphanReconciliationLimit?: number
   orphanClaimTimeoutMs?: number
+  telemetry?: OnlineTelemetry
 }
 
 /**
@@ -45,6 +48,7 @@ export async function createPrivateCloudObjectStorage(options: PrivateCloudObjec
     accessKeyId: options.accessKeyId,
     secretAccessKey: options.secretAccessKey,
     maxObjectBytes: options.maxObjectBytes,
+    telemetry: options.telemetry,
     ...(options.forcePathStyle !== undefined ? { forcePathStyle: options.forcePathStyle } : {}),
   })
   const capacity = new PostgresObjectCapacityLedger(options.organizationId, options.maxArtifactBytes, options.hotState, {

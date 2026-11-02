@@ -19,12 +19,14 @@ class PublishedTopology(unittest.TestCase):
         self.root = Path(self.scratch.name).resolve()
         for name in ['compose.yaml', 'published.env', 'deployment.json', 'key', 'installation-id', 'Caddyfile']:
             (self.root / name).write_text('fixture')
+        (self.root / 'deployment.json').write_text(json.dumps({'schemaVersion': 1, 'architecture': 'platform', 'tenancy': 'single-tenant', 'runtimeProfile': 'full'}))
         (self.root / 'dashboard.settings.json').write_text(json.dumps({'Dashboard': {
             'Frontend': {'AuthMode': 'BrowserToken'}, 'Otlp': {'AuthMode': 'ApiKey'}, 'Api': {'AuthMode': 'ApiKey'}},
             'AllowedHosts': 'localhost;127.0.0.1;observability-dashboard'}))
+        (self.root / 'otel-collector-caddy.yaml').write_text(
+            (Path(__file__).parent / 'telemetry' / 'otel-collector-caddy.yaml').read_text())
         (self.root / 'otel-collector.yaml').write_text(
-            'bearertokenauth/ingest\nmemory_limiter\nsend_batch_max_size:\nqueue_size:\nmax_elapsed_time:\n'
-            'x-otlp-api-key:\ncompression: none\nencoding: proto\n')
+            (Path(__file__).parent / 'telemetry' / 'otel-collector.yaml').read_text())
         for name in ['pg', 'objects']:
             (self.root / name).mkdir()
         self.services = {name: {'image': 'example/fixture@sha256:' + '0' * 64,
@@ -36,6 +38,17 @@ class PublishedTopology(unittest.TestCase):
             mount('key', '/run/kala-secrets/runtime-state-master-key', True), mount('installation-id', '/run/kala-secrets/installation-id', True)]
         self.services['gateway']['volumes'] = [mount('deployment.json', '/etc/kala/deployment.json', True),
             mount('installation-id', '/run/kala-secrets/installation-id', True)]
+        self.services['gateway']['environment'] = {
+            'KALA_PUBLIC_URLS': 'https://example.com',
+            'KALA_INGRESS_DATABASE_URL': 'postgresql://kala_gateway:gateway-role-password@postgres/runlab_control',
+            'KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING':
+                'postgresql://kala_runtime_reader:reader-role-password@postgres/kala_runtime',
+        }
+        self.services['runtime']['environment'] = {
+            'KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING':
+                'postgresql://kala_runtime:runtime-role-password@postgres/kala_runtime',
+        }
+        self.services['postgres']['environment'] = {'POSTGRES_PASSWORD': 'postgres-admin-password'}
         self.services['ingress']['volumes'] = [mount('Caddyfile', '/etc/caddy/Caddyfile', True)]
         self.services['ingress']['ports'] = [{'target': 443, 'protocol': 'tcp'}]
         self.services['postgres']['volumes'] = [mount('pg', '/var/lib/postgresql/data')]
@@ -63,14 +76,30 @@ class PublishedTopology(unittest.TestCase):
             'Dashboard__Frontend__BrowserToken': 'b' * 64, 'Dashboard__Otlp__PrimaryApiKey': 'o' * 64,
             'Dashboard__Api__PrimaryApiKey': 'o' * 64}
         self.services['otel-collector']['environment'] = {
-            'KALA_OTEL_INGEST_TOKEN': 'i' * 64, 'KALA_ASPIRE_DASHBOARD_OTLP_API_KEY': 'o' * 64}
+            'KALA_OTEL_INGEST_TOKEN': 'i' * 64,
+            'KALA_ASPIRE_DASHBOARD_OTLP_API_KEY': 'o' * 64,
+            'KALA_OBSERVABILITY_POSTGRES_PASSWORD': 'p' * 64,
+            'KALA_OBSERVABILITY_SILO_METRICS_TOKEN': 'headerpart.payloadpart.signaturepart',
+        }
         self.services['otel-collector']['volumes'] = [mount('otel-collector.yaml', '/etc/otelcol-contrib/config.yaml', True)]
+        self.services['otel-collector']['command'] = ['--config=/etc/otelcol-contrib/config.yaml']
+        if 'ingress' in self.services:
+            self.services['otel-collector']['volumes'].append(mount('otel-collector-caddy.yaml', '/etc/otelcol-contrib/caddy.yaml', True))
+            self.services['otel-collector']['command'].append('--config=/etc/otelcol-contrib/caddy.yaml')
         for name in ('gateway', 'runtime'):
-            self.services[name]['environment'] = {
+            self.services[name].setdefault('environment', {}).update({
                 'KALA_OTEL_ENABLED': '1', 'KALA_OTEL_EXPORTER_ENDPOINT': 'http://otel-collector:4318',
-                'KALA_OTEL_EXPORTER_TOKEN': 'i' * 64}
+                'KALA_OTEL_EXPORTER_TOKEN': 'i' * 64})
             self.services[name]['depends_on'] = {
                 'observability-readiness': {'condition': 'service_completed_successfully'}}
+
+    def enable_external_ingress(self):
+        self.services.pop('ingress', None)
+        if 'otel-collector' in self.services:
+            self.services['otel-collector']['volumes'] = [m for m in self.services['otel-collector']['volumes'] if m['target'] != '/etc/otelcol-contrib/caddy.yaml']
+            self.services['otel-collector']['command'] = ['--config=/etc/otelcol-contrib/config.yaml']
+        self.services['gateway']['environment']['KALA_DEDICATED_INGRESS_MODE'] = 'external'
+        self.services['gateway']['ports'] = [{'target': 13001, 'published': '13001', 'protocol': 'tcp', 'host_ip': '127.0.0.1'}]
 
     def check(self):
         result = SimpleNamespace(returncode=0, stdout=json.dumps({'services': self.services}))
@@ -118,7 +147,7 @@ class PublishedTopology(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'CPU and memory limits'):
             self.check()
         self.services.pop('otel-collector')
-        with self.assertRaisesRegex(ValueError, 'reviewed six-service or nine-service'):
+        with self.assertRaisesRegex(ValueError, 'reviewed five/six-service or eight/nine-resource'):
             self.check()
 
     def test_telemetry_credentials_cannot_be_reused_or_misbound(self):
@@ -129,6 +158,37 @@ class PublishedTopology(unittest.TestCase):
         self.enable_observability()
         self.services['otel-collector']['environment']['KALA_OTEL_INGEST_TOKEN'] = 'wrong-ingest'
         with self.assertRaisesRegex(ValueError, 'consistent endpoint bindings'):
+            self.check()
+        self.enable_observability()
+        self.services['otel-collector']['environment']['KALA_OBSERVABILITY_POSTGRES_PASSWORD'] = 'postgres-admin-password'
+        with self.assertRaisesRegex(ValueError, 'fixed monitor authority'):
+            self.check()
+
+    def test_external_profiles_require_explicit_custody_and_loopback_handoff(self):
+        self.services.pop('ingress')
+        with self.assertRaisesRegex(ValueError, 'marker must agree'):
+            self.check()
+        self.enable_external_ingress()
+        self.check()
+        self.enable_observability()
+        self.check()
+        self.services['gateway']['ports'][0]['host_ip'] = '0.0.0.0'
+        with self.assertRaisesRegex(ValueError, 'loopback-only'):
+            self.check()
+        self.services['gateway']['ports'][0]['host_ip'] = '127.0.0.1'
+        self.services['runtime']['volumes'].append({'type': 'volume', 'source': 'certificate-state', 'target': '/certs'})
+        with self.assertRaisesRegex(ValueError, 'named application/certificate'):
+            self.check()
+
+    def test_external_tls_does_not_remove_origin_or_mode_safety(self):
+        self.enable_external_ingress()
+        self.services['gateway']['environment']['KALA_PUBLIC_URLS'] = 'http://example.com'
+        with self.assertRaisesRegex(ValueError, 'HTTPS public Origin'):
+            self.check()
+        self.services['gateway']['environment']['KALA_PUBLIC_URLS'] = 'https://example.com'
+        descriptor = {'schemaVersion': 1, 'architecture': 'standalone', 'tenancy': 'single-tenant', 'runtimeProfile': 'full'}
+        (self.root / 'deployment.json').write_text(json.dumps(descriptor))
+        with self.assertRaisesRegex(ValueError, 'Dedicated storage/tenancy'):
             self.check()
 
     def test_unmonitored_or_disabled_health_checks_cannot_claim_waited_readiness(self):
