@@ -1918,6 +1918,13 @@ export type DedicatedDeploymentStatus = {
   }
 }
 
+export type ExternalDeploymentHealth = {
+  kind: 'external'
+  checkedAt: string
+  ok: boolean
+  checks: readonly { component: 'gateway' | 'runtime' | 'dashboard'; ready: boolean }[]
+}
+
 export type ServerSettingsPayload = {
   deployment?: RuntimeCapabilitiesPayload
   providers: readonly SettingsProviderSummary[]

@@ -1280,8 +1280,11 @@ export function Composer({
               />
               <div className="hidden min-w-0 flex-none items-center gap-1.5 sm:flex" data-testid="composer-footer-config">
               {allowModelSelection ? <Select
-                value={modelInfoFor(models, model ?? '') ? model : ''}
-                onValueChange={onModelChange}
+                value={modelInfoFor(models, model)?.ref ?? modelInfoFor(models, model)?.id ?? model}
+                onValueChange={(value) => {
+                  // Native form synchronization can emit an empty value without a user choice.
+                  if (value) onModelChange(value)
+                }}
                 disabled={models.length === 0}
               >
                 <SelectTrigger
@@ -1297,6 +1300,7 @@ export function Composer({
                   </span>
                 </SelectTrigger>
                 <SelectContent position="popper" sideOffset={4} className="max-h-[min(24rem,60vh)]">
+                  {model && !modelInfoFor(models, model) ? <SelectItem value={model} disabled>{model} ({t('common.modelNotListed')})</SelectItem> : null}
                   {models.map((m) => {
                     const key = modelKey(m)
                     return (
@@ -2211,7 +2215,7 @@ function ComposerConfigButton({
   }, [open])
 
   const activeModel = modelInfoFor(models, model ?? '')
-  const modelSummary = activeModel?.label ?? t('common.model')
+  const modelSummary = activeModel?.label ?? (model || t('common.model'))
   const approvalTone =
     approvalMode === 'allow_all'
       ? 'text-rose-600 dark:text-rose-300'
@@ -2258,14 +2262,15 @@ function ComposerConfigButton({
                 <span className="ml-auto truncate text-caption text-muted-foreground">{modelSummary}</span>
               </span>
               <Select
-                value={activeModel ? model : ''}
-                onValueChange={onModelChange}
+                value={activeModel ? modelKey(activeModel) : model}
+                onValueChange={(value) => { if (value) onModelChange(value) }}
                 disabled={models.length === 0}
               >
                 <SelectTrigger className="h-9 w-full" aria-label={t('common.model')}>
                   <SelectValue placeholder={models.length === 0 ? t('common.noModels') : t('common.model')} />
                 </SelectTrigger>
                 <SelectContent position="popper" sideOffset={4} className="max-h-[min(24rem,60vh)]" data-composer-config-select="model">
+                  {model && !activeModel ? <SelectItem value={model} disabled>{model} ({t('common.modelNotListed')})</SelectItem> : null}
                   {models.map((m) => {
                     const key = modelKey(m)
                     return (

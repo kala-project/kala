@@ -5,7 +5,9 @@
       lb_try_duration 10s
       lb_try_interval 250ms
       header_up Host {$KALA_IDENTITY_HOST}
-      header_up X-Forwarded-Proto http
+      header_up X-Forwarded-Proto {$KALA_IDENTITY_SCHEME:http}
+      header_up X-Zitadel-Instance-Host {$KALA_IDENTITY_HOST}
+      header_up X-Zitadel-Public-Host {$KALA_IDENTITY_HOST}
     }
   }
 
@@ -13,7 +15,9 @@
   handle @identity {
     reverse_proxy h2c://identity-zitadel:8080 {
       header_up Host {$KALA_IDENTITY_HOST}
-      header_up X-Forwarded-Proto http
+      header_up X-Forwarded-Proto {$KALA_IDENTITY_SCHEME:http}
+      header_up X-Zitadel-Instance-Host {$KALA_IDENTITY_HOST}
+      header_up X-Zitadel-Public-Host {$KALA_IDENTITY_HOST}
     }
   }
 

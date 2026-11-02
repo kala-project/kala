@@ -171,6 +171,25 @@ describe('SettingsDialog', () => {
     expect(screen.queryByText('Healthy')).toBeNull()
   })
 
+  it.each([true, false])('uses live container-managed readiness without supervisor slots (healthy=%s)', async healthy => {
+    const externalPayload = { ...payload, runtimeManagement: 'external' as const }
+    fetchMock.mockImplementation(async input => {
+      const path = String(input)
+      if (path.endsWith('/runtime/deployment/status')) return new Response('{}', { status: 404 })
+      if (path.endsWith('/runtime/deployment/health')) return new Response(JSON.stringify({
+        kind: 'external', checkedAt: '2026-11-01T04:00:00Z', ok: healthy,
+        checks: [{ component: 'gateway', ready: true }, { component: 'runtime', ready: healthy }, { component: 'dashboard', ready: true }],
+      }), { status: 200 })
+      return new Response(JSON.stringify(externalPayload), { status: 200 })
+    })
+    render(<SettingsDialog open cacheNamespace={`external-health-${healthy}`} initialSection="deployment" onOpenChange={() => {}} />)
+    expect(await screen.findByTestId('settings-external-deployment')).toBeTruthy()
+    expect(screen.getByTestId('settings-deployment-overview').textContent).toContain(healthy ? 'Healthy' : 'Needs attention')
+    expect(screen.queryByText('Deployment health not verified')).toBeNull()
+    expect(screen.queryByTestId('settings-dedicated-deployment')).toBeNull()
+    expect(screen.getByText('Authenticated Gateway')).toBeTruthy()
+  })
+
   it('does not render when closed', () => {
     render(<SettingsDialog open={false} onOpenChange={() => {}} />)
     expect(screen.queryByTestId('settings-dialog')).toBeNull()

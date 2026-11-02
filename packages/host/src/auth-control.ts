@@ -20,6 +20,7 @@ export type ExecutorTokenScope = {
 }
 
 export type AuthConfig = {
+  requireIngressIdentity?: boolean
   sharedToken?: string
   github?: GithubOAuthConfig
   executorTokens?: readonly ExecutorTokenScope[]
@@ -51,7 +52,7 @@ const COOKIE_NAME = 'ak_session'
 const OAUTH_STATE_COOKIE = 'ak_oauth_state'
 
 export function dashboardAuthRequired(config: AuthConfig | undefined): boolean {
-  return Boolean(config?.github?.required || config?.sharedToken)
+  return Boolean(config?.requireIngressIdentity || config?.github?.required || config?.sharedToken)
 }
 
 export function authenticateDashboardHandshake(
@@ -63,6 +64,7 @@ export function authenticateDashboardHandshake(
   const organizationId = header(req, 'x-agent-runlab-organization-id')
   const role = header(req, 'x-agent-runlab-organization-role')
   if (principal && organizationId && isOrganizationRole(role)) return { ok: true, actor: { kind: 'ingress', principal, organizationId, role } }
+  if (config?.requireIngressIdentity) return { ok: false, reason: 'auth_failed' }
   if (!config?.github?.required && !config?.sharedToken) return { ok: true, actor: { kind: 'anonymous' } }
   if (config.github?.required) {
     const session = readGithubSession(req, config.github)

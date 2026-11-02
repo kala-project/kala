@@ -1,7 +1,7 @@
-import { createServer, request as httpRequest } from 'node:http'
+import { createServer, request as httpRequest, type IncomingHttpHeaders } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { issueRuntimeRoutingTicket } from '@agent-kernel/shared'
+import { issueRuntimeRoutingTicket, parsePublicUrls } from '@agent-kernel/shared'
 
 import { inviteKey, MemoryRuntimeAssignmentStore, type AuthenticatedIdentity } from '../assignments/store.js'
 import type { LoginState, LoginStateStore } from '../auth/login-state-store.js'
@@ -42,6 +42,65 @@ const running: Array<{ close(): Promise<void> }> = []
 afterEach(async () => { await Promise.all(running.splice(0).map((server) => server.close())) })
 
 describe('Private Cloud edge request path', () => {
+  it('binds OIDC callback URLs, redirects and cookie security to the validated browser origin', async () => {
+    const gateway = await createGateway('http://127.0.0.1:9', undefined, {
+      publicUrls: 'https://dashboard.example.test,http://local.example.test',
+    })
+    const call = (path: string, host: string, cookie?: string) => publicHostRequest(gateway.port, path, {
+      host, ...(cookie ? { cookie } : {}),
+      'x-forwarded-host': 'evil.example.test', 'x-kala-public-origin': 'https://evil.example.test',
+    })
+    const login = await call('/auth/login', 'dashboard.example.test')
+    expect(new URL(login.headers.location!).searchParams.get('redirect_uri')).toBe('https://dashboard.example.test/auth/callback')
+    expect(login.headers['set-cookie']?.[0]).toContain('; Secure;')
+    const nonce = cookieValue(login.headers['set-cookie'] ?? [], 'ak_login')
+    const callback = await call('/auth/callback?code=ok', 'dashboard.example.test', `ak_login=${nonce}`)
+    expect(callback.status).toBe(302)
+    expect(callback.headers.location).toBe('https://dashboard.example.test/')
+    expect(callback.headers['set-cookie']?.[0]).toContain('; Secure;')
+    const localLogin = await call('/auth/login', 'local.example.test')
+    expect(new URL(localLogin.headers.location!).searchParams.get('redirect_uri')).toBe('http://local.example.test/auth/callback')
+    expect(localLogin.headers['set-cookie']?.[0]).not.toContain('; Secure;')
+    const localNonce = cookieValue(localLogin.headers['set-cookie'] ?? [], 'ak_login')
+    expect((await call('/auth/callback?code=ok', 'dashboard.example.test', `ak_login=${localNonce}`)).status).toBe(400)
+    expect((await call('/auth/login', 'evil.example.test')).status).toBe(400)
+  })
+
+  it('reports authenticated external readiness without inventing supervisor status or hiding failed probes', async () => {
+    let runtimeReady = true
+    const secrets: Array<string | undefined> = []
+    const upstream = createServer((request, response) => {
+      if (request.url === '/internal/health') {
+        secrets.push(request.headers['x-agent-runlab-ingress-secret'] as string | undefined)
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ ok: true, state: runtimeReady ? 'ready' : 'failed', units: ['private-unit-details'] }))
+      } else {
+        response.writeHead(200, { 'content-type': 'text/html' })
+        response.end('<!doctype html><title>Kala</title>')
+      }
+    })
+    await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
+    running.push({ close: () => new Promise<void>(resolve => upstream.close(() => resolve())) })
+    const address = upstream.address()
+    const upstreamOrigin = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`
+    const gateway = await createGateway(upstreamOrigin, undefined, { dashboardOrigin: upstreamOrigin, organizations: new TestOrganizationStore() })
+    const origin = `http://127.0.0.1:${gateway.port}`
+    expect((await fetch(`${origin}/runtime/deployment/health`)).status).toBe(401)
+    expect(secrets).toHaveLength(0)
+    const login = await fetch(`${origin}/auth/login`, { redirect: 'manual' })
+    const callback = await fetch(`${origin}/auth/callback?code=ok`, { headers: { cookie: `ak_login=${cookieValue(login.headers.getSetCookie(), 'ak_login')}` }, redirect: 'manual' })
+    const headers = { cookie: `ak_session=${cookieValue(callback.headers.getSetCookie(), 'ak_session')}` }
+    const healthy = await (await fetch(`${origin}/runtime/deployment/health`, { headers })).json()
+    expect(healthy).toEqual({ kind: 'external', checkedAt: expect.any(String), ok: true, checks: [
+      { component: 'gateway', ready: true }, { component: 'runtime', ready: true }, { component: 'dashboard', ready: true },
+    ] })
+    expect(secrets).toEqual(['gateway-secret'])
+    runtimeReady = false
+    const failed = await (await fetch(`${origin}/runtime/deployment/health`, { headers })).json()
+    expect(failed.ok).toBe(false)
+    expect(failed.checks).toContainEqual({ component: 'runtime', ready: false })
+    expect(JSON.stringify(failed)).not.toContain('private-unit-details')
+  })
   it('routes memo and tabs through the complete trusted handoff without cookie, forged authority or viewer-write bypass', async () => {
     const received: Array<Record<string, string | undefined>> = []
     const upstream = createServer((request, response) => {
@@ -1208,6 +1267,19 @@ describe('Private Cloud edge request path', () => {
   })
 })
 
+async function publicHostRequest(port: number, path: string, headers: Record<string, string>): Promise<{ status: number; headers: IncomingHttpHeaders; body: string }> {
+  return await new Promise((resolve, reject) => {
+    const request = httpRequest({ host: '127.0.0.1', port, path, headers }, response => {
+      let body = ''
+      response.on('data', chunk => { body += String(chunk) })
+      response.on('end', () => resolve({ status: response.statusCode!, headers: response.headers, body }))
+      response.on('error', reject)
+    })
+    request.on('error', reject)
+    request.end()
+  })
+}
+
 async function createGateway(
   hostOrigin: string,
   provision?: (unitId: string) => Promise<void>,
@@ -1224,6 +1296,7 @@ async function createGateway(
     runtimeOriginResolver?: RuntimeOriginResolver
     runtimeRoutingTicketResolver?: RuntimeRoutingTicketResolver
     socketRecheckMs?: number
+    publicUrls?: string
   },
 ): Promise<RuntimeIngressGateway> {
   const dir = mkdtempSync(join(tmpdir(), 'gateway-sessions-'))
@@ -1237,6 +1310,7 @@ async function createGateway(
     ...(auth?.runtimeRoutingTicketResolver ? { runtimeRoutingTicketResolver: auth.runtimeRoutingTicketResolver } : {}),
     ...(auth?.dashboardOrigin ? { dashboardOrigin: auth.dashboardOrigin } : {}),
     publicOrigin: 'http://127.0.0.1:0',
+    ...(auth?.publicUrls ? { publicUrls: parsePublicUrls(auth.publicUrls) } : {}),
     sessions,
     cacheNamespaceSecret: 'test-session-secret-with-sufficient-entropy',
     ingressSecret: 'gateway-secret',
@@ -1252,8 +1326,9 @@ async function createGateway(
       ...(auth?.enterpriseSso ? { enterpriseSso: auth.enterpriseSso } : {}),
       ...(auth?.resolveIdentity ? { resolveIdentity: auth.resolveIdentity } : {}),
       oidc: {
-        async authorizationUrl(_redirectUri, authorizationOptions) {
+        async authorizationUrl(redirectUri, authorizationOptions) {
           const url = new URL('http://identity.example/authorize')
+          url.searchParams.set('redirect_uri', redirectUri)
           if (authorizationOptions?.prompt) url.searchParams.set('prompt', authorizationOptions.prompt)
           if (authorizationOptions?.idpHint) url.searchParams.set('idp_hint', authorizationOptions.idpHint)
           auth?.authorizationOptions?.push({ ...(authorizationOptions?.idpHint ? { idpHint: authorizationOptions.idpHint } : {}), ...(authorizationOptions?.loginHint ? { loginHint: authorizationOptions.loginHint } : {}) })

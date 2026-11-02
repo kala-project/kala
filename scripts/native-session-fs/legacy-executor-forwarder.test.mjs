@@ -10,10 +10,11 @@ import test from 'node:test'
 
 const routeHint = 'a'.repeat(43)
 const publicHost = 'kala.example:18081'
+const browserHost = 'dashboard.example.test'
 
 async function fixture(t) {
   const upstream = http.createServer((request, response) => {
-    response.writeHead(request.headers.host === publicHost ? 200 : 400, { 'content-type': 'application/json' })
+    response.writeHead([publicHost, browserHost].includes(request.headers.host) ? 200 : 400, { 'content-type': 'application/json' })
     response.end(JSON.stringify({ url: request.url, headers: request.headers }))
   })
   await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve))
@@ -26,6 +27,7 @@ async function fixture(t) {
   await writeFile(config, JSON.stringify({
     routeHint, listenHost: '127.0.0.1', port,
     upstream: `http://127.0.0.1:${upstream.address().port}`, publicOrigin: `http://${publicHost}`,
+    browserPublicOrigins: [`https://${browserHost}`],
   }), { mode: 0o600 })
   const child = spawn(process.execPath, [
     fileURLToPath(new URL('./legacy-executor-forwarder.mjs', import.meta.url)), config,
@@ -91,4 +93,21 @@ test('WebSocket forwarding preserves the canonical Host, credentials, upgrade he
   assert.equal(received['x-kala-executor-route'], routeHint)
   assert.equal(received.authorization, 'Bearer original-executor-test-token')
   assert.deepEqual(upgraded, { header: 'preserved', body: 'legacy-upgrade-head' })
+})
+
+test('only explicitly registered browser authorities survive the compatibility listener', { timeout: 15000 }, async t => {
+  const { port } = await fixture(t)
+  for (const [host, expected] of [[browserHost, browserHost], ['untrusted.example.test', publicHost]]) {
+    const body = await new Promise((resolve, reject) => {
+      const request = http.get({ host: '127.0.0.1', port, path: '/auth/login', headers: { host,
+        'x-forwarded-host': 'untrusted.example.test', origin: `https://${browserHost}` } }, response => {
+        let text = ''
+        response.on('data', data => { text += data })
+        response.on('end', () => resolve(JSON.parse(text)))
+      })
+      request.on('error', reject)
+    })
+    assert.equal(body.headers.host, expected)
+    assert.equal(body.headers.origin, `https://${browserHost}`)
+  }
 })

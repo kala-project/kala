@@ -11,6 +11,9 @@ import type { ChatDisplayPrefs } from './chatDisplayPrefs.js'
 const EMPTY_HUMAN_ATTENTION = { sessionId: '', points: [], latest: null } as const
 
 function renderComposer(props?: {
+  model?: React.ComponentProps<typeof Composer>['model']
+  models?: React.ComponentProps<typeof Composer>['models']
+  onModelChange?: React.ComponentProps<typeof Composer>['onModelChange']
   onSubmit?: (
     text: string,
     mode: 'steer' | 'queue',
@@ -50,9 +53,9 @@ function renderComposer(props?: {
 }) {
   return render(
     <Composer
-      model=""
-      models={[]}
-      onModelChange={() => {}}
+      model={props?.model ?? ''}
+      models={props?.models ?? []}
+      onModelChange={props?.onModelChange ?? (() => {})}
       approvalMode={props?.approvalMode ?? 'auto'}
       onApprovalModeChange={props?.onApprovalModeChange ?? (() => {})}
       state={props?.state ?? null}
@@ -87,6 +90,54 @@ function renderComposer(props?: {
     />,
   )
 }
+
+describe('saved model selection', () => {
+  it.each(['saved-model', 'retired-model'])('does not clear %s when its native form select synchronizes', model => {
+    window.localStorage.setItem('ak-composer-mode', 'full')
+    const onModelChange = vi.fn()
+    const view = renderComposer({ model, models: [
+      { id: 'auto', label: 'Auto', provider: 'Copilot' },
+      { id: 'saved-model', label: 'Saved model', provider: 'Copilot' },
+    ], onModelChange })
+    const native = [...view.container.querySelectorAll('select')].find(select =>
+      [...select.options].some(option => option.value === model))
+    if (!native) throw new Error('Missing native model select')
+    fireEvent.change(native, { target: { value: '' } })
+    expect(onModelChange).not.toHaveBeenCalled()
+    fireEvent.change(native, { target: { value: 'auto' } })
+    expect(onModelChange).toHaveBeenCalledWith('auto')
+    window.localStorage.removeItem('ak-composer-mode')
+  })
+
+  it.each(['simple', 'full'] as const)('shows a saved bare ID using its catalog reference in %s mode', mode => {
+    window.localStorage.setItem('ak-composer-mode', mode)
+    const onModelChange = vi.fn()
+    renderComposer({ model: 'saved-model', models: [{ id: 'saved-model', ref: 'copilot:saved-model', label: 'Saved model', provider: 'Copilot' }], onModelChange })
+    if (mode === 'simple') {
+      fireEvent.click(screen.getByTestId('composer-tools-trigger'))
+      fireEvent.click(screen.getByTestId('composer-config-trigger'))
+    }
+    const picker = mode === 'full' ? screen.getByTestId('model-picker') : screen.getByRole('combobox', { name: /^model$/i })
+    expect(picker.textContent).toContain('Saved model')
+    expect(onModelChange).not.toHaveBeenCalled()
+    window.localStorage.removeItem('ak-composer-mode')
+  })
+
+  it.each(['simple', 'full'] as const)('keeps an unlisted saved model visible instead of implying Auto in %s mode', mode => {
+    window.localStorage.setItem('ak-composer-mode', mode)
+    const onModelChange = vi.fn()
+    renderComposer({ model: 'retired-model', models: [{ id: 'auto', label: 'Auto', provider: 'Copilot' }], onModelChange })
+    if (mode === 'simple') {
+      fireEvent.click(screen.getByTestId('composer-tools-trigger'))
+      fireEvent.click(screen.getByTestId('composer-config-trigger'))
+    }
+    const picker = mode === 'full' ? screen.getByTestId('model-picker') : screen.getByRole('combobox', { name: /^model$/i })
+    expect(picker.textContent).toContain('retired-model')
+    expect(picker.textContent).toContain('Not in current catalog')
+    expect(onModelChange).not.toHaveBeenCalled()
+    window.localStorage.removeItem('ak-composer-mode')
+  })
+})
 
 function firePointer(
   target: Element,

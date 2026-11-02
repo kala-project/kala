@@ -89,16 +89,18 @@ export function RuntimeSection({
         subtitle={t('settings.runtime.subtitle')}
       />
       {runtime ? (
-        <div className="mb-4 rounded-md bg-black/[0.18] p-4 ring-1 ring-white/10">
+        <div className="mb-5 rounded-lg bg-card p-4 ring-1 ring-border/40">
           <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
-            <div className="min-w-0 space-y-1 text-sm">
-              <div className="font-medium text-foreground">{t('settings.runtime.hostRuntime')}</div>
-              <div className="text-xs text-muted-foreground">PID {runtime.pid} - {t('settings.runtime.startedAt')}: {runtime.startedAt}</div>
-              <div className="text-xs text-muted-foreground">
+            <div className="min-w-0 space-y-2 text-sm">
+              <div className="text-base font-semibold text-foreground">{t('settings.runtime.hostRuntime')}</div>
+              <div className="text-sm text-foreground">
+                {t('settings.runtime.startedAt')}: <time dateTime={runtime.startedAt}>{new Date(runtime.startedAt).toLocaleString()}</time>
+              </div>
+              {restartActive ? <div className="text-sm text-foreground" role="status">
                 {t('settings.runtime.restartPhase')}: {platform ? operation?.phase ?? t('settings.runtime.restartIdle') : currentAttempt?.phase ?? t('settings.runtime.restartIdle')}
                 {!platform && currentAttempt ? ` - ${currentAttempt.sessions.length} ${t('settings.runtime.restartSessions')}` : ''}
-              </div>
-              {operation?.blockers?.length ? <div className="text-xs text-amber-600">{t('settings.runtime.restartBlockers')}: {operation.blockers.join(', ')}</div> : null}
+              </div> : null}
+              {operation?.blockers?.length ? <div className="text-sm text-amber-700 dark:text-amber-300">{t('settings.runtime.restartBlockers')}: {operation.blockers.join(', ')}</div> : null}
               {operation?.operationId ? <div className="break-all font-mono text-caption text-muted-foreground">{operation.operationId}</div> : null}
             </div>
             {!externallyManaged ? <div className="flex flex-col gap-2 sm:flex-row">
@@ -112,18 +114,29 @@ export function RuntimeSection({
               ) : null}
             </div> : null}
           </div>
-          <p className="mt-3 text-xs leading-5 text-muted-foreground">{t(externallyManaged ? 'settings.runtime.externallyManaged' : 'settings.runtime.restartDesc')}</p>
-          {error ? <div className="mt-2 text-xs text-destructive">{error}</div> : null}
+          <details className="mt-4 rounded-md bg-muted/40 p-3">
+            <summary className="cursor-pointer text-sm font-medium text-foreground">{t('settings.deployment.technicalDetails')}</summary>
+            <div className="mt-3 space-y-2 text-sm leading-6 text-foreground">
+              <p>PID {runtime.pid}</p>
+              <p>{t('settings.runtime.restartPhase')}: {platform ? operation?.phase ?? t('settings.runtime.restartIdle') : currentAttempt?.phase ?? t('settings.runtime.restartIdle')}</p>
+              <p>{t(externallyManaged ? 'settings.runtime.externallyManaged' : 'settings.runtime.restartDesc')}</p>
+            </div>
+          </details>
+          {error ? <div className="mt-2 text-sm text-destructive" role="alert">{error}</div> : null}
         </div>
       ) : <p className="text-sm text-muted-foreground">{t('settings.runtime.unavailable')}</p>}
-      {payload.agentRuntimes?.map((agentRuntime) => (
-        <div key={agentRuntime.id} className="mb-3 rounded-md bg-muted/40 p-4 text-sm" data-testid={`agent-runtime-${agentRuntime.id}`}>
-          <div className="font-medium">{agentRuntime.label}</div>
-          <div>{t(`settings.runtime.status.${agentRuntime.status}`)}</div>
-          {agentRuntime.reason ? <p className="text-destructive">{agentRuntime.reason}</p> : null}
-          {agentRuntime.models?.length ? <p className="text-muted-foreground">{t('settings.runtime.availableModels', { count: agentRuntime.models.length })}</p> : null}
-        </div>
-      ))}
+      <div className="grid gap-3">
+        {payload.agentRuntimes?.map((agentRuntime) => (
+          <section key={agentRuntime.id} className="rounded-lg bg-card p-4 ring-1 ring-border/40" data-testid={`agent-runtime-${agentRuntime.id}`}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h3 className="text-base font-semibold text-foreground">{agentRuntime.label}</h3>
+              <span className={agentRuntime.status === 'ready' ? 'rounded-full bg-emerald-500/10 px-3 py-1 text-sm font-medium text-emerald-700 dark:text-emerald-300' : 'rounded-full bg-muted px-3 py-1 text-sm font-medium text-foreground'}>{t(`settings.runtime.status.${agentRuntime.status}`)}</span>
+            </div>
+            {agentRuntime.models?.length ? <p className="mt-3 text-sm text-foreground">{t('settings.runtime.availableModels', { count: agentRuntime.models.length })}</p> : null}
+            {agentRuntime.reason ? <p className="text-sm text-destructive">{agentRuntime.reason}</p> : null}
+          </section>
+        ))}
+      </div>
     </div>
   )
 }

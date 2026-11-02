@@ -45,6 +45,10 @@ For a single-port HTTP loopback evaluation, the optional [single-origin Caddy co
 
 The Platform Dashboard uses OIDC identity and identity-scoped caches for both Dedicated and Private Cloud. Portable Executor pairing is not polled in either Platform mode. Runtime status remains available without the Portable restart coordinator; externally managed Runtime replacement is an operator action. Platform storage shows organization-bound PostgreSQL object allocation and quota with S3 object authority, not a global filesystem inventory or whole-database size. Organization Owner is the tenant administrator, not an unrestricted host administrator.
 
+An external proxy may terminate HTTPS while the private identity proxy, Gateway, Login and ZITADEL communicate over HTTP. Keep the public application origin and OIDC issuer HTTPS; ZITADEL's `ExternalSecure=true` describes that **public** origin, not its private listener. With the optional single-origin identity router, set `KALA_IDENTITY_HOST` to the registered public authority and `KALA_IDENTITY_SCHEME=https`; leave ZITADEL's private TLS listener disabled and Gateway's private discovery origin HTTP. Register the exact public callback with the provider. Gateway derives browser callbacks, redirects, Secure cookies and upstream forwarding metadata from its validated public-origin allowlist, never arbitrary client-supplied forwarding headers.
+
+For externally managed deployments, Deployment settings can show authenticated Gateway, Runtime readiness and Dashboard-response checks without claiming a local supervisor, blue/green slots or complete PostgreSQL/S3 health. The separate [Aspire telemetry UI](telemetry/README.md) remains token-protected on loopback; use its documented local URL or a trusted SSH tunnel, not an anonymous public telemetry listener.
+
 After setting publication inputs, finalize the raw template **without resolving secrets or contacting Docker** (Python/PyYAML required):
 
 ```sh

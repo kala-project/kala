@@ -1,4 +1,4 @@
-import type { BuildMetadata, DedicatedDeploymentStatus, ServerSettingsPayload } from '@agent-kernel/shared'
+import type { BuildMetadata, DedicatedDeploymentStatus, ExternalDeploymentHealth, ServerSettingsPayload } from '@agent-kernel/shared'
 import { PROTOCOL_VERSION } from '@agent-kernel/shared'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
@@ -15,28 +15,42 @@ export function DeploymentSection({ payload, host, token }: { payload: ServerSet
   const { t } = useTranslation()
   const statusQuery = useQuery({
     queryKey: ['dedicated-deployment-status', host],
-    queryFn: async (): Promise<DedicatedDeploymentStatus | null> => {
+    queryFn: async (): Promise<DedicatedDeploymentStatus | ExternalDeploymentHealth | null> => {
       const response = await fetch(`${host.replace(/\/$/u, '')}/runtime/deployment/status`, { cache: 'no-store', credentials: 'include', signal: AbortSignal.timeout(10_000), headers: token ? { authorization: `Bearer ${token}` } : undefined })
-      if (response.status === 404) return null
+      if (response.status === 404) {
+        if (payload.runtimeManagement !== 'external') return null
+        const health = await fetch(`${host.replace(/\/$/u, '')}/runtime/deployment/health`, { cache: 'no-store', credentials: 'include', signal: AbortSignal.timeout(10_000), headers: token ? { authorization: `Bearer ${token}` } : undefined })
+        if (health.status === 404) return null
+        if (!health.ok) throw new Error(`HTTP ${health.status}`)
+        return await health.json() as ExternalDeploymentHealth
+      }
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       return await response.json() as DedicatedDeploymentStatus
     },
-    refetchInterval: (query) => query.state.data === null ? false : 2_000,
+    refetchInterval: (query) => query.state.data === null ? false : query.state.data && 'kind' in query.state.data ? 10_000 : 2_000,
   })
-  const status = statusQuery.data
+  const externalHealth = statusQuery.data && 'kind' in statusQuery.data ? statusQuery.data : undefined
+  const status = statusQuery.data && 'route' in statusQuery.data ? statusQuery.data : undefined
   const build = payload.versions?.build
   const deploymentHealthy = !status?.deployment || status.deployment.phase === 'completed' && !status.deployment.error && !(status.deployment.blockers?.length)
   const dashboardCompatible = !status?.dashboard || protocolCompatible(PROTOCOL_VERSION, status.dashboard.protocol)
-  const overallHealthy = !statusQuery.isError && deploymentHealthy && dashboardCompatible
+  const verified = Boolean(status || externalHealth)
+  const overallHealthy = !statusQuery.isError && (externalHealth?.ok ?? deploymentHealthy) && dashboardCompatible
   return (
     <div>
       <SectionHeader title={t('settings.sections.deployment.label')} subtitle={t('settings.deployment.subtitle')} />
       <div className="grid gap-2 sm:grid-cols-2" data-testid="settings-deployment-overview">
-        <OverviewCard icon={status && overallHealthy ? CheckCircle2 : CircleAlert} label={t('settings.deployment.overallStatus')} value={!status && !statusQuery.isError ? t('settings.deployment.externalStatus') : overallHealthy ? t('settings.deployment.healthy') : t('settings.deployment.needsAttention')} tone={status && overallHealthy ? 'good' : 'warn'} />
+        <OverviewCard icon={verified && overallHealthy ? CheckCircle2 : CircleAlert} label={t('settings.deployment.overallStatus')} value={!verified && !statusQuery.isError ? t('settings.deployment.externalStatus') : overallHealthy ? t('settings.deployment.healthy') : t('settings.deployment.needsAttention')} tone={verified && overallHealthy ? 'good' : 'warn'} />
         <OverviewCard icon={MonitorUp} label={t('settings.deployment.dashboardRelease')} value={status?.dashboard?.version ?? build?.releaseTag ?? DASHBOARD_VERSION} detail={status?.dashboard ? t('settings.deployment.generationValue', { generation: status.dashboard.generation }) : dashboardDeliveryLabel(build)} />
         <OverviewCard icon={Server} label={t('settings.deployment.runtimeRelease')} value={status?.route.activeReleaseId ?? build?.releaseTag ?? payload.versions?.host ?? '—'} detail={status ? t('settings.deployment.activeSlotValue', { slot: status.route.activeSlot }) : hostDeliveryLabel(build)} />
       </div>
       {status ? <CurrentDeployment status={status} compatible={dashboardCompatible} /> : statusQuery.isError ? <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-700 dark:text-amber-300">{t('settings.deployment.statusUnavailable')}</div> : null}
+      {externalHealth && !statusQuery.isError ? <section className="mt-5 rounded-lg bg-card p-4 ring-1 ring-border/40" data-testid="settings-external-deployment">
+        <h4 className="text-base font-semibold text-foreground">{t('settings.deployment.externalChecks')}</h4>
+        <p className="mt-2 text-sm leading-6 text-foreground">{t('settings.deployment.externalChecksScope')}</p>
+        <dl className="mt-4 grid gap-3 sm:grid-cols-3">{externalHealth.checks.map(check => <div key={check.component}><dt className="text-sm text-muted-foreground">{t(`settings.deployment.checkComponents.${check.component}`)}</dt><dd className={check.ready ? 'mt-1 text-sm font-semibold text-emerald-700 dark:text-emerald-300' : 'mt-1 text-sm font-semibold text-amber-700 dark:text-amber-300'}>{t(check.ready ? 'settings.deployment.ready' : 'settings.deployment.needsAttention')}</dd></div>)}</dl>
+        <p className="mt-4 text-sm text-muted-foreground">{t('settings.deployment.checkedAt')}: <time dateTime={externalHealth.checkedAt}>{new Date(externalHealth.checkedAt).toLocaleString()}</time></p>
+      </section> : null}
       <details className="mt-5 rounded-lg border border-border bg-card/40" data-testid="settings-deployment-diagnostics">
         <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm font-semibold text-foreground [&::-webkit-details-marker]:hidden"><ChevronRight className="h-4 w-4" /><CloudCog className="h-4 w-4 text-muted-foreground" />{t('settings.deployment.versionDiagnostics')}</summary>
         <div className="border-t border-border px-4 py-4">

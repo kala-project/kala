@@ -1,13 +1,36 @@
 import { describe, expect, it, vi } from 'vitest'
+import { IncomingMessage } from 'node:http'
+import { Socket } from 'node:net'
 
 import {
   authenticateExecutorToken,
+  authenticateDashboardHandshake,
   validateExecutorAnnouncement,
   authSettings,
 } from './auth-control.js'
 import { ExecutorIdentityStore } from './store/executor-identity.js'
 
 describe('auth-control', () => {
+  it('requires complete ingress identity without falling back to anonymous or shared-token access', () => {
+    const request = new IncomingMessage(new Socket())
+    const handshake = { role: 'dashboard' as const, clientVersion: '1.1.0', token: 'legacy-token' }
+    const config = { requireIngressIdentity: true, sharedToken: 'legacy-token' }
+    expect(authenticateDashboardHandshake(handshake, request, config)).toEqual({ ok: false, reason: 'auth_failed' })
+    request.headers = { 'x-agent-runlab-principal': 'principal', 'x-agent-runlab-organization-id': 'org' }
+    expect(authenticateDashboardHandshake(handshake, request, config)).toEqual({ ok: false, reason: 'auth_failed' })
+    request.headers['x-agent-runlab-organization-role'] = 'owner'
+    expect(authenticateDashboardHandshake(handshake, request, config)).toEqual({
+      ok: true, actor: { kind: 'ingress', principal: 'principal', organizationId: 'org', role: 'owner' },
+    })
+    expect(authSettings({ requireIngressIdentity: true }).dashboardAuthRequired).toBe(true)
+  })
+
+  it('preserves Portable anonymous authentication when ingress identity is not required', () => {
+    expect(authenticateDashboardHandshake(undefined, new IncomingMessage(new Socket()), undefined)).toEqual({
+      ok: true, actor: { kind: 'anonymous' },
+    })
+  })
+
   it('binds executor token scope to one workspace id', async () => {
     const identity = await authenticateExecutorToken(
       { role: 'executor', clientVersion: '0.1.0', token: 'secret' },
@@ -28,7 +51,7 @@ describe('auth-control', () => {
 
     expect(await authenticateExecutorToken(
       { role: 'executor', clientVersion: '0.1.0', token: 'bound-token' },
-      { executorIdentityStore: store },
+      { executorIdentityStore: store, requireIngressIdentity: true },
     )).toMatchObject({ accepted: true, workspaceId: 'ws-bound', installId: 'install-bound' })
     expect(await authenticateExecutorToken(
       { role: 'executor', clientVersion: '0.1.0', token: 'legacy-token' },

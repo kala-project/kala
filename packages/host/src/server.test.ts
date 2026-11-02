@@ -397,6 +397,41 @@ describe('wire protocol', () => {
     }
   })
 
+  it.each([DEDICATED_DEPLOYMENT, PRIVATE_CLOUD_DEPLOYMENT])('requires ingress identity on platform Dashboard transports (%j)', async (deployment) => {
+    await server.close()
+    server = await startHostServer({
+      port: 0, sessionsDir: dir, llm: scriptedLlm(), defaultConfig: config,
+      deployment, authToken: 'legacy-shared-token',
+    })
+    url = `http://localhost:${server.port}`
+    const connect = (headers?: Record<string, string>) => clientIO(`${url}/dashboard`, {
+      auth: { role: 'dashboard', clientVersion: PROTOCOL_VERSION, clientId: 'platform-auth-check', token: 'legacy-shared-token' },
+      transports: ['websocket'], reconnection: false, autoConnect: false, extraHeaders: headers,
+    })
+    for (const headers of [undefined, { 'x-agent-runlab-principal': 'principal', 'x-agent-runlab-organization-role': 'owner' }]) {
+      const socket = connect(headers)
+      try {
+        await expect(new Promise<void>((resolve, reject) => {
+          socket.once('connect', resolve)
+          socket.once('connect_error', reject)
+          socket.connect()
+        })).rejects.toThrow('auth_failed')
+      } finally { socket.close() }
+    }
+    const owner = connect({
+      'x-agent-runlab-principal': 'principal',
+      'x-agent-runlab-organization-id': 'org_owner',
+      'x-agent-runlab-organization-role': 'owner',
+    })
+    try {
+      await new Promise<void>((resolve, reject) => {
+        owner.once('connect', resolve)
+        owner.once('connect_error', reject)
+        owner.connect()
+      })
+    } finally { owner.close() }
+  })
+
   it('binds a routed Session Upgrade to the later dashboard handshake and RPC target', async () => {
     const routedSessionId = 'ticket-session-a'
     await server.store.ensure({ sessionId: routedSessionId, defaultConfig: config })
@@ -4087,6 +4122,36 @@ describe('wire protocol', () => {
     expect(ready.selectedModel).toBe('secondary:gpt-shared')
     expect(ready.contextSnapshot.contextWindow).toEqual({ tokens: 353_346, source: 'model_registry' })
     dashboard.close()
+  })
+
+  it.each(['kernel', 'copilot'] as const)('uses the loaded %s snapshot model when its writable cache is fenced', async agentRuntime => {
+    await server.close()
+    const http = createServer()
+    await new Promise<void>((resolve) => http.listen(0, resolve))
+    server = await startHostServer({
+      port: (http.address() as AddressInfo).port, sessionsDir: dir, defaultConfig: config,
+      httpServer: http, llm: scriptedLlm(), defaultModel: 'openai:gpt-default',
+      models: [
+        { ref: 'openai:gpt-default', id: 'gpt-default', label: 'Default', provider: 'openai' },
+        { ref: 'openai:gpt-saved', id: 'gpt-saved', label: 'Saved', provider: 'openai' },
+      ],
+    })
+    const sessionId = `read-only-${agentRuntime}-model`
+    const selectedModel = agentRuntime === 'copilot' ? 'gpt-saved' : 'openai:gpt-saved'
+    await server.store.create({ sessionId, agentRuntime, config, preferences: { selectedModel } })
+    const get = vi.spyOn(server.store, 'get').mockReturnValue(undefined)
+    const dashboard = clientIO(`http://localhost:${server.port}/dashboard`, {
+      transports: ['websocket'], auth: { sessionId, role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+      reconnection: false,
+    }) as ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents>
+    try {
+      const ready = await new Promise<SessionReadyEvent>((resolve) => dashboard.on('session:ready', resolve))
+      expect(ready.agentRuntime).toBe(agentRuntime)
+      expect(ready.selectedModel).toBe(selectedModel)
+    } finally {
+      get.mockRestore()
+      dashboard.close()
+    }
   })
 
   it('uses persisted session model preferences over the host default model', async () => {

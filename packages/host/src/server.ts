@@ -304,11 +304,14 @@ export async function startHostServer(
       options.logger?.warn(entry, 'wire validation failed')
     })
   }
+  const deployment = options.deployment ?? PORTABLE_DEPLOYMENT
   const configuredAuth: AuthConfig | undefined = options.auth ?? (options.authToken ? { sharedToken: options.authToken } : undefined)
-  const auth: AuthConfig | undefined = options.executorIdentityStore
+  const identityAuth: AuthConfig | undefined = options.executorIdentityStore
     ? { ...(configuredAuth ?? {}), executorIdentityStore: options.executorIdentityStore }
     : configuredAuth
-  const deployment = options.deployment ?? PORTABLE_DEPLOYMENT
+  const auth: AuthConfig | undefined = deployment.architecture === 'platform'
+    ? { ...identityAuth, requireIngressIdentity: true }
+    : identityAuth
   const product = productVariant(deployment)
   // Existing PG callers supply their paired queue through the PG Session authority.
   // SQLite must supply its own queue explicitly; a durable Session cannot fall back to JSONL snapshots.
@@ -985,8 +988,8 @@ export async function startHostServer(
     const fallback = configured.trim()
     return normalizeModelRef(configured) ?? (fallback.length > 0 ? fallback : undefined)
   }
-  const effectiveModelForSession = (sessionId: string): string | undefined => {
-    const record = store.get(sessionId)
+  const effectiveModelForSession = (sessionId: string, snapshot?: SessionRecord): string | undefined => {
+    const record = snapshot ?? store.get(sessionId)
     const selected = record?.preferences.selectedModel
     if (record?.agentRuntime === 'copilot') return selected
     return (selected ? normalizeModelRef(selected) : undefined) ?? effectiveDefaultModel()
@@ -2628,7 +2631,8 @@ export async function startHostServer(
     broadcastError,
     contextWindowForModel,
     effectiveDefaultModel,
-    effectiveModelForSession: (record) => effectiveModelForSession(record.sessionId),
+    // Read-only snapshots need not be admitted to the writable owner cache.
+    effectiveModelForSession: (record) => effectiveModelForSession(record.sessionId, record),
     normalizeModelRef,
     dashboardNs,
     // Drain pending deltas before taking the synchronous ready snapshot. New

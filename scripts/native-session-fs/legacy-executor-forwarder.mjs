@@ -9,9 +9,19 @@ assert(upstream.protocol === 'http:' && !upstream.username && !upstream.password
 const publicOrigin = new URL(config.publicOrigin ?? config.upstream)
 assert(['http:', 'https:'].includes(publicOrigin.protocol) && !publicOrigin.username && !publicOrigin.password
   && publicOrigin.pathname === '/' && !publicOrigin.search && !publicOrigin.hash)
+const browserHosts = new Set((config.browserPublicOrigins ?? []).map(value => {
+  const origin = new URL(value)
+  assert(['http:', 'https:'].includes(origin.protocol) && !origin.username && !origin.password
+    && origin.pathname === '/' && !origin.search && !origin.hash)
+  return origin.host
+}))
 assert(['127.0.0.1', '0.0.0.0'].includes(config.listenHost))
 assert(Number.isInteger(config.port) && config.port > 1024 && config.port < 65536)
-const headers = request => ({ ...request.headers, host: publicOrigin.host, 'x-kala-executor-route': config.routeHint })
+const headers = request => ({
+  ...request.headers,
+  host: browserHosts.has(request.headers.host) ? request.headers.host : publicOrigin.host,
+  'x-kala-executor-route': config.routeHint,
+})
 const server = http.createServer((request, response) => {
   if (request.url === '/health') {
     response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })

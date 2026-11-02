@@ -4,7 +4,7 @@ import { Agent as HttpsAgent, request as httpsRequest } from 'node:https'
 import { Readable, type Duplex } from 'node:stream'
 
 import httpProxy from 'http-proxy'
-import { parsePublicUrls, validatePublicRequest, type PublicUrlPattern } from '@agent-kernel/shared'
+import { parsePublicUrls, validatePublicRequest, type ExternalDeploymentHealth, type PublicUrlPattern } from '@agent-kernel/shared'
 import { createOnlineTelemetryFromEnv, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
 
 import type { LoginStateStore } from '../auth/login-state-store.js'
@@ -380,8 +380,6 @@ export async function startRuntimeIngressGateway(options: {
   }
   const publicUrl = new URL(options.publicOrigin)
   let publicUrls = options.publicUrls
-  const secure = publicUrl.protocol === 'https:' ? '; Secure' : ''
-  const callbackUri = `${options.publicOrigin}/auth/callback`
   const requestPublicOrigin = (request: IncomingMessage): string => {
     const value = request.headers['x-kala-public-origin']
     return typeof value === 'string' ? value : publicUrl.origin
@@ -415,7 +413,12 @@ export async function startRuntimeIngressGateway(options: {
     return token
   }
   const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
-    const url = new URL(request.url ?? '/', options.publicOrigin)
+    const requestOrigin = new URL(requestPublicOrigin(request))
+    const url = new URL(request.url ?? '/', requestOrigin)
+    request.headers['x-forwarded-proto'] = requestOrigin.protocol.slice(0, -1)
+    request.headers['x-forwarded-host'] = requestOrigin.host
+    const secure = requestOrigin.protocol === 'https:' ? '; Secure' : ''
+    const callbackUri = `${requestOrigin.origin}/auth/callback`
     if (url.pathname === '/install/invite.ps1' && url.search) {
       response.writeHead(400, { 'content-type': 'application/json', 'cache-control': 'no-store' })
       response.end(JSON.stringify({ error: 'query_not_allowed' }))
@@ -431,8 +434,6 @@ export async function startRuntimeIngressGateway(options: {
       // route. Replace untrusted client headers before contacting the Runtime.
       request.headers['x-agent-runlab-runtime-unit'] = 'public-installer'
       request.headers['x-agent-runlab-ingress-secret'] = options.ingressSecret
-      request.headers['x-forwarded-proto'] = publicUrl.protocol.slice(0, -1)
-      request.headers['x-forwarded-host'] = publicUrl.host
       proxy.web(request, response, { target: options.hostOrigin }, () => {
         if (!response.headersSent) response.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' })
         response.end('installer upstream unavailable')
@@ -498,7 +499,7 @@ export async function startRuntimeIngressGateway(options: {
         if (access.organization.status !== 'active') { denyInactiveOrganization(response, access.organization.status); return }
         await options.provision?.(access.organization.unitId)
         const sessionToken = await issueBrowserSession(request, authenticated.identity, access)
-        response.writeHead(303, { location: publicUrl.href, 'cache-control': 'no-store', 'set-cookie': `ak_session=${sessionToken}; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=2592000` })
+        response.writeHead(303, { location: requestOrigin.href, 'cache-control': 'no-store', 'set-cookie': `ak_session=${sessionToken}; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=2592000` })
         response.end(); return
       }
       if (request.method !== 'GET') { response.writeHead(405, { allow: 'GET', 'cache-control': 'no-store' }); response.end(); return }
@@ -534,6 +535,7 @@ export async function startRuntimeIngressGateway(options: {
       const nonce = cookies(request).ak_login
       const login = nonce ? await options.authentication.loginStates.take(nonce) : undefined
       if (!login) { response.writeHead(400); response.end('invalid login state'); return }
+      if (login.redirectUri !== callbackUri) { response.writeHead(400); response.end('login origin mismatch'); return }
       const upstreamAuthentication = await options.authentication.oidc.callback(url, login.redirectUri, login.codeVerifier, login.state, login.oidcNonce)
       const identity = options.authentication.resolveIdentity
         ? await options.authentication.resolveIdentity(upstreamAuthentication.identity)
@@ -593,7 +595,7 @@ export async function startRuntimeIngressGateway(options: {
       const assignment = access ? { unitId: access.organization.unitId, identity } : await options.directory.getOrCreateForIdentity(identity)
       await options.provision?.(assignment.unitId)
       const sessionToken = await issueBrowserSession(request, identity, access, authentication)
-      response.writeHead(302, { location: login.organizationInviteHash ? '/auth/invite-result?status=accepted' : publicUrl.href, 'set-cookie': [`ak_session=${sessionToken}; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=2592000`, `ak_login=; HttpOnly${secure}; SameSite=Lax; Path=/auth; Max-Age=0`] }); response.end(); return
+      response.writeHead(302, { location: login.organizationInviteHash ? '/auth/invite-result?status=accepted' : requestOrigin.href, 'set-cookie': [`ak_session=${sessionToken}; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=2592000`, `ak_login=; HttpOnly${secure}; SameSite=Lax; Path=/auth; Max-Age=0`] }); response.end(); return
     }
     if (url.pathname === '/auth/me') {
       if (request.method !== 'GET') { response.writeHead(405, { allow: 'GET', 'cache-control': 'no-store' }); response.end(); return }
@@ -1075,6 +1077,33 @@ export async function startRuntimeIngressGateway(options: {
         response.end(JSON.stringify({ error: error instanceof SessionHttpInputError ? error.message : 'session_route_unavailable' })); return
       }
     } else runtimeOrigin = await resolveRuntimeOrigin(assignment.unitId)
+    if (url.pathname === '/runtime/deployment/health' && request.method === 'GET') {
+      const probe = async (component: 'runtime' | 'dashboard', origin: string): Promise<ExternalDeploymentHealth['checks'][number]> => {
+        try {
+          const upstream = await requestRuntime(origin, component === 'runtime' ? '/internal/health' : '/', 'GET',
+            component === 'runtime' ? { 'x-agent-runlab-ingress-secret': options.ingressSecret } : {},
+            undefined, component === 'runtime' ? options.runtimeTls : undefined,
+            { signal: AbortSignal.timeout(3_000), maxResponseBytes: 1_048_576 })
+          let ready = upstream.status === 200
+          if (component === 'runtime') {
+            const body: unknown = JSON.parse(upstream.body.toString('utf8'))
+            ready &&= typeof body === 'object' && body !== null && 'ok' in body && body.ok === true && 'state' in body && body.state === 'ready'
+          } else ready &&= upstream.contentType.includes('text/html')
+          return { component, ready }
+        } catch (error) {
+          process.stderr.write(`${JSON.stringify({ event: 'deployment_health_probe_failed', component, error: error instanceof Error ? error.message : String(error) })}\n`)
+          return { component, ready: false }
+        }
+      }
+      const checks = [{ component: 'gateway' as const, ready: true }, ...await Promise.all([
+        probe('runtime', runtimeOrigin),
+        ...(options.dashboardOrigin ? [probe('dashboard', options.dashboardOrigin)] : []),
+      ])]
+      const health: ExternalDeploymentHealth = { kind: 'external', checkedAt: new Date().toISOString(), ok: checks.every(check => check.ready), checks }
+      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      response.end(JSON.stringify(health))
+      return
+    }
     if (url.pathname.startsWith('/auth/executor-pairings')) {
       const decision = /^\/auth\/executor-pairings\/[^/]+\/(approve|reject)$/u.test(url.pathname)
       if (decision && (!organizationAccess || !permits(organizationAccess.membership.role, 'workspace:manage'))) { response.writeHead(403, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: 'forbidden', requiredPermission: 'workspace:manage' })); return }
