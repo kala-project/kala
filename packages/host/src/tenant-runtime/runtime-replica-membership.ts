@@ -134,7 +134,10 @@ export class PostgresRuntimeReplicaMembership implements RuntimeReplicaMembershi
       if (this.#leases.get(unitId) !== active) return
       active.lease = lease
       this.#renewLater(unitId, active)
-    } catch {
+    } catch (error) {
+      process.emitWarning(`Runtime replica membership renewal failed: ${error instanceof Error ? error.message : String(error)}`, {
+        code: 'KALA_RUNTIME_MEMBERSHIP_RENEW',
+      })
       if (this.#leases.get(unitId) !== active) return
       this.#forget(unitId, active)
       await this.#leaseLost(unitId)

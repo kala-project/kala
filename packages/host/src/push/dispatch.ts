@@ -54,6 +54,14 @@ export type PushDispatcher = {
   status: () => Promise<{ configured: true; subscribers: number } | { configured: false }>
 }
 
+export function notifyPushSafely(dispatcher: Pick<PushDispatcher, 'send'>, payload: PushEventPayload): void {
+  void dispatcher.send(payload).catch((error: unknown) => {
+    process.emitWarning(`Push notification unavailable: ${error instanceof Error ? error.message : String(error)}`, {
+      code: 'KALA_PUSH_DISPATCH',
+    })
+  })
+}
+
 export function createPushDispatcher(input: {
   store: PushSubscriptionStorage
   vapid: VapidKeys | null

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { PushSubscriptionStore } from './store.js'
-import { createPushDispatcher } from './dispatch.js'
+import { createPushDispatcher, notifyPushSafely } from './dispatch.js'
 import { PushActivityTracker } from './activity.js'
 
 vi.mock('web-push', () => ({
@@ -121,6 +121,20 @@ describe('createPushDispatcher', () => {
   })
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('reports an asynchronous store failure without an unhandled notification rejection', async () => {
+    const warning = vi.spyOn(process, 'emitWarning').mockImplementation(() => undefined)
+    const payload = { kind: 'session_error' as const, title: 't', body: 'b', url: '/' }
+    try {
+      notifyPushSafely({ send: async () => { throw new Error('ownership fenced') } }, payload)
+      await vi.waitFor(() => expect(warning).toHaveBeenCalledWith(
+        'Push notification unavailable: ownership fenced',
+        { code: 'KALA_PUSH_DISPATCH' },
+      ))
+    } finally {
+      warning.mockRestore()
+    }
   })
 
   it('short-circuits when no VAPID keys are configured', async () => {

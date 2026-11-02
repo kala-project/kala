@@ -157,7 +157,12 @@ export class RuntimeResourceOwnershipManager {
       active.lease = renewed
       this.#renewLater(active)
     } catch (error) {
-      if (active.healthy && this.#leases.get(active.key) === active) this.#lose(active, error)
+      if (active.healthy && this.#leases.get(active.key) === active) {
+        process.emitWarning(`Runtime resource owner renewal failed: ${error instanceof Error ? error.message : String(error)}`, {
+          code: 'KALA_RUNTIME_OWNER_RENEW',
+        })
+        this.#lose(active, error)
+      }
     }
   }
 

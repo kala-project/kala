@@ -158,6 +158,7 @@ async function main(): Promise<void> {
         replicaId: randomUUID(),
         origin: experimentalStorage.nodeOrigin,
         ttlMs: experimentalStorage.placementTtlMs,
+        operationTimeoutMs: Math.min(10_000, Math.floor(experimentalStorage.placementTtlMs / 3)),
       })
     : undefined
   const placementOwnership = placementStore && experimentalStorage
@@ -165,6 +166,7 @@ async function main(): Promise<void> {
         nodeId: experimentalStorage.nodeId,
         origin: experimentalStorage.nodeOrigin,
         ttlMs: experimentalStorage.placementTtlMs,
+        operationTimeoutMs: Math.min(10_000, Math.floor(experimentalStorage.placementTtlMs / 3)),
       })
     : undefined
   const catalogPath = process.env.KALA_RUNTIME_HOST_LLM_CATALOG_FILE?.trim()
@@ -267,9 +269,12 @@ async function main(): Promise<void> {
       // A loopback Executor's workspace and execution receipts are durable
       // authorities and cannot safely live in this Pod's tmpfs.
       if (!experimentalStorage) await mkdir(workspaceDir, { recursive: true, mode: 0o700 })
-      const sessionOwnership = sessionOwnershipFlag === '1' && replicaStore && replicaMembership && organizationId
+      const sessionOwnership = sessionOwnershipFlag === '1' && replicaStore && replicaMembership && organizationId && experimentalStorage
         ? new RuntimeSessionOwnership(organizationId, id, replicaMembership,
-            new RuntimeResourceOwnershipManager(replicaStore),
+            new RuntimeResourceOwnershipManager(replicaStore, {
+              ttlMs: experimentalStorage.placementTtlMs,
+              operationTimeoutMs: Math.min(10_000, Math.floor(experimentalStorage.placementTtlMs / 3)),
+            }),
             async (lostUnitId) => { await host.suspendUnit(lostUnitId) })
         : undefined
       if (placementLease?.protocol === 'parallel-v1') {
@@ -568,7 +573,7 @@ async function readExperimentalDockerStorageConfig(): Promise<ExperimentalDocker
   if (schemaMode !== 'experimental-initialize' && schemaMode !== 'versioned') {
     throw new Error('KALA_RUNTIME_POSTGRES_SCHEMA_MODE must be experimental-initialize or versioned')
   }
-  const placementTtlMs = Number(process.env.KALA_RUNTIME_EXPERIMENTAL_PLACEMENT_TTL_MS ?? 15_000)
+  const placementTtlMs = Number(process.env.KALA_RUNTIME_EXPERIMENTAL_PLACEMENT_TTL_MS ?? 45_000)
   if (!Number.isSafeInteger(placementTtlMs) || placementTtlMs < 5_000 || placementTtlMs > 120_000) {
     throw new Error('KALA_RUNTIME_EXPERIMENTAL_PLACEMENT_TTL_MS must be an integer between 5000 and 120000')
   }

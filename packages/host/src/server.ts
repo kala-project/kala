@@ -53,7 +53,7 @@ import type { ExecutorIdentityStorage } from './store/executor-identity.js'
 import { WorkspaceAliasStore, type WorkspaceAliasStorage } from './store/workspace-alias.js'
 import { PushSubscriptionStore, type PushSubscriptionStorage } from './push/store.js'
 import { loadOrCreateVapidKeys, type VapidKeys } from './push/vapid.js'
-import { createPushDispatcher } from './push/dispatch.js'
+import { createPushDispatcher, notifyPushSafely } from './push/dispatch.js'
 import { createPushRoutes } from './push/routes.js'
 import { PushActivityTracker } from './push/activity.js'
 import { OperationalMetrics } from './operational-metrics.js'
@@ -2106,7 +2106,7 @@ export async function startHostServer(
       lastSessionStatus.set(sessionId, state.status)
       const isSubAgentSession = store.get(sessionId)?.parentSessionId !== undefined
       if (!isSubAgentSession && prev && prev !== 'done' && state.status === 'done' && messageQueues.pending(sessionId) === 0) {
-        void pushDispatcher.send({
+        notifyPushSafely(pushDispatcher, {
           kind: 'waiting_for_user',
           sessionId,
           title: 'Session ready for you',
@@ -2124,7 +2124,7 @@ export async function startHostServer(
         input: eff.input,
       })
       if (store.get(sessionId)?.parentSessionId === undefined) {
-        void pushDispatcher.send({
+        notifyPushSafely(pushDispatcher, {
           kind: 'approval_required',
           sessionId,
           title: 'Approval required',
@@ -2145,7 +2145,7 @@ export async function startHostServer(
       io.of('/dashboard').to(sessionRoom(sessionId)).emit('session:error', payload)
       io.of('/executor').to(sessionRoom(sessionId)).emit('session:error', payload)
       if (store.get(sessionId)?.parentSessionId === undefined) {
-        void pushDispatcher.send({
+        notifyPushSafely(pushDispatcher, {
           kind: 'session_error',
           sessionId,
           title: 'Session error',

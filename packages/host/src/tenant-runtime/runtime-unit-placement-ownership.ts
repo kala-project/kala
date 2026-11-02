@@ -176,7 +176,10 @@ export class PostgresRuntimeUnitPlacementOwnership implements RuntimeUnitPlaceme
       if (this.#leases.get(unitId) !== active) return
       active.lease = renewed
       this.#scheduleRenewal(unitId, active)
-    } catch {
+    } catch (error) {
+      process.emitWarning(`Runtime Unit placement renewal failed: ${error instanceof Error ? error.message : String(error)}`, {
+        code: 'KALA_RUNTIME_PLACEMENT_RENEW',
+      })
       await this.#failClosed(unitId, active)
     }
   }
