@@ -1,6 +1,8 @@
 import type { CompletedTimingSpan, EventTimingMetadata, TurnTimingSummary } from '@agent-kernel/shared'
 import type { OnlineTelemetry, SafeTelemetryAttributes } from '@agent-kernel/shared/node-telemetry'
 
+import type { AgentRuntimeTurnObservation } from './agent-runtime/types.js'
+
 const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/u
 const SPAN_KINDS = new Set(['llm', 'tool', 'approval', 'compaction', 'retry', 'recovery'])
 const SPAN_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'interrupted'])
@@ -19,6 +21,36 @@ type SpanStatus = CompletedTimingSpan['status']
  */
 export class AgentTelemetryBridge {
   constructor(private readonly telemetry: OnlineTelemetry, private readonly unitId = 'local') {}
+
+  observeCopilotTurn(sessionId: string, observation: AgentRuntimeTurnObservation): void {
+    if (!validId(this.unitId) || !validId(sessionId) || !validId(observation.turnId)) return
+    const startedAtUnixMs = parseTimestamp(observation.startedAt)
+    if (startedAtUnixMs === undefined) return
+    const traceId = this.telemetry.deriveTraceId('agent.turn.trace', [this.unitId, sessionId, observation.turnId])
+    const spanId = this.telemetry.deriveSpanId('agent.turn.root', [this.unitId, sessionId, observation.turnId])
+    if (!traceId || !spanId) return
+    const attributes: Partial<SafeTelemetryAttributes> = {
+      component: 'host', operation: 'turn', provider: 'github_copilot',
+      'agent.runtime': 'copilot', 'measurement.source': 'server_observed', outcome: observation.status,
+    }
+    if (observation.status === 'running') {
+      this.telemetry.log('info', 'Agent turn started', attributes, traceId, spanId)
+      return
+    }
+    const completedAtUnixMs = parseTimestamp(observation.completedAt)
+    if (completedAtUnixMs === undefined || completedAtUnixMs < startedAtUnixMs) return
+    const durationMs = completedAtUnixMs - startedAtUnixMs
+    this.telemetry.recordSpan({
+      traceId, spanId, name: 'agent.turn', startedAtUnixMs, completedAtUnixMs,
+      status: otlpStatus(observation.status), attributes,
+    })
+    this.telemetry.counter('kala_agent_turns_total', 1, attributes)
+    this.telemetry.histogram('kala_agent_turn_duration_ms', durationMs, 'ms', attributes)
+    this.telemetry.log(observation.status === 'failed' ? 'error' : 'info',
+      observation.status === 'failed' ? 'Agent turn failed'
+        : observation.status === 'cancelled' ? 'Agent turn cancelled' : 'Agent turn completed',
+      { ...attributes, 'duration.ms': durationMs }, traceId, spanId)
+  }
 
   observe(sessionId: string, metadata: EventTimingMetadata | unknown, provider?: string): void {
     try {
@@ -105,6 +137,11 @@ export class AgentTelemetryBridge {
     })
     this.telemetry.counter('kala_agent_turns_total', 1, attributes)
     this.telemetry.histogram('kala_agent_turn_duration_ms', summary.wallDurationMs, 'ms', attributes)
+    this.telemetry.log(summary.status === 'failed' ? 'error' : 'info',
+      summary.status === 'failed' ? 'Agent turn failed'
+        : summary.status === 'cancelled' ? 'Agent turn cancelled'
+          : summary.status === 'interrupted' ? 'Agent turn interrupted' : 'Agent turn completed',
+      { ...attributes, 'agent.runtime': 'kernel', 'duration.ms': summary.wallDurationMs }, traceId, rootSpanId)
 
     const phases: ReadonlyArray<readonly [string, number]> = [
       ['queue', summary.queueDurationMs],

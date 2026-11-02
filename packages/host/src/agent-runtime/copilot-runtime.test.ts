@@ -210,6 +210,44 @@ describe('Copilot runtime custom tools', () => {
     store = new SessionStore(dir)
   })
 
+  it.each(['completed', 'failed', 'cancelled'] as const)('reports committed Copilot turn lifecycle without message content for %s turns', async (outcome) => {
+    const onTurn = vi.fn()
+    const runtime = new CopilotAgentRuntime({
+      store, tools: { async callTool() { return { ok: true, content: 'unused' } }, cancelPending() {} },
+      broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError() {}, onTurn },
+    }, { enabled: true, sessionsDir: dir })
+    const record = await store.create({ sessionId: `observed-${outcome}`, agentRuntime: 'copilot', config: createConfig({ tools: [] }) })
+    if (outcome === 'completed') sdk.responses.push({ type: 'assistant.message', id: 'observed-response', data: { content: 'private answer' } })
+    if (outcome === 'failed') sdk.responses.push(new Error('private SDK error'))
+    await runtime.start()
+    await runtime.send(record, { text: 'private prompt', operationId: 'observed-operation' })
+    if (outcome === 'cancelled') await runtime.cancel(record)
+    await vi.waitFor(() => expect(onTurn).toHaveBeenCalledTimes(2))
+    expect(onTurn.mock.calls[0]).toEqual([record.sessionId, {
+      turnId: 'observed-operation', startedAt: expect.any(String), status: 'running',
+    }])
+    expect(onTurn.mock.calls[1]).toEqual([record.sessionId, {
+      turnId: 'observed-operation', startedAt: onTurn.mock.calls[0]![1].startedAt,
+      completedAt: expect.any(String), status: outcome,
+    }])
+    expect(JSON.stringify(onTurn.mock.calls)).not.toMatch(/private prompt|private answer|private SDK error/u)
+    await runtime.close()
+  })
+
+  it('does not report a started turn when its durable projection fails', async () => {
+    const onTurn = vi.fn()
+    const runtime = new CopilotAgentRuntime({
+      store, tools: { async callTool() { return { ok: true, content: 'unused' } }, cancelPending() {} },
+      broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError() {}, onTurn },
+    }, { enabled: true, sessionsDir: dir })
+    const record = await store.create({ sessionId: 'uncommitted-observation', agentRuntime: 'copilot', config: createConfig({ tools: [] }) })
+    vi.spyOn(store, 'recordRuntimeProjection').mockRejectedValueOnce(new Error('projection unavailable'))
+    await runtime.start()
+    await expect(runtime.send(record, { text: 'must not be reported' })).rejects.toThrow('projection unavailable')
+    expect(onTurn).not.toHaveBeenCalled()
+    await runtime.close()
+  })
+
   it('uses an admitted POSIX mount and dedicated SDK client without the whole-file string transport', async () => {
     store = new SessionStore(join(dir, 'sessions'), { authority: new SqliteSessionAuthority(join(dir, 'state.sqlite')) })
     await store.initialize()

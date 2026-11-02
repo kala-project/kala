@@ -1522,6 +1522,9 @@ export class SessionStore {
           },
         })
         if (!persisted) throw new SessionNotFoundError(sessionId)
+        rec.turnStartedAt = typeof persisted.turnStartedAt === 'string'
+          ? validTimestamp(persisted.turnStartedAt)
+          : undefined
       } else {
         const metadataEntry = await appendRuntimeMetadataEntry(rec.logPath, {
           sessionId,

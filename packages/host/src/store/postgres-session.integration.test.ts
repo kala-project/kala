@@ -583,6 +583,42 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     expect(existsSync(reader.root)).toBe(false)
   })
 
+  it.each([undefined, '2026-10-01T00:00:00.000Z'])('synchronizes live Copilot turn timing with PostgreSQL when the previous start is %s', async (previousStart) => {
+    const creator = makeStore(`copilot-timing-creator-${previousStart ?? 'new'}`)
+    const sessionId = `copilot-timing-${previousStart ?? 'new'}`
+    await creator.store.create({ sessionId, agentRuntime: 'copilot', config })
+    if (previousStart) {
+      await creator.authority.mutate(sessionId, {
+        mutationId: 'fixture.previous-turn',
+        eventType: 'fixture.previous-turn',
+        apply: (current) => current && { ...current, turnStartedAt: previousStart },
+      })
+    }
+    const writer = makeStore(`copilot-timing-writer-${previousStart ?? 'new'}`)
+    const record = await writer.store.load(sessionId, { recoverDangling: false })
+    expect(record.turnStartedAt).toBe(previousStart)
+    const before = Date.now()
+    await writer.store.recordRuntimeProjection(sessionId, {
+      ...record.state,
+      cursor: record.state.cursor + 1,
+      status: 'thinking',
+      messages: [...record.state.messages, { role: 'user', content: [{ type: 'text', text: 'new turn' }] }],
+    }, 'copilot.user_message', { text: 'new turn' })
+
+    const persisted = await writer.authority.load(sessionId)
+    expect(record.turnStartedAt).toBe(persisted?.turnStartedAt)
+    expect(Date.parse(record.turnStartedAt!)).toBeGreaterThanOrEqual(before)
+    expect(Date.parse(record.turnStartedAt!)).toBeLessThanOrEqual(Date.now())
+    const startedAt = record.turnStartedAt
+    await writer.store.recordRuntimeProjection(sessionId, {
+      ...record.state, cursor: record.state.cursor + 1, status: 'done',
+    }, 'copilot.turn_end', {})
+    expect(record.turnStartedAt).toBe(startedAt)
+    const reader = makeStore(`copilot-timing-reader-${previousStart ?? 'new'}`)
+    const reloaded = await reader.store.load(sessionId, { recoverDangling: false })
+    expect(reloaded.turnStartedAt).toBe(startedAt)
+  })
+
   it('forks from the durable event prefix instead of the latest projection and rejects conflicting children', async () => {
     const writer = makeStore('fork-writer')
     const parent = await writer.store.create({

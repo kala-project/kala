@@ -10,8 +10,17 @@ import type { SessionRecord, SessionStore } from '../store/session.js'
 import type { ToolDispatcher } from '../loop-types.js'
 import type { MessageAttachmentStorage } from '../message-attachment-store.js'
 
+export type AgentRuntimeTurnObservation = {
+  turnId: string
+  startedAt: string
+} & (
+  | { status: 'running' }
+  | { status: 'completed' | 'failed' | 'cancelled'; completedAt: string }
+)
+
 export type AgentRuntimeBroadcast = {
   onState(record: SessionRecord, state: AgentState, contextSnapshot?: ContextUsageSnapshot): void
+  onTurn?(sessionId: string, observation: AgentRuntimeTurnObservation): void
   onTokenDelta(sessionId: string, text: string): void
   onApprovalRequired(sessionId: string): void
   onError(sessionId: string, message: string): void

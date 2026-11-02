@@ -2143,6 +2143,9 @@ export async function startHostServer(
     messageAttachments,
     publishLocalImages,
     broadcast: {
+      onTurn(sessionId, observation) {
+        agentTelemetry?.observeCopilotTurn(sessionId, observation)
+      },
       onState(record, state, runtimeContextSnapshot) {
         scheduleSessionsBroadcast(record.sessionId)
         const room = sessionRoom(record.sessionId)

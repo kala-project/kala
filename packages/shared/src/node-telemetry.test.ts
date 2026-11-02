@@ -5,6 +5,28 @@ import { createOnlineTelemetryFromEnv, OnlineTelemetry, tracePostgresQuery } fro
 const TOKEN = 't'.repeat(32)
 
 describe('OnlineTelemetry', () => {
+  it('aggregates successful assets without SQL trace noise while retaining asset failure spans', async () => {
+    const requests: Array<{ url: string; body: string }> = []
+    const telemetry = new OnlineTelemetry({
+      serviceName: 'kala-gateway', endpoint: 'http://localhost:4318', authToken: TOKEN, flushIntervalMs: 60_000,
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), body: String(init?.body) })
+        return new Response('', { status: 200 })
+      },
+    })
+    const asset = telemetry.startHttpSpan('GET', 'gateway.assets')
+    asset.activate()
+    await tracePostgresQuery(telemetry, async () => ({ rows: [] }))
+    asset.end(200)
+    telemetry.startHttpSpan('GET', 'gateway.assets').end(404)
+    await telemetry.close()
+    const spans = requests.filter(request => request.url.endsWith('/traces'))
+      .flatMap(request => JSON.parse(request.body).resourceSpans[0].scopeSpans[0].spans)
+    expect(spans).toHaveLength(1)
+    expect(spans[0]).toMatchObject({ name: 'http gateway.assets' })
+    expect(spans[0].attributes).toContainEqual({ key: 'http.response.status_code', value: { intValue: '404' } })
+    expect(requests.some(request => request.url.endsWith('/metrics'))).toBe(true)
+  })
   it('is explicit opt-in and requires endpoint plus a protected token', () => {
     expect(createOnlineTelemetryFromEnv('kala-test', {})).toBeUndefined()
     const original = Promise.resolve({ rows: [] })
@@ -79,6 +101,7 @@ describe('OnlineTelemetry', () => {
     const metrics = JSON.parse(requests.find((request) => request.url.endsWith('/metrics'))!.body)
     const histogram = metrics.resourceMetrics[0].scopeMetrics[0].metrics[0]
     expect(histogram).toMatchObject({ name: 'kala_agent_span_duration_ms', unit: 'ms' })
+    expect(histogram.description).toMatch(/Kernel phase duration/u)
     expect(histogram.histogram.dataPoints[0]).toMatchObject({ count: '1', sum: 1250, min: 1250, max: 1250 })
     expect(JSON.stringify(requests)).not.toContain('session-sensitive')
     expect(JSON.stringify(requests)).not.toContain('turn-sensitive')
@@ -153,6 +176,7 @@ describe('OnlineTelemetry', () => {
     const metrics = JSON.parse(requests[0]!.body).resourceMetrics[0].scopeMetrics[0].metrics
     expect(metrics).toHaveLength(2)
     const counts = metrics.find((m: { name: string }) => m.name === 'kala_client_calls_total').sum.dataPoints
+    expect(metrics.find((m: { name: string }) => m.name === 'kala_client_calls_total').description).toMatch(/PostgreSQL and object-storage/u)
     expect(counts.map((p: { asDouble: number }) => p.asDouble).sort((a: number, b: number) => a - b)).toEqual([1, 2000])
     expect(JSON.stringify(metrics)).toContain('background')
     expect(JSON.stringify(metrics)).toContain('error')

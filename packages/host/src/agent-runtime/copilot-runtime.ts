@@ -58,6 +58,7 @@ type TurnCapture = {
 type ActiveTurnTiming = {
   turnId: string
   startedAt: string
+  terminalObserved?: boolean
 }
 
 type ActiveCompaction = {
@@ -1268,6 +1269,19 @@ export class CopilotAgentRuntime implements AgentRuntime {
       const projected = { ...update(latest.state), cursor: latest.state.cursor + 1 } as AgentState
       const next = await this.externalizeInlineImages(record.sessionId, projected)
       await this.context.store.recordRuntimeProjection(record.sessionId, next, action, payload)
+      const timing = this.activeTurnTimings.get(record.sessionId)
+      if (timing && action === 'copilot.user_message') {
+        this.context.broadcast.onTurn?.(record.sessionId, {
+          turnId: timing.turnId, startedAt: timing.startedAt, status: 'running',
+        })
+      } else if (timing && !timing.terminalObserved && (next.status === 'done' || next.status === 'error')) {
+        timing.terminalObserved = true
+        this.context.broadcast.onTurn?.(record.sessionId, {
+          turnId: timing.turnId, startedAt: timing.startedAt,
+          completedAt: new Date().toISOString(),
+          status: action === 'copilot.cancelled' ? 'cancelled' : next.status === 'error' ? 'failed' : 'completed',
+        })
+      }
       this.context.broadcast.onState(latest, next, contextSnapshot?.(latest))
     })
     this.tails.set(record.sessionId, current)

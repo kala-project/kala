@@ -4,7 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 export type SafeTelemetryAttributes = Readonly<Record<
   'component' | 'deployment.mode' | 'error.type' | 'http.request.method' | 'http.response.status_code' |
   'http.route' | 'operation' | 'outcome' | 'provider' | 'status.class' | 'execution.state' |
-  'measurement.source' | 'timing.estimated',
+  'measurement.source' | 'timing.estimated' | 'agent.runtime' | 'duration.ms',
   string | number | undefined
 >>
 
@@ -36,6 +36,7 @@ type OtlpLog = {
 type OtlpMetric = {
   name: string
   unit: string
+  description?: string
   gauge?: { dataPoints: OtlpDataPoint[] }
   sum?: { aggregationTemporality: number; isMonotonic: boolean; dataPoints: OtlpDataPoint[] }
   histogram?: { aggregationTemporality: number; dataPoints: OtlpHistogramDataPoint[] }
@@ -90,6 +91,25 @@ const ATTRIBUTE_KEYS = new Set([
   'component', 'deployment.mode', 'error.type', 'http.request.method', 'http.response.status_code',
   'http.route', 'operation', 'outcome', 'provider', 'status.class', 'execution.state',
   'measurement.source', 'timing.estimated',
+  'agent.runtime', 'duration.ms',
+])
+const METRIC_METADATA = new Map([
+  ['kala_http_server_requests_total', { description: 'HTTP requests by route, method and response status class.', unit: '1' }],
+  ['kala_http_server_duration_ms_total', { description: 'Total HTTP request processing time; divide by request count for mean latency.', unit: 'ms' }],
+  ['kala_client_calls_total', { description: 'PostgreSQL and object-storage operations, grouped by result and request/background source.', unit: '1' }],
+  ['kala_client_duration_ms', { description: 'Latency distribution of actual PostgreSQL and object-storage operations.', unit: 'ms' }],
+  ['kala_runtime_queue_depth', { description: 'Accepted messages waiting to run; excludes currently executing turns.', unit: '{message}' }],
+  ['kala_agent_turns_total', { description: 'Finished Agent turns by outcome. Copilot SDK turns are measured at the Runtime boundary.', unit: '{turn}' }],
+  ['kala_agent_turn_duration_ms', { description: 'Agent turn wall time, including model, tools and waits; not model-only latency.', unit: 'ms' }],
+  ['kala_agent_turn_phase_duration_ms', { description: 'Kernel turn time by phase. Copilot SDK internal phases are not instrumented.', unit: 'ms' }],
+  ['kala_agent_spans_total', { description: 'Completed Kernel phases by kind and outcome; not Copilot SDK internal calls.', unit: '1' }],
+  ['kala_agent_span_duration_ms', { description: 'Kernel phase duration by kind and outcome.', unit: 'ms' }],
+  ['kala_agent_llm_first_token_ms', { description: 'Kernel model request time to first observed token.', unit: 'ms' }],
+  ['kala_agent_tool_executor_duration_ms', { description: 'Tool duration reported by the Executor, distinct from Runtime wall time.', unit: 'ms' }],
+  ['kala_agent_turn_llm_requests', { description: 'Model requests within a completed Kernel turn.', unit: '{call}' }],
+  ['kala_agent_turn_tool_calls', { description: 'Tool calls within a completed Kernel turn.', unit: '{call}' }],
+  ['kala_agent_turn_tool_peak_concurrency', { description: 'Peak concurrent tool calls within a Kernel turn.', unit: '{call}' }],
+  ['kala_agent_turn_llm_first_token_ms', { description: 'Kernel turn time to first observed model token.', unit: 'ms' }],
 ])
 const METRIC_NAME = /^[a-zA-Z_:][a-zA-Z0-9_:]{0,127}$/u
 const ROUTE = /^[a-z][a-z0-9_.-]{0,63}$/u
@@ -162,7 +182,8 @@ export class OnlineTelemetry {
     const startedAt = nowNano()
     const startedMono = process.hrtime.bigint()
     let ended = false
-    const metricsOnly = normalizedRoute === 'gateway.health' || normalizedRoute === 'runtime.health'
+    const assets = normalizedRoute === 'gateway.assets'
+    const metricsOnly = normalizedRoute === 'gateway.health' || normalizedRoute === 'runtime.health' || assets
     const context: ActiveRequestTrace = { traceId, spanId, active: !metricsOnly }
     return {
       traceparent: `00-${traceId}-${spanId}-${metricsOnly ? '00' : '01'}`,
@@ -181,7 +202,8 @@ export class OnlineTelemetry {
           'status.class': statusClass,
           outcome: safeStatus >= 500 ? 'error' : safeStatus >= 400 ? 'rejected' : 'ok',
         })
-        if (!metricsOnly) this.enqueue({ kind: 'span', value: {
+        const recordSpan = !metricsOnly || (assets && safeStatus >= 400)
+        if (recordSpan) this.enqueue({ kind: 'span', value: {
           traceId, spanId, ...(parentSpanId ? { parentSpanId } : {}), name: `http ${normalizedRoute}`, kind: 2,
           startTimeUnixNano: startedAt,
           endTimeUnixNano: (BigInt(startedAt) + (process.hrtime.bigint() - startedMono)).toString(),
@@ -196,7 +218,7 @@ export class OnlineTelemetry {
         })
         if (safeStatus >= 500) this.log('error', 'HTTP request failed', {
           'http.request.method': normalizedMethod, 'http.route': normalizedRoute, 'status.class': statusClass,
-        }, metricsOnly ? undefined : traceId, metricsOnly ? undefined : spanId)
+        }, recordSpan ? traceId : undefined, recordSpan ? spanId : undefined)
       },
     }
   }
@@ -301,12 +323,13 @@ export class OnlineTelemetry {
     if (!METRIC_NAME.test(name) || !Number.isFinite(value) || value < 0) return
     this.enqueue({ kind: 'metric', value: {
       name, unit: '1', sum: { aggregationTemporality: 1, isMonotonic: true, dataPoints: [point(value, attributes)] },
+      ...METRIC_METADATA.get(name),
     } })
   }
 
   gauge(name: string, value: number, attributes: Partial<SafeTelemetryAttributes> = {}): void {
     if (!METRIC_NAME.test(name) || !Number.isFinite(value)) return
-    this.enqueue({ kind: 'metric', value: { name, unit: '1', gauge: { dataPoints: [point(value, attributes)] } } })
+    this.enqueue({ kind: 'metric', value: { name, unit: '1', ...METRIC_METADATA.get(name), gauge: { dataPoints: [point(value, attributes)] } } })
   }
 
   histogram(name: string, value: number, unit: 'ms' | '{call}', attributes: Partial<SafeTelemetryAttributes> = {}): void {
@@ -317,6 +340,7 @@ export class OnlineTelemetry {
     const bucketCounts = Array.from({ length: bounds.length + 1 }, (_, index) => index === selectedBucket ? '1' : '0')
     this.enqueue({ kind: 'metric', value: {
       name,
+      description: METRIC_METADATA.get(name)?.description,
       unit,
       histogram: {
         aggregationTemporality: 1,
@@ -328,7 +352,9 @@ export class OnlineTelemetry {
     } })
   }
 
-  log(severity: 'info' | 'warn' | 'error', message: 'HTTP request failed' | 'Runtime operation failed', attributes: Partial<SafeTelemetryAttributes> = {}, traceId?: string, spanId?: string): void {
+  log(severity: 'info' | 'warn' | 'error', message: 'HTTP request failed' | 'Runtime operation failed' | 'Service telemetry initialized' |
+    'Agent turn started' | 'Agent turn completed' | 'Agent turn failed' | 'Agent turn cancelled' | 'Agent turn interrupted',
+  attributes: Partial<SafeTelemetryAttributes> = {}, traceId?: string, spanId?: string): void {
     const levels = { info: 9, warn: 13, error: 17 } as const
     this.enqueue({ kind: 'log', value: {
       timeUnixNano: nowNano(), severityNumber: levels[severity], severityText: severity.toUpperCase(),
@@ -350,10 +376,10 @@ export class OnlineTelemetry {
       this.clientAggregates.clear()
       this.clientMetricsFlushedAt = process.hrtime.bigint()
       // Two bounded metric messages per window, not one signal per SQL call.
-      batch.push({ kind: 'metric', value: { name: 'kala_client_calls_total', unit: '1',
+      batch.push({ kind: 'metric', value: { name: 'kala_client_calls_total', unit: '1', ...METRIC_METADATA.get('kala_client_calls_total'),
         sum: { aggregationTemporality: 1, isMonotonic: true,
           dataPoints: aggregates.map((a) => ({ timeUnixNano, asDouble: a.count, attributes: safeAttributes(a.attributes) })) } } })
-      batch.push({ kind: 'metric', value: { name: 'kala_client_duration_ms', unit: 'ms',
+      batch.push({ kind: 'metric', value: { name: 'kala_client_duration_ms', unit: 'ms', ...METRIC_METADATA.get('kala_client_duration_ms'),
         histogram: { aggregationTemporality: 1, dataPoints: aggregates.map((a) => ({
           timeUnixNano, count: String(a.count), sum: a.sum, min: a.min, max: a.max,
           explicitBounds: HISTOGRAM_BOUNDS_MS, bucketCounts: a.buckets.map(String), attributes: safeAttributes(a.attributes),
@@ -441,7 +467,9 @@ export function createOnlineTelemetryFromEnv(serviceName: string, env: NodeJS.Pr
   const authToken = env.KALA_OTEL_EXPORTER_TOKEN?.trim()
   if (!endpoint || !authToken) throw new Error('online telemetry requires KALA_OTEL_EXPORTER_ENDPOINT and KALA_OTEL_EXPORTER_TOKEN')
   const serviceVersion = env.KALA_OTEL_SERVICE_VERSION?.trim()
-  return new OnlineTelemetry({ serviceName, endpoint, authToken, ...(serviceVersion ? { serviceVersion } : {}) })
+  const telemetry = new OnlineTelemetry({ serviceName, endpoint, authToken, ...(serviceVersion ? { serviceVersion } : {}) })
+  telemetry.log('info', 'Service telemetry initialized', { component: serviceName })
+  return telemetry
 }
 
 function safeAttributes(attributes: Partial<SafeTelemetryAttributes>): OtlpAttribute[] {

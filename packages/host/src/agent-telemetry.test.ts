@@ -46,6 +46,36 @@ function attributes(span: { attributes: Array<{ key: string; value: { stringValu
 }
 
 describe('AgentTelemetryBridge', () => {
+  it.each(['completed', 'failed', 'cancelled'] as const)('exports actual Copilot turn time and correlated safe logs for %s turns without inventing internal phases', async (status) => {
+    const requests: Array<{ url: string; body: string }> = []
+    const telemetry = new OnlineTelemetry({
+      serviceName: 'kala-runtime', endpoint: 'http://localhost:4318', authToken: TOKEN, flushIntervalMs: 60_000,
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), body: String(init?.body) })
+        return new Response('', { status: 200 })
+      },
+    })
+    const bridge = new AgentTelemetryBridge(telemetry, 'private-unit')
+    const startedAt = '2026-01-01T00:00:00.000Z'
+    bridge.observeCopilotTurn(SESSION_ID, { turnId: TURN_ID, startedAt, status: 'running' })
+    bridge.observeCopilotTurn(SESSION_ID, { turnId: TURN_ID, startedAt, completedAt: '2026-01-01T00:00:02.500Z', status })
+    await telemetry.close()
+    const spans = JSON.parse(requests.find(request => request.url.endsWith('/traces'))!.body).resourceSpans[0].scopeSpans[0].spans
+    expect(spans).toHaveLength(1)
+    expect(spans[0]).toMatchObject({
+      name: 'agent.turn', startTimeUnixNano: '1767225600000000000', endTimeUnixNano: '1767225602500000000',
+      status: { code: status === 'failed' ? 2 : status === 'cancelled' ? 0 : 1 },
+    })
+    expect(attributes(spans[0])).toMatchObject({ 'agent.runtime': 'copilot', provider: 'github_copilot', outcome: status })
+    const logs = JSON.parse(requests.find(request => request.url.endsWith('/logs'))!.body).resourceLogs[0].scopeLogs[0].logRecords
+    expect(logs).toHaveLength(2)
+    expect(logs.every((log: { traceId: string; spanId: string }) => log.traceId === spans[0].traceId && log.spanId === spans[0].spanId)).toBe(true)
+    expect(logs[1].attributes).toContainEqual({ key: 'duration.ms', value: { intValue: '2500' } })
+    const metrics = JSON.parse(requests.find(request => request.url.endsWith('/metrics'))!.body).resourceMetrics[0].scopeMetrics[0].metrics
+    expect(metrics.map((metric: { name: string }) => metric.name)).toEqual(['kala_agent_turns_total', 'kala_agent_turn_duration_ms'])
+    expect(JSON.stringify(requests)).not.toMatch(/private-unit|session-01|turn-01|agent\.llm|agent\.tool/u)
+  })
+
   it('exports one anonymous turn trace with real child timings, metrics, and stable IDs across duplicate/out-of-order observations', async () => {
     const requests: Array<{ url: string; body: string }> = []
     const send = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
