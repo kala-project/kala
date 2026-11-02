@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '../../../components/ui/button.js'
+import { HelpHint } from '../../../components/ui/help-hint.js'
 import { SectionHeader } from '../controls.js'
 import { responseError } from '../section-utils.js'
 
@@ -104,7 +105,7 @@ export function WebSearchSection(): JSX.Element {
         <div className="space-y-4">
           <div className="rounded-md border border-border/50 bg-card/60 px-4 py-3 text-sm">
             <div className="font-medium">{t('settings.webSearch.status')}</div>
-            <p className="mt-1 text-xs text-muted-foreground" data-testid="settings-web-search-status">
+            <p className="mt-1 text-sm text-muted-foreground" data-testid="settings-web-search-status">
               {settings?.configured ? t('settings.webSearch.configured') : t('settings.webSearch.notConfigured')}
               {settings?.updatedAt
                 ? ` · ${t('settings.webSearch.updatedAt', { date: new Date(settings.updatedAt).toLocaleString(i18n.language) })}`
@@ -120,9 +121,10 @@ export function WebSearchSection(): JSX.Element {
               <option value="serper">Serper</option>
             </select>
 
-            <label className="block text-sm font-medium" htmlFor="settings-web-search-api-key">
-              {t('settings.webSearch.apiKey')}
-            </label>
+            <div className="flex items-center gap-1 text-sm font-medium">
+              <label htmlFor="settings-web-search-api-key">{t('settings.webSearch.apiKey')}</label>
+              <HelpHint label={t('settings.webSearch.apiKey')}>{t('settings.webSearch.apiKeyHint')}</HelpHint>
+            </div>
             <input
               id="settings-web-search-api-key"
               data-testid="settings-web-search-api-key"
@@ -133,7 +135,6 @@ export function WebSearchSection(): JSX.Element {
               onChange={(event) => setApiKey(event.target.value)}
               placeholder={settings?.configured ? t('settings.webSearch.apiKeyConfiguredPlaceholder') : t('settings.webSearch.apiKeyPlaceholder')}
             />
-            <p className="text-xs text-muted-foreground">{t('settings.webSearch.apiKeyHint')}</p>
 
             <div className="flex flex-wrap gap-2">
               <Button type="submit" disabled={busy || !apiKey.trim()} data-testid="settings-web-search-save">

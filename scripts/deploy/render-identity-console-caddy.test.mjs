@@ -25,6 +25,15 @@ test('corrects only the API scheme and preserves metadata and all original route
   assert(rendered.includes('header Cache-Control "no-store"'))
 })
 
+test('routes Kala Socket.IO administration to Gateway before the identity provider Admin API', () => {
+  const rendered = renderIdentityConsoleCaddy(template, environment, publicOrigin)
+  assert.match(rendered, /@socketAdmin path \/admin\/socket\.io \/admin\/socket\.io\/\*/u)
+  assert.match(rendered, /handle @socketAdmin \{\s+reverse_proxy \{\$KALA_GATEWAY_ORIGIN\}\s+\}/u)
+  assert(rendered.indexOf('handle @socketAdmin') < rendered.indexOf('handle @identity'))
+  assert.match(rendered, /@identity path [^\n]* \/admin\/\* /u)
+  assert.match(rendered, /handle @identity \{\s+reverse_proxy h2c:\/\/identity-zitadel:8080/u)
+})
+
 test('refuses issuer, authority, client identity and configuration injection ambiguity', () => {
   const credentialOrigin = new URL(publicOrigin)
   credentialOrigin.username = 'fixture-user'

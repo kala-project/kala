@@ -1792,11 +1792,26 @@ export type ManualProviderInput = {
 
 export type ClientAddManualProvider = ManualProviderInput
 
+export type ClientUpdateManualProvider = {
+  providerId: string
+  label?: string
+  wire?: 'anthropic' | 'openai'
+  baseUrl?: string
+  apiKey?: string
+}
+
 export type ClientDeleteManualProvider = {
   providerId: string
 }
 
 export type ClientAddManualModel = ManualModelInput
+
+export type ClientUpdateManualModel = {
+  providerId: string
+  id: string
+  label?: string
+  contextWindow?: number
+}
 
 export type ClientDeleteManualModel = {
   providerId: string
@@ -1931,7 +1946,7 @@ export type ExternalDeploymentHealth = {
   checks: readonly { component: 'gateway' | 'runtime' | 'dashboard'; ready: boolean }[]
 }
 
-export type DeploymentServices = { identityConsoleUrl?: string; observability: boolean }
+export type DeploymentServices = { identityConsoleUrl?: string; observability: boolean; observabilityUrl?: string }
 export type OperatorObservabilitySnapshot = {
   checkedAt: string
   retainedLogs: number
@@ -1939,6 +1954,16 @@ export type OperatorObservabilitySnapshot = {
   resources: { name: string; hasLogs: boolean; hasTraces: boolean; hasMetrics: boolean }[]
   logs: { message: string; service: string; timestamp?: string; traceId?: string; attributes: Record<string, string> }[]
   spans: { name: string; service: string; timestamp?: string; durationMs: number; traceId?: string; attributes: Record<string, string> }[]
+}
+
+export type ObjectStorageUsageSnapshot = {
+  measuredAt: string
+  storedFiles: number
+  storedBytes: number
+  reservedFiles: number
+  reservedBytes: number
+  artifacts: { files: number; bytes: number }
+  attachments: { files: number; bytes: number }
 }
 
 export type ServerSettingsPayload = {
@@ -1953,12 +1978,14 @@ export type ServerSettingsPayload = {
   }
   runtime?: HostRestartStatus
   runtimeManagement?: 'local' | 'external'
+  modelConfiguration?: { management: 'dashboard' | 'operator'; providerCatalogPath?: string }
   agentRuntimes?: readonly AgentRuntimeDescriptor[]
   storage?: {
     kind: 'postgres-s3'
     organizationId: string
     objectBytes: number
     objectLimitBytes: number
+    usage?: ObjectStorageUsageSnapshot
   }
   socketConnections?: SocketConnectionAuditSnapshot
   agentModule?: AgentModuleMetadata
@@ -1978,6 +2005,8 @@ export type ServerSettingsPayload = {
     }
   }
   socketAdmin?: {
+    authentication?: 'password' | 'gateway-owner'
+    unavailableReason?: string
     active: boolean
     initialized: boolean
     path: string

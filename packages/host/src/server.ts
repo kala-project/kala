@@ -97,7 +97,7 @@ import { setWireValidationLogger } from './wire-validation.js'
 import type { RuntimeLogger } from './logger.js'
 import { AGENT_RUNTIME_CAPABILITIES, FULL_RUNTIME_CAPABILITIES, PORTABLE_DEPLOYMENT, effectiveTenancy, productVariant, type ProductDeploymentConfig, type RuntimeCapabilities } from '@agent-kernel/shared'
 import { SOCKET_MAX_HTTP_BUFFER_BYTES } from '@agent-kernel/shared'
-import { redactApplicationDebugAdminEvents, type SocketAdminConfig } from './socket-admin.js'
+import { GATEWAY_OWNER_SOCKET_ADMIN_BOOTSTRAP, isGatewaySocketAdminOwner, loadGatewayOwnerSocketAdminConfig, redactApplicationDebugAdminEvents, type SocketAdminConfig } from './socket-admin.js'
 import { defaultRestartStatePath, RestartCoordinator } from './restart-coordinator.js'
 import { inspectUnitQuiescence } from './tenant-runtime/quiescence.js'
 import { socketConnectionAuditSnapshot } from './connection/socket-audit.js'
@@ -254,8 +254,11 @@ export type HostServerOptions = {
    */
   settings?: ServerSettingsPayload | ((actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>)
   addManualModel?: Parameters<typeof attachJsonRoutes>[1]['addManualModel']
+  updateManualModel?: Parameters<typeof attachJsonRoutes>[1]['updateManualModel']
   deleteManualModel?: Parameters<typeof attachJsonRoutes>[1]['deleteManualModel']
   addManualProvider?: Parameters<typeof attachJsonRoutes>[1]['addManualProvider']
+  updateManualProvider?: Parameters<typeof attachJsonRoutes>[1]['updateManualProvider']
+  onModelCatalogChange?: (listener: () => void) => () => void
   deleteManualProvider?: Parameters<typeof attachJsonRoutes>[1]['deleteManualProvider']
   setDefaultModel?: Parameters<typeof attachJsonRoutes>[1]['setDefaultModel']
   updateAgentPrompt?: Parameters<typeof attachJsonRoutes>[1]['updateAgentPrompt']
@@ -391,6 +394,7 @@ export async function startHostServer(
   let safeCleanup: SafeCleanupEngine | undefined
   let scheduledTaskScheduler: UnitScheduler | undefined
   let stopScheduledInboxNotifications: (() => Promise<void>) | undefined
+  let stopModelCatalogNotifications: (() => void) | undefined
   let detachPublicAccessGate: (() => void) | undefined
   let promptSynchronizationTimer: ReturnType<typeof setTimeout> | undefined
   let deletionRecoveryTimer: ReturnType<typeof setInterval> | undefined
@@ -416,6 +420,7 @@ export async function startHostServer(
     // Stop claims first; shutdown waits for the active scheduler mutation/side effect.
     await scheduledTaskScheduler?.stop()
     await stopScheduledInboxNotifications?.()
+    stopModelCatalogNotifications?.()
     // Queue persistence and post-turn drains may still be crossing their durable
     // boundary after the last socket closes. Wait before callers remove the
     // Session directory (tests) or replace storage (shutdown/deploy).
@@ -450,11 +455,24 @@ export async function startHostServer(
     if (ownsTelemetry) void telemetry?.close()
   }
   let activeSocketAdmin: SocketAdminConfig | undefined
+  const gatewayOwnerAdmin = product === 'dedicated' && options.requireIngressIdentity && options.resourceUnitId
+    ? loadGatewayOwnerSocketAdminConfig({
+        currentModulePath: typeof __filename === 'string' ? __filename : import.meta.url,
+        embeddedAssets: options.embeddedSocketAdminAssets,
+      })
+    : undefined
   const activateSocketAdmin = (config: SocketAdminConfig): void => {
     if (activeSocketAdmin) return
-    redactApplicationDebugAdminEvents(io.of('/admin'))
+    const namespace = io.of('/admin')
+    if (config.authentication === 'gateway-owner') {
+      if (!gatewayOwnerAdmin) return
+      namespace.use((socket, next) => {
+        next(isGatewaySocketAdminOwner(socket.request, options.resourceUnitId) ? undefined : new Error('deployment_owner_required'))
+      })
+    }
+    redactApplicationDebugAdminEvents(namespace)
     instrument(io, {
-      auth: {
+      auth: config.authentication === 'gateway-owner' ? false : {
         type: 'basic',
         username: config.username,
         password: config.passwordHash,
@@ -463,7 +481,8 @@ export async function startHostServer(
     })
     activeSocketAdmin = config
   }
-  if (options.socketAdmin) activateSocketAdmin(options.socketAdmin)
+  if (gatewayOwnerAdmin?.runtime) activateSocketAdmin(gatewayOwnerAdmin.runtime)
+  else if (options.socketAdmin) activateSocketAdmin(options.socketAdmin)
 
   const getDefaultConfig = (actor?: DashboardActor): AgentConfig => typeof options.defaultConfig === 'function'
     ? options.defaultConfig(actor)
@@ -902,15 +921,40 @@ export async function startHostServer(
     response.end(JSON.stringify({ error: { code: 'internal_error', message: 'Runtime API is starting', requestId: 'startup' } }))
     return true
   }
+  const withModelCatalogUpdate = <Input,>(
+    callback: (input: Input, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>,
+    removedModels?: (input: Input) => readonly ModelInfo[],
+  ) => async (input: Input, actor: DashboardActor): Promise<ServerSettingsPayload> => {
+    if (options.mutableReady?.() === false) throw Object.assign(new Error('Host is not ready to update model settings'), { status: 503 })
+    if (product === 'dedicated' && removedModels) {
+      const removed = removedModels(input)
+      const sessions = await store.listSummaries({ organizationId: organizationIdForActor(actor) })
+      if (sessions.some(session => session.agentRuntime !== 'copilot' && removed.some(model =>
+        session.preferences?.selectedModel === (model.ref ?? model.id) || session.preferences?.selectedModel === model.id))) {
+        throw Object.assign(new Error('Select another model in existing Sessions before deleting this model or provider'), { status: 409 })
+      }
+    }
+    const result = await callback(input, actor)
+    if (!options.onModelCatalogChange) io.of('/dashboard').emit('server:agent_runtimes', { runtimes: agentRuntimes?.catalog() ?? [] })
+    return result
+  }
   attachJsonRoutes(http, {
     models: options.models ?? [],
     defaultModel: options.defaultModel ?? '',
-    ...(options.settings ? { settings: async (actor: DashboardActor) => ({ ...await settingsWithSkills(options.settings!)(actor), deployment: { product, deployment, capabilities } }) } : {}),
-    ...(options.addManualModel ? { addManualModel: options.addManualModel } : {}),
-    ...(options.deleteManualModel ? { deleteManualModel: options.deleteManualModel } : {}),
-    ...(options.addManualProvider ? { addManualProvider: options.addManualProvider } : {}),
-    ...(options.deleteManualProvider ? { deleteManualProvider: options.deleteManualProvider } : {}),
-    ...(options.setDefaultModel ? { setDefaultModel: options.setDefaultModel } : {}),
+    ...(options.settings ? { settings: async (actor: DashboardActor) => ({
+      ...await settingsWithSkills(options.settings!)(actor),
+      ...(gatewayOwnerAdmin && actor.kind === 'ingress' && actor.role === 'owner' ? { socketAdmin: gatewayOwnerAdmin.summary } : {}),
+      deployment: { product, deployment, capabilities },
+    }) } : {}),
+    ...(options.addManualModel ? { addManualModel: withModelCatalogUpdate(options.addManualModel) } : {}),
+    ...(options.updateManualModel ? { updateManualModel: withModelCatalogUpdate(options.updateManualModel) } : {}),
+    ...(options.deleteManualModel ? { deleteManualModel: withModelCatalogUpdate(options.deleteManualModel, input =>
+      (typeof options.models === 'function' ? options.models() : options.models ?? []).filter(model => model.providerId === input.providerId && model.id === input.id)) } : {}),
+    ...(options.addManualProvider ? { addManualProvider: withModelCatalogUpdate(options.addManualProvider) } : {}),
+    ...(options.updateManualProvider ? { updateManualProvider: withModelCatalogUpdate(options.updateManualProvider) } : {}),
+    ...(options.deleteManualProvider ? { deleteManualProvider: withModelCatalogUpdate(options.deleteManualProvider, input =>
+      (typeof options.models === 'function' ? options.models() : options.models ?? []).filter(model => model.providerId === input.providerId)) } : {}),
+    ...(options.setDefaultModel ? { setDefaultModel: withModelCatalogUpdate(options.setDefaultModel) } : {}),
     ...(options.updateAgentPrompt ? {
       updateAgentPrompt: (input, actor) => {
         const organizationId = organizationIdForActor(actor)
@@ -1033,6 +1077,35 @@ export async function startHostServer(
     }
   }
 
+  if (product !== 'portable') http.on('request', (request, response) => {
+    const pathname = new URL(request.url ?? '/', 'http://runtime').pathname
+    if (pathname !== '/admin' && !pathname.startsWith('/admin/')) return
+    if (response.headersSent || response.writableEnded) return
+    const deny = (status: number, error: string): void => {
+      claimRoute(request)
+      response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      response.end(JSON.stringify({ error }))
+    }
+    if (!gatewayOwnerAdmin || !isGatewaySocketAdminOwner(request, options.resourceUnitId)) {
+      deny(403, 'deployment_owner_required')
+      return
+    }
+    if (!gatewayOwnerAdmin.runtime) {
+      deny(503, 'socket_admin_assets_missing')
+      return
+    }
+    response.setHeader('cache-control', 'no-store')
+    response.setHeader('referrer-policy', 'no-referrer')
+    response.setHeader('x-content-type-options', 'nosniff')
+    response.setHeader('content-security-policy', "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'")
+    if (request.method !== 'GET' && request.method !== 'HEAD') { deny(405, 'method_not_allowed'); return }
+    const html = pathname === '/admin/socket.io/' || pathname === '/admin/socket.io/index.html'
+    if (html || pathname === '/admin/socket.io/kala-bootstrap.js') {
+      claimRoute(request)
+      response.writeHead(200, { 'content-type': html ? 'text/html; charset=utf-8' : 'application/javascript; charset=utf-8' })
+      response.end(request.method === 'HEAD' ? undefined : html ? gatewayOwnerAdmin.indexHtml : GATEWAY_OWNER_SOCKET_ADMIN_BOOTSTRAP)
+    }
+  })
   const socketAdminMount = (): StaticMount | undefined => activeSocketAdmin
     ? {
         path: activeSocketAdmin.path,
@@ -2155,7 +2228,14 @@ export async function startHostServer(
   }
   loop = runHostLoop(loopDeps)
   agentRuntimes = new AgentRuntimeRegistry()
-  agentRuntimes.register(new KernelAgentRuntime(loop, store))
+  agentRuntimes.register(new class extends KernelAgentRuntime {
+    override descriptor() {
+      return { ...super.descriptor(), models: advertisedModels() }
+    }
+  }(loop, store))
+  stopModelCatalogNotifications = options.onModelCatalogChange?.(() => {
+    io.of('/dashboard').emit('server:agent_runtimes', { runtimes: agentRuntimes?.catalog() ?? [] })
+  })
   const runtimeController: SubAgentRuntimeController = {
     async send(record, text, model) {
       await ensureEffectiveSystemPrompt(record)

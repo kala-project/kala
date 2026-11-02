@@ -5,13 +5,16 @@ import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '../../../components/ui/button.js'
+import { HelpHint } from '../../../components/ui/help-hint.js'
 import { SectionHeader } from '../controls.js'
 import { errorMessageFromBody } from '../section-utils.js'
 
 export function RuntimeSection({
   payload,
+  onOpenModels,
 }: {
   payload: ServerSettingsPayload
+  onOpenModels?(): void
 }): JSX.Element {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -92,7 +95,7 @@ export function RuntimeSection({
         <div className="mb-5 rounded-lg bg-card p-4 ring-1 ring-border/40">
           <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
             <div className="min-w-0 space-y-2 text-sm">
-              <div className="text-base font-semibold text-foreground">{t('settings.runtime.hostRuntime')}</div>
+              <div className="flex flex-wrap items-center gap-2 text-base font-semibold text-foreground">{t('settings.runtime.hostRuntime')}{externallyManaged ? <HelpHint label={t('settings.runtime.hostRuntime')}>{t('settings.runtime.externallyManaged')}</HelpHint> : null}</div>
               <div className="text-sm text-foreground">
                 {t('settings.runtime.startedAt')}: <time dateTime={runtime.startedAt}>{new Date(runtime.startedAt).toLocaleString()}</time>
               </div>
@@ -118,21 +121,22 @@ export function RuntimeSection({
             <summary className="cursor-pointer text-sm font-medium text-foreground">{t('settings.deployment.technicalDetails')}</summary>
             <div className="mt-3 space-y-2 text-sm leading-6 text-foreground">
               <p>PID {runtime.pid}</p>
-              <p>{t('settings.runtime.restartPhase')}: {platform ? operation?.phase ?? t('settings.runtime.restartIdle') : currentAttempt?.phase ?? t('settings.runtime.restartIdle')}</p>
-              <p>{t(externallyManaged ? 'settings.runtime.externallyManaged' : 'settings.runtime.restartDesc')}</p>
+              {restartActive ? <p>{t('settings.runtime.restartPhase')}: {platform ? operation?.phase : currentAttempt?.phase}</p> : null}
+              {!externallyManaged ? <p>{t('settings.runtime.restartDesc')}</p> : null}
             </div>
           </details>
           {error ? <div className="mt-2 text-sm text-destructive" role="alert">{error}</div> : null}
         </div>
       ) : <p className="text-sm text-muted-foreground">{t('settings.runtime.unavailable')}</p>}
+      <h3 className="mb-3 flex items-center gap-1 text-base font-semibold">{t('settings.runtime.agentEngines')}<HelpHint label={t('settings.runtime.agentEngines')}>{t('settings.runtime.engineHelp')}</HelpHint></h3>
       <div className="grid gap-3">
         {payload.agentRuntimes?.map((agentRuntime) => (
           <section key={agentRuntime.id} className="rounded-lg bg-card p-4 ring-1 ring-border/40" data-testid={`agent-runtime-${agentRuntime.id}`}>
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <h3 className="text-base font-semibold text-foreground">{agentRuntime.label}</h3>
+              <h4 className="flex items-center gap-1 text-base font-semibold text-foreground">{t(`settings.runtime.engines.${agentRuntime.id}.title`, { defaultValue: agentRuntime.label })}<HelpHint label={t(`settings.runtime.engines.${agentRuntime.id}.title`, { defaultValue: agentRuntime.label })}>{t(`settings.runtime.engines.${agentRuntime.id}.description`, { defaultValue: agentRuntime.description })}</HelpHint></h4>
               <span className={agentRuntime.status === 'ready' ? 'rounded-full bg-emerald-500/10 px-3 py-1 text-sm font-medium text-emerald-700 dark:text-emerald-300' : 'rounded-full bg-muted px-3 py-1 text-sm font-medium text-foreground'}>{t(`settings.runtime.status.${agentRuntime.status}`)}</span>
             </div>
-            {agentRuntime.models?.length ? <p className="mt-3 text-sm text-foreground">{t('settings.runtime.availableModels', { count: agentRuntime.models.length })}</p> : null}
+            {agentRuntime.models?.length ? <div className="mt-3 text-sm text-foreground">{onOpenModels ? <button type="button" className="underline underline-offset-4" onClick={onOpenModels}>{t('settings.runtime.availableModels', { count: agentRuntime.models.length })}</button> : t('settings.runtime.availableModels', { count: agentRuntime.models.length })}</div> : null}
             {agentRuntime.reason ? <p className="text-sm text-destructive">{agentRuntime.reason}</p> : null}
           </section>
         ))}

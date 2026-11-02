@@ -67,6 +67,7 @@ export async function createOidcClient(options: {
             : typeof claims.preferred_username === 'string' && claims.preferred_username.trim() ? claims.preferred_username.trim()
               : undefined
       const verifiedEmail = selectVerifiedEmail(claims, userInfo)
+      const username = trustedStringClaim(claims, userInfo, ['preferred_username'])
       const upstreamProviderId = trustedStringClaim(claims, userInfo, [
         'urn:zitadel:iam:user:metadata:idp_id',
         'urn:zitadel:iam:user:metadata:idpId',
@@ -77,6 +78,7 @@ export async function createOidcClient(options: {
           issuer: options.issuer.href.replace(/\/$/u, ''),
           subject: claims.sub,
           ...(displayName ? { displayName } : {}),
+          ...(username ? { username } : {}),
           ...(verifiedEmail ? { email: verifiedEmail.email, emailVerified: verifiedEmail.verified } : {}),
           ...(upstreamProviderId ? { upstreamProviderId } : {}),
         },

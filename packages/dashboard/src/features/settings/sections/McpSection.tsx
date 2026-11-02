@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '../../../components/ui/button.js'
+import { HelpHint } from '../../../components/ui/help-hint.js'
 import { EmptyRow, SectionHeader } from '../controls.js'
 
 type McpServer = {
@@ -254,11 +255,10 @@ export function McpSection({ executors = [], token }: { executors?: readonly Att
                         <input className="mt-1 h-9 w-full min-w-0 rounded-md border border-border/50 px-3 font-mono text-sm" value={draft.command} disabled={saving} onChange={(event) => updateDraft(index, 'command', event.target.value)} aria-label={t('settings.mcp.commandNumber', { number: index + 1 })} />
                       </label>
                     </div>
-                    <label className="block min-w-0 text-sm font-medium">
-                      {t('settings.mcp.args')}
-                      <textarea className="mt-1 min-h-24 w-full min-w-0 resize-y rounded-md border border-border/50 px-3 py-2 font-mono text-sm" value={draft.args} disabled={saving} onChange={(event) => updateDraft(index, 'args', event.target.value)} aria-label={t('settings.mcp.argsNumber', { number: index + 1 })} spellCheck={false} />
-                    </label>
-                    <p className="text-xs text-muted-foreground">{t('settings.mcp.argsHint')}</p>
+                    <div className="min-w-0 text-sm font-medium">
+                      <div className="flex items-center gap-1"><label htmlFor={`settings-mcp-args-${index}`}>{t('settings.mcp.args')}</label><HelpHint label={t('settings.mcp.args')}>{t('settings.mcp.argsHint')}</HelpHint></div>
+                      <textarea id={`settings-mcp-args-${index}`} className="mt-1 min-h-24 w-full min-w-0 resize-y rounded-md border border-border/50 px-3 py-2 font-mono text-sm" value={draft.args} disabled={saving} onChange={(event) => updateDraft(index, 'args', event.target.value)} aria-label={t('settings.mcp.argsNumber', { number: index + 1 })} spellCheck={false} />
+                    </div>
                     <Button type="button" variant="outline" disabled={saving} onClick={() => { setDrafts((current) => current.filter((_, draftIndex) => draftIndex !== index)); setSaved(false) }} aria-label={t('settings.mcp.removeServerNumber', { number: index + 1 })}>
                       <Trash2 className="mr-1.5 h-4 w-4" aria-hidden="true" />{t('settings.mcp.removeServer')}
                     </Button>

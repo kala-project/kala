@@ -1001,6 +1001,25 @@ export const ServerSettingsPayloadSchema = z.object({
     })
     .optional(),
   runtime: HostRestartStatusSchema.optional(),
+  modelConfiguration: z.object({
+    management: z.enum(['dashboard', 'operator']),
+    providerCatalogPath: z.string().optional(),
+  }).optional(),
+  storage: z.object({
+    kind: z.literal('postgres-s3'),
+    organizationId: z.string(),
+    objectBytes: z.number().int().nonnegative(),
+    objectLimitBytes: z.number().int().positive(),
+    usage: z.object({
+      measuredAt: z.string(),
+      storedFiles: z.number().int().nonnegative(),
+      storedBytes: z.number().int().nonnegative(),
+      reservedFiles: z.number().int().nonnegative(),
+      reservedBytes: z.number().int().nonnegative(),
+      artifacts: z.object({ files: z.number().int().nonnegative(), bytes: z.number().int().nonnegative() }),
+      attachments: z.object({ files: z.number().int().nonnegative(), bytes: z.number().int().nonnegative() }),
+    }).optional(),
+  }).optional(),
   socketConnections: z.object({
     total: z.number().int().nonnegative(),
     dashboard: z.number().int().nonnegative(),
@@ -1035,6 +1054,8 @@ export const ServerSettingsPayloadSchema = z.object({
     .optional(),
   socketAdmin: z
     .object({
+      authentication: z.enum(['password', 'gateway-owner']).optional(),
+      unavailableReason: z.string().optional(),
       active: z.boolean(),
       initialized: z.boolean(),
       path: z.string(),

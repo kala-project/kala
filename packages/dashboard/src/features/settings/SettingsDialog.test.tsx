@@ -107,6 +107,57 @@ describe('SettingsDialog', () => {
     vi.unstubAllGlobals()
   })
 
+  it.each(['member', 'viewer', undefined] as const)('keeps administrator tabs out of desktop and mobile settings for role %s', async organizationRole => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      ...payload,
+      deployment: { product: 'dedicated', deployment: DEDICATED_DEPLOYMENT, capabilities: FULL_RUNTIME_CAPABILITIES },
+    }), { status: 200 }))
+    render(<SettingsDialog open platform organizationRole={organizationRole} initialSection="models" onOpenChange={() => {}} />)
+    await screen.findByTestId('settings-platform-models')
+    expect(screen.getByText('To add a model or change a provider endpoint, contact your organization administrator.')).toBeTruthy()
+    expect(screen.queryByTestId('settings-group-administration')).toBeNull()
+    expect(screen.queryByTestId('settings-configure-providers')).toBeNull()
+    const options = Array.from((screen.getByTestId('settings-mobile-section-select') as HTMLSelectElement).options).map(option => option.value)
+    expect(options).toEqual(['interface', 'notifications', 'connection', 'models', 'executorAccess'])
+    fireEvent.click(screen.getByTestId('settings-tab-executorAccess'))
+    expect(screen.getByText('Connected workspaces')).toBeTruthy()
+    expect(screen.queryByText('Executor access invites')).toBeNull()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/auth/executor-invites'))).toBe(false)
+    expect(screen.queryByTestId('settings-tab-modelProviders')).toBeNull()
+    expect(screen.queryByTestId('settings-tab-runtime')).toBeNull()
+    expect(screen.queryByTestId('settings-tab-socketAdmin')).toBeNull()
+  })
+
+  it('gives the deployment Owner actionable provider configuration and working administration entries', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      ...payload, runtimeManagement: 'external',
+      deployment: { product: 'dedicated', deployment: DEDICATED_DEPLOYMENT, capabilities: FULL_RUNTIME_CAPABILITIES },
+      modelConfiguration: { management: 'dashboard' },
+      socketAdmin: { ...payload.socketAdmin, authentication: 'gateway-owner' },
+    }), { status: 200 }))
+    render(<SettingsDialog open platform organizationRole="owner" initialSection="models" deploymentServices={{ identityConsoleUrl: '/ui/console/instance', observability: true, observabilityUrl: 'http://127.0.0.1:18888' }} onOpenChange={() => {}} />)
+    await screen.findByTestId('settings-provider-api-key-input')
+    fireEvent.click(screen.getByRole('button', { name: 'Edit provider Anthropic' }))
+    expect((screen.getByTestId('settings-provider-base-url-input') as HTMLInputElement).value).toBe('http://private-3.example.com/v1')
+    expect((screen.getByTestId('settings-provider-api-key-input') as HTMLInputElement).value).toBe('')
+    expect(screen.queryByTestId('settings-tab-modelProviders')).toBeNull()
+    fireEvent.click(screen.getByTestId('settings-tab-socketAdmin'))
+    expect(screen.getByTestId('settings-open-socket-admin').getAttribute('href')).toBe('/admin/socket.io')
+    fireEvent.click(screen.getByTestId('settings-tab-deployment'))
+    expect(screen.getByTestId('settings-native-aspire').textContent).toContain('http://127.0.0.1:18888')
+    expect(screen.queryByTestId('settings-tab-observability')).toBeNull()
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/organization/observability'))).toBe(false)
+  })
+
+  it('explains an administrator-only deep link rather than silently sending a member to another form', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(payload), { status: 200 }))
+    render(<SettingsDialog open platform organizationRole="member" initialSection="speech" onOpenChange={() => {}} />)
+    expect(await screen.findByText('Administrator access required')).toBeTruthy()
+    expect(screen.queryByTestId('settings-tab-speech')).toBeNull()
+    fireEvent.click(screen.getByTestId('settings-tab-models'))
+    expect(screen.getByTestId('settings-platform-models')).toBeTruthy()
+  })
+
   it('shows actual Platform Runtime models and centralized auth instead of Portable configuration instructions', async () => {
     const platformPayload: ServerSettingsPayload = {
       ...payload, providers: [], socketAdmin: undefined, hooks: [], runtimeManagement: 'external',
@@ -118,10 +169,10 @@ describe('SettingsDialog', () => {
       }],
     }
     fetchMock.mockResolvedValue(new Response(JSON.stringify(platformPayload), { status: 200 }))
-    render(<SettingsDialog open cacheNamespace="platform-model-auth" initialSection="models" onOpenChange={() => {}} />)
+    render(<SettingsDialog open organizationRole="owner" cacheNamespace="platform-model-auth" initialSection="models" onOpenChange={() => {}} />)
     expect(await screen.findByText('Actual Copilot model')).toBeTruthy()
     expect(screen.queryByTestId('settings-model-provider-id')).toBeNull()
-    expect(screen.getByText(/managed by the deployment operator, not local Dashboard files/)).toBeTruthy()
+    expect(screen.getByTestId('settings-model-configuration').textContent).toContain('KALA_RUNTIME_HOST_LLM_CATALOG_FILE')
     fireEvent.click(screen.getByTestId('settings-tab-security'))
     expect(await screen.findByText(/browser sign-in uses shared OIDC/)).toBeTruthy()
     expect(screen.queryByText('not required')).toBeNull()
@@ -143,7 +194,7 @@ describe('SettingsDialog', () => {
     vi.spyOn(socket, 'timeout').mockReturnValue(socket)
     const acknowledge = vi.spyOn(socket, 'emitWithAck').mockResolvedValueOnce(Date.now()).mockRejectedValueOnce(new Error('ACK timed out'))
     try {
-      render(<SettingsDialog open cacheNamespace="platform-socket" initialSection="socketAdmin" storageSocket={socket} onOpenChange={() => {}} />)
+      render(<SettingsDialog open organizationRole="owner" cacheNamespace="platform-socket" initialSection="socketAdmin" storageSocket={socket} onOpenChange={() => {}} />)
       await screen.findByTestId('settings-platform-socket-diagnostics')
       fireEvent.click(screen.getByTestId('settings-socket-ping'))
       expect(await screen.findByTestId('settings-socket-ping-result')).toBeTruthy()
@@ -273,7 +324,7 @@ describe('SettingsDialog', () => {
     }
   })
 
-  it('preserves full interface help, mobile section explanations and direct risk notices', async () => {
+  it('preserves complete help behind info controls on desktop and mobile', async () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify(payload), { status: 200 }))
     render(<SettingsDialog open onOpenChange={() => {}} />)
     await waitForSettingsLoaded()
@@ -292,7 +343,9 @@ describe('SettingsDialog', () => {
     }
     expect(document.querySelector('button button')).toBeNull()
     fireEvent.click(screen.getByTestId('settings-tab-hooks'))
-    expect(screen.getByText(i18n.t('settings.hooks.subtitle')).getAttribute('data-description-kind')).toBe('notice')
+    expect(screen.queryByText(i18n.t('settings.hooks.subtitle'))).toBeNull()
+    fireEvent.click(screen.getAllByRole('button', { name: `About ${i18n.t('settings.sections.hooks.label')}` }).at(-1)!)
+    expect(screen.getByRole('tooltip').textContent).toContain(i18n.t('settings.hooks.subtitle'))
     expect(screen.queryByTestId('settings-tab-approvals')).toBeNull()
   })
 
@@ -707,6 +760,34 @@ describe('SettingsDialog', () => {
     expect(onModelsChanged).toHaveBeenCalledTimes(2)
   })
 
+  it('edits saved endpoints without replacing the key and preserves model identities during metadata edits', async () => {
+    const editable: ServerSettingsPayload = { ...payload, modelConfiguration: { management: 'dashboard' } }
+    const updatedProvider: ServerSettingsPayload = { ...editable, providers: editable.providers.map(provider => provider.id === 'anthropic' ? { ...provider, baseUrl: 'http://updated.example/v1' } : provider) }
+    const updatedModel: ServerSettingsPayload = { ...updatedProvider, providers: updatedProvider.providers.map(provider => provider.id === 'anthropic' ? {
+      ...provider, models: provider.models.map(model => model.id === 'claude-opus-4-7' ? { ...model, contextWindow: 12345 } : model),
+    } : provider) }
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify(editable)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(updatedProvider)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(updatedModel)))
+    render(<SettingsDialog open platform organizationRole="owner" initialSection="models" onOpenChange={() => {}} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit provider Anthropic' }))
+    expect((screen.getByTestId('settings-provider-id-input') as HTMLInputElement).disabled).toBe(true)
+    fireEvent.change(screen.getByTestId('settings-provider-base-url-input'), { target: { value: 'http://updated.example/v1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/settings/providers', expect.objectContaining({
+      method: 'PATCH', body: JSON.stringify({ providerId: 'anthropic', label: 'Anthropic', wire: 'anthropic', baseUrl: 'http://updated.example/v1' }),
+    })))
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit model claude-opus-4-7' }))
+    expect((screen.getByTestId('settings-model-id-input') as HTMLInputElement).disabled).toBe(true)
+    fireEvent.change(screen.getByTestId('settings-model-context-window-input'), { target: { value: '12345' } })
+    fireEvent.click(screen.getByTestId('settings-model-add-button'))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/settings/models', expect.objectContaining({
+      method: 'PATCH', body: JSON.stringify({ providerId: 'anthropic', id: 'claude-opus-4-7', label: 'claude-opus-4-7', contextWindow: 12345 }),
+    })))
+    expect(await screen.findByText('12,345')).toBeTruthy()
+  })
+
   it('sets the default model by provider-qualified ref', async () => {
     const modelPayload: ServerSettingsPayload = {
       ...payload,
@@ -760,7 +841,7 @@ describe('SettingsDialog', () => {
     fireEvent.change(screen.getByTestId('settings-provider-label-input'), { target: { value: 'Local OpenAI' } })
     fireEvent.change(screen.getByTestId('settings-provider-base-url-input'), { target: { value: 'http://localhost:8000/v1' } })
     fireEvent.change(screen.getByTestId('settings-provider-api-key-input'), { target: { value: 'test-redacted-api-key' } })
-    fireEvent.click(screen.getByRole('button', { name: /add provider/i }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add provider', exact: true }))
 
     const provider = await screen.findByTestId('settings-provider-local-openai')
     expect(provider.textContent).toContain('Local OpenAI')
@@ -796,12 +877,12 @@ describe('SettingsDialog', () => {
     expect(screen.getByText('post_tool_use')).toBeTruthy()
   })
 
-  it('exposes MCP settings in the workspace group', async () => {
+  it('exposes organization-wide MCP settings in the administrator group', async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(payload), { status: 200 }))
     render(<SettingsDialog open onOpenChange={() => {}} />)
     await waitForSettingsLoaded()
 
-    const workspaceItems = screen.getByTestId('settings-group-items-workspace')
+    const workspaceItems = screen.getByTestId('settings-group-items-administration')
     expect(screen.getByTestId('settings-tab-mcp')).toBeTruthy()
     expect(workspaceItems.contains(screen.getByTestId('settings-tab-mcp'))).toBe(true)
   })
@@ -869,15 +950,16 @@ describe('SettingsDialog', () => {
     await waitFor(() => expect(i18n.resolvedLanguage).toBe('zh'))
   })
 
-  it('groups personal, workspace, agent, and administration settings', async () => {
+  it('separates settings for everyone from administrator-only settings', async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(payload), { status: 200 }))
     render(<SettingsDialog open onOpenChange={() => {}} />)
     await waitForSettingsLoaded()
 
-    for (const group of ['personal', 'workspace', 'agent', 'administration']) expect(screen.getByTestId(`settings-group-${group}`)).toBeTruthy()
+    for (const group of ['personal', 'administration']) expect(screen.getByTestId(`settings-group-${group}`)).toBeTruthy()
     expect(screen.getByTestId('settings-group-personal').textContent).toContain('Notifications')
-    expect(screen.getByTestId('settings-group-workspace').textContent).toContain('Workspaces')
-    expect(screen.getByTestId('settings-group-administration').textContent).toContain('Connection')
+    expect(screen.getByTestId('settings-group-personal').textContent).toContain('Workspaces')
+    expect(screen.getByTestId('settings-group-administration').textContent).not.toContain('Workspaces')
+    expect(screen.getByTestId('settings-group-personal').textContent).toContain('Connection')
   })
 
   it('offers follow system as a theme preference', async () => {
@@ -1145,7 +1227,7 @@ describe('SettingsDialog', () => {
     fireEvent.click(screen.getByTestId('settings-tab-executorAccess'))
 
     expect(screen.getByText('Connected workspaces')).toBeTruthy()
-    expect(screen.getByText('Live workspace')).toBeTruthy()
+    expect(screen.getAllByText('Live workspace').length).toBeGreaterThan(0)
     expect(screen.getByText('workspace-host · Node.js v22.22.2')).toBeTruthy()
     await screen.findByTestId('executor-invite-list')
     expect(screen.getAllByTestId('executor-invite-row')).toHaveLength(2)
@@ -1223,7 +1305,7 @@ describe('SettingsDialog', () => {
     expect(screen.getByText('Use only when an update is stuck. Removes this origin’s Dashboard service worker and caches, then loads a fresh network copy.')).toBeTruthy()
     expect(screen.queryByText('Executor: example-executor')).toBeNull()
     fireEvent.click(screen.getByTestId('settings-tab-executorAccess'))
-    expect(await screen.findByText('example-executor')).toBeTruthy()
+    expect((await screen.findAllByText('example-executor')).length).toBeGreaterThan(0)
     expect(screen.getByText('example-executor-host · Node.js v22.22.2')).toBeTruthy()
   })
 })

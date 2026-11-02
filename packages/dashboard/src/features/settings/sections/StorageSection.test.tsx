@@ -19,7 +19,8 @@ describe('StorageSection', () => {
     }
     render(<StorageSection socket={{ emit } as never} payload={payload} />)
     expect(screen.getByText('org-owned')).toBeTruthy()
-    expect(screen.getByText('123 / 456 bytes')).toBeTruthy()
+    expect(screen.getByText('123 B / 456 B')).toBeTruthy()
+    expect(screen.getAllByText('Not reported')).toHaveLength(2)
     expect(screen.getByText('PostgreSQL')).toBeTruthy()
     expect(screen.getByText('S3')).toBeTruthy()
     expect(emit).not.toHaveBeenCalled()
@@ -34,6 +35,33 @@ describe('StorageSection', () => {
       deployment: { product: 'dedicated', deployment: DEDICATED_DEPLOYMENT, capabilities: FULL_RUNTIME_CAPABILITIES },
     }} />)
     expect(screen.getByText('Organization storage usage unavailable')).toBeTruthy()
+    expect(emit).not.toHaveBeenCalled()
+  })
+
+  it('shows measured files, readable sizes and reservations with an explicit refresh only', () => {
+    const onRefresh = vi.fn()
+    const emit = vi.fn()
+    render(<StorageSection socket={{ emit } as never} onRefresh={onRefresh} payload={{
+      providers: [], defaultModel: '', hooks: [], mcp: { supported: false },
+      paths: { claudeSettings: '', codexConfig: '', manualModels: '', hooksConfig: '', sessionsDir: '' },
+      deployment: { product: 'dedicated', deployment: DEDICATED_DEPLOYMENT, capabilities: FULL_RUNTIME_CAPABILITIES },
+      storage: {
+        kind: 'postgres-s3', organizationId: 'org-owned', objectBytes: 4096, objectLimitBytes: 1048576,
+        usage: {
+          measuredAt: '2026-11-02T00:00:00Z', storedFiles: 3, storedBytes: 3072,
+          reservedFiles: 1, reservedBytes: 1024,
+          artifacts: { files: 2, bytes: 2048 }, attachments: { files: 1, bytes: 1024 },
+        },
+      },
+    }} />)
+    expect(screen.getByText('3.00 KiB')).toBeTruthy()
+    expect(screen.getByText('4.00 KiB / 1.00 MiB')).toBeTruthy()
+    expect(screen.getByText('2 files · 2.00 KiB')).toBeTruthy()
+    expect(screen.getByText('Upload reservations')).toBeTruthy()
+    expect(onRefresh).not.toHaveBeenCalled()
+    expect(emit).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByTestId('settings-storage-refresh'))
+    expect(onRefresh).toHaveBeenCalledTimes(1)
     expect(emit).not.toHaveBeenCalled()
   })
 

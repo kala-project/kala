@@ -13,6 +13,12 @@
     }
   }
 
+  # Keep Kala administration out of ZITADEL's broad /admin API route.
+  @socketAdmin path /admin/socket.io /admin/socket.io/*
+  handle @socketAdmin {
+    reverse_proxy {$KALA_GATEWAY_ORIGIN}
+  }
+
   @identity path /.well-known/openid-configuration /.well-known/oauth-authorization-server /oauth/* /oidc/* /ui/* /idps/* /saml/* /v2/* /auth/v1/* /admin/* /management/* /zitadel.* /debug/healthz /debug/ready
   handle @identity {
     reverse_proxy h2c://identity-zitadel:8080 {

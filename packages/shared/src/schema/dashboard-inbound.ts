@@ -65,6 +65,8 @@ import type {
   ClientUserReject,
   ClientAddManualModel,
   ClientAddManualProvider,
+  ClientUpdateManualModel,
+  ClientUpdateManualProvider,
   ClientAskUserChoice,
   ClientAnswerDagDecision,
   ClientUpdateAgentPromptSettings,
@@ -542,11 +544,30 @@ export const ManualProviderInputSchema = z.object({
 
 export const ClientAddManualProviderSchema = ManualProviderInputSchema satisfies z.ZodType<ClientAddManualProvider>
 
+export const ClientUpdateManualProviderSchema = z.object({
+  providerId: NonEmptyStringSchema,
+  label: z.string().trim().optional(),
+  wire: z.enum(['anthropic', 'openai']).optional(),
+  baseUrl: UrlStringSchema.optional(),
+  apiKey: z.string().trim().optional(),
+}).refine(value => ['label', 'wire', 'baseUrl', 'apiKey'].some(key => key in value), {
+  message: 'A provider update must contain at least one field',
+}) satisfies z.ZodType<ClientUpdateManualProvider>
+
 export const ClientDeleteManualProviderSchema = z.object({
   providerId: NonEmptyStringSchema,
 }) satisfies z.ZodType<ClientDeleteManualProvider>
 
 export const ClientAddManualModelSchema = ManualModelInputSchema satisfies z.ZodType<ClientAddManualModel>
+
+export const ClientUpdateManualModelSchema = z.object({
+  providerId: NonEmptyStringSchema,
+  id: NonEmptyStringSchema,
+  label: z.string().trim().optional(),
+  contextWindow: z.number().int().positive().optional(),
+}).refine(value => value.label !== undefined || value.contextWindow !== undefined, {
+  message: 'A model update must contain at least one field',
+}) satisfies z.ZodType<ClientUpdateManualModel>
 
 export const ClientDeleteManualModelSchema = z.object({
   providerId: NonEmptyStringSchema,

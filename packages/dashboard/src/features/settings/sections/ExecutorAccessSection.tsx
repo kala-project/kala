@@ -5,11 +5,24 @@ import { useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '../../../components/ui/button.js'
+import { HelpHint } from '../../../components/ui/help-hint.js'
 import { cn } from '../../../lib/utils.js'
 import { CopyButton, EmptyRow, SectionHeader } from '../controls.js'
 import { executorSetupCommand, formatDate, meaningfulInviteLabel, responseError } from '../section-utils.js'
 
-export function ExecutorAccessSection({ executors = [] }: { executors?: readonly AttachedExecutor[] }): JSX.Element {
+export function ExecutorAccessSection({ executors = [], canManage = true, cacheNamespace = 'default' }: { executors?: readonly AttachedExecutor[]; canManage?: boolean; cacheNamespace?: string }): JSX.Element {
+  const { t } = useTranslation()
+  return <div>
+    <SectionHeader title={t('settings.sections.executorAccess.label')} subtitle={t('settings.executorAccess.subtitle')} />
+    <section className="mb-5" aria-labelledby="connected-workspaces-heading">
+      <h4 id="connected-workspaces-heading" className="flex items-center gap-1 text-sm font-semibold text-foreground">{t('settings.executorAccess.connectedTitle')}<HelpHint label={t('settings.executorAccess.connectedTitle')}>{t('settings.executorAccess.connectedDesc')}</HelpHint></h4>
+      {executors.length === 0 ? <EmptyRow>{t('settings.executorAccess.noConnected')}</EmptyRow> : <div className="mt-3 space-y-2" data-testid="settings-connected-executors">{executors.map(executor => <ConnectedWorkspace key={executor.executorId} executor={executor} />)}</div>}
+    </section>
+    {canManage ? <ExecutorInviteManagement key={cacheNamespace} executors={executors} cacheNamespace={cacheNamespace} /> : null}
+  </div>
+}
+
+function ExecutorInviteManagement({ executors, cacheNamespace }: { executors: readonly AttachedExecutor[]; cacheNamespace: string }): JSX.Element {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [label, setLabel] = useState('')
@@ -20,7 +33,7 @@ export function ExecutorAccessSection({ executors = [] }: { executors?: readonly
   const [error, setError] = useState<string | null>(null)
 
   const invitesQuery = useQuery({
-    queryKey: ['executor-invites'],
+    queryKey: ['executor-invites', cacheNamespace],
     queryFn: async (): Promise<ServerExecutorInvitesPayload> => {
       const res = await fetch('/auth/executor-invites', { cache: 'no-store' })
       const body = await res.json() as ServerExecutorInvitesPayload | { error?: string }
@@ -132,23 +145,10 @@ export function ExecutorAccessSection({ executors = [] }: { executors?: readonly
 
   return (
     <div>
-      <SectionHeader title={t('settings.sections.executorAccess.label')} subtitle={t('settings.executorAccess.subtitle')} />
-      <section className="mb-5" aria-labelledby="connected-workspaces-heading">
-        <h4 id="connected-workspaces-heading" className="text-sm font-semibold text-foreground">{t('settings.executorAccess.connectedTitle')}</h4>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('settings.executorAccess.connectedDesc')}</p>
-        {executors.length === 0 ? (
-          <EmptyRow>{t('settings.executorAccess.noConnected')}</EmptyRow>
-        ) : (
-          <div className="mt-3 space-y-2" data-testid="settings-connected-executors">
-            {executors.map((executor) => <ConnectedWorkspace key={executor.executorId} executor={executor} />)}
-          </div>
-        )}
-      </section>
-      <h4 className="mb-2 text-sm font-semibold text-foreground">{t('settings.executorAccess.invitesTitle')}</h4>
-      <form onSubmit={submit} className="mb-4 max-w-full min-w-0 overflow-hidden rounded-md bg-muted/30 p-3 ring-1 ring-border/50">
-        <p className="mb-3 text-xs text-muted-foreground" data-description-kind="notice">{t('settings.executorAccess.plaintextNotice')}</p>
-        <div className="grid min-w-0 gap-2 lg:grid-cols-2">
-          <label className="min-w-0 text-xs font-medium text-muted-foreground">
+      <h4 className="mb-2 flex items-center gap-1 text-sm font-semibold text-foreground">{t('settings.executorAccess.invitesTitle')}<HelpHint label={t('settings.executorAccess.invitesTitle')}>{t('settings.executorAccess.plaintextNotice')}</HelpHint></h4>
+      <form onSubmit={submit} className="mb-4 max-w-full min-w-0 rounded-md bg-muted/30 p-3 ring-1 ring-border/50">
+        <div className="grid min-w-0 gap-3 xl:grid-cols-2">
+          <label className="min-w-0 text-sm font-medium text-foreground">
             {t('settings.executorAccess.label')}
             <input
               className="mt-1 h-9 w-full rounded-md border-0 bg-background px-2 text-sm text-foreground outline-none ring-1 ring-border/50 focus:ring-ring/50"
@@ -158,11 +158,11 @@ export function ExecutorAccessSection({ executors = [] }: { executors?: readonly
               disabled={busy}
             />
           </label>
-          <label className="min-w-0 text-xs font-medium text-muted-foreground">
+          <label className="min-w-0 text-sm font-medium text-foreground">
             {t('settings.executorAccess.workspaceId')}
-            <select className="mt-1 h-9 w-full rounded-md border-0 bg-background px-2 font-mono text-sm text-foreground outline-none ring-1 ring-border/50 focus:ring-ring/50" value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)} disabled={busy}>
+            <select className="mt-1 h-9 w-full min-w-0 max-w-full rounded-md border-0 bg-background px-2 text-sm text-foreground outline-none ring-1 ring-border/50 focus:ring-ring/50" value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)} disabled={busy}>
               <option value="">{t('settings.executorAccess.workspacePlaceholder')}</option>
-              {[...new Map(executors.map((executor) => [executor.workspaceId, executor])).values()].map((executor) => <option key={executor.workspaceId} value={executor.workspaceId}>{executor.workspaceName} · {executor.workspaceId}</option>)}
+              {[...new Map(executors.map((executor) => [executor.workspaceId, executor])).values()].map((executor) => <option key={executor.workspaceId} value={executor.workspaceId}>{executor.workspaceName}</option>)}
             </select>
           </label>
         </div>
@@ -171,26 +171,27 @@ export function ExecutorAccessSection({ executors = [] }: { executors?: readonly
             <Plus className="mr-1.5 h-4 w-4" aria-hidden="true" /> {t('settings.executorAccess.create')}
           </Button>
         </div>
-        {error ? <div className="mt-2 text-xs text-destructive">{error}</div> : null}
+        {error ? <div className="mt-2 text-sm text-destructive" role="alert">{error}</div> : null}
       </form>
       {plainInvite ? (
         <div className="mb-4 min-w-0 rounded-md bg-primary/5 px-3 py-2 ring-1 ring-primary/30">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="text-xs font-medium text-foreground">{t('settings.executorAccess.plaintextTitle')}</div>
+            <div className="text-sm font-medium text-foreground">{t('settings.executorAccess.plaintextTitle')}</div>
             <select
               value={copyMode}
               onChange={(event) => setCopyMode(event.target.value === 'token' ? 'token' : 'command')}
-              className="h-7 rounded-md bg-background px-2 text-xs text-foreground outline-none ring-1 ring-border/50"
+              className="h-9 rounded-md bg-background px-2 text-sm text-foreground outline-none ring-1 ring-border/50"
               aria-label={t('settings.executorAccess.copyMode')}
             >
               <option value="command">{t('settings.executorAccess.copyCommand')}</option>
               <option value="token">{t('settings.executorAccess.copyToken')}</option>
             </select>
           </div>
-          <div className="mt-1 flex items-start gap-2 rounded bg-background px-2 py-1.5 font-mono text-xs ring-1 ring-border/50">
+          <div className="mt-1 flex items-start gap-2 rounded bg-background px-2 py-1.5 font-mono text-sm ring-1 ring-border/50">
             <span className="min-w-0 flex-1 break-all" title={inviteCopyValue}>{inviteCopyValue}</span>
             <CopyButton value={inviteCopyValue} />
           </div>
+          <p className="mt-2 text-sm text-muted-foreground">{t('settings.executorAccess.plaintextNotice')}</p>
         </div>
       ) : null}
       {invitesQuery.isLoading ? (
@@ -201,19 +202,20 @@ export function ExecutorAccessSection({ executors = [] }: { executors?: readonly
         <div className="space-y-2" data-testid="executor-invite-list">
           {invites.map((invite) => {
             const labelValue = meaningfulInviteLabel(invite.label) ?? ''
-            const title = invite.workspaceId ?? (labelValue || t('settings.executorAccess.unboundInvite'))
+            const workspace = executors.find(executor => executor.workspaceId === invite.workspaceId)
+            const title = workspace?.workspaceName ?? (labelValue || t(invite.workspaceId ? 'settings.executorAccess.boundInvite' : 'settings.executorAccess.unboundInvite'))
             const expired = Date.parse(invite.expiresAt) <= Date.now()
             const canDelete = !invite.workspaceId || invite.revoked || expired
             const subtitle = invite.workspaceId
-              ? labelValue || t('settings.executorAccess.boundInvite')
+              ? invite.workspaceId
               : t('settings.executorAccess.waitingForFirstUse')
             return (
-              <article key={invite.id} className="rounded-md border border-border/50 bg-card/60 px-3 py-3" data-testid="executor-invite-row">
-                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                  <div className="min-w-0 flex-1 space-y-2">
+              <article key={invite.id} className="min-w-0 max-w-full rounded-xl bg-card/65 p-4 ring-1 ring-border/40" data-testid="executor-invite-row">
+                <div className="grid min-w-0 gap-4">
+                  <div className="min-w-0 space-y-3">
                     <div className="flex flex-wrap items-start gap-2">
                       <div className="min-w-0 flex-1">
-                        <div className={cn('min-w-0 break-words text-sm font-semibold text-foreground [overflow-wrap:anywhere]', invite.workspaceId && 'font-mono')} title={title}>
+                        <div className="min-w-0 break-words text-sm font-semibold text-foreground [overflow-wrap:anywhere]" title={title}>
                           {title}
                         </div>
                         <div className="mt-0.5 min-w-0 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]" title={subtitle}>
@@ -224,7 +226,7 @@ export function ExecutorAccessSection({ executors = [] }: { executors?: readonly
                         {invite.revoked ? t('settings.executorAccess.revoked') : expired ? t('settings.executorAccess.expired') : t('settings.executorAccess.inviteActive')}
                       </span>
                     </div>
-                    <label className="block max-w-md text-caption font-medium text-muted-foreground">
+                    <label className="block max-w-md text-sm font-medium text-muted-foreground">
                       {t('settings.executorAccess.label')}
                       <input
                         className="mt-1 h-8 w-full rounded-md border-0 bg-background px-2 text-sm text-foreground outline-none ring-1 ring-border/50 focus:ring-ring/50 disabled:opacity-70"
@@ -236,15 +238,14 @@ export function ExecutorAccessSection({ executors = [] }: { executors?: readonly
                         disabled={busy || invite.revoked}
                       />
                     </label>
-                    <div className="grid gap-1 text-xs text-muted-foreground sm:grid-cols-2 lg:grid-cols-4">
+                    <div className="grid min-w-0 gap-3 text-sm text-muted-foreground sm:grid-cols-2">
                       <InviteMeta label={t('settings.executorAccess.inviteId')} value={invite.id.slice(0, 12)} mono />
                       <InviteMeta label={t('settings.executorAccess.created')} value={formatDate(invite.createdAt)} />
                       <InviteMeta label={t('settings.executorAccess.expires')} value={formatDate(invite.expiresAt)} />
                       <InviteMeta label={t('settings.executorAccess.lastUsed')} value={invite.lastUsedAt ? formatDate(invite.lastUsedAt) : t('settings.executorAccess.never')} />
                     </div>
                   </div>
-                  <div className="flex flex-none flex-wrap justify-end gap-1.5">
-                    <p className="w-full text-xs text-muted-foreground" data-description-kind="notice">{t('settings.executorAccess.plaintextNotice')}</p>
+                  <div className="flex min-w-0 flex-wrap justify-end gap-2 border-t border-border/40 pt-3">
                     <Button type="button" variant="outline" size="sm" className="h-8" onClick={() => regenerateInvite.mutate(invite.id)} disabled={busy} aria-label={t('settings.executorAccess.regenerate')}>
                       <RefreshCw className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
                       {t('settings.executorAccess.regenerate')}

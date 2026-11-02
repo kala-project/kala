@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { DeploymentServices } from '@agent-kernel/shared'
 
-export type AccountProfile = { displayName: string; email?: string; initials: string }
+export type AccountProfile = { displayName: string; username?: string; email?: string; initials: string }
 export type AccountOrganization = { id: string; name: string; status: 'provisioning' | 'active' | 'suspended' | 'closing' | 'closed'; role: 'owner' | 'admin' | 'member' | 'viewer' }
 export type AuthSession = { authenticated: true; profile: AccountProfile; organization?: AccountOrganization; deploymentServices?: DeploymentServices; cacheNamespace: string; expiresAt: string } | { authenticated: false }
 export type AuthSessionState = { loading: boolean; checked: boolean; session: AuthSession | null; error: string | null; refresh(): Promise<AuthSession>; logout(): Promise<void>; announceLogout(): void }

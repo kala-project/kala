@@ -5,7 +5,7 @@ import { Agent as HttpsAgent, request as httpsRequest } from 'node:https'
 import { Readable, type Duplex } from 'node:stream'
 
 import httpProxy from 'http-proxy'
-import { parsePublicUrls, validatePublicRequest, type ExternalDeploymentHealth, type OperatorObservabilitySnapshot, type PublicUrlPattern } from '@agent-kernel/shared'
+import { parsePublicUrls, validatePublicRequest, type ExternalDeploymentHealth, type PublicUrlPattern } from '@agent-kernel/shared'
 import { createOnlineTelemetryFromEnv, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
 
 import type { LoginStateStore } from '../auth/login-state-store.js'
@@ -24,7 +24,6 @@ import { isOwnerBootstrapToken, ownerBootstrapHash, type OwnerBootstrapGateway }
 import type { RuntimeConnectionRoute, RuntimeOriginResolver } from '../runtime-origin/postgres-runtime-origin-resolver.js'
 import type { RuntimeRoutingTicketResolver } from '../runtime-origin/runtime-routing-ticket-resolver.js'
 import type { DedicatedOwnerAuthenticator } from '../auth/dedicated-owner.js'
-import { loadOperatorObservability } from './observability.js'
 
 export type RuntimeIngressGateway = { readonly http: HttpServer; readonly port: number; close(): Promise<void> }
 export type { RuntimeOriginResolver } from '../runtime-origin/postgres-runtime-origin-resolver.js'
@@ -61,10 +60,10 @@ class RuntimeOriginUnavailableError extends Error {
   constructor() { super('runtime_origin_unavailable') }
 }
 
-function publicProfile(session: AuthenticatedIdentity): { displayName: string; email?: string; initials: string } {
-  const displayName = session.displayName?.trim() || session.email?.split('@')[0] || 'Kala user'
+function publicProfile(session: AuthenticatedIdentity): { displayName: string; username?: string; email?: string; initials: string } {
+  const displayName = session.username?.trim() || session.displayName?.trim() || session.email?.split('@')[0] || 'Kala user'
   const initials = displayName.split(/\s+/u).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() ?? '').join('') || 'AR'
-  return { displayName, ...(session.email ? { email: session.email } : {}), initials }
+  return { displayName, ...(session.username ? { username: session.username } : {}), ...(session.email ? { email: session.email } : {}), initials }
 }
 
 function isDocumentNavigation(request: IncomingMessage, pathname: string): boolean {
@@ -80,9 +79,9 @@ function isPublicInstallerPath(pathname: string): boolean {
   return pathname === '/install' || pathname === '/install.ps1' || pathname === '/install/invite.ps1' || pathname.startsWith('/install/assets/') || pathname.startsWith('/release-assets/')
 }
 
-const DASHBOARD_API_EXACT = new Set(['/models', '/settings', '/memo', '/metrics', '/organization', '/install', '/install.ps1'])
+const DASHBOARD_API_EXACT = new Set(['/models', '/settings', '/memo', '/metrics', '/organization', '/install', '/install.ps1', '/admin'])
 const DASHBOARD_API_PREFIXES = [
-  '/socket.io/', '/runtime/', '/internal/', '/settings/', '/auth/', '/push/', '/api/', '/user/', '/organization/',
+  '/socket.io/', '/runtime/', '/internal/', '/settings/', '/auth/', '/push/', '/api/', '/user/', '/organization/', '/admin/',
   '/artifacts/', '/session-artifacts/', '/router/', '/enhancement/', '/install/', '/release-assets/', '/themes/',
 ]
 
@@ -246,7 +245,7 @@ export async function startRuntimeIngressGateway(options: {
   singleTenantOwner?: boolean
   operatorServices?: {
     identityConsoleUrl?: string
-    observability?: { origin: string; apiKey: string }
+    observabilityUrl?: string
   }
   directory: RuntimeAssignmentStore
   organizations?: OrganizationStore
@@ -646,7 +645,8 @@ export async function startRuntimeIngressGateway(options: {
         ...(options.singleTenantOwner && access?.membership.role === 'owner' && options.operatorServices ? {
           deploymentServices: {
             ...(options.operatorServices.identityConsoleUrl ? { identityConsoleUrl: options.operatorServices.identityConsoleUrl } : {}),
-            observability: Boolean(options.operatorServices.observability),
+            observability: Boolean(options.operatorServices.observabilityUrl),
+            ...(options.operatorServices.observabilityUrl ? { observabilityUrl: options.operatorServices.observabilityUrl } : {}),
           },
         } : {}),
         ...(access ? { organization: { id: access.organization.id, name: access.organization.name, status: access.organization.status, role: access.membership.role } } : {}),
@@ -936,27 +936,8 @@ export async function startRuntimeIngressGateway(options: {
       return
     }
     if (url.pathname === '/organization/observability') {
-      if (!session) { response.writeHead(401, { 'cache-control': 'no-store' }); response.end(); return }
-      if (!options.singleTenantOwner || organizationAccess?.membership.role !== 'owner') { response.writeHead(403, { 'cache-control': 'no-store' }); response.end(); return }
-      if (request.method !== 'GET') { response.writeHead(405, { allow: 'GET', 'cache-control': 'no-store' }); response.end(); return }
-      const observation = options.operatorServices?.observability
-      if (!observation) { response.writeHead(503, { 'cache-control': 'no-store' }); response.end(JSON.stringify({ error: 'observability_not_configured' })); return }
-      try {
-        const snapshot: OperatorObservabilitySnapshot = await loadOperatorObservability(async path => {
-          const upstream = await requestRuntime(observation.origin, `/api/telemetry/${path}`, 'GET',
-            { 'x-api-key': observation.apiKey }, undefined, undefined,
-            // SQLite trace queries scan retained history, even with a small result limit.
-            { signal: AbortSignal.timeout(10_000), maxResponseBytes: 2_097_152 })
-          if (upstream.status !== 200) throw new Error('observability_upstream_unavailable')
-          return JSON.parse(upstream.body.toString('utf8')) as unknown
-        })
-        response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
-        response.end(JSON.stringify(snapshot))
-      } catch (error) {
-        process.stderr.write(`${JSON.stringify({ event: 'operator_observability_unavailable', errorType: error instanceof Error ? error.name : 'unknown' })}\n`)
-        response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' })
-        response.end(JSON.stringify({ error: 'observability_unavailable' }))
-      }
+      response.writeHead(404, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      response.end(JSON.stringify({ error: 'not_found' }))
       return
     }
     if (url.pathname === '/organization' && request.method === 'GET' && organizationAccess && options.organizations) {
@@ -1080,6 +1061,12 @@ export async function startRuntimeIngressGateway(options: {
       if (isDocumentNavigation(request, url.pathname)) response.writeHead(303, { location: '/auth/login', 'cache-control': 'no-store' })
       else { response.writeHead(401, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ error: 'authentication_required' })); return }
       response.end(); return
+    }
+    if ((url.pathname === '/admin' || url.pathname.startsWith('/admin/'))
+        && (!options.singleTenantOwner || organizationAccess?.membership.role !== 'owner')) {
+      response.writeHead(403, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      response.end(JSON.stringify({ error: 'deployment_owner_required' }))
+      return
     }
     if (options.runtimeOriginResolver && url.pathname.startsWith('/socket.io/') && url.searchParams.get('transport') === 'polling') {
       // Engine.IO's sid is assigned in the upstream response, so this stateless

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { ObjectStorageUsageSnapshot } from '@agent-kernel/shared'
 
 import type { PostgresSchemaManagement } from '../postgres-migrations.js'
 import type { RuntimeResourceOwnership } from '../tenant-runtime/postgres-runtime-resource-ownership.js'
@@ -182,6 +183,33 @@ export class PostgresObjectCapacityLedger implements ObjectCapacityLedger {
     const usage = Number(result.rows[0]?.bytes ?? 0)
     if (!Number.isSafeInteger(usage) || usage < 0) throw new Error('Persisted object capacity usage is outside the safe integer range')
     return usage
+  }
+
+  async usageSnapshot(): Promise<ObjectStorageUsageSnapshot> {
+    const result = await this.hotState.database.query<Record<string, string>>(`SELECT
+      COUNT(*) FILTER (WHERE state = 'committed')::text AS stored_files,
+      COALESCE(SUM(bytes) FILTER (WHERE state = 'committed'), 0)::text AS stored_bytes,
+      COUNT(*) FILTER (WHERE state = 'reserved')::text AS reserved_files,
+      COALESCE(SUM(bytes) FILTER (WHERE state = 'reserved'), 0)::text AS reserved_bytes,
+      COUNT(*) FILTER (WHERE state = 'committed' AND object_kind = 'session_artifact')::text AS artifact_files,
+      COALESCE(SUM(bytes) FILTER (WHERE state = 'committed' AND object_kind = 'session_artifact'), 0)::text AS artifact_bytes,
+      COUNT(*) FILTER (WHERE state = 'committed' AND object_kind = 'message_attachment')::text AS attachment_files,
+      COALESCE(SUM(bytes) FILTER (WHERE state = 'committed' AND object_kind = 'message_attachment'), 0)::text AS attachment_bytes
+      FROM ${this.allocationsTable} WHERE tenant_id = $1`, [this.organizationId])
+    const row = result.rows[0]
+    if (!row) throw new Error('Object storage usage snapshot is unavailable')
+    const read = (key: string): number => {
+      const value = Number(row[key])
+      if (!Number.isSafeInteger(value) || value < 0) throw new Error(`Invalid object storage usage: ${key}`)
+      return value
+    }
+    return {
+      measuredAt: new Date().toISOString(),
+      storedFiles: read('stored_files'), storedBytes: read('stored_bytes'),
+      reservedFiles: read('reserved_files'), reservedBytes: read('reserved_bytes'),
+      artifacts: { files: read('artifact_files'), bytes: read('artifact_bytes') },
+      attachments: { files: read('attachment_files'), bytes: read('attachment_bytes') },
+    }
   }
 
   async reservationState(reservation: ObjectCapacityReservation): Promise<'reserved' | 'committed' | 'missing'> {

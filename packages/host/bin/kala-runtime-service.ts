@@ -14,6 +14,7 @@ import { resolveBuiltinAgentModule } from '../src/builtin-tools.js'
 import type { DashboardActor } from '../src/auth-control.js'
 import { PostgresAgentPromptSettingsStore } from '../src/tenant-runtime/postgres-agent-settings.js'
 import { ExplicitLLMClientFactory } from '../src/llm/client-factory.js'
+import { DedicatedModelSettings } from '../src/llm/dedicated-model-settings.js'
 import { startTenantRuntimeService } from '../src/tenant-runtime/service.js'
 import { readRequiredSecretEnv } from '../src/config/secret-env.js'
 import { createRuntimeProviderRuntime, FileSecretResolver, loadRuntimeProviderCatalog } from '../src/llm/runtime-provider-catalog.js'
@@ -167,11 +168,16 @@ async function main(): Promise<void> {
     : undefined
   const catalogPath = process.env.KALA_RUNTIME_HOST_LLM_CATALOG_FILE?.trim()
   const runtimeCatalog = catalogPath ? await loadRuntimeProviderCatalog(catalogPath) : undefined
+  const providerSecrets = createConfiguredSecretResolver(process.env)
+    ?? new FileSecretResolver(process.env.KALA_RUNTIME_HOST_SECRET_ROOT ?? '/run/kala-secrets')
   const runtimeProvider = runtimeCatalog
-    ? await createRuntimeProviderRuntime(
+    ? product === 'dedicated' ? {
+        llm: { name: 'dedicated-models-not-loaded', call: async () => { throw new Error('Dedicated model settings have not loaded') } },
+        models: [],
+        defaultModel: runtimeCatalog.defaultModel,
+      } : await createRuntimeProviderRuntime(
         runtimeCatalog,
-        new ExplicitLLMClientFactory(createConfiguredSecretResolver(process.env)
-          ?? new FileSecretResolver(process.env.KALA_RUNTIME_HOST_SECRET_ROOT ?? '/run/kala-secrets')),
+        new ExplicitLLMClientFactory(providerSecrets),
       )
     : await createEnvironmentRuntimeProvider()
   const agentModule = resolveBuiltinAgentModule()
@@ -277,6 +283,21 @@ async function main(): Promise<void> {
             placementLease, maxArtifactBytes, telemetry, nativeFsLimits, sessionOwnership)
         : undefined
       const agentSettings = persistentStorage?.agentSettings
+      const modelSettings = product === 'dedicated' && persistentStorage && organizationId && runtimeCatalog
+        ? new DedicatedModelSettings(persistentStorage.tenantState, organizationId, runtimeCatalog, providerSecrets)
+        : undefined
+      try {
+        await modelSettings?.load()
+      } catch (error) {
+        await modelSettings?.close().catch(() => undefined)
+        await persistentStorage?.close().catch(() => undefined)
+        throw error
+      }
+      const unitProvider = !modelSettings && product === 'dedicated' && runtimeCatalog && id !== publicInstallerUnitId
+        ? await createRuntimeProviderRuntime(runtimeCatalog, new ExplicitLLMClientFactory(providerSecrets))
+        : runtimeProvider
+      const currentModels = () => modelSettings?.models ?? unitProvider.models
+      const currentDefaultModel = () => modelSettings?.defaultModel ?? unitProvider.defaultModel
       let currentAgentSettings = persistentStorage?.initialAgentSettings
       const assertActorOrganization = (actor?: DashboardActor): void => {
         if (actor?.kind === 'ingress' && actor.organizationId !== organizationId) {
@@ -305,15 +326,17 @@ async function main(): Promise<void> {
           ])
       const makeSettings = async (actor: DashboardActor): Promise<ServerSettingsPayload> => {
         const prompt = await refreshAgentSettings(actor)
+        const objectUsage = await persistentStorage?.objectStorage.resourceArtifactUsageSnapshot()
         const [identities, invites] = persistentStorage
           ? await Promise.all([persistentStorage.executorIdentityStore.snapshot(), persistentStorage.executorIdentityStore.inviteSnapshot()])
           : [[], []]
         return {
-          providers: runtimeCatalog?.providers.map(provider => ({
+          providers: modelSettings?.providers ?? runtimeCatalog?.providers.map(provider => ({
             id: provider.id, label: provider.label ?? provider.id, wire: provider.wire, baseUrl: provider.baseUrl,
-            models: runtimeProvider.models.filter(model => model.providerId === provider.id),
+            models: currentModels().filter(model => model.providerId === provider.id),
           })) ?? [],
-          defaultModel: runtimeProvider.defaultModel, hooks: [],
+          defaultModel: currentDefaultModel(), hooks: [],
+          modelConfiguration: modelSettings ? { management: 'dashboard' } : { management: 'operator', ...(catalogPath ? { providerCatalogPath: catalogPath } : {}) },
           versions: { host: packageJson.version, protocol: PROTOCOL_VERSION },
           agentModule: currentAgentModule().metadata,
           ...(prompt && agentSettings ? { agentPrompt: { ...prompt, configPath: agentSettings.configPath } } : {}),
@@ -326,12 +349,13 @@ async function main(): Promise<void> {
           } : {}),
           mcp: { supported: false, note: 'MCP availability is resolved by the Runtime.' },
           paths: { claudeSettings: '', codexConfig: '', manualModels: '', hooksConfig: '', sessionsDir: join(unitRoot, 'sessions') },
-          ...(persistentStorage && organizationId ? {
+          ...(objectUsage && organizationId ? {
             storage: {
               kind: 'postgres-s3' as const,
               organizationId,
-              objectBytes: await resourceArtifactUsage(),
+              objectBytes: objectUsage.storedBytes + objectUsage.reservedBytes,
               objectLimitBytes: maxArtifactBytes,
+              usage: objectUsage,
             },
           } : {}),
           ...(releaseAssetsDir ? { release: { bootstrapBaseUrl: '/release-assets', source: 'local' as const } } : {}),
@@ -371,13 +395,13 @@ async function main(): Promise<void> {
           executorIdentityStore: persistentStorage.executorIdentityStore,
           pushStore: persistentStorage.pushStore,
           vapidKeys: persistentStorage.vapidKeys,
-          closeResource: persistentStorage.close,
+          closeResource: async () => { await modelSettings?.close(); await persistentStorage.close() },
         } : {}),
         ...(!persistentStorage && id !== publicInstallerUnitId ? {
           workspaceDir,
           executorIdentityStorePath: join(unitRoot, 'executor-identities.json'),
         } : {}),
-        llm: runtimeProvider.llm,
+        llm: modelSettings?.llm ?? unitProvider.llm,
         defaultConfig: () => currentAgentModule().config,
         ...(agentSettings ? {
           resolveSystemPrompt: async (actor?: DashboardActor) => {
@@ -390,8 +414,18 @@ async function main(): Promise<void> {
             return makeSettings(actor)
           },
         } : {}),
-        models: runtimeProvider.models,
-        defaultModel: runtimeProvider.defaultModel,
+        ...(modelSettings ? {
+          onModelCatalogChange: (listener) => modelSettings.onChange(listener),
+          addManualProvider: async (input, actor) => { await modelSettings.addProvider(input, actor); return makeSettings(actor) },
+          updateManualProvider: async (input, actor) => { await modelSettings.updateProvider(input, actor); return makeSettings(actor) },
+          deleteManualProvider: async (input, actor) => { await modelSettings.deleteProvider(input, actor); return makeSettings(actor) },
+          addManualModel: async (input, actor) => { await modelSettings.addModel(input, actor); return makeSettings(actor) },
+          updateManualModel: async (input, actor) => { await modelSettings.updateModel(input, actor); return makeSettings(actor) },
+          deleteManualModel: async (input, actor) => { await modelSettings.deleteModel(input, actor); return makeSettings(actor) },
+          setDefaultModel: async (input, actor) => { await modelSettings.setDefault(input, actor); return makeSettings(actor) },
+        } : {}),
+        models: currentModels,
+        defaultModel: currentDefaultModel,
         deployment,
         capabilities,
         webSearchCredentials: webSearchCredentialStore,
@@ -662,6 +696,7 @@ async function createExperimentalUnitStorage(
       } : {}),
       objectStorage,
       memoStore: new PostgresMemoStore(tenantState),
+      tenantState,
       agentSettings,
       initialAgentSettings,
       dagStore,

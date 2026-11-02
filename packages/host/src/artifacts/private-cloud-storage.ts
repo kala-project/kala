@@ -1,4 +1,5 @@
 import type { OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
+import type { ObjectStorageUsageSnapshot } from '@agent-kernel/shared'
 
 import type { PostgresHotStateStore } from '../tenant-runtime/postgres-hot-state.js'
 import { S3MessageAttachmentStore } from '../message-attachments/s3-message-attachment-store.js'
@@ -39,6 +40,7 @@ export async function createPrivateCloudObjectStorage(options: PrivateCloudObjec
   messageAttachments: S3MessageAttachmentStore
   reconcileOrphans: () => Promise<void>
   resourceArtifactUsage: () => Promise<number>
+  resourceArtifactUsageSnapshot: () => Promise<ObjectStorageUsageSnapshot>
   quotaManagedExternally: true
 }> {
   const objects = new S3ArtifactObjectStore({
@@ -74,6 +76,7 @@ export async function createPrivateCloudObjectStorage(options: PrivateCloudObjec
     sessionArtifacts: new S3SessionArtifactRegistry(options.organizationId, objects, metadata, capacity),
     messageAttachments: new S3MessageAttachmentStore(options.organizationId, objects, metadata, capacity),
     resourceArtifactUsage: async () => await capacity.usageBytes(),
+    resourceArtifactUsageSnapshot: async () => await capacity.usageSnapshot(),
     quotaManagedExternally: true,
     reconcileOrphans: async () => {
       await metadata.reconcileOrphanIntents(objects, {

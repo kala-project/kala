@@ -220,7 +220,6 @@ import { useApplicationDebugging } from './lib/use-application-debugging.js'
 import { isDesktopClient } from './lib/desktop.js'
 import { AccountCenter } from './features/account/AccountCenter.js'
 import { AdminCenter } from './features/admin/AdminCenter.js'
-import { DeploymentCenter } from './features/admin/DeploymentCenter.js'
 import { usePushActivityHeartbeat } from './lib/push-activity.js'
 import { useRunningTitleIndicator } from './lib/running-title.js'
 import { useTheme, type Theme } from './lib/theme.js'
@@ -304,10 +303,9 @@ export function App(): JSX.Element {
   const [chapterModeOverrides, setChapterModeOverrides] = useState<Record<string, ChapterReadingMode | null>>({})
   const [cwdDialogOpen, setCwdDialogOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [settingsInitialSection, setSettingsInitialSection] = useState<'connection' | 'speech'>('connection')
+  const [settingsInitialSection, setSettingsInitialSection] = useState<'connection' | 'speech' | 'deployment'>('connection')
   const [accountCenterOpen, setAccountCenterOpen] = useState(false)
   const [adminCenterOpen, setAdminCenterOpen] = useState(false)
-  const [deploymentCenterOpen, setDeploymentCenterOpen] = useState(false)
   const [metadataOpen, setMetadataOpen] = useState(false)
   const [metadataSessionId, setMetadataSessionId] = useState<string | null>(null)
   const [slashDelete, setSlashDelete] = useState<SlashDeleteState | null>(null)
@@ -1675,7 +1673,6 @@ export function App(): JSX.Element {
       setExplorerDrawerOpen(false)
       setAccountCenterOpen(false)
       setAdminCenterOpen(false)
-      setDeploymentCenterOpen(false)
       setSettingsOpen(false)
       setSection('agent')
     },
@@ -1698,7 +1695,7 @@ export function App(): JSX.Element {
   useNativeDesktop({
     sessions: nativeSessions,
     activeSessionId,
-    viewedSessionId: section === 'agent' && !accountCenterOpen && !adminCenterOpen && !deploymentCenterOpen && !settingsOpen ? activeSessionId : null,
+    viewedSessionId: section === 'agent' && !accountCenterOpen && !adminCenterOpen && !settingsOpen ? activeSessionId : null,
     socket: controlSocket,
     ready: productAccessReady && control.sessionsLoaded,
     workspaceOnline: hasSelectedSession && control.executorsLoaded ? sessionWorkspaceOnline : null,
@@ -1706,7 +1703,6 @@ export function App(): JSX.Element {
       selectSession(sessionId)
       setAccountCenterOpen(false)
       setAdminCenterOpen(false)
-      setDeploymentCenterOpen(false)
       setSettingsOpen(false)
       setSection('agent')
     },
@@ -1728,7 +1724,7 @@ export function App(): JSX.Element {
     setSection(next)
     // Operations, Artifacts, Pipeline, and Docs are real pages rendered inline below.
   }, [])
-  const openDeployment = useMemo(() => deploymentServices ? () => { setExplorerDrawerOpen(false); setDeploymentCenterOpen(true) } : undefined, [deploymentServices])
+  const openDeployment = useMemo(() => deploymentServices ? () => { setExplorerDrawerOpen(false); setSettingsInitialSection('deployment'); setSettingsOpen(true) } : undefined, [deploymentServices])
   const explorerHeaderLeading = useMemo(
     () => <ProductSwitcher section={section} onSelect={handleSectionSelect} adaptive onOpenManagement={openDeployment} />,
     [handleSectionSelect, section, openDeployment],
@@ -2127,7 +2123,6 @@ export function App(): JSX.Element {
       ) : null}
       {accountCenterOpen && account ? <AccountCenter profile={account} organization={authSession.session?.authenticated ? authSession.session.organization : undefined} onClose={() => setAccountCenterOpen(false)} /> : null}
       {adminCenterOpen ? <AdminCenter onClose={() => setAdminCenterOpen(false)} /> : null}
-      {deploymentCenterOpen && deploymentServices ? <DeploymentCenter services={deploymentServices} onClose={() => setDeploymentCenterOpen(false)} /> : null}
       <PwaUpdateGlobalBanner />
       <div className="min-h-0 min-w-0 max-w-full flex-1 overflow-hidden">
       <div className="hidden" data-testid="login-column-hidden" />
@@ -2920,6 +2915,9 @@ export function App(): JSX.Element {
               if (!open) setSettingsInitialSection('connection')
             }}
             initialSection={settingsInitialSection}
+            platform={platformMode}
+            organizationRole={authSession.session?.authenticated ? authSession.session.organization?.role : undefined}
+            deploymentServices={deploymentServices}
             onModelsChanged={reloadModels}
             executors={control.executors}
             sessionCache={sessionViewCache}

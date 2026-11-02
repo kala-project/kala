@@ -58,7 +58,6 @@ export const SettingsSectionHelpContext = createContext<((help: string | undefin
 export function SectionHeader({
   title,
   subtitle,
-  descriptionKind = 'help',
 }: {
   title: string
   subtitle?: string
@@ -66,17 +65,14 @@ export function SectionHeader({
 }): JSX.Element {
   const setMobileHelp = useContext(SettingsSectionHelpContext)
   useEffect(() => {
-    setMobileHelp?.(descriptionKind === 'help' ? subtitle : undefined)
+    setMobileHelp?.(subtitle)
     return () => setMobileHelp?.(undefined)
-  }, [setMobileHelp, subtitle, descriptionKind])
+  }, [setMobileHelp, subtitle])
   return (
-    <div className={cn('min-w-0 md:mb-7', descriptionKind === 'notice' ? 'mb-5' : 'hidden md:block')}>
+    <div className="hidden min-w-0 md:mb-7 md:block">
       <h3 className="sr-only text-xl font-semibold tracking-[-0.02em] text-foreground md:not-sr-only md:text-2xl">
-        {title} {subtitle && descriptionKind === 'help' ? <HelpHint label={title}>{subtitle}</HelpHint> : null}
+        {title} {subtitle ? <HelpHint label={title}>{subtitle}</HelpHint> : null}
       </h3>
-      {subtitle && descriptionKind === 'notice' ? (
-        <p className="max-w-3xl break-words text-sm leading-5 text-muted-foreground md:mt-2 md:leading-6" data-description-kind="notice">{subtitle}</p>
-      ) : null}
     </div>
   )
 }
@@ -88,7 +84,6 @@ export function InterfaceToggle({
   onChange,
   testId,
   disabled = false,
-  descriptionKind = disabled ? 'notice' : 'help',
 }: {
   label: string
   description: string
@@ -101,8 +96,7 @@ export function InterfaceToggle({
   return (
     <li className="flex items-center justify-between gap-4 rounded-xl bg-card/70 px-4 py-3.5 ring-1 ring-border/40">
       <div className="min-w-0">
-        <div className="flex items-center gap-1 font-medium">{label}{descriptionKind === 'help' ? <HelpHint label={label}>{description}</HelpHint> : null}</div>
-        {descriptionKind === 'notice' ? <p className="mt-0.5 text-xs text-muted-foreground" data-description-kind="notice">{description}</p> : null}
+        <div className="flex items-center gap-1 font-medium">{label}<HelpHint label={label}>{description}</HelpHint></div>
       </div>
       <Toggle checked={checked} onChange={onChange} ariaLabel={label} testId={testId} disabled={disabled} />
     </li>

@@ -31,4 +31,32 @@ describe('dashboard channel contracts', () => {
       session: { sessionId: 'session-1', eventCount: -1 },
     }).success).toBe(false)
   })
+
+  it('preserves operator model guidance, measured storage and Owner-authenticated administration metadata', () => {
+    const settings = {
+      providers: [], defaultModel: '', hooks: [],
+      paths: { claudeSettings: '', codexConfig: '', manualModels: '', hooksConfig: '', sessionsDir: '' },
+      mcp: { supported: false, note: 'Managed by Runtime' },
+      modelConfiguration: { management: 'operator', providerCatalogPath: '/etc/kala/providers.json' },
+      storage: {
+        kind: 'postgres-s3', organizationId: 'org-test', objectBytes: 1024, objectLimitBytes: 4096,
+        usage: {
+          measuredAt: '2026-11-02T00:00:00Z', storedFiles: 1, storedBytes: 768, reservedFiles: 1, reservedBytes: 256,
+          artifacts: { files: 1, bytes: 768 }, attachments: { files: 0, bytes: 0 },
+        },
+      },
+      socketAdmin: {
+        authentication: 'gateway-owner', active: false, initialized: true, path: '/admin/socket.io',
+        username: '', runtimeMode: 'production', configuredMode: 'production', configPath: '',
+        unavailableReason: 'Official assets are unavailable',
+      },
+    }
+    const parsed = schema.ServerSettingsPayloadSchema.parse(settings)
+    expect(parsed.modelConfiguration).toEqual(settings.modelConfiguration)
+    expect(parsed.storage).toEqual(settings.storage)
+    expect(parsed.socketAdmin).toEqual(settings.socketAdmin)
+    expect(schema.ServerSettingsPayloadSchema.safeParse({
+      ...settings, storage: { ...settings.storage, usage: { ...settings.storage.usage, storedFiles: -1 } },
+    }).success).toBe(false)
+  })
 })

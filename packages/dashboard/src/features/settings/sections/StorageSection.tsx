@@ -20,26 +20,49 @@ type DashboardSocket = Socket<DashboardServerToClientEvents, DashboardClientToSe
 type SessionTreeSortField = 'name' | 'size'
 type SortDirection = 'asc' | 'desc'
 
-export function StorageSection({ socket, payload }: { socket?: DashboardSocket; payload?: ServerSettingsPayload }): JSX.Element {
+export function StorageSection({ socket, payload, onRefresh, refreshing = false }: { socket?: DashboardSocket; payload?: ServerSettingsPayload; onRefresh?(): void; refreshing?: boolean }): JSX.Element {
   return payload?.deployment?.deployment.architecture === 'platform'
-    ? <PlatformStorageSection storage={payload.storage} />
+    ? <PlatformStorageSection storage={payload.storage} onRefresh={onRefresh} refreshing={refreshing} />
     : <LocalStorageSection socket={socket} />
 }
 
-function PlatformStorageSection({ storage }: { storage: ServerSettingsPayload['storage'] }): JSX.Element {
+function PlatformStorageSection({ storage, onRefresh, refreshing }: { storage: ServerSettingsPayload['storage']; onRefresh?(): void; refreshing: boolean }): JSX.Element {
   const { t, i18n } = useTranslation()
+  const usage = storage?.usage
   return (
     <div data-testid="platform-storage">
       <SectionHeader title={t('settings.sections.storage.label')} subtitle={t('settings.platformStorage.subtitle')} />
       {storage ? (
-        <dl className="space-y-3 rounded-md bg-muted/40 p-4 text-sm">
-          <div><dt className="text-muted-foreground">{t('settings.platformStorage.organization')}</dt><dd>{storage.organizationId}</dd></div>
-          <div><dt className="text-muted-foreground">{t('settings.platformStorage.sessionAuthority')}</dt><dd>PostgreSQL</dd></div>
-          <div><dt className="text-muted-foreground">{t('settings.platformStorage.objectAuthority')}</dt><dd>S3</dd></div>
-          <div><dt className="text-muted-foreground">{t('settings.platformStorage.objectUsage')}</dt><dd>{storage.objectBytes.toLocaleString(i18n.language)} / {storage.objectLimitBytes.toLocaleString(i18n.language)} bytes</dd></div>
-        </dl>
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h4 className="flex items-center gap-1 font-medium">{t('settings.platformStorage.uploadedFiles')}<HelpHint label={t('settings.platformStorage.uploadedFiles')}>{t('settings.platformStorage.boundary')}</HelpHint></h4>
+            {onRefresh ? <Button variant="outline" disabled={refreshing} onClick={onRefresh} data-testid="settings-storage-refresh"><RefreshCw className="mr-2 h-4 w-4" aria-hidden />{t('settings.platformStorage.refresh')}</Button> : null}
+          </div>
+          <dl className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-xl bg-card p-4 ring-1 ring-border/40"><dt className="text-sm text-muted-foreground">{t('settings.platformStorage.storedSize')}</dt><dd className="mt-2 text-2xl font-semibold">{usage ? formatBytes(usage.storedBytes) : t('settings.platformStorage.notReported')}</dd></div>
+            <div className="rounded-xl bg-card p-4 ring-1 ring-border/40"><dt className="text-sm text-muted-foreground">{t('settings.platformStorage.fileCount')}</dt><dd className="mt-2 text-2xl font-semibold">{usage ? usage.storedFiles.toLocaleString(i18n.language) : t('settings.platformStorage.notReported')}</dd></div>
+          </dl>
+          <section className="space-y-3 rounded-xl bg-muted/30 p-4">
+            <h4 className="flex items-center gap-1 text-sm font-medium">{t('settings.platformStorage.quota')}<HelpHint label={t('settings.platformStorage.quota')}>{t('settings.platformStorage.quotaHelp')}</HelpHint></h4>
+            <div className="text-base font-semibold" data-testid="settings-storage-quota">{formatBytes(storage.objectBytes)} / {formatBytes(storage.objectLimitBytes)}</div>
+            <progress className="h-2 w-full accent-primary" aria-label={t('settings.platformStorage.quota')} value={storage.objectBytes} max={storage.objectLimitBytes} />
+            {usage ? <dl className="grid gap-3 text-sm sm:grid-cols-2">
+              <div><dt className="text-muted-foreground">{t('settings.platformStorage.artifacts')}</dt><dd>{t('settings.platformStorage.filesSize', { count: usage.artifacts.files, size: formatBytes(usage.artifacts.bytes) })}</dd></div>
+              <div><dt className="text-muted-foreground">{t('settings.platformStorage.attachments')}</dt><dd>{t('settings.platformStorage.filesSize', { count: usage.attachments.files, size: formatBytes(usage.attachments.bytes) })}</dd></div>
+              <div><dt className="text-muted-foreground">{t('settings.platformStorage.reserved')}</dt><dd>{t('settings.platformStorage.filesSize', { count: usage.reservedFiles, size: formatBytes(usage.reservedBytes) })}</dd></div>
+            </dl> : null}
+          </section>
+          {usage ? <p className="text-sm text-muted-foreground">{t('settings.platformStorage.measuredAt', { time: new Date(usage.measuredAt).toLocaleString(i18n.language) })}</p> : null}
+          <details className="rounded-lg bg-muted/20 p-4 text-sm">
+            <summary className="cursor-pointer font-medium">{t('settings.platformStorage.technicalDetails')}</summary>
+            <dl className="mt-3 space-y-3">
+              <div><dt className="text-muted-foreground">{t('settings.platformStorage.organization')}</dt><dd className="break-all font-mono">{storage.organizationId}</dd></div>
+              <div><dt className="text-muted-foreground">{t('settings.platformStorage.sessionAuthority')}</dt><dd>PostgreSQL</dd></div>
+              <div><dt className="text-muted-foreground">{t('settings.platformStorage.objectAuthority')}</dt><dd>S3</dd></div>
+            </dl>
+          </details>
+        </div>
       ) : <ProductState kind="empty" title={t('settings.platformStorage.unavailable')} description={t('settings.platformStorage.unavailableDescription')} />}
-      <p className="mt-4 text-sm text-muted-foreground">{t('settings.platformStorage.boundary')}</p>
     </div>
   )
 }

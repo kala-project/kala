@@ -16,6 +16,37 @@ Host is the only process with a public IP. It owns:
 6. **Provider/model auto-import** (`src/runtime-config.ts`) — reads `~/.claude/settings.json` and `~/.codex/config.toml`, then merges manual model ids from `~/.config/kala/models.json`.
 7. **Agent module assembly** (`src/agent-modules/`) — renders the default `SystemPromptPlugin` plus built-in `ToolsetPlugin[]` into the kernel config, settings metadata, and session artifacts.
 
+## Dedicated model settings
+
+Dedicated Runtime Units with the PostgreSQL authority and an operator provider
+catalog expose dashboard-managed providers, endpoints, write-only API keys,
+model IDs, and the default model. Initial loading copies the operator catalog
+and resolves its keys into one tenant-bound AES-256-GCM encrypted credential
+record; source files are not changed. Subsequent restarts use the saved keys.
+No new schema or local configuration file is required.
+
+Owner/admin writes are bound to the Unit organization. `POST`/`DELETE
+/settings/providers`, `PATCH /settings/providers`, `POST`/`DELETE
+/settings/models`, `PATCH /settings/models`, and `POST /settings/default-model` await validation and
+durable commit before returning success. Omitted or blank edit keys preserve
+the current credential. A provider can be created before its models.
+Model metadata patches edit the label/context window without changing the model
+ID or reference used by Sessions; an empty label clears the custom label.
+
+Updates compile an immutable adapter snapshot before commit. PostgreSQL
+transactional NOTIFY/LISTEN invalidates other replicas and reloads after listener
+reconnection; healthy routing performs no configuration polling or per-call SQL.
+Existing in-flight requests retain their adapter snapshot, and dashboard clients
+receive the existing `server:agent_runtimes` event. Failed invalidations retry
+only until synchronized.
+Synchronization failures/recovery and post-commit observer failures are logged
+without credential-bearing exception messages.
+
+Choose another default before deleting its model/provider. Dedicated also
+rejects deletion of models selected by existing Sessions: change those Session
+selections explicitly first. Private Cloud operator catalogs and Portable
+configuration retain their existing management behavior.
+
 ## Agent modules
 
 The host keeps the kernel config plain, but the authored agent surface is
@@ -64,6 +95,23 @@ Or run the Portable bundle directly:
 node packages/host/bin/kala-host.js
 # reads ANTHROPIC_API_KEY, PORT, KALA_SESSIONS_DIR from env
 ```
+
+## Socket.IO Admin UI
+
+Dedicated Runtime Units behind the authenticated Gateway expose the installed
+official Admin UI at `/admin/socket.io/`. Only the deployment Owner can load its
+assets or connect to its `/admin` namespace; Private Cloud organization ownership
+does not grant this access. The UI uses the existing same-origin browser session
+and WebSocket route, without a separate password, public port, or external
+`admin.socket.io` connection. Logout/revocation closes the existing Gateway
+transport.
+
+Dedicated instrumentation stays in production mode (aggregated diagnostics,
+without broad event-payload capture). Images must retain
+`@socket.io/admin-ui/ui/dist` from the existing Host dependency, or provide the
+embedded official assets. Missing assets leave `settings.socketAdmin.active`
+false with an unavailable reason; startup never downloads them. Portable's
+password-initialized Admin UI and configured instrumentation mode are unchanged.
 
 ## References
 

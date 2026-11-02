@@ -1,4 +1,6 @@
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import type { IncomingMessage } from 'node:http'
+import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 
 import type { SocketAdminRecord } from './socket-admin-store.js'
@@ -25,17 +27,22 @@ export function redactApplicationDebugAdminEvents(namespace: Namespace): void {
 
 export type SocketAdminMode = 'development' | 'production'
 
-export type SocketAdminConfig = {
+type SocketAdminAssets = {
   enabled: true
   path: string
   username: string
-  passwordHash: string
   mode: SocketAdminMode
   distDir?: string
   distSource: 'embedded' | 'filesystem'
 }
 
+export type SocketAdminConfig = SocketAdminAssets & (
+  | { authentication?: 'password'; passwordHash: string }
+  | { authentication: 'gateway-owner'; passwordHash?: never }
+)
+
 export type SocketAdminSummary = {
+  authentication?: 'password' | 'gateway-owner'
   active: boolean
   initialized: boolean
   path: string
@@ -46,6 +53,7 @@ export type SocketAdminSummary = {
   distSource?: 'embedded' | 'filesystem'
   createdAt?: string
   restartRequired?: boolean
+  unavailableReason?: string
 }
 
 export type EmbeddedSocketAdminAsset = {
@@ -56,6 +64,69 @@ export type EmbeddedSocketAdminAsset = {
 const DEFAULT_PATH = '/admin/socket.io'
 const DEFAULT_USERNAME = 'admin'
 const DEFAULT_MODE: SocketAdminMode = 'development'
+
+export function loadGatewayOwnerSocketAdminConfig(opts: {
+  currentModulePath: string
+  embeddedAssets?: readonly EmbeddedSocketAdminAsset[]
+}): { runtime?: SocketAdminConfig; summary: SocketAdminSummary; indexHtml?: string } {
+  const summary: SocketAdminSummary = {
+    authentication: 'gateway-owner',
+    active: false,
+    initialized: false,
+    path: DEFAULT_PATH,
+    username: '',
+    runtimeMode: 'production',
+    configuredMode: 'production',
+    configPath: '',
+  }
+  const embeddedIndex = opts.embeddedAssets?.find((asset) => asset.path === 'index.html')
+  let distDir: string | undefined
+  if (!embeddedIndex) {
+    try {
+      const require = createRequire(opts.currentModulePath)
+      const installed = join(dirname(require.resolve('@socket.io/admin-ui/package.json')), 'ui', 'dist')
+      if (existsSync(join(installed, 'index.html'))) distDir = installed
+    } catch { /* Missing packaged assets are reported without failing Runtime startup. */ }
+  }
+  if (!embeddedIndex && !distDir) {
+    summary.unavailableReason = 'The installed Socket.IO Admin UI assets are missing from this Runtime image.'
+    return { summary }
+  }
+  const distSource = embeddedIndex ? 'embedded' : 'filesystem'
+  const html = embeddedIndex
+    ? Buffer.from(embeddedIndex.contentBase64, 'base64').toString('utf8')
+    : readFileSync(join(distDir!, 'index.html'), 'utf8')
+  // The official UI otherwise opens a connection/password dialog and loads
+  // third-party fonts. Keep its assets and cookie-authenticated connection local.
+  const indexHtml = html.replace(/<link\b[^>]*href=["']https?:\/\/[^>]*>/gi, '')
+    .replace('<head>', '<head><script src="kala-bootstrap.js"></script>')
+  return {
+    runtime: { enabled: true, authentication: 'gateway-owner', path: DEFAULT_PATH, username: '', mode: 'production', distSource, ...(distDir ? { distDir } : {}) },
+    summary: { ...summary, active: true, initialized: true, distSource },
+    indexHtml,
+  }
+}
+
+export const GATEWAY_OWNER_SOCKET_ADMIN_BOOTSTRAP = `(() => {
+  localStorage.setItem("server_url", location.origin);
+  localStorage.setItem("namespace", "/admin");
+  localStorage.setItem("ws_only", "true");
+  localStorage.setItem("path", "/socket.io");
+  localStorage.setItem("parser", "default");
+  localStorage.removeItem("session_id");
+})();`
+
+export function isGatewaySocketAdminOwner(request: IncomingMessage, unitId: string | undefined): boolean {
+  // Used only by Dedicated Hosts composed behind the authenticated Runtime
+  // service. The Gateway replaces browser identity/Unit headers at that boundary.
+  return Boolean(unitId
+    && request.headers['x-agent-runlab-runtime-unit'] === unitId
+    && request.headers['x-agent-runlab-organization-role'] === 'owner'
+    && typeof request.headers['x-agent-runlab-organization-id'] === 'string'
+    && request.headers['x-agent-runlab-organization-id']
+    && typeof request.headers['x-agent-runlab-principal'] === 'string'
+    && request.headers['x-agent-runlab-principal'])
+}
 
 export function loadSocketAdminConfig(opts: {
   currentModulePath: string

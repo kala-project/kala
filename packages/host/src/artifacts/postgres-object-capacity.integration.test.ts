@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { promisify } from 'node:util'
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { S3MessageAttachmentStore } from '../message-attachments/s3-message-attachment-store.js'
 import { createPostgresHotStateStore, type PostgresHotStateStore } from '../tenant-runtime/postgres-hot-state.js'
@@ -103,6 +103,31 @@ integrationDescribe('PostgreSQL object capacity integration', () => {
     expect(await restarted.usageBytes()).toBe(png.length)
     await registry.deleteSession(sessionId)
     expect(await restarted.usageBytes()).toBe(0)
+  }, 60_000)
+
+  it('measures committed files, upload reservations and kinds in one organization-filtered query', async () => {
+    const organizationId = `org_${randomUUID().replaceAll('-', '')}`
+    const authority = await authorities('usage-snapshot', organizationId, 10_000)
+    const other = await authorities('usage-other', `org_${randomUUID().replaceAll('-', '')}`, 10_000)
+    const artifact = await authority.capacity.reserve({ objectKey: 'artifact', sessionId: 'usage', kind: 'session_artifact', bytes: 2048 })
+    const attachment = await authority.capacity.reserve({ objectKey: 'attachment', sessionId: 'usage', kind: 'message_attachment', bytes: 1024 })
+    await authority.capacity.reserve({ objectKey: 'pending', sessionId: 'usage', kind: 'message_attachment', bytes: 512 })
+    await other.capacity.reserve({ objectKey: 'other', sessionId: 'usage', kind: 'session_artifact', bytes: 4096 })
+    await authority.hotState.database.transaction(async transaction => {
+      await authority.capacity.applyMutation(transaction, { kind: 'commit', reservation: artifact })
+      await authority.capacity.applyMutation(transaction, { kind: 'commit', reservation: attachment })
+    })
+    const query = vi.spyOn(authority.hotState.database, 'query')
+    const snapshot = await authority.capacity.usageSnapshot()
+    expect(query).toHaveBeenCalledTimes(1)
+    query.mockRestore()
+    expect(snapshot).toEqual({
+      measuredAt: expect.any(String), storedFiles: 2, storedBytes: 3072,
+      reservedFiles: 1, reservedBytes: 512,
+      artifacts: { files: 1, bytes: 2048 }, attachments: { files: 1, bytes: 1024 },
+    })
+    expect(Number.isFinite(Date.parse(snapshot.measuredAt))).toBe(true)
+    expect(await other.capacity.usageSnapshot()).toMatchObject({ storedFiles: 0, storedBytes: 0, reservedFiles: 1, reservedBytes: 4096 })
   }, 60_000)
 
   it('shares one organization quota between attachments and Artifacts', async () => {

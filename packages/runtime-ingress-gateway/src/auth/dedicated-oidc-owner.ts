@@ -50,8 +50,13 @@ export class DedicatedOidcOwnerService {
       WHERE b.issuer=$1 AND b.subject=$2 AND m.status='active' AND m.role='owner'
         AND (SELECT count(*) FROM organizations)=1`, [identity.issuer, identity.subject])
     const row = result.rows[0]
-    return row ? { issuer: row.issuer, subject: row.subject,
-      ...(row.display_name ? { displayName: row.display_name } : {}), ...(row.email ? { email: row.email } : {}) } : undefined
+    if (!row) return undefined
+    const displayName = identity.displayName || row.display_name
+    const email = identity.email || row.email
+    return { issuer: row.issuer, subject: row.subject,
+      ...(displayName ? { displayName } : {}),
+      ...(identity.username ? { username: identity.username } : {}),
+      ...(email ? { email } : {}) }
   }
 
   async bindExisting(input: {

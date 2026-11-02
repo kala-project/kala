@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '../../../components/ui/button.js'
+import { HelpHint } from '../../../components/ui/help-hint.js'
 import { ScrollArea } from '../../../components/ui/scroll-area.js'
 import { CopyButton, EmptyRow, SectionHeader } from '../controls.js'
 
@@ -110,8 +111,10 @@ export function SocketAdminSection({ payload, onPayloadChange, socket }: { paylo
     const snapshot = payload.socketConnections
     const error = refresh.error ?? ping.error
     return <div data-testid="settings-platform-socket-diagnostics">
-      <SectionHeader title={t('settings.sections.socketAdmin.label')} subtitle={t('settings.socketAdmin.scopedDescription')} descriptionKind="notice" />
+      <SectionHeader title={t('settings.sections.socketAdmin.label')} subtitle={t(payload.socketAdmin?.authentication === 'gateway-owner' ? 'settings.socketAdmin.ownerDescription' : 'settings.socketAdmin.scopedDescription')} />
       <div className="space-y-4 rounded-md bg-card/60 p-4 text-sm">
+        {payload.socketAdmin?.authentication === 'gateway-owner' && payload.socketAdmin.active ? <Button variant="outline" asChild><a href={payload.socketAdmin.path} target="_blank" rel="noreferrer" data-testid="settings-open-socket-admin"><ExternalLink className="mr-2 h-4 w-4" aria-hidden />{t('settings.socketAdmin.open')}</a></Button> : null}
+        {payload.socketAdmin?.authentication === 'gateway-owner' && !payload.socketAdmin.active ? <p role="alert" className="text-destructive">{payload.socketAdmin.unavailableReason ?? t('settings.socketAdmin.unavailable')}</p> : null}
         <div>{connected ? t('settings.socketAdmin.connected') : t('settings.socketAdmin.disconnected')}</div>
         <div>{t('settings.socketAdmin.transport')}: <code>{socket?.io.engine?.transport.name ?? '—'}</code></div>
         {payload.storage ? <div className="break-all">{t('settings.socketAdmin.scope')}: <code>{payload.storage.organizationId}</code></div> : null}
@@ -123,8 +126,8 @@ export function SocketAdminSection({ payload, onPayloadChange, socket }: { paylo
         {error ? <p role="alert" className="text-destructive">{error.message}</p> : null}
         {snapshot ? <>
           <p>{t('settings.socketAdmin.total')}: {snapshot.total}</p>
-          <p className="text-xs text-muted-foreground">{t('settings.socketAdmin.snapshotUpdated')}: {snapshot.updatedAt}</p>
-          <ScrollArea><table className="w-full text-left text-xs" data-testid="settings-socket-namespaces">
+          <p className="text-sm text-muted-foreground">{t('settings.socketAdmin.snapshotUpdated')}: {new Date(snapshot.updatedAt).toLocaleString()}</p>
+          <ScrollArea><table className="w-full text-left text-sm" data-testid="settings-socket-namespaces">
             <thead><tr>{['namespace', 'total', 'dashboard', 'executor', 'other'].map(key => <th key={key} className="p-2">{t(`settings.socketAdmin.${key}`)}</th>)}</tr></thead>
             <tbody>{snapshot.namespaces.map(entry => <tr key={entry.namespace}><td className="p-2 font-mono">{entry.namespace}</td><td>{entry.sockets}</td><td>{entry.dashboard}</td><td>{entry.executor}</td><td>{entry.other}</td></tr>)}</tbody>
           </table></ScrollArea>
@@ -146,7 +149,7 @@ export function SocketAdminSection({ payload, onPayloadChange, socket }: { paylo
         >
           <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(12rem,0.6fr)]">
             <div className="min-w-0">
-              <label className="text-sm font-medium text-foreground" htmlFor="socket-admin-password">{t('settings.socketAdmin.initialPassword')}</label>
+              <div className="flex items-center gap-1 text-sm font-medium text-foreground"><label htmlFor="socket-admin-password">{t('settings.socketAdmin.initialPassword')}</label><HelpHint label={t('settings.socketAdmin.initialPassword')}>{t('settings.socketAdmin.initialPasswordDesc')}</HelpHint></div>
               <input
                 id="socket-admin-password"
                 type="password"
@@ -157,11 +160,11 @@ export function SocketAdminSection({ payload, onPayloadChange, socket }: { paylo
                 minLength={8}
                 required
               />
-              <p className="mt-2 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{t('settings.socketAdmin.initialPasswordDesc')}</p>
             </div>
-            <label className="min-w-0 text-sm font-medium text-foreground">
-              {t('settings.socketAdmin.initialMode')}
+            <div className="min-w-0 text-sm font-medium text-foreground">
+              <div className="flex items-center gap-1"><label htmlFor="socket-admin-initial-mode">{t('settings.socketAdmin.initialMode')}</label><HelpHint label={t('settings.socketAdmin.initialMode')}>{t('settings.socketAdmin.modeDesc')}</HelpHint></div>
               <select
+                id="socket-admin-initial-mode"
                 className="mt-2 h-9 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground outline-none ring-offset-background focus-visible:ring-2 focus-visible:ring-ring"
                 value={mode}
                 onChange={(event) => setMode(event.currentTarget.value === 'development' ? 'development' : 'production')}
@@ -171,8 +174,7 @@ export function SocketAdminSection({ payload, onPayloadChange, socket }: { paylo
                 <option value="production">{t('settings.socketAdmin.modeProduction')}</option>
                 <option value="development">{t('settings.socketAdmin.modeDevelopment')}</option>
               </select>
-              <p className="mt-2 text-xs text-muted-foreground">{t('settings.socketAdmin.modeDesc')}</p>
-            </label>
+            </div>
           </div>
           {error ? <div className="text-xs text-destructive">{error}</div> : null}
           <Button type="submit" size="sm" className="w-full sm:w-auto" disabled={init.isPending || password.trim().length < 8}>{t('settings.socketAdmin.initialize')}</Button>

@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest'
 import { createPostgresControlPlaneDatabase, migrateControlPlane, readControlPlaneMigrations } from '../persistence/postgres.js'
 import { DedicatedOwnerBootstrapService, DedicatedOwnerCredentialService, PostgresDedicatedOwnerAuthenticator } from './dedicated-owner.js'
 import { DedicatedOidcOwnerService } from './dedicated-oidc-owner.js'
+import { PostgresBrowserSessionStore } from './postgres-browser-session-store.js'
 import { PostgresOrganizationStore } from '../organizations/postgres-store.js'
 import { grantControlWriter } from '../bin/init-control-plane.js'
 
@@ -91,6 +92,21 @@ integration('Dedicated Owner credential lifecycle on real control PostgreSQL', (
       const store = new PostgresOrganizationStore(database, { singleTenantOwner: true })
       const canonical = { issuer: 'urn:kala:dedicated-owner', subject: 'owner' }
       await expect(oidc.resolveIdentity(external)).resolves.toMatchObject(canonical)
+      const presentation = { displayName: 'Real Account', username: 'real.account', email: 'account@example.test' }
+      const mapped = await oidc.resolveIdentity({ ...external, ...presentation })
+      expect(mapped).toEqual({ ...canonical, ...presentation })
+      if (!mapped) throw new Error('Owner presentation mapping is missing')
+      const sessions = new PostgresBrowserSessionStore(database)
+      const now = Date.now()
+      const browserSession = await sessions.create({
+        tokenHash: 'profile-session-token-hash', identity: mapped, cacheNamespace: 'profile-fixture',
+        device: { label: 'Integration browser' }, createdAt: now,
+        idleExpiresAt: now + 60_000, absoluteExpiresAt: now + 120_000,
+      })
+      const restartedSessions = new PostgresBrowserSessionStore(database)
+      expect((await restartedSessions.findByTokenHash(browserSession.tokenHash))?.identity).toEqual(mapped)
+      expect((await restartedSessions.touch(browserSession.id, now + 1, now + 60_001))?.identity).toEqual(mapped)
+      expect((await database.query('SELECT display_name FROM principals WHERE id=$1', [identity.principal_id])).rows[0]!.display_name).toBe('Owner')
       await expect(oidc.resolveIdentity({ ...external, subject: 'different-user' })).resolves.toBeUndefined()
       await expect(store.findAccess(canonical)).resolves.toMatchObject({ organization: { id: bootstrapped.organizationId, unitId: bootstrapped.runtimeUnitId }, membership: { role: 'owner' } })
       expect((await database.query('SELECT id FROM principals WHERE issuer=$1 AND subject=$2', [canonical.issuer, canonical.subject])).rows[0]!.id).toBe(identity.principal_id)

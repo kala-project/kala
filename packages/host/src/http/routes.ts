@@ -22,7 +22,9 @@ import { dirname, extname, join, normalize, resolve as resolvePath, sep } from '
 import type {
   AttachedExecutor,
   ClientAddManualModel,
+  ClientUpdateManualModel,
   ClientAddManualProvider,
+  ClientUpdateManualProvider,
   ClientDeleteManualModel,
   ClientDeleteManualProvider,
   ClientSetDefaultModel,
@@ -215,11 +217,13 @@ export function attachJsonRoutes(
     models: readonly ModelInfo[] | (() => readonly ModelInfo[])
     defaultModel: string | (() => string)
     settings?: ServerSettingsPayload | ((actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>)
-    addManualModel?: (input: ClientAddManualModel) => ServerSettingsPayload
-    deleteManualModel?: (input: ClientDeleteManualModel) => ServerSettingsPayload
-    addManualProvider?: (input: ClientAddManualProvider) => ServerSettingsPayload
-    deleteManualProvider?: (input: ClientDeleteManualProvider) => ServerSettingsPayload
-    setDefaultModel?: (input: ClientSetDefaultModel) => ServerSettingsPayload
+    addManualModel?: (input: ClientAddManualModel, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
+    updateManualModel?: (input: ClientUpdateManualModel, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
+    deleteManualModel?: (input: ClientDeleteManualModel, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
+    addManualProvider?: (input: ClientAddManualProvider, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
+    updateManualProvider?: (input: ClientUpdateManualProvider, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
+    deleteManualProvider?: (input: ClientDeleteManualProvider, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
+    setDefaultModel?: (input: ClientSetDefaultModel, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
     updateAgentPrompt?: (input: ClientUpdateAgentPromptSettings, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
     initializeSocketAdmin?: (input: { password: string; mode?: 'development' | 'production' }) => ServerSettingsPayload
     updateSocketAdminMode?: (input: { mode: 'development' | 'production' }) => ServerSettingsPayload
@@ -1012,28 +1016,41 @@ export function attachJsonRoutes(
     }
     if (path === '/settings/models' && req.method === 'POST' && payloads.addManualModel) {
       claimRoute(req)
-      const auth = authorizeSensitiveManagement(req, effectiveTenancy(payloads.deployment ?? PORTABLE_DEPLOYMENT), payloads.auth)
+      const auth = authorizeModelManagement(req, payloads)
       if (!auth.ok) { sendError(res, auth.status, auth.error); return }
       void readJson(req)
-        .then((body) => {
+        .then(async (body) => {
           const input = parseWire(schema.ClientAddManualModelSchema, body, { channel: 'POST /settings/models' })
           if (!input) {
             sendError(res, 400, 'invalid manual model input')
             return
           }
-          const result = payloads.addManualModel!(input)
+          const result = await payloads.addManualModel!(input, auth.actor)
           payloads.audit?.log({ action: 'settings.model_add', actor: httpActor(req, payloads.auth), target: { providerId: input.providerId, model: input.id }, outcome: 'ok' })
           sendJson(req, res, result)
         })
-        .catch((err: unknown) => sendError(res, 400, err instanceof Error ? err.message : String(err)))
+        .catch((err: unknown) => sendSettingsError(res, err))
+      return
+    }
+    if (path === '/settings/models' && req.method === 'PATCH' && payloads.updateManualModel) {
+      claimRoute(req)
+      const auth = authorizeModelManagement(req, payloads)
+      if (!auth.ok) { sendError(res, auth.status, auth.error); return }
+      void readJson(req).then(async body => {
+        const input = parseWire(schema.ClientUpdateManualModelSchema, body, { channel: 'PATCH /settings/models' })
+        if (!input) { sendError(res, 400, 'invalid manual model update input'); return }
+        const result = await payloads.updateManualModel!(input, auth.actor)
+        payloads.audit?.log({ action: 'settings.model_update', actor: auth.actor, target: { providerId: input.providerId, model: input.id }, outcome: 'ok' })
+        sendJson(req, res, result)
+      }).catch((err: unknown) => sendSettingsError(res, err))
       return
     }
     if (path === '/settings/models' && req.method === 'DELETE' && payloads.deleteManualModel) {
       claimRoute(req)
-      const auth = authorizeSensitiveManagement(req, effectiveTenancy(payloads.deployment ?? PORTABLE_DEPLOYMENT), payloads.auth)
+      const auth = authorizeModelManagement(req, payloads)
       if (!auth.ok) { sendError(res, auth.status, auth.error); return }
       const parsed = new URL(url, 'http://x')
-      try {
+      void Promise.resolve().then(async () => {
         const input = parseWire(schema.ClientDeleteManualModelSchema, {
           providerId: parsed.searchParams.get('providerId') ?? '',
           id: parsed.searchParams.get('id') ?? '',
@@ -1042,38 +1059,49 @@ export function attachJsonRoutes(
           sendError(res, 400, 'invalid manual model delete input')
           return
         }
-        const result = payloads.deleteManualModel(input)
+        const result = await payloads.deleteManualModel!(input, auth.actor)
         payloads.audit?.log({ action: 'settings.model_delete', actor: httpActor(req, payloads.auth), target: { providerId: input.providerId, model: input.id }, outcome: 'ok' })
         sendJson(req, res, result)
-      } catch (err: unknown) {
-        sendError(res, 400, err instanceof Error ? err.message : String(err))
-      }
+      }).catch((err: unknown) => sendSettingsError(res, err))
       return
     }
     if (path === '/settings/providers' && req.method === 'POST' && payloads.addManualProvider) {
       claimRoute(req)
-      const auth = authorizeSensitiveManagement(req, effectiveTenancy(payloads.deployment ?? PORTABLE_DEPLOYMENT), payloads.auth)
+      const auth = authorizeModelManagement(req, payloads)
       if (!auth.ok) { sendError(res, auth.status, auth.error); return }
       void readJson(req)
-        .then((body) => {
+        .then(async (body) => {
           const input = parseWire(schema.ClientAddManualProviderSchema, body, { channel: 'POST /settings/providers' })
           if (!input) {
             sendError(res, 400, 'invalid manual provider input')
             return
           }
-          const result = payloads.addManualProvider!(input)
+          const result = await payloads.addManualProvider!(input, auth.actor)
           payloads.audit?.log({ action: 'settings.provider_add', actor: httpActor(req, payloads.auth), target: { providerId: input.id }, outcome: 'ok' })
           sendJson(req, res, result)
         })
-        .catch((err: unknown) => sendError(res, 400, err instanceof Error ? err.message : String(err)))
+        .catch((err: unknown) => sendSettingsError(res, err))
+      return
+    }
+    if (path === '/settings/providers' && req.method === 'PATCH' && payloads.updateManualProvider) {
+      claimRoute(req)
+      const auth = authorizeModelManagement(req, payloads)
+      if (!auth.ok) { sendError(res, auth.status, auth.error); return }
+      void readJson(req).then(async body => {
+        const input = parseWire(schema.ClientUpdateManualProviderSchema, body, { channel: 'PATCH /settings/providers' })
+        if (!input) { sendError(res, 400, 'invalid manual provider update input'); return }
+        const result = await payloads.updateManualProvider!(input, auth.actor)
+        payloads.audit?.log({ action: 'settings.provider_update', actor: auth.actor, target: { providerId: input.providerId }, outcome: 'ok' })
+        sendJson(req, res, result)
+      }).catch((err: unknown) => sendSettingsError(res, err))
       return
     }
     if (path === '/settings/providers' && req.method === 'DELETE' && payloads.deleteManualProvider) {
       claimRoute(req)
-      const auth = authorizeSensitiveManagement(req, effectiveTenancy(payloads.deployment ?? PORTABLE_DEPLOYMENT), payloads.auth)
+      const auth = authorizeModelManagement(req, payloads)
       if (!auth.ok) { sendError(res, auth.status, auth.error); return }
       const parsed = new URL(url, 'http://x')
-      try {
+      void Promise.resolve().then(async () => {
         const input = parseWire(schema.ClientDeleteManualProviderSchema, {
           providerId: parsed.searchParams.get('providerId') ?? '',
         }, { channel: 'DELETE /settings/providers' })
@@ -1081,30 +1109,28 @@ export function attachJsonRoutes(
           sendError(res, 400, 'invalid manual provider delete input')
           return
         }
-        const result = payloads.deleteManualProvider(input)
+        const result = await payloads.deleteManualProvider!(input, auth.actor)
         payloads.audit?.log({ action: 'settings.provider_delete', actor: httpActor(req, payloads.auth), target: { providerId: input.providerId }, outcome: 'ok' })
         sendJson(req, res, result)
-      } catch (err: unknown) {
-        sendError(res, 400, err instanceof Error ? err.message : String(err))
-      }
+      }).catch((err: unknown) => sendSettingsError(res, err))
       return
     }
     if (path === '/settings/default-model' && req.method === 'POST' && payloads.setDefaultModel) {
       claimRoute(req)
-      const auth = authorizeSensitiveManagement(req, effectiveTenancy(payloads.deployment ?? PORTABLE_DEPLOYMENT), payloads.auth)
+      const auth = authorizeModelManagement(req, payloads)
       if (!auth.ok) { sendError(res, auth.status, auth.error); return }
       void readJson(req)
-        .then((body) => {
+        .then(async (body) => {
           const input = parseWire(schema.ClientSetDefaultModelSchema, body, { channel: 'POST /settings/default-model' })
           if (!input) {
             sendError(res, 400, 'invalid default model input')
             return
           }
-          const result = payloads.setDefaultModel!(input)
+          const result = await payloads.setDefaultModel!(input, auth.actor)
           payloads.audit?.log({ action: 'settings.default_model_set', actor: httpActor(req, payloads.auth), target: { model: input.model }, outcome: 'ok' })
           sendJson(req, res, result)
         })
-        .catch((err: unknown) => sendError(res, 400, err instanceof Error ? err.message : String(err)))
+        .catch((err: unknown) => sendSettingsError(res, err))
       return
     }
     if (path === '/settings/agent-prompt' && req.method === 'POST' && payloads.updateAgentPrompt) {
@@ -1439,6 +1465,11 @@ function isProtectedJsonRoute(path: string): boolean {
     path.startsWith('/artifacts/') ||
     path.startsWith('/docs/') ||
     path.startsWith('/router/')
+}
+
+function authorizeModelManagement(req: IncomingMessage, options: { deployment?: import('@agent-kernel/shared').ProductDeploymentConfig; auth?: AuthConfig }) {
+  const tenancy = productVariant(options.deployment ?? PORTABLE_DEPLOYMENT) === 'portable' ? 'single-tenant' : 'multi-tenant'
+  return authorizeSensitiveManagement(req, tenancy, options.auth)
 }
 
 function authorizeSensitiveManagement(req: IncomingMessage, tenancy: import('@agent-kernel/shared').PlatformTenancy, auth: AuthConfig | undefined): { ok: true; actor: DashboardActor } | { ok: false; status: number; error: string; reason: string } {
@@ -2118,6 +2149,11 @@ function sendJsonStatus(req: IncomingMessage, res: ServerResponse, status: numbe
     return
   }
   res.end(json)
+}
+
+function sendSettingsError(res: ServerResponse, error: unknown): void {
+  const status = error instanceof Error && 'status' in error && typeof error.status === 'number' ? error.status : 400
+  sendError(res, status, error instanceof Error ? error.message : String(error))
 }
 
 function sendError(res: ServerResponse, status: number, message: string): void {

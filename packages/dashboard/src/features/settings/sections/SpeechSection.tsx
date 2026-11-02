@@ -185,16 +185,16 @@ export function SpeechSection(): JSX.Element {
                 ['afterRecordingMaxMinutes', afterRecordingMaxMinutes, setAfterRecordingMaxMinutes],
               ] as const).map(([key, value, setValue]) => (
                 <div key={key}>
-                  <label className="block text-sm font-medium" htmlFor={`settings-speech-${key}`}>
-                    {t(`settings.speech.${key}`)}
-                  </label>
+                  <div className="flex items-center gap-1 text-sm font-medium">
+                    <label htmlFor={`settings-speech-${key}`}>{t(`settings.speech.${key}`)}</label>
+                    <HelpHint label={t(`settings.speech.${key}`)}>{t('settings.speech.maxMinutesInfo')}</HelpHint>
+                  </div>
                   <input id={`settings-speech-${key}`} data-testid={`settings-speech-${key}`} type="number" min="1" max={MAX_SPEECH_MAX_MINUTES} step="1" required
                     className="mt-1 h-9 w-full rounded-md border border-border/50 px-3 text-sm" value={value}
                     onChange={(event) => setValue(event.target.value === '' ? 0 : Number(event.target.value))} />
                 </div>
               ))}
             </div>
-            <p className="text-xs text-muted-foreground">{t('settings.speech.maxMinutesInfo')}</p>
 
             <label className="flex items-center gap-1 text-sm font-medium" htmlFor="settings-speech-endpoint">
               {t('settings.speech.endpoint')}

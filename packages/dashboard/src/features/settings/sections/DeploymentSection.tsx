@@ -1,17 +1,18 @@
-import type { BuildMetadata, DedicatedDeploymentStatus, ExternalDeploymentHealth, ServerSettingsPayload } from '@agent-kernel/shared'
+import type { BuildMetadata, DedicatedDeploymentStatus, DeploymentServices, ExternalDeploymentHealth, ServerSettingsPayload } from '@agent-kernel/shared'
 import { PROTOCOL_VERSION } from '@agent-kernel/shared'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
 import { CheckCircle2, ChevronRight, CircleAlert, CloudCog, MonitorUp, Server } from 'lucide-react'
 
-import { SectionHeader, SettingsRecord, SettingsRecordField, SettingsRecordList } from '../controls.js'
+import { CopyButton, SectionHeader, SettingsRecord, SettingsRecordField, SettingsRecordList } from '../controls.js'
 import packageJson from '../../../../package.json'
 import { HelpHint } from '../../../components/ui/help-hint.js'
+import { Button } from '../../../components/ui/button.js'
 import { forcePwaRefresh } from '../../../lib/pwa.js'
 
 const DASHBOARD_VERSION = packageJson.version
 
-export function DeploymentSection({ payload, host, token }: { payload: ServerSettingsPayload; host: string; token?: string }): JSX.Element {
+export function DeploymentSection({ payload, host, token, services }: { payload: ServerSettingsPayload; host: string; token?: string; services?: DeploymentServices }): JSX.Element {
   const { t } = useTranslation()
   const statusQuery = useQuery({
     queryKey: ['dedicated-deployment-status', host],
@@ -27,7 +28,11 @@ export function DeploymentSection({ payload, host, token }: { payload: ServerSet
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       return await response.json() as DedicatedDeploymentStatus
     },
-    refetchInterval: (query) => query.state.data === null ? false : query.state.data && 'kind' in query.state.data ? 10_000 : 2_000,
+    refetchOnWindowFocus: false,
+    refetchInterval: (query) => {
+      const current = query.state.data
+      return current && 'route' in current && current.deployment && !['completed', 'failed', 'aborted'].includes(current.deployment.phase) ? 2_000 : false
+    },
   })
   const externalHealth = statusQuery.data && 'kind' in statusQuery.data ? statusQuery.data : undefined
   const status = statusQuery.data && 'route' in statusQuery.data ? statusQuery.data : undefined
@@ -39,6 +44,19 @@ export function DeploymentSection({ payload, host, token }: { payload: ServerSet
   return (
     <div>
       <SectionHeader title={t('settings.sections.deployment.label')} subtitle={t('settings.deployment.subtitle')} />
+      {services ? <section className="mb-5 space-y-3 rounded-lg border border-border/50 bg-card/60 p-4" data-testid="settings-management-tools">
+        <h4 className="font-semibold">{t('settings.deployment.managementTools')}</h4>
+        <div className="flex flex-wrap gap-2">
+          {services.identityConsoleUrl ? <Button asChild variant="outline"><a href={services.identityConsoleUrl} target="_blank" rel="noreferrer">{t('deploymentCenter.openIdentity')}</a></Button> : null}
+          {payload.socketAdmin?.active && payload.socketAdmin.path ? <Button asChild variant="outline"><a href={payload.socketAdmin.path} target="_blank" rel="noreferrer">Socket.IO Admin</a></Button> : null}
+        </div>
+        {services.observabilityUrl ? <div data-testid="settings-native-aspire">
+          <div className="flex items-center gap-1 text-sm font-medium">Aspire<HelpHint label="Aspire">{t('settings.deployment.aspireAccessHelp')}</HelpHint></div>
+          <div className="mt-1 flex min-w-0 items-center gap-2"><code className="min-w-0 break-all text-sm">{services.observabilityUrl}</code><CopyButton value={services.observabilityUrl} /></div>
+          <p className="mt-1 text-sm text-muted-foreground">{t('settings.deployment.aspireLocalAccess')}</p>
+        </div> : null}
+      </section> : null}
+      <div className="mb-4 flex justify-end"><Button variant="outline" disabled={statusQuery.isFetching} onClick={() => { void statusQuery.refetch() }}>{t('settings.socketAdmin.refresh')}</Button></div>
       <div className="grid gap-2 sm:grid-cols-2" data-testid="settings-deployment-overview">
         <OverviewCard icon={verified && overallHealthy ? CheckCircle2 : CircleAlert} label={t('settings.deployment.overallStatus')} value={!verified && !statusQuery.isError ? t('settings.deployment.externalStatus') : overallHealthy ? t('settings.deployment.healthy') : t('settings.deployment.needsAttention')} tone={verified && overallHealthy ? 'good' : 'warn'} />
         <OverviewCard icon={MonitorUp} label={t('settings.deployment.dashboardRelease')} value={status?.dashboard?.version ?? build?.releaseTag ?? DASHBOARD_VERSION} detail={status?.dashboard ? t('settings.deployment.generationValue', { generation: status.dashboard.generation }) : dashboardDeliveryLabel(build)} />
@@ -46,8 +64,7 @@ export function DeploymentSection({ payload, host, token }: { payload: ServerSet
       </div>
       {status ? <CurrentDeployment status={status} compatible={dashboardCompatible} /> : statusQuery.isError ? <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-700 dark:text-amber-300">{t('settings.deployment.statusUnavailable')}</div> : null}
       {externalHealth && !statusQuery.isError ? <section className="mt-5 rounded-lg bg-card p-4 ring-1 ring-border/40" data-testid="settings-external-deployment">
-        <h4 className="text-base font-semibold text-foreground">{t('settings.deployment.externalChecks')}</h4>
-        <p className="mt-2 text-sm leading-6 text-foreground">{t('settings.deployment.externalChecksScope')}</p>
+        <h4 className="flex items-center gap-1 text-base font-semibold text-foreground">{t('settings.deployment.externalChecks')}<HelpHint label={t('settings.deployment.externalChecks')}>{t('settings.deployment.externalChecksScope')}</HelpHint></h4>
         <dl className="mt-4 grid gap-3 sm:grid-cols-3">{externalHealth.checks.map(check => <div key={check.component}><dt className="text-sm text-muted-foreground">{t(`settings.deployment.checkComponents.${check.component}`)}</dt><dd className={check.ready ? 'mt-1 text-sm font-semibold text-emerald-700 dark:text-emerald-300' : 'mt-1 text-sm font-semibold text-amber-700 dark:text-amber-300'}>{t(check.ready ? 'settings.deployment.ready' : 'settings.deployment.needsAttention')}</dd></div>)}</dl>
         <p className="mt-4 text-sm text-muted-foreground">{t('settings.deployment.checkedAt')}: <time dateTime={externalHealth.checkedAt}>{new Date(externalHealth.checkedAt).toLocaleString()}</time></p>
       </section> : null}

@@ -39,13 +39,14 @@ export async function loadRuntimeProviderCatalog(path: string): Promise<RuntimeP
   return parseRuntimeProviderCatalog(parsed)
 }
 
-export function parseRuntimeProviderCatalog(value: unknown): RuntimeProviderCatalog {
+export function parseRuntimeProviderCatalog(value: unknown, options: { allowEmptyProviders?: boolean } = {}): RuntimeProviderCatalog {
   if (!value || typeof value !== 'object') throw new Error('Runtime Provider Catalog must be an object')
   const input = value as Record<string, unknown>
   if (input.version !== 1) throw new Error('Runtime Provider Catalog version must be 1')
   const defaultModel = requiredString(input.defaultModel, 'defaultModel')
   if (!Array.isArray(input.providers) || input.providers.length === 0) throw new Error('Runtime Provider Catalog providers must not be empty')
-  const providers = input.providers.map((raw, index) => parseProvider(raw, index))
+  const providers = input.providers.map((raw, index) => parseProvider(raw, index, options.allowEmptyProviders))
+  if (new Set(providers.map(provider => provider.id)).size !== providers.length) throw new Error('Runtime Provider Catalog provider ids must be unique')
   const refs = providers.flatMap((provider) => provider.models.map((model) => model.ref ?? `${provider.id}:${model.id}`))
   if (new Set(refs).size !== refs.length) throw new Error('Runtime Provider Catalog model refs must be unique')
   if (!refs.includes(defaultModel)) throw new Error(`Runtime Provider Catalog defaultModel is unknown: ${defaultModel}`)
@@ -59,6 +60,7 @@ export async function createRuntimeProviderRuntime(
   const routes: Array<{ prefix: string; adapter: LLMAdapter; routedModel: string }> = []
   const models: ModelInfo[] = []
   for (const provider of catalog.providers) {
+    if (provider.models.length === 0) continue
     // One adapter per Provider is enough: adapters accept a per-call model id.
     const seed = provider.models[0]!
     const config: LLMProviderConfig = {
@@ -102,13 +104,13 @@ export class FileSecretResolver implements SecretResolver {
   }
 }
 
-function parseProvider(value: unknown, index: number): RuntimeProviderCatalogEntry {
+function parseProvider(value: unknown, index: number, allowEmpty = false): RuntimeProviderCatalogEntry {
   if (!value || typeof value !== 'object') throw new Error(`providers[${index}] must be an object`)
   const input = value as Record<string, unknown>
   const id = requiredString(input.id, `providers[${index}].id`)
   const wire = input.wire
   if (wire !== 'openai' && wire !== 'anthropic') throw new Error(`providers[${index}].wire must be openai or anthropic`)
-  if (!Array.isArray(input.models) || input.models.length === 0) throw new Error(`providers[${index}].models must not be empty`)
+  if (!Array.isArray(input.models) || (!allowEmpty && input.models.length === 0)) throw new Error(`providers[${index}].models must not be empty`)
   return {
     id,
     wire,

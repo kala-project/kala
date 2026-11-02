@@ -21,7 +21,7 @@ import {
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import type { AttachedExecutor, DashboardClientToServerEvents, DashboardServerToClientEvents, ServerSettingsPayload } from '@agent-kernel/shared'
+import type { AttachedExecutor, DashboardClientToServerEvents, DashboardServerToClientEvents, DeploymentServices, ServerSettingsPayload } from '@agent-kernel/shared'
 import type { Socket } from 'socket.io-client'
 
 import {
@@ -71,22 +71,25 @@ type Props = {
   token?: string
   initialSection?: SectionKey
   storageSocket?: Socket<DashboardServerToClientEvents, DashboardClientToServerEvents>
+  platform?: boolean
+  organizationRole?: 'owner' | 'admin' | 'member' | 'viewer'
+  deploymentServices?: DeploymentServices
 }
 
 type SectionKey = 'runtime' | 'connection' | 'agent' | 'models' | 'webSearch' | 'speech' | 'security' | 'socketAdmin' | 'executorAccess' | 'mcp' | 'hooks' | 'interface' | 'deployment' | 'notifications' | 'storage'
 
-type SectionGroup = 'personal' | 'workspace' | 'agent' | 'administration'
-const SECTION_GROUPS: readonly SectionGroup[] = ['personal', 'workspace', 'agent', 'administration']
+type SectionGroup = 'personal' | 'administration'
+const SECTION_GROUPS: readonly SectionGroup[] = ['personal', 'administration']
 const SECTIONS: readonly { key: SectionKey; label: string; hint: string; icon: LucideIcon; group: SectionGroup }[] = [
   { key: 'interface', label: 'settings.sections.interface.label', hint: 'settings.sections.interface.hint', icon: Palette, group: 'personal' },
   { key: 'notifications', label: 'settings.sections.notifications.label', hint: 'settings.sections.notifications.hint', icon: Bell, group: 'personal' },
-  { key: 'executorAccess', label: 'settings.sections.executorAccess.label', hint: 'settings.sections.executorAccess.hint', icon: TerminalSquare, group: 'workspace' },
-  { key: 'mcp', label: 'settings.sections.mcp.label', hint: 'settings.sections.mcp.hint', icon: PlugZap, group: 'workspace' },
-  { key: 'agent', label: 'settings.sections.agent.label', hint: 'settings.sections.agent.hint', icon: Bot, group: 'agent' },
-  { key: 'models', label: 'settings.sections.models.label', hint: 'settings.sections.models.hint', icon: Cpu, group: 'agent' },
-  { key: 'webSearch', label: 'settings.sections.webSearch.label', hint: 'settings.sections.webSearch.hint', icon: Search, group: 'agent' },
-  { key: 'speech', label: 'settings.sections.speech.label', hint: 'settings.sections.speech.hint', icon: Mic, group: 'agent' },
-  { key: 'connection', label: 'settings.sections.connection.label', hint: 'settings.sections.connection.hint', icon: Cable, group: 'administration' },
+  { key: 'connection', label: 'settings.sections.connection.label', hint: 'settings.sections.connection.hint', icon: Cable, group: 'personal' },
+  { key: 'models', label: 'settings.sections.models.label', hint: 'settings.sections.models.hint', icon: Cpu, group: 'personal' },
+  { key: 'executorAccess', label: 'settings.sections.executorAccess.label', hint: 'settings.sections.executorAccess.hint', icon: TerminalSquare, group: 'personal' },
+  { key: 'mcp', label: 'settings.sections.mcp.label', hint: 'settings.sections.mcp.hint', icon: PlugZap, group: 'administration' },
+  { key: 'agent', label: 'settings.sections.agent.label', hint: 'settings.sections.agent.hint', icon: Bot, group: 'administration' },
+  { key: 'webSearch', label: 'settings.sections.webSearch.label', hint: 'settings.sections.webSearch.hint', icon: Search, group: 'administration' },
+  { key: 'speech', label: 'settings.sections.speech.label', hint: 'settings.sections.speech.hint', icon: Mic, group: 'administration' },
   { key: 'security', label: 'settings.sections.security.label', hint: 'settings.sections.security.hint', icon: Shield, group: 'administration' },
   { key: 'socketAdmin', label: 'settings.sections.socketAdmin.label', hint: 'settings.sections.socketAdmin.hint', icon: ServerCog, group: 'administration' },
   { key: 'hooks', label: 'settings.sections.hooks.label', hint: 'settings.sections.hooks.hint', icon: PlugZap, group: 'administration' },
@@ -95,13 +98,12 @@ const SECTIONS: readonly { key: SectionKey; label: string; hint: string; icon: L
   { key: 'deployment', label: 'settings.sections.deployment.label', hint: 'settings.sections.deployment.hint', icon: Rocket, group: 'administration' },
 ]
 
-export function SettingsDialog({ open, cacheNamespace = 'default', autoHideOfflineWorkspacesByDefault = true, onOpenChange, onModelsChanged, executors = [], sessionCache, host = '', token, initialSection = 'connection', storageSocket }: Props): JSX.Element {
+export function SettingsDialog({ open, cacheNamespace = 'default', autoHideOfflineWorkspacesByDefault = true, onOpenChange, onModelsChanged, executors = [], sessionCache, host = '', token, initialSection = 'connection', storageSocket, platform = false, organizationRole, deploymentServices }: Props): JSX.Element {
   const { t } = useTranslation()
   const desktopLayout = useMinWidth(768)
   const queryClient = useQueryClient()
-  const [section, setSection] = useState<SectionKey>(initialSection)
+  const [selectedSection, setSection] = useState<SectionKey>(initialSection)
   const [sectionHelp, setSectionHelp] = useState<string>()
-  const activeSection = SECTIONS.find((item) => item.key === section) ?? SECTIONS[0]!
 
   const settingsQuery = useQuery({
     queryKey: ['settings', cacheNamespace],
@@ -111,9 +113,17 @@ export function SettingsDialog({ open, cacheNamespace = 'default', autoHideOffli
       return (await r.json()) as ServerSettingsPayload
     },
     enabled: open,
-    staleTime: 30_000,
+    staleTime: 300_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   })
   const payload = settingsQuery.data ?? null
+  const hosted = platform || payload?.deployment?.deployment.architecture === 'platform'
+  const canManage = !hosted || organizationRole === 'owner' || organizationRole === 'admin'
+  const visibleSections = SECTIONS.filter(item => item.group === 'personal' || canManage)
+  const activeSection = visibleSections.find(item => item.key === selectedSection) ?? visibleSections[0]!
+  const section = activeSection.key
+  const administratorRequired = !canManage && SECTIONS.some(item => item.key === selectedSection && item.group === 'administration')
   const loadError = settingsQuery.error ? (settingsQuery.error as Error).message : null
 
   const applyPayload = (next: ServerSettingsPayload): void => {
@@ -141,7 +151,7 @@ export function SettingsDialog({ open, cacheNamespace = 'default', autoHideOffli
                 aria-label={t('settings.sectionsLabel')}
                 data-testid="settings-mobile-section-select"
               >
-                {SECTIONS.map((item) => <option key={item.key} value={item.key}>{t(item.label)}</option>)}
+                {SECTION_GROUPS.filter(group => visibleSections.some(item => item.group === group)).map(group => <optgroup key={group} label={t(`settings.groups.${group}`)}>{visibleSections.filter(item => item.group === group).map(item => <option key={item.key} value={item.key}>{t(item.label)}</option>)}</optgroup>)}
               </select>
             </label>
             <HelpHint key={section} label={t(activeSection.label)}><span className="block">{t(activeSection.hint)}</span>{sectionHelp ? <span className="mt-2 block">{sectionHelp}</span> : null}</HelpHint>
@@ -162,13 +172,13 @@ export function SettingsDialog({ open, cacheNamespace = 'default', autoHideOffli
         <div className={cn('grid min-h-0 min-w-0', desktopLayout && 'grid-cols-[14.5rem_minmax(0,1fr)]')}>
           <aside className={cn('min-h-0 min-w-0 border-r border-border/35 bg-muted/15', !desktopLayout && 'hidden')}>
             <ScrollArea className="h-full overflow-x-hidden" aria-label={t('settings.sectionsLabel')} contentClassName="space-y-4 px-3 py-4 min-w-full" role="navigation">
-              {SECTION_GROUPS.map((group) => (
+              {SECTION_GROUPS.filter(group => visibleSections.some(item => item.group === group)).map((group) => (
                 <div key={group} className="space-y-1" data-testid={`settings-group-${group}`}>
                   <div className="px-2 pb-1 text-caption font-semibold uppercase tracking-[0.16em] text-muted-foreground/70">
                     {t(`settings.groups.${group}`)}
                   </div>
                   <div className="ml-2 space-y-0.5 border-l border-border/45 pl-2" data-testid={`settings-group-items-${group}`}>
-                    {SECTIONS.filter((item) => item.group === group).map((item) => (
+                    {visibleSections.filter((item) => item.group === group).map((item) => (
                       <SettingsSectionButton key={item.key} section={item} active={section === item.key} onClick={() => setSection(item.key)} />
                     ))}
                   </div>
@@ -186,16 +196,18 @@ export function SettingsDialog({ open, cacheNamespace = 'default', autoHideOffli
                 <ProductState kind="error" title={t('settings.loadErrorTitle')} description={t('settings.loadFailed', { error: loadError })} primary={{ label: t('common.retry'), onClick: () => { void settingsQuery.refetch() } }} />
               ) : payload === null ? (
                 <ProductState kind="loading" title={t('settings.loadingTitle')} description={t('settings.loadingDescription')} />
+              ) : administratorRequired ? (
+                <ProductState kind="empty" title={t('settings.administratorRequired')} description={t('settings.administratorContact')} />
               ) : section === 'runtime' ? (
-                <RuntimeSection payload={payload} />
+                <RuntimeSection payload={payload} onOpenModels={() => setSection('models')} />
               ) : section === 'storage' ? (
-                <StorageSection socket={storageSocket} payload={payload} />
+                <StorageSection socket={storageSocket} payload={payload} onRefresh={() => { void settingsQuery.refetch() }} refreshing={settingsQuery.isFetching} />
               ) : section === 'connection' ? (
                 <ConnectionSection />
               ) : section === 'agent' ? (
                 <AgentSection payload={payload} onPayloadChange={applyPayload} />
               ) : section === 'models' ? (
-                <ModelsSection payload={payload} onPayloadChange={applyPayload} onModelsChanged={onModelsChanged} />
+                <ModelsSection payload={payload} mode={canManage ? 'configuration' : 'catalog'} onPayloadChange={applyPayload} onModelsChanged={onModelsChanged} />
               ) : section === 'webSearch' ? (
                 <WebSearchSection />
               ) : section === 'speech' ? (
@@ -205,7 +217,7 @@ export function SettingsDialog({ open, cacheNamespace = 'default', autoHideOffli
               ) : section === 'socketAdmin' ? (
                 <SocketAdminSection payload={payload} onPayloadChange={applyPayload} socket={storageSocket} />
               ) : section === 'executorAccess' ? (
-                <ExecutorAccessSection executors={executors} />
+                <ExecutorAccessSection executors={executors} canManage={canManage} cacheNamespace={cacheNamespace} />
               ) : section === 'mcp' ? (
                 <McpSection executors={executors} token={token} />
               ) : section === 'hooks' ? (
@@ -213,7 +225,7 @@ export function SettingsDialog({ open, cacheNamespace = 'default', autoHideOffli
               ) : section === 'interface' ? (
                 <InterfaceSection sessionCache={sessionCache} autoHideOfflineWorkspacesByDefault={autoHideOfflineWorkspacesByDefault} />
               ) : section === 'deployment' ? (
-                <DeploymentSection payload={payload} host={host} token={token} />
+                <DeploymentSection payload={payload} host={host} token={token} services={deploymentServices} />
               ) : (
                 <NotificationsSection />
               )}

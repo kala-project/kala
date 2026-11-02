@@ -4,6 +4,7 @@ export type AuthenticatedIdentity = {
   readonly issuer: string
   readonly subject: string
   readonly displayName?: string
+  readonly username?: string
   readonly email?: string
   /** True only when the OIDC provider explicitly attested that `email` is verified. */
   readonly emailVerified?: boolean

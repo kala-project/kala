@@ -3011,6 +3011,43 @@ describe('wire protocol', () => {
     }
   })
 
+  it('preserves existing Dedicated Session model selections when models or providers are deleted', async () => {
+    const localSessionsDir = mkdtempSync(join(tmpdir(), 'agent-kernel-model-delete-'))
+    const remove = vi.fn(async () => ({ providers: [] } as never))
+    const localServer = await startHostServer({
+      port: 0, sessionsDir: localSessionsDir, llm: scriptedLlm(), defaultConfig: config,
+      deployment: DEDICATED_DEPLOYMENT,
+      models: [{ id: 'existing', ref: 'custom:existing', label: 'Existing', providerId: 'custom' }],
+      defaultModel: 'other:default',
+      deleteManualModel: remove, deleteManualProvider: remove,
+    })
+    try {
+      await localServer.store.create({
+        sessionId: 'retained-model', config, organizationId: 'org_models',
+        preferences: { selectedModel: 'custom:existing' },
+      })
+      const headers = {
+        'x-agent-runlab-principal': 'admin', 'x-agent-runlab-organization-id': 'org_models',
+        'x-agent-runlab-organization-role': 'admin',
+      }
+      for (const path of ['/settings/models?providerId=custom&id=existing', '/settings/providers?providerId=custom']) {
+        const result = await fetch(`http://localhost:${localServer.port}${path}`, { method: 'DELETE', headers })
+        expect(result.status).toBe(409)
+        expect(await result.json()).toMatchObject({ error: expect.stringContaining('existing Sessions') })
+      }
+      expect(remove).not.toHaveBeenCalled()
+      expect(localServer.store.get('retained-model')!.preferences.selectedModel).toBe('custom:existing')
+      await localServer.store.updatePreferences('retained-model', { selectedModel: '' })
+      const allowed = await fetch(`http://localhost:${localServer.port}/settings/models?providerId=custom&id=existing`, { method: 'DELETE', headers })
+      expect(allowed.status).toBe(200)
+      await allowed.json()
+      expect(remove).toHaveBeenCalledOnce()
+    } finally {
+      await localServer.close()
+      rmSync(localSessionsDir, { recursive: true, force: true })
+    }
+  })
+
   it('updates manual providers through HTTP without returning API keys', async () => {
     let providers: ServerSettingsPayload['providers'] = []
     let defaultModel = ''
@@ -3028,6 +3065,8 @@ describe('wire protocol', () => {
       llm: scriptedLlm(),
       defaultConfig: config,
       settings,
+      models: () => providers.flatMap(provider => provider.models),
+      defaultModel: () => defaultModel,
       addManualProvider: (input) => {
         providers = [{
           id: input.id,
@@ -3043,13 +3082,42 @@ describe('wire protocol', () => {
         providers = providers.filter((p) => p.id !== input.providerId)
         return settings()
       },
+      updateManualProvider: async (input) => {
+        providers = providers.map(provider => provider.id === input.providerId
+          ? { ...provider, baseUrl: input.baseUrl ?? provider.baseUrl, label: input.label ?? provider.label }
+          : provider)
+        return settings()
+      },
+      addManualModel: async (input) => {
+        providers = providers.map(provider => provider.id === input.providerId ? {
+          ...provider, models: [...provider.models, {
+            id: input.id, ref: `${input.providerId}:${input.id}`, label: input.id, providerId: input.providerId,
+          }],
+        } : provider)
+        return settings()
+      },
+      updateManualModel: async (input) => {
+        providers = providers.map(provider => provider.id === input.providerId ? {
+          ...provider, models: provider.models.map(model => model.id === input.id ? {
+            ...model, label: input.label ?? model.label, contextWindow: input.contextWindow ?? model.contextWindow,
+          } : model),
+        } : provider)
+        return settings()
+      },
       setDefaultModel: (input) => {
         defaultModel = input.model
         return settings()
       },
     })
 
+    const socket: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(`http://localhost:${localServer.port}/dashboard`, {
+      transports: ['websocket'], auth: { sessionId: 'live-model-catalog', role: 'dashboard', clientVersion: PROTOCOL_VERSION }, reconnection: false,
+    })
     try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once('server:agent_runtimes', () => resolve())
+        socket.once('connect_error', reject)
+      })
       const add = await fetch(`http://localhost:${localServer.port}/settings/providers`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -3074,6 +3142,40 @@ describe('wire protocol', () => {
       ])
       expect(JSON.stringify(added)).not.toContain('test-redacted-api-key')
 
+      const patch = await fetch(`http://localhost:${localServer.port}/settings/providers`, {
+        method: 'PATCH', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ providerId: 'local-openai', label: 'Edited', baseUrl: 'http://localhost:9000/v1', apiKey: '' }),
+      })
+      expect(patch.status).toBe(200)
+      expect((await patch.json() as ServerSettingsPayload).providers[0]).toMatchObject({ label: 'Edited', baseUrl: 'http://localhost:9000/v1' })
+      const catalogChanged = new Promise<Parameters<DashboardServerToClientEvents['server:agent_runtimes']>[0]>(resolve => {
+        socket.once('server:agent_runtimes', resolve)
+      })
+      const addModel = await fetch(`http://localhost:${localServer.port}/settings/models`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ providerId: 'local-openai', id: 'gpt-local' }),
+      })
+      expect(addModel.status).toBe(200)
+      await addModel.json()
+      expect((await catalogChanged).runtimes.find(runtime => runtime.id === 'kernel')?.models).toMatchObject([{ ref: 'local-openai:gpt-local' }])
+      const modelResponse = await fetch(`http://localhost:${localServer.port}/models`)
+      expect((await modelResponse.json() as { models: unknown[] }).models).toMatchObject([{ ref: 'local-openai:gpt-local' }])
+
+      const metadataChanged = new Promise<Parameters<DashboardServerToClientEvents['server:agent_runtimes']>[0]>(resolve => {
+        socket.once('server:agent_runtimes', resolve)
+      })
+      const editModel = await fetch(`http://localhost:${localServer.port}/settings/models`, {
+        method: 'PATCH', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ providerId: 'local-openai', id: 'gpt-local', label: 'Edited model', contextWindow: 64000 }),
+      })
+      expect(editModel.status).toBe(200)
+      expect((await editModel.json() as ServerSettingsPayload).providers[0]?.models[0]).toMatchObject({
+        id: 'gpt-local', ref: 'local-openai:gpt-local', label: 'Edited model', contextWindow: 64000,
+      })
+      expect((await metadataChanged).runtimes.find(runtime => runtime.id === 'kernel')?.models).toMatchObject([{
+        ref: 'local-openai:gpt-local', label: 'Edited model', contextWindow: 64000,
+      }])
+
       const setDefault = await fetch(`http://localhost:${localServer.port}/settings/default-model`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -3089,6 +3191,7 @@ describe('wire protocol', () => {
       const deleted = await del.json() as ServerSettingsPayload
       expect(deleted.providers).toEqual([])
     } finally {
+      socket.close()
       await localServer.close()
       rmSync(localSessionsDir, { recursive: true, force: true })
     }

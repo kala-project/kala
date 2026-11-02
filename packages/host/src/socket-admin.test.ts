@@ -1,12 +1,30 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { existsSync } from 'node:fs'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { loadSocketAdminConfig } from './socket-admin.js'
+import { loadGatewayOwnerSocketAdminConfig, loadSocketAdminConfig } from './socket-admin.js'
+
+vi.mock('node:fs', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return { ...actual, existsSync: vi.fn(actual.existsSync) }
+})
 
 const ORIGINAL_MODE = process.env.KALA_SOCKET_ADMIN_MODE
 
 afterEach(() => {
+  vi.mocked(existsSync).mockReset()
   if (ORIGINAL_MODE === undefined) delete process.env.KALA_SOCKET_ADMIN_MODE
   else process.env.KALA_SOCKET_ADMIN_MODE = ORIGINAL_MODE
+})
+
+it('reports missing installed Dedicated assets without enabling instrumentation or falling back to another UI', () => {
+  vi.mocked(existsSync).mockReturnValue(false)
+  const state = loadGatewayOwnerSocketAdminConfig({ currentModulePath: import.meta.url })
+  expect(state.runtime).toBeUndefined()
+  expect(state.indexHtml).toBeUndefined()
+  expect(state.summary).toMatchObject({
+    authentication: 'gateway-owner', active: false, initialized: false,
+    unavailableReason: expect.stringContaining('missing'),
+  })
 })
 
 describe('loadSocketAdminConfig', () => {
