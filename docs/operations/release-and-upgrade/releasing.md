@@ -13,7 +13,7 @@ must declare MIT and cannot depend on private workspace packages. Verify before
 cutting a tag:
 
 ```bash
-pnpm run verify:version -- --tag v0.2.0
+pnpm run verify:version -- --tag v0.3.0
 ```
 
 The release asset verifier repeats the check against `release/manifest.json`.
@@ -31,8 +31,9 @@ validation tools remain available for a separately approved future npm release.
 
 The `GitHub Release Assets` workflow also accepts only the unified `v*` tag. Its
 current release matrix builds matching-runner Node SEA assets for Linux x64
-and macOS x64/arm64. Linux arm64 and Windows are paused; SEA binaries are never
-cross-compiled or relabeled. The CJS job builds portable fallbacks, the Dashboard
+and macOS x64/arm64, plus a Windows x64 Node.js Host and native Executor
+with ConPTY and service installer assets. Linux arm64 remains paused; SEA binaries
+are never cross-compiled or relabeled. The CJS job builds portable fallbacks, the Dashboard
 archive, Dedicated support archive, release metadata archive, manifest, and
 checksums. The final job merges exact
 artifacts and regenerates all metadata before publication.
@@ -62,7 +63,8 @@ reject duplicate, linked, traversing, or unexpected members before extraction.
 
 1. Update `CHANGELOG.md` and set the intended root/workspace version.
 2. Run `verify:version`, privacy history, licenses, build/typecheck/tests, and
-   Portable clean-environment acceptance for the three currently supported native targets.
+   Portable clean-environment acceptance for Linux x64, macOS x64/arm64,
+   and Windows x64 with ConPTY.
 3. Commit from a clean worktree and create the matching annotated `v*` tag.
 4. Let GitHub Release and Private Cloud workflows build from the tag; do not upload local binaries.
 5. Keep the GitHub Release as a draft until signatures, provenance, SBOMs,

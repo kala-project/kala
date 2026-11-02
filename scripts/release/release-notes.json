@@ -1,4 +1,23 @@
 {
+  "v0.3.0": {
+    "previousTag": "v0.3.0-beta.19",
+    "improvements": [
+      "Dedicated Platform adds fenced Runtime ownership, durable Session and Executor recovery, independent Dashboard updates, and Owner-controlled administration.",
+      "The Dashboard restores Workspace installation, Session navigation, connection health, notifications, and desktop controls with clearer account and timing views.",
+      "Private Cloud adds authenticated tenant isolation, persistent authority and export paths, and durable background work."
+    ],
+    "fixes": [
+      "Dedicated Executor invitation serves the public installer through the Runtime ingress instead of returning 404.",
+      "The Dashboard connection status dialog remains inside the viewport when opened from the header.",
+      "Release and acceptance checks bind Windows Executor and ConPTY assets, Portable OCI images, and signed Private Cloud bundles to the exact candidate revision."
+    ],
+    "knownIssues": [
+      "Dedicated and Private Cloud lifecycle certification remains preview-only; public distribution of signed artifacts is not production support.",
+      "Private Cloud NFS remains experimental and requires independent full-stack acceptance; use local-volume storage by default.",
+      "Linux arm64 native Portable assets remain outside the required acceptance matrix."
+    ],
+    "desktopViaDashboard": true
+  },
   "v0.3.0-beta.19": {
     "previousTag": "v0.3.0-beta.18",
     "improvements": [

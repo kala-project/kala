@@ -29,7 +29,7 @@ The required promotion matrix is:
 
 | Category | Target | Required proof |
 |---|---|---|
-| Portable | Linux x64 and macOS x64/arm64 (exactly three records; Linux arm64 paused for this release) | exact attested asset, clean install, boot, capabilities, embedded Dashboard, persisted Session state, graceful stop, same-version reinstall |
+| Portable | Linux x64, macOS x64/arm64, and Windows x64 with ConPTY (exactly four records; Linux arm64 paused) | exact attested asset, clean install, boot, capabilities, embedded Dashboard, persisted Session state, graceful stop, same-version reinstall; Windows also verifies the native Executor and ConPTY installer lifecycles |
 
 Optional Dedicated and Private Cloud lifecycle evidence still has a strict schema
 if independently produced, but is not claimed as proven for this release.
@@ -40,7 +40,7 @@ asserted by a same-version Portable reinstall.
 ## Promotion
 
 `rc-acceptance.yml` runs against the draft tag on matching GitHub-hosted
-native runners, with no self-hosted or predecessor release dependency. The
+Linux, macOS, and Windows runners, with no self-hosted or predecessor release dependency. The
 Private Cloud tag workflow independently builds, signs, and scans versioned
 multi-architecture images and bundles; those artifacts remain preview-only
 until real clean Compose lifecycle evidence is available.
@@ -52,7 +52,8 @@ GHCR tag workflows also succeeded for that revision. It downloads all evidence a
 `verify-rc-evidence.mjs`, which rejects missing, duplicate, or extra targets, false or
 missing checks, revision/tag drift, unknown schema fields, and private diagnostic
 material. Only then is the public redacted aggregate attached and the draft bit
-cleared. Promotion also fails if the draft contains a Windows-only download.
+cleared. Promotion also fails if any required Windows asset is missing or
+fails its exact-tag verification.
 
 No npm packages are published by version tags. GHCR images are published by
 the existing Private Cloud tag workflow, but image publication alone does not

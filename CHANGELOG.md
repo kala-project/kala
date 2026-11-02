@@ -5,6 +5,20 @@ Versioning while pre-1.0 and uses one product version across release artifacts.
 
 ## [Unreleased]
 
+### Added for v0.3.0
+
+- Dedicated fenced Runtime ownership, durable Session and Executor recovery,
+  independent Dashboard releases, and Owner administration.
+- Private Cloud tenant-scoped authority, exports, and durable background work.
+- Windows x64 Portable Host and native Executor with ConPTY release and
+  acceptance workflows; availability depends on exact-tag hosted acceptance.
+
+### Fixed for v0.3.0
+
+- Dedicated Executor invite installation is routed through public ingress.
+- Dashboard connection health popup remains visible and clickable.
+- Release checks bind Portable and Private Cloud artifacts to the exact revision.
+
 ## [0.2.0] - 2026-10-02
 
 ### Added

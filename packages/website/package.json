@@ -1,6 +1,6 @@
 {
   "name": "@agent-kernel/website",
-  "version": "0.3.0-beta.19",
+  "version": "0.3.0",
   "description": "Official Kala product website.",
   "private": true,
   "type": "module",
@@ -22,6 +22,6 @@
     "@types/node": "22.9.0",
     "puppeteer-core": "25.3.0",
     "typescript": "5.6.3",
-    "vite": "6.4.3"
+    "vite": "6.4.4"
   }
 }

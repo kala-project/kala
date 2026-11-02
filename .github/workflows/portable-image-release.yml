@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Exact signed draft release tag (only v0.3.0-beta.19 is accepted)
+        description: Exact signed draft release tag (only v0.3.0 is accepted)
         required: true
         type: string
       revision:
@@ -29,7 +29,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  ACCEPTED_TAG: v0.3.0-beta.19
+  ACCEPTED_TAG: v0.3.0
   IMAGE_NAME: ghcr.io/${{ github.repository }}-portable
 
 jobs:

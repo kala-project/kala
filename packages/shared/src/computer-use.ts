@@ -3,7 +3,11 @@ import { z } from 'zod'
 const coordinate = z.number().int().min(-32768).max(32767)
 const button = z.enum(['left', 'middle', 'right'])
 export const COMPUTER_TYPE_MAX_LENGTH = 512
-const desktopText = z.string().max(COMPUTER_TYPE_MAX_LENGTH).refine(
+// Zod's string max counts code points; desktop pacing is bounded by UTF-16 length.
+const desktopText = z.string().refine(
+  (text) => text.length <= COMPUTER_TYPE_MAX_LENGTH,
+  'Desktop text exceeds the maximum length',
+).refine(
   (text) => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]|\p{Surrogate}/u.test(text),
   'Only well-formed Unicode text without control characters other than newline and tab is allowed',
 )

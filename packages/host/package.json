@@ -1,6 +1,6 @@
 {
   "name": "@agent-kernel/host",
-  "version": "0.3.0-beta.19",
+  "version": "0.3.0",
   "description": "Kala Host runtime: model adapters, session store, and Socket.IO server.",
   "repository": { "type": "git", "url": "git+https://github.com/xingsy97/kala.git" },
   "homepage": "https://github.com/xingsy97/kala#readme",
@@ -57,7 +57,7 @@
     "socket.io": "4.8.4",
     "ulid": "2.3.0",
     "web-push": "3.6.7",
-    "zod": "4.4.3"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@types/bcryptjs": "2.4.6",
@@ -68,7 +68,7 @@
     "socket.io-client": "4.8.4",
     "tsx": "4.19.2",
     "typescript": "5.6.3",
-    "vite": "6.4.3",
+    "vite": "6.4.4",
     "vitest": "4.1.11"
   },
   "sideEffects": false,

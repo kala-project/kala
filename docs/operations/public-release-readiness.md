@@ -2,7 +2,7 @@
 
 **Status:** normative; implementation in progress
 
-**Target:** `v0.2.0`
+**Target:** `v0.3.0` (candidate; do not mark accepted before exact-tag evidence)
 
 **Scope:** public source repository, supported Portable artifacts, preview
 Dedicated bundles and Private Cloud images/bundles, and release evidence
@@ -10,7 +10,7 @@ Dedicated bundles and Private Cloud images/bundles, and release evidence
 ## 1. Release contract
 
 One product release uses one SemVer version and one tag, such as
-`v0.2.0`. The root package, workspace packages, manifests,
+`v0.3.0`. The root package, workspace packages, manifests,
 Dashboard metadata, container labels, and release notes must agree.
 Protocol and persisted-schema versions are independent compatibility contracts and
 must not be changed merely to match the product version. Component-specific tags
@@ -19,8 +19,9 @@ are not part of the target release model.
 The release is built from a clean, signed or protected Git revision. Generated
 assets record the exact revision and content digest. This stable pre-1.0 release may be
 published only after privacy, license, build, test, signed-asset verification,
-GHCR image vulnerability scanning, and the six-target hosted Portable clean
-install/reinstall matrix pass. Upgrade, rollback, backup/restore, and
+GHCR image vulnerability scanning, and the four-target hosted Portable clean
+install/reinstall matrix pass (Linux x64, macOS x64/arm64, Windows x64 with
+ConPTY). Upgrade, rollback, backup/restore, and
 Dedicated/Private Cloud lifecycle checks are **not certified** by this release.
 
 ## 2. User-facing distributions
@@ -50,8 +51,9 @@ Cloud is the same Platform architecture with `multi-tenant`.
 
 - [x] One product version is enforced across packages and artifacts.
 - [x] Linux and macOS x64/arm64 Portable build jobs exist on matching runners.
-- [ ] Windows native Executor ConPTY/installer lifecycle has not passed; this release
-  excludes Windows release assets, UI installation paths, and acceptance claims.
+- [ ] Windows x64 Portable Host, native Executor, ConPTY, and installer lifecycle
+  must pass the exact-tag hosted acceptance before promotion. Windows assets
+  are required by the current release and promotion workflows, not excluded.
 - [x] GitHub release assets have a keyless checksum signature and GitHub build
   provenance; container digests have keyless signatures, OCI provenance, and SBOMs.
 - [x] CycloneDX SBOMs and third-party notices ship with GitHub release assets.

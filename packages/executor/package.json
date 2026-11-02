@@ -1,6 +1,6 @@
 {
   "name": "@agent-kernel/executor",
-  "version": "0.3.0-beta.19",
+  "version": "0.3.0",
   "description": "Kala workspace executor: sandboxed tool runner that connects to the Kala Host.",
   "repository": { "type": "git", "url": "git+https://github.com/xingsy97/kala.git" },
   "homepage": "https://github.com/xingsy97/kala#readme",
@@ -43,7 +43,7 @@
     "puppeteer-core": "25.3.0",
     "socket.io-client": "4.8.4",
     "ulid": "2.3.0",
-    "undici": "8.10.2"
+    "undici": "8.12.2"
   },
   "devDependencies": {
     "@types/node": "22.9.0",
