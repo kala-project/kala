@@ -19,6 +19,7 @@ import { PushSubscriptionStore } from './push/store.js'
 import { bangShellResultOperationId } from './bang-shell.js'
 import { QueueClaimFencedError } from './postgres-message-queue.js'
 import { PostgresSessionAuthority } from './store/postgres-session-authority.js'
+import { SessionStore } from './store/session.js'
 import { createPostgresHotStateStore, type PostgresHotStateStore } from './tenant-runtime/postgres-hot-state.js'
 
 const execFileAsync = promisify(execFile)
@@ -81,19 +82,25 @@ integrationDescribe('Private Cloud PostgreSQL message queue integration', () => 
   }
 
   it('serializes concurrent enqueue and preserves priority, edits, reorder, delete, and stop tombstones', async () => {
-    const first = makeAuthority('queue-a').messageQueue
+    const authority = makeAuthority('queue-a')
+    const first = authority.messageQueue
     const second = makeAuthority('queue-b').messageQueue
     const sessionId = `queue-semantics-${randomUUID()}`
+    // Current queue admission requires a live Session, not a standalone row.
+    const root = mkdtempSync(join(tmpdir(), 'kala-queue-delegation-'))
+    roots.push(root)
+    await new SessionStore(root, { authority }).create({ sessionId, config })
 
     await Promise.all([
       first.enqueue(sessionId, item('one'), 'back'),
       second.enqueue(sessionId, item('two'), 'back'),
-      first.enqueue(sessionId, item('front', 'priority'), 'front'),
+      first.enqueue(sessionId, { ...item('front', 'priority'), scheduledBy: { organizationId: 'org-fixture', principal: 'creator' } }, 'front'),
       second.enqueue(sessionId, item('one'), 'back'),
     ])
     let state = await first.load(sessionId)
     expect(state.items.map(({ operationId }) => operationId).sort()).toEqual(['front', 'one', 'two'])
     expect(state.items[0]?.operationId).toBe('front')
+    expect((await second.load(sessionId)).items[0]?.scheduledBy).toEqual({ organizationId: 'org-fixture', principal: 'creator' })
 
     await second.update(sessionId, 'two', { ...state.items.find(({ id }) => id === 'two')!, text: 'edited' })
     await first.reorder(sessionId, 'two', 'one')

@@ -1,3 +1,4 @@
+import { BackgroundAuthorizationError } from './authorization.js'
 import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -278,6 +279,104 @@ describe('Unit scheduler durability and isolation', () => {
       expect.objectContaining({ status: 'enqueued', task: expect.objectContaining({ prompt: 'original' }) }),
     ])
     await restarted.stop()
+  })
+
+  it.each([
+    { receipt: 'committed' as const, status: 'enqueued', validations: 0 },
+    { receipt: 'unknown' as const, status: 'needs_review', validations: 0 },
+    { receipt: 'absent' as const, status: 'failed', validations: 1 },
+  ])('reconciles $receipt admission before checking current target availability', async ({ receipt, status, validations }) => {
+    let now = new Date('2026-10-02T09:00:00.000Z')
+    const path = await directory()
+    const first = new ScheduledTaskStore(path, () => now)
+    await first.start('u')
+    const task = await first.create({
+      ownerKey: 'principal:p', createdBy: 'p', prompt: 'retain identity', target: { kind: 'session', sessionId: 'original' },
+      schedule: { kind: 'once', at: '2026-10-02T10:00:00.000Z' },
+    })
+    now = new Date('2026-10-02T10:00:00.000Z')
+    const claimed = await first.claim(task.id, task.nextRunAt!)
+    await first.close()
+    const exec = executor({
+      receipt: vi.fn(async () => receipt),
+      validate: vi.fn(async () => { throw new Error('Workspace currently offline') }),
+    })
+    const scheduler = new UnitScheduler(new ScheduledTaskStore(path, () => now), exec, { unitId: 'u', pollMs: 60_000 })
+    try {
+      await scheduler.start()
+      expect((await scheduler.store.history('principal:p', task.id))?.[0]).toMatchObject({
+        occurrenceId: claimed!.occurrenceId, operationId: claimed!.operationId, status,
+      })
+      expect(exec.validate).toHaveBeenCalledTimes(validations)
+      expect(exec.enqueueSession).not.toHaveBeenCalled()
+      expect(exec.createWorkspaceSession).not.toHaveBeenCalled()
+    } finally { await scheduler.stop() }
+  })
+
+  it('drains validation without new admission and leaves the same claim recoverable after stop', async () => {
+    let now = new Date('2026-10-02T09:00:00.000Z')
+    const path = await directory()
+    let validationEntered!: () => void
+    const entered = new Promise<void>((resolve) => { validationEntered = resolve })
+    let release!: () => void
+    const barrier = new Promise<void>((resolve) => { release = resolve })
+    const exec = executor({ validate: vi.fn(async () => { validationEntered(); await barrier }) })
+    const scheduler = new UnitScheduler(new ScheduledTaskStore(path, () => now), exec, { unitId: 'u', pollMs: 60_000 })
+    await scheduler.start()
+    const task = await scheduler.store.create({
+      ownerKey: 'principal:p', createdBy: 'p', prompt: 'after drain', target: { kind: 'session', sessionId: 'original' },
+      schedule: { kind: 'once', at: '2026-10-02T10:00:00.000Z' },
+    })
+    now = new Date('2026-10-02T10:00:00.000Z')
+    const tick = scheduler.tick()
+    let claimed: Awaited<ReturnType<typeof scheduler.store.history>>
+    try {
+      await entered
+      claimed = await scheduler.store.history('principal:p', task.id)
+      const stopping = scheduler.stop()
+      release()
+      await Promise.all([tick, stopping])
+      expect(exec.enqueueSession).not.toHaveBeenCalled()
+    } finally { release(); await scheduler.stop() }
+    const replacementExec = executor()
+    const replacement = new UnitScheduler(new ScheduledTaskStore(path, () => now), replacementExec, { unitId: 'u', pollMs: 60_000 })
+    try {
+      await replacement.start()
+      const history = await replacement.store.history('principal:p', task.id)
+      expect(history).toHaveLength(1)
+      expect(history?.[0]).toMatchObject({
+        occurrenceId: claimed![0]!.occurrenceId, operationId: claimed![0]!.operationId, status: 'enqueued',
+      })
+      expect(replacementExec.enqueueSession).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        operationId: history![0]!.operationId, sessionId: 'original', prompt: 'after drain',
+      }))
+    } finally { await replacement.stop() }
+  })
+
+  it('defers unavailable startup authorization and later admits the original claim once', async () => {
+    let now = new Date('2026-10-02T09:00:00.000Z')
+    const path = await directory()
+    const store = new ScheduledTaskStore(path, () => now)
+    await store.start('u')
+    const task = await store.create({
+      ownerKey: 'organization:a', createdBy: 'creator', prompt: 'retained', target: { kind: 'session', sessionId: 'original' },
+      schedule: { kind: 'once', at: '2026-10-02T10:00:00.000Z' },
+    })
+    now = new Date('2026-10-02T10:00:00.000Z')
+    const original = await store.claim(task.id, task.nextRunAt!)
+    await store.close()
+    let available = false
+    const exec = executor({ validate: vi.fn(async () => { if (!available) throw new BackgroundAuthorizationError('unavailable') }) })
+    const scheduler = new UnitScheduler(new ScheduledTaskStore(path, () => now), exec, { unitId: 'u', pollMs: 60_000, reportError() {} })
+    try {
+      await scheduler.start()
+      expect((await scheduler.store.history('organization:a', task.id))?.[0]?.status).toBe('claimed')
+      expect(exec.enqueueSession).not.toHaveBeenCalled()
+      available = true
+      await scheduler.tick()
+      expect(exec.enqueueSession).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ operationId: original!.operationId }))
+      expect((await scheduler.store.history('organization:a', task.id))?.[0]).toMatchObject({ occurrenceId: original!.occurrenceId, status: 'enqueued' })
+    } finally { await scheduler.stop() }
   })
 
   it('reports a transient poll error and schedules the next poll', async () => {

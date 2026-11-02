@@ -6,6 +6,7 @@ import process from 'node:process'
 
 import { AGENT_RUNTIME_CAPABILITIES, FULL_RUNTIME_CAPABILITIES, productVariant } from '@agent-kernel/shared'
 
+import { createScheduledPrincipalAuthorizer } from '../src/scheduled-tasks/authorization.js'
 import { startLoopbackHostRuntimeUnit } from '../src/tenant-runtime/loopback-host-unit.js'
 import { resolveBuiltinAgentModule } from '../src/builtin-tools.js'
 import { ExplicitLLMClientFactory } from '../src/llm/client-factory.js'
@@ -271,6 +272,11 @@ async function main(): Promise<void> {
       const webSearchCredentialStore = persistentStorage?.webSearchCredentialStore ?? localWebSearchCredentialStore
       const speechCredentialStore = persistentStorage?.speechCredentialStore ?? localSpeechCredentialStore
       return startLoopbackHostRuntimeUnit(id, {
+        authorizeScheduledPrincipal: createScheduledPrincipalAuthorizer({
+          origin: process.env.KALA_RUNTIME_AUTHORITY_ORIGIN,
+          serviceSecret: ingressSecret,
+          unitId: id,
+        }),
         sessionsDir: join(unitRoot, 'sessions'),
         // The container entrypoint is in /app/packages/host/dist, while the
         // verified Copilot CLI platform pair is in /app/release. Discover it

@@ -144,12 +144,13 @@ describe('executor idempotency', () => {
     expect(logger.warn).not.toHaveBeenCalled()
   })
 
-  it('returns an explicit failure instead of timing out when an agent tool receipt cannot persist', async () => {
+  it('rejects an agent tool before execution when its journal cannot be loaded', async () => {
     const socket = makeMockSocket()
     const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() }
+    const runs = vi.fn(async () => 'SIDE_EFFECT_COMPLETED')
     startExecutor({
       host: 'http://x', workspaceId: 'ws-durability', workspaceName: 'ws-durability', executorId: 'ex-durability',
-      tools: [{ name: 'shell', run: vi.fn(async () => 'SIDE_EFFECT_COMPLETED') }],
+      tools: [{ name: 'shell', run: runs }],
       ioFactory: (() => socket) as never,
       receiptStorePath: '/dev/null/execution-receipts.json',
       logger,
@@ -162,7 +163,33 @@ describe('executor idempotency', () => {
 
     expect(ack).toHaveBeenCalledWith(expect.objectContaining({ ok: false, content: expect.stringContaining('EDURABILITY') }))
     expect(logger.warn).toHaveBeenCalledWith(expect.objectContaining({ tool: 'shell' }), expect.stringContaining('durability failed'))
-    expect(logger.info).toHaveBeenCalledWith(expect.objectContaining({ input: { command: 'printf ok', env: { API_TOKEN: '[REDACTED]', NODE_ENV: 'test' } } }), 'tool execution started')
+    expect(runs).not.toHaveBeenCalled()
+    expect(logger.info).not.toHaveBeenCalledWith(expect.anything(), 'tool execution started')
+  })
+
+  it('returns unknown rather than confirmed success when completion persistence fails after a side effect', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kala-receipt-completion-failure-'))
+    const sharedExecution = createExecutorSharedExecution(join(dir, 'receipts.json'))
+    await sharedExecution.receiptStoreReady
+    const persist = vi.spyOn(sharedExecution.receiptStore!, 'set').mockRejectedValue(new Error('fixture disk failure'))
+    const socket = makeMockSocket()
+    const runs = vi.fn(async () => 'SIDE_EFFECT_COMPLETED')
+    const handle = startExecutor({
+      host: 'http://x', workspaceId: 'ws-completion-failure', workspaceName: 'fixture', executorId: 'fixture',
+      tools: [{ name: 'effect', run: runs }], sharedExecution, ioFactory: (() => socket) as never,
+    })
+    const call = { sessionId: 'session-fixture', callId: 'effect-fixture', name: 'effect', input: {} }
+    const first = vi.fn()
+    socket.__trigger('tool:call', call, first)
+    await vi.waitFor(() => expect(first).toHaveBeenCalled())
+    expect(JSON.parse(first.mock.calls[0]![0].content)).toMatchObject({ outcome: 'execution_unknown' })
+    const replay = vi.fn()
+    socket.__trigger('tool:call', call, replay)
+    await vi.waitFor(() => expect(replay).toHaveBeenCalled())
+    expect(replay).toHaveBeenCalledWith(first.mock.calls[0]![0])
+    expect(runs).toHaveBeenCalledTimes(1)
+    persist.mockRestore()
+    await handle.close()
   })
 
   it('fans out completion to duplicate in-flight ACK callbacks without double-spawn', async () => {

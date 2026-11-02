@@ -250,6 +250,109 @@ export function sessionRouteTicketSocketOptions(input: {
   }
 }
 
+export async function runSessionCommand<T>(
+  input: {
+    host: string
+    sessionId: string
+    sharedSocket: DashboardSocket
+    token?: string
+    sessionScoped?: boolean
+    sessionRouteTickets?: boolean
+    timeoutMs?: number
+  },
+  command: (socket: DashboardSocket) => Promise<T>,
+): Promise<T> {
+  if (!input.sessionScoped && !input.sessionRouteTickets) return command(input.sharedSocket)
+
+  const timeoutMs = input.timeoutMs ?? 10_000
+  let target: DashboardSocket
+  if (input.sessionRouteTickets) {
+    const controller = new AbortController()
+    const ticketTimer = window.setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const result = await requestSessionRouteTicket({
+        host: input.host,
+        sessionId: input.sessionId,
+        signal: controller.signal,
+      })
+      if (result.kind === 'unavailable') throw new Error('Target Session routing is unavailable')
+      target = openDashboardSocket(
+        `${input.host}/dashboard`,
+        sessionRouteTicketSocketOptions({
+          sessionId: input.sessionId,
+          ticket: result.ticket,
+          ...(input.token !== undefined ? { token: input.token } : {}),
+        }),
+      )
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        throw new Error('Target Session route ticket timed out')
+      }
+      throw error
+    } finally {
+      window.clearTimeout(ticketTimer)
+    }
+  } else {
+    target = openDashboardSocket(`${input.host}/dashboard`, {
+      auth: {
+        sessionId: input.sessionId,
+        role: 'dashboard',
+        clientVersion: PROTOCOL_VERSION,
+        ...(input.token !== undefined ? { token: input.token } : {}),
+      },
+      forceNew: true,
+      autoConnect: false,
+      reconnection: false,
+      transports: ['websocket'],
+      withCredentials: true,
+    })
+  }
+
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      let commandStarted = false
+      let settled = false
+      const cleanup = () => {
+        window.clearTimeout(timer)
+        target.off('session:ready', ready)
+        target.off('connect_error', connectError)
+        target.off('disconnect', disconnected)
+      }
+      const finish = (settle: () => void) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        settle()
+      }
+      const connectError = (error: Error) => finish(() => reject(error))
+      const disconnected = (reason: string) => finish(() => reject(new Error(`Target Session disconnected: ${reason}`)))
+      const ready = (payload: SessionReadyEvent) => {
+        if (settled || commandStarted) return
+        if (payload.sessionId !== input.sessionId) {
+          finish(() => reject(new Error('Target Session readiness did not match the requested Session')))
+          return
+        }
+        commandStarted = true
+        window.clearTimeout(timer)
+        void Promise.resolve().then(() => {
+          if (settled) throw new Error('Target Session closed before command dispatch')
+          return command(target)
+        }).then(
+          (value) => finish(() => resolve(value)),
+          (error: unknown) => finish(() => reject(error)),
+        )
+      }
+      const timer = window.setTimeout(() => finish(() => reject(new Error('Target Session readiness timed out'))), timeoutMs)
+      target.on('session:ready', ready)
+      target.on('connect_error', connectError)
+      target.on('disconnect', disconnected)
+      try { target.connect() } catch (error) { finish(() => reject(error)) }
+    })
+  } finally {
+    target.close()
+  }
+}
+
 export function acceptsSessionTokenDelta(status: AgentState['status']): boolean {
   return status === 'thinking'
 }
@@ -1279,8 +1382,9 @@ export function respondAskUserChoice(
 export function deleteSession(
   socket: DashboardSocket,
   sessionId: string,
+  options?: { attempts?: number },
 ): Promise<void> {
-  return emitRpc(socket, 'client:delete_session', { sessionId })
+  return emitRpc(socket, 'client:delete_session', { sessionId }, options)
 }
 
 /**
@@ -1411,8 +1515,9 @@ export function updateSessionPreferences(
   socket: DashboardSocket,
   sessionId: string,
   preferences: import('@agent-kernel/shared').SessionPreferencesPatch,
+  options?: { attempts?: number },
 ): Promise<void> {
-  return emitRpc(socket, 'client:update_preferences', { sessionId, preferences })
+  return emitRpc(socket, 'client:update_preferences', { sessionId, preferences }, options)
 }
 
 export function setSessionApprovalMode(
@@ -1458,8 +1563,9 @@ export function renameSession(
   socket: DashboardSocket,
   sessionId: string,
   label: string,
-): void {
-  socket.emit('client:rename_session', { sessionId, label })
+  options?: { attempts?: number },
+): Promise<string> {
+  return emitRpc<string>(socket, 'client:rename_session', { sessionId, label }, options)
 }
 
 export function renameWorkspace(

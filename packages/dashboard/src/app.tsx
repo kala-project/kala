@@ -143,6 +143,7 @@ import {
   reorderQueuedMessage,
   renameSession,
   renameWorkspace,
+  runSessionCommand,
   respondApproval,
   respondAskUserChoice,
   setSessionApprovalMode,
@@ -1187,7 +1188,14 @@ export function App(): JSX.Element {
       notify.error('Session could not be deleted', { description: 'Host is not connected.' })
       return
     }
-    void deleteSession(controlSocket, sessionId).then(() => {
+    void runSessionCommand({
+      host: hostEndpoint.url,
+      sessionId,
+      sharedSocket: controlSocket,
+      sessionScoped,
+      sessionRouteTickets,
+      ...(config.token !== undefined ? { token: config.token } : {}),
+    }, (socket) => deleteSession(socket, sessionId, { attempts: 1 })).then(() => {
       for (const id of sessionIdsForCacheInvalidation(controlSessionsRef.current, sessionId)) {
         sessionViewCache.delete(id)
         deleteSessionScrollState(id)
@@ -1206,11 +1214,20 @@ export function App(): JSX.Element {
     }).catch((error: unknown) => {
       notify.error('Session could not be deleted', { description: error instanceof Error ? error.message : String(error) })
     })
-  }, [config.sessionId, controlSocket, sessionViewCache])
+  }, [config.sessionId, config.token, controlSocket, hostEndpoint.url, sessionRouteTickets, sessionScoped, sessionViewCache])
   const renameSessionAt = useCallback((sessionId: string, label: string): void => {
     if (!controlSocket) return
-    renameSession(controlSocket, sessionId, label)
-  }, [controlSocket])
+    void runSessionCommand({
+      host: hostEndpoint.url,
+      sessionId,
+      sharedSocket: controlSocket,
+      sessionScoped,
+      sessionRouteTickets,
+      ...(config.token !== undefined ? { token: config.token } : {}),
+    }, (socket) => renameSession(socket, sessionId, label, { attempts: 1 })).catch((error: unknown) => {
+      notify.error('Session could not be renamed', { description: error instanceof Error ? error.message : String(error) })
+    })
+  }, [config.token, controlSocket, hostEndpoint.url, sessionRouteTickets, sessionScoped])
   const renameWorkspaceAt = useCallback((workspaceId: string, workspaceName: string): void => {
     if (!controlSocket || workspaceId.length === 0) return
     renameWorkspace(controlSocket, workspaceId, workspaceName)
@@ -2954,7 +2971,17 @@ export function App(): JSX.Element {
         }}
         onChangeToolCardMode={(mode: ToolCardMode) => {
           if (controlSocket && metadataTargetSessionId !== null) {
-            updateSessionPreferences(controlSocket, metadataTargetSessionId, { toolCardMode: mode })
+            void runSessionCommand({
+              host: hostEndpoint.url,
+              sessionId: metadataTargetSessionId,
+              sharedSocket: controlSocket,
+              sessionScoped,
+              sessionRouteTickets,
+              ...(config.token !== undefined ? { token: config.token } : {}),
+            }, (socket) => updateSessionPreferences(socket, metadataTargetSessionId, { toolCardMode: mode }, { attempts: 1 }))
+              .catch((error: unknown) => {
+                notify.error('Unable to change Tool Card mode', { description: error instanceof Error ? error.message : String(error) })
+              })
           }
         }}
       />

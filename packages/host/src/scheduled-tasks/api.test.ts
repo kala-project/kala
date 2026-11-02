@@ -14,6 +14,7 @@ import type {
 import { PRIVATE_CLOUD_DEPLOYMENT, PROTOCOL_VERSION } from '@agent-kernel/shared'
 import { io as clientIO, type Socket as ClientSocket } from 'socket.io-client'
 
+import { BackgroundAuthorizationError } from './authorization.js'
 import { startHostServer, type HostServer } from '../server.js'
 
 type ScheduledRun = {
@@ -75,6 +76,7 @@ describe('scheduled task product API', () => {
       port: 0,
       sessionsDir: root,
       deployment: PRIVATE_CLOUD_DEPLOYMENT,
+      authorizeScheduledPrincipal: async () => 'member',
       defaultConfig: createConfig({ systemPrompt: 'test', tools: [] }),
       llm: { name: 'test', async call() { return { message: { role: 'assistant', content: [] } } } },
     })
@@ -110,6 +112,16 @@ describe('scheduled task product API', () => {
     expect((await fetch(`${base}/scheduled-tasks`, {
       method: 'POST', headers: headers('org-a', 'viewer'), body: JSON.stringify({}),
     })).status).toBe(403)
+
+    expect((await fetch(`${base}/scheduled-tasks/${task.id}`, {
+      method: 'PATCH', headers: headers('org-a', 'member', 'another-member'), body: JSON.stringify({ prompt: 'borrow creator authority' }),
+    })).status).toBe(403)
+    expect((await fetch(`${base}/scheduled-tasks/${task.id}/resume`, {
+      method: 'POST', headers: headers('org-a', 'owner', 'another-owner'),
+    })).status).toBe(403)
+    expect((await fetch(`${base}/scheduled-tasks/${task.id}/pause`, {
+      method: 'POST', headers: headers('org-a', 'admin', 'administrator'),
+    })).status).toBe(200)
 
     const paused = await fetch(`${base}/scheduled-tasks/${task.id}/pause`, { method: 'POST', headers: headers('org-a') })
     expect(await paused.json()).toMatchObject({ task: { status: 'paused' } })
@@ -162,6 +174,7 @@ describe('scheduled task product API', () => {
       port: 0,
       sessionsDir: root!,
       deployment: PRIVATE_CLOUD_DEPLOYMENT,
+      authorizeScheduledPrincipal: async () => 'member',
       defaultConfig: createConfig({ systemPrompt: 'test', tools: [] }),
       llm: { name: 'test', async call() { return { message: { role: 'assistant', content: [] } } } },
     })
@@ -232,6 +245,7 @@ describe('scheduled task product API', () => {
       port: 0,
       sessionsDir: root,
       deployment: PRIVATE_CLOUD_DEPLOYMENT,
+      authorizeScheduledPrincipal: async () => 'member',
       defaultConfig: createConfig({ systemPrompt: 'test', tools: [] }),
       llm: { name: 'test', async call() { return { message: { role: 'assistant', content: [] } } } },
     })
@@ -258,21 +272,31 @@ describe('scheduled task product API', () => {
     await expect(duplicateDay.json()).resolves.toMatchObject({ error: { code: 'invalid_request', message: expect.stringContaining('unique integers') } })
   })
 
-  it('triggers a once task through the Host and leaves its prompt queued behind an active Session turn', async () => {
+  it.each(['allowed', 'denied', 'unavailable'] as const)('rechecks a queued scheduled principal before dispatch (%s)', async (decision) => {
     root = await mkdtemp(join(tmpdir(), 'kala-scheduled-session-trigger-'))
     let markLlmStarted: (() => void) | undefined
     const llmStarted = new Promise<void>((resolve) => { markLlmStarted = resolve })
     const llmBlocked = new Promise<void>((resolve) => { releaseLlm = resolve })
+    let access: 'allowed' | 'denied' | 'unavailable' = 'allowed'
+    let calls = 0
+    let checks = 0
     server = await startHostServer({
       port: 0,
       sessionsDir: root,
       deployment: PRIVATE_CLOUD_DEPLOYMENT,
+      authorizeScheduledPrincipal: async (principal) => {
+        expect(principal).toEqual({ organizationId: 'org-queue', principal: 'org-queue-user' })
+        checks += 1
+        if (access !== 'allowed') throw new BackgroundAuthorizationError(access)
+        return 'member'
+      },
       defaultConfig: createConfig({ systemPrompt: 'test', tools: [] }),
       llm: {
         name: 'blocked-test',
         async call() {
+          calls += 1
           markLlmStarted?.()
-          await llmBlocked
+          if (calls === 1) await llmBlocked
           return { message: { role: 'assistant', content: [] } }
         },
       },
@@ -331,8 +355,29 @@ describe('scheduled task product API', () => {
       return enqueued && queued ? enqueued : undefined
     })
     expect(run).toMatchObject({ status: 'enqueued', sessionId })
+    const queued = latestQueue!.items.find((item) => item.text === prompt)!
+    const edit = await dashboard.timeout(1_000).emitWithAck('client:update_queued_message', {
+      sessionId, id: queued.id, operationId: 'attempt-delegation-edit', text: 'modified delegated program',
+    })
+    expect(edit).toMatchObject({ ok: false, error: expect.stringContaining('immutable') })
+    const previousChecks = checks
+    access = decision
+    releaseLlm?.()
+    if (decision === 'allowed') {
+      await waitFor('authorized queued turn', () => calls === 2 ? true : undefined)
+    } else {
+      await waitFor('queued-principal check or unauthorized admission', () => checks > previousChecks || calls > 1 ? true : undefined)
+      expect(checks).toBeGreaterThan(previousChecks)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(calls).toBe(1)
+      expect(latestQueue?.items.some((item) => item.text === prompt)).toBe(true)
+      if (decision === 'unavailable') {
+        access = 'allowed'
+        await waitFor('authority recovery without submitting a new operation', () => calls === 2 ? true : undefined, 8_000)
+      }
+    }
     expect((await fetch(`${base}/scheduled-tasks/${taskId}/history`, { headers: headers('org-other') })).status).toBe(404)
-  }, 10_000)
+  }, 15_000)
 
   it('triggers a workspace once task into a fresh bound Session linked from run history', async () => {
     root = await mkdtemp(join(tmpdir(), 'kala-scheduled-workspace-trigger-'))
@@ -342,6 +387,7 @@ describe('scheduled task product API', () => {
       port: 0,
       sessionsDir: root,
       deployment: PRIVATE_CLOUD_DEPLOYMENT,
+      authorizeScheduledPrincipal: async () => 'member',
       auth: { executorTokens: [{ token: executorToken, workspaceId }] },
       defaultConfig: createConfig({ systemPrompt: 'test', tools: [] }),
       llm: { name: 'test', async call() { return { message: { role: 'assistant', content: [] } } } },

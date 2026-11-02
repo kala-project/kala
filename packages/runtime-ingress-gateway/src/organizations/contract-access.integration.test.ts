@@ -1,3 +1,6 @@
+import { createServer } from 'node:http'
+import { handleBackgroundAuthority } from '../edge/background-authority.js'
+import { PostgresBackgroundAuthority } from './background-authority.js'
 import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
@@ -103,4 +106,52 @@ integrationDescribe('Private Cloud contract authorization on real PostgreSQL', (
     await pool.query(`UPDATE organizations SET status='suspended' WHERE id='org_contract'`)
     expect(await state()).toEqual({ human: 'suspended', service: 'suspended', executor: undefined })
   })
+  it('rechecks background principals through service-authenticated HTTP against shared control PG', async () => {
+    await pool.query(`UPDATE organizations SET status='active' WHERE id='org_contract'`)
+    await pool.query(`INSERT INTO contract_entitlements(organization_id,contract_reference,support_tier,starts_at,ends_at,seat_limit,concurrent_session_limit)
+      VALUES('org_contract','contract-test','standard',now()-interval '1 day',now()+interval '1 day',2,2)
+      ON CONFLICT(organization_id) DO UPDATE SET starts_at=EXCLUDED.starts_at,ends_at=EXCLUDED.ends_at,grace_ends_at=NULL`)
+    const authority = new PostgresBackgroundAuthority({ query: (sql, values) => pool.query(sql, values as unknown[]) })
+    const secret = 'fixture-background-service-secret-not-a-real-credential'
+    let unavailable = false
+    const http = createServer((request, response) => {
+      void handleBackgroundAuthority(request, response, secret, {
+        authorize: async (input) => { if (unavailable) throw new Error('fixture authority failure'); return authority.authorize(input) },
+      })
+    })
+    await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', resolve))
+    const address = http.address()
+    if (!address || typeof address === 'string') throw new Error('missing fixture port')
+    const url = `http://127.0.0.1:${address.port}/internal/background-authority`
+    const principal = Buffer.from(`${owner.issuer}\0${owner.subject}`).toString('base64url')
+    const check = (who = principal, extra: Record<string, string> = {}, unitId = 'tenant_contract') => fetch(url, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-agent-runlab-ingress-secret': secret, ...extra },
+      body: JSON.stringify({ organizationId: 'org_contract', unitId, principal: who }),
+    })
+    try {
+      expect((await check(principal, { 'x-agent-runlab-ingress-secret': 'wrong' })).status).toBe(403)
+      expect((await check(principal, { cookie: 'ak_session=not-a-service-credential' })).status).toBe(403)
+      expect(await (await check()).json()).toEqual({ role: 'owner' })
+      expect((await check(principal, {}, 'another-unit')).status).toBe(403)
+      await pool.query(`UPDATE organization_memberships SET role='viewer' WHERE principal_id='prn_owner'`)
+      expect((await check()).status).toBe(403)
+      await pool.query(`DELETE FROM organization_memberships WHERE principal_id='prn_owner'`)
+      expect((await check()).status).toBe(403)
+      await pool.query(`INSERT INTO organization_memberships(organization_id,principal_id,role) VALUES('org_contract','prn_owner','owner')`)
+      expect((await check('prn_service')).status).toBe(403) // read scope is not a background write grant
+      await pool.query(`UPDATE service_account_tokens SET scopes=ARRAY['workspace:write'] WHERE principal_id='prn_service'`)
+      expect(await (await check('prn_service')).json()).toEqual({ role: 'member' })
+      await serviceAccounts.revoke('org_contract', 'prn_service')
+      expect((await check('prn_service')).status).toBe(403)
+      await pool.query(`UPDATE service_account_tokens SET revoked_at=NULL,expires_at=now()-interval '1 second' WHERE principal_id='prn_service'`)
+      expect((await check('prn_service')).status).toBe(403)
+      await pool.query(`UPDATE service_account_tokens SET expires_at=now()+interval '1 day' WHERE principal_id='prn_service'`)
+      await pool.query(`UPDATE contract_entitlements SET ends_at=now()-interval '1 second' WHERE organization_id='org_contract'`)
+      expect((await check()).status).toBe(403)
+      expect((await check('prn_service')).status).toBe(403)
+      unavailable = true
+      expect((await check()).status).toBe(503)
+    } finally { http.closeAllConnections(); await new Promise<void>((resolve) => http.close(() => resolve())) }
+  })
+
 })

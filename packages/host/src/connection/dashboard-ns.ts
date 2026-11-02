@@ -155,6 +155,8 @@ export type QueuedUserMessage = {
   createdAt: string
   content?: readonly MessageContent[]
   model?: string
+  /** Server-owned scheduled delegation; never accepted from client payloads. */
+  scheduledBy?: import('../scheduled-tasks/authorization.js').ScheduledPrincipal
   /** Host-owned shell escape. State and result are persisted before Agent dispatch. */
   shell?: {
     command: string
@@ -262,6 +264,7 @@ export type DashboardDeps = {
   onSessionDeleted?(record: SessionRecord): void | Promise<void>
   renameWorkspace?(workspaceId: string, workspaceName: string): Promise<string>
   mutableReady?(): boolean
+  sessionScopedIngress?: boolean
 }
 
 export type TenantSessionQuotaEnforcer = {
@@ -421,8 +424,13 @@ export function configureDashboardNamespace(
     const sessionId = auth.sessionId ?? `control:${auth.clientId}`
     socket.emit('server:agent_runtimes', { runtimes: deps.agentRuntimes.catalog() })
     socket.use(([event, ...args], next) => {
-      const routedSessionId = socket.handshake.headers['x-agent-runlab-route-session-id']
-      if (typeof routedSessionId === 'string') {
+      const routedHeader = socket.handshake.headers['x-agent-runlab-route-session-id']
+      // Direct new Dedicated ingress connections have no route ticket, but their
+      // authenticated single-Session handshake still bounds command payloads.
+      // Unmarked legacy/Portable shared previews retain their existing scope.
+      const routedSessionId = typeof routedHeader === 'string' ? routedHeader
+        : deps.sessionScopedIngress && !multiplexed && auditActor(socket).kind === 'ingress' ? sessionId : undefined
+      if (routedSessionId !== undefined) {
         const payload = args[0]
         if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
           const scoped = payload as Record<string, unknown>
@@ -1378,10 +1386,11 @@ export function configureDashboardNamespace(
       const result = await runOperation('client:delete_queued_message', p.sessionId, p.operationId, p, () => deps.messageQueues.delete(p.sessionId, p.id))
       ack?.(result)
     })
-    socket.on('client:rename_session', async (raw: ClientRenameSession) => {
+    socket.on('client:rename_session', async (raw: ClientRenameSession, ack) => {
       const p = vparse(schema.ClientRenameSessionSchema, raw, 'client:rename_session', (raw as ClientRenameSession | undefined)?.sessionId)
-      if (!p) return
-      try {
+      if (!p) { ack?.({ ok: false, error: 'invalid rename session request' }); return }
+      const result = await runOperation('client:rename_session', p.sessionId, p.operationId, p, async () => {
+        await deps.loopDeps.assertSessionEffectOwner?.(p.sessionId)
         const applied = await deps.store.rename(p.sessionId, p.label)
         deps.dashboardNs.emit('server:control_update', {
           kind: 'session_meta_changed',
@@ -1389,13 +1398,10 @@ export function configureDashboardNamespace(
           label: applied,
         })
         await broadcastSessionList(deps)
-      } catch (err) {
-        deps.broadcastError(
-          p.sessionId,
-          'host',
-          err instanceof Error ? err.message : String(err),
-        )
-      }
+        return applied
+      })
+      ack?.(result)
+      if (!result.ok) deps.broadcastError(p.sessionId, 'host', result.error)
     })
     socket.on('client:rename_workspace', async (raw: ClientRenameWorkspace) => {
       const p = vparse(schema.ClientRenameWorkspaceSchema, raw, 'client:rename_workspace')
@@ -2113,6 +2119,7 @@ export function configureDashboardNamespace(
         return
       }
       const result = await runOperation('client:update_preferences', p.sessionId, p.operationId, p, async () => {
+        await deps.loopDeps.assertSessionEffectOwner?.(p.sessionId)
         if ('selectedModel' in p.preferences) {
           if (!await requireRuntimeCapability(deps, p.sessionId, 'modelSelection', 'model selection')) {
             throw new Error('model selection is unavailable for this Session Runtime')

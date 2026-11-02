@@ -13,6 +13,8 @@ const policy = loadPrivacyPolicy(root)
 test('allows public examples and registered runtime assets', () => {
   assert.deepEqual(scan('docs/example.md', 'home=/home/example ip=192.0.2.10 email=user@example.com path=`/home/example`'), [])
   assert.deepEqual(scan('docs/example.md', 'systemctl status kala-dedicated-unit@blue.service'), [])
+  assert.deepEqual(scan('deploy/aspire/Program.cs', 'http://gateway:13001'), [])
+  assert.deepEqual(scan('deploy/private-cloud/compose.postgres-s3-base.yaml', 'http://runtime-ingress:13001'), [])
   assert.deepEqual(scan('packages/dashboard/public/favicon.svg', readFileSync(join(root, 'packages/dashboard/public/favicon.svg'))), [])
 })
 

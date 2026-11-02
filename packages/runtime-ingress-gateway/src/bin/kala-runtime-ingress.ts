@@ -7,6 +7,7 @@ import { parsePublicUrls } from '@agent-kernel/shared'
 import { Pool } from 'pg'
 
 import { JsonOrganizationStore } from '../organizations/json-store.js'
+import { PostgresBackgroundAuthority } from '../organizations/background-authority.js'
 import { PostgresOrganizationStore } from '../organizations/postgres-store.js'
 import { startRuntimeIngressGateway, type GatewayAuthentication } from '../edge/server.js'
 import { createOidcClient } from '../auth/oidc-client.js'
@@ -248,6 +249,7 @@ async function main(): Promise<void> {
     cacheNamespaceSecret,
     ingressSecret,
     ...(database ? {
+      backgroundAuthority: new PostgresBackgroundAuthority(database),
       serviceAccounts: new ServiceAccountService(database, {
         maxActiveServiceAccounts: numberEnv('KALA_INGRESS_MAX_SERVICE_ACCOUNTS', 100),
       }),

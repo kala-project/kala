@@ -48,7 +48,7 @@ export async function persistMessageQueueSnapshot(
   await store.appendRuntimeMetadata(sessionId, {
     action: ACTION,
     payload: {
-      schemaVersion: SCHEMA_VERSION,
+      schemaVersion: items.some((item) => item.scheduledBy) ? 4 : SCHEMA_VERSION,
       items: items.map(serializeQueuedMessage),
       cancelledOperationIds: uniqueCancelledOperationIds,
     },
@@ -57,7 +57,7 @@ export async function persistMessageQueueSnapshot(
 
 function normalizeQueueSnapshot(entry: RuntimeMetadataEntry): PersistedMessageQueueState {
   const payload = entry.payload
-  if (!payload || (payload.schemaVersion !== 1 && payload.schemaVersion !== 2 && payload.schemaVersion !== SCHEMA_VERSION) || !Array.isArray(payload.items)) {
+  if (!payload || (payload.schemaVersion !== 1 && payload.schemaVersion !== 2 && payload.schemaVersion !== SCHEMA_VERSION && payload.schemaVersion !== 4) || !Array.isArray(payload.items)) {
     throw new Error('unsupported persisted message queue snapshot')
   }
   const out: QueuedUserMessage[] = []
@@ -65,7 +65,7 @@ function normalizeQueueSnapshot(entry: RuntimeMetadataEntry): PersistedMessageQu
     const item = normalizeQueuedMessage(raw)
     if (item) out.push(item)
   }
-  const cancelledOperationIds = payload.schemaVersion === 2 || payload.schemaVersion === SCHEMA_VERSION
+  const cancelledOperationIds = payload.schemaVersion === 2 || payload.schemaVersion === SCHEMA_VERSION || payload.schemaVersion === 4
     ? normalizeCancelledOperationIds(payload.cancelledOperationIds)
     : []
   const cancelled = new Set(cancelledOperationIds)
@@ -104,9 +104,15 @@ export function normalizeQueuedMessage(raw: unknown): QueuedUserMessage | undefi
   const operationId = stringValue(record.operationId)
   const text = typeof record.text === 'string' ? record.text : undefined
   const createdAt = stringValue(record.createdAt)
-  const mode = record.mode === 'queue' || record.mode === 'steer' ? record.mode : undefined
+  // A persistence-only tagged mode makes old PG/SQLite readers reject the
+  // entire item instead of silently stripping its new authorization context.
+  const delegated = record.mode === 'scheduled:v1:queue' || record.mode === 'scheduled:v1:steer'
+  const mode = record.mode === 'scheduled:v1:queue' ? 'queue' : record.mode === 'scheduled:v1:steer' ? 'steer'
+    : record.mode === 'queue' || record.mode === 'steer' ? record.mode : undefined
   const content = schema.MessageContentSchema.array().safeParse(record.content ?? [])
   const shell = normalizeShell(record.shell)
+  const scheduledBy = normalizeScheduledPrincipal(record.scheduledBy)
+  if (delegated !== Boolean(scheduledBy)) throw new Error('invalid persisted scheduled principal version')
   if (!id || text === undefined || !createdAt || !mode || !content.success) return undefined
   if (text.trim().length === 0 && content.data.length === 0) return undefined
   return {
@@ -118,6 +124,7 @@ export function normalizeQueuedMessage(raw: unknown): QueuedUserMessage | undefi
     ...(content.data.length > 0 ? { content: content.data as readonly MessageContent[] } : {}),
     ...(typeof record.model === 'string' && record.model.trim().length > 0 ? { model: record.model } : {}),
     ...(shell ? { shell } : {}),
+    ...(scheduledBy ? { scheduledBy } : {}),
   }
 }
 
@@ -126,12 +133,23 @@ export function serializeQueuedMessage(item: QueuedUserMessage): Record<string, 
     id: item.id,
     operationId: item.operationId,
     text: item.text,
-    mode: item.mode,
+    mode: item.scheduledBy ? `scheduled:v1:${item.mode}` : item.mode,
     createdAt: item.createdAt,
     ...(item.content ? { content: item.content } : {}),
     ...(item.model ? { model: item.model } : {}),
     ...(item.shell ? { shell: item.shell } : {}),
+    ...(item.scheduledBy ? { scheduledBy: item.scheduledBy } : {}),
   }
+}
+
+function normalizeScheduledPrincipal(raw: unknown): QueuedUserMessage['scheduledBy'] {
+  if (raw === undefined) return undefined
+  if (!raw || typeof raw !== 'object') throw new Error('invalid persisted scheduled principal')
+  const value = raw as Record<string, unknown>
+  if (![value.organizationId, value.principal].every((part) => typeof part === 'string' && part.length > 0 && part.length <= 1_024)) {
+    throw new Error('invalid persisted scheduled principal')
+  }
+  return { organizationId: value.organizationId as string, principal: value.principal as string }
 }
 
 function normalizeShell(raw: unknown): QueuedUserMessage['shell'] | undefined {

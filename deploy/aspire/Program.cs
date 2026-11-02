@@ -66,6 +66,7 @@ var runtime = builder.AddContainer("runtime", runtimeImage)
     .WithEnvironment("KALA_DEPLOYMENT_CONFIG", "/etc/kala/deployment.json")
     // Container-writable scratch inside the unprivileged Host package; PG/S3 remain the authorities.
     .WithEnvironment("KALA_RUNTIME_HOST_DATA_ROOT", "/app/packages/host/.runtime-tmp/kala")
+    .WithEnvironment("KALA_RUNTIME_AUTHORITY_ORIGIN", "http://gateway:13001")
     .WithEnvironment("TMPDIR", "/app/packages/host/.runtime-tmp")
     .WithEnvironment("KALA_RUNTIME_HOST_RELEASE_ASSETS_DIR", "/app/release")
     .WithEnvironment("KALA_RUNTIME_KALA_PORT", "13002")

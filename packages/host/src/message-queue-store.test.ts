@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { createConfig, step } from '@agent-kernel/kernel'
-import { loadPersistedMessageQueue, loadPersistedMessageQueueState, MAX_CANCELLED_OPERATION_IDS, persistMessageQueueSnapshot } from './message-queue-store.js'
+import { loadPersistedMessageQueue, loadPersistedMessageQueueState, MAX_CANCELLED_OPERATION_IDS, persistMessageQueueSnapshot, normalizeQueuedMessage } from './message-queue-store.js'
 import { appendRuntimeMetadataEntry, readSessionLog } from './store/log.js'
 import { SessionStore } from './store/session.js'
 
@@ -77,11 +77,15 @@ describe('durable message queue metadata', () => {
       mode: 'queue' as const,
       createdAt: new Date().toISOString(),
       shell: { command: 'printf hello', state: 'nonzero' as const, result: 'persisted shell result' },
+      scheduledBy: { organizationId: 'org-fixture', principal: 'delegated-principal' },
     }
 
     await persistMessageQueueSnapshot(store, record.sessionId, [item])
 
     await expect(loadPersistedMessageQueue(new SessionStore(root), record.sessionId)).resolves.toEqual([item])
+    expect(() => normalizeQueuedMessage({ ...item, scheduledBy: { principal: 'missing-organization' } })).toThrow('scheduled principal')
+    const persisted = (await readSessionLog(record.logPath)).runtimeMetadata.at(-1)?.payload
+    expect(persisted).toMatchObject({ schemaVersion: 4, items: [{ mode: 'scheduled:v1:queue' }] })
   })
 
   it('restores an unknown shell result and its operator recovery guidance', async () => {

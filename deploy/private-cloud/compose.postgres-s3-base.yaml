@@ -67,6 +67,7 @@ services:
       KALA_RUNTIME_KALA_BIND_HOST: 0.0.0.0
       KALA_RUNTIME_HOST_DATA_ROOT: /var/lib/kala
       KALA_RUNTIME_HOST_MAX_LOADED_UNITS: 100
+      KALA_RUNTIME_AUTHORITY_ORIGIN: ${KALA_RUNTIME_AUTHORITY_ORIGIN:-http://runtime-ingress:13001}
       KALA_RUNTIME_HOST_DOCS_DIR: /app/docs
       KALA_RUNTIME_HOST_RELEASE_ASSETS_DIR: /app/release
       KALA_RUNTIME_HOST_LLM_CATALOG_FILE: /run/kala-secrets/runtime-provider-catalog.json

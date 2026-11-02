@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -50,4 +50,56 @@ describe('ExecutionReceiptStore', () => {
     expect(restarted.get('call-a')?.content).toBe('a')
     expect(restarted.get('call-b')?.content).toBe('b')
   })
+  it('retains old unresolved calls across TTL and capacity pressure and denies overflow admission', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'ak-receipts-pending-'))
+    const path = join(dir, 'receipts.json')
+    await writeFile(path, JSON.stringify(Object.fromEntries(Array.from({ length: 500 }, (_, index) => [
+      `pending-${index}`, { startedAt: 1, callId: `pending-${index}` },
+    ]))))
+    const store = new ExecutionReceiptStore(path)
+    await store.load()
+    await store.set('completed', { callId: 'completed', ok: true, content: 'done' })
+    expect(JSON.parse(store.get('pending-0')!.content)).toMatchObject({ outcome: 'execution_unknown' })
+    await expect(store.begin('new-call', 'new-call')).rejects.toThrow('reconciliation')
+    const recovered = new ExecutionReceiptStore(path)
+    await recovered.load()
+    expect(recovered.get('pending-499')?.ok).toBe(false)
+    // Only a confirmed completion releases an unresolved slot, never age/eviction.
+    const completion = store.set('pending-0', { callId: 'pending-0', ok: true, content: 'confirmed' })
+    await expect(store.begin('too-early', 'too-early')).rejects.toThrow('reconciliation')
+    await completion
+    await store.begin('new-call', 'new-call')
+    expect(store.get('new-call')?.ok).toBe(false)
+  })
+
+  it('rejects a malformed journal without installing a partial cache or overwriting evidence', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'ak-receipts-invalid-'))
+    const path = join(dir, 'receipts.json')
+    const text = JSON.stringify({
+      completed: { completedAt: Date.now(), result: { callId: 'completed', ok: true, content: 'done' } },
+      unresolved: { startedAt: 1 },
+    })
+    await writeFile(path, text)
+    const store = new ExecutionReceiptStore(path)
+    await expect(store.load()).rejects.toThrow('invalid execution receipt journal entry')
+    expect(store.get('completed')).toBeUndefined()
+    expect(await readFile(path, 'utf8')).toBe(text)
+  })
+
+  it('releases failed pre-run admission so a later healthy commit cannot strand false unknown calls', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'ak-receipts-admission-failure-'))
+    const blocked = join(dir, 'blocked-parent')
+    await writeFile(blocked, 'fixture')
+    const path = join(blocked, 'receipts.json')
+    const store = new ExecutionReceiptStore(path)
+    await expect(store.begin('not-started', 'not-started')).rejects.toBeDefined()
+    expect(store.get('not-started')).toBeUndefined()
+    await unlink(blocked)
+    await store.begin('healthy', 'healthy')
+    const recovered = new ExecutionReceiptStore(path)
+    await recovered.load()
+    expect(recovered.get('not-started')).toBeUndefined()
+    expect(recovered.get('healthy')?.ok).toBe(false)
+  })
+
 })

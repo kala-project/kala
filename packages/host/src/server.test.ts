@@ -406,6 +406,62 @@ describe('wire protocol', () => {
         requestId: 'cross-session-subscription', generation: 1, channels: ['session:ticket-session-b'],
       })
       expect(deniedChannels).toMatchObject({ ok: false, error: 'session_route_mismatch' })
+      const rename = vi.spyOn(server.store, 'rename')
+      const command = { sessionId: routedSessionId, operationId: 'target-rename-command', label: '  Routed label  ' }
+      const applied = await dashboard.timeout(1_000).emitWithAck('client:rename_session', command)
+      expect(applied).toEqual({ ok: true, value: 'Routed label' })
+      expect(await dashboard.timeout(1_000).emitWithAck('client:rename_session', command)).toEqual(applied)
+      expect(rename).toHaveBeenCalledTimes(1)
+      expect(await dashboard.timeout(1_000).emitWithAck('client:rename_session', { ...command, label: 'Conflicting label' }))
+        .toMatchObject({ ok: false, error: expect.stringContaining('different payload') })
+      expect(server.store.get(routedSessionId)?.label).toBe('Routed label')
+      expect(await dashboard.timeout(1_000).emitWithAck('client:update_preferences', {
+        sessionId: routedSessionId, operationId: 'target-preferences-command', preferences: { toolCardMode: 'dots' },
+      })).toEqual({ ok: true })
+      expect(server.store.get(routedSessionId)?.preferences.toolCardMode).toBe('dots')
+      expect(await dashboard.timeout(1_000).emitWithAck('client:delete_session', {
+        sessionId: routedSessionId, operationId: 'target-delete-command',
+      })).toEqual({ ok: true })
+      expect(server.store.get(routedSessionId)).toBeUndefined()
+      rename.mockRestore()
+    } finally { dashboard.close() }
+  })
+
+  it.each([false, true])('keeps new Dedicated ingress command scope distinct from legacy Portable (scoped=%s)', async (scoped) => {
+    await server.close()
+    let ownerCurrent = true
+    server = await startHostServer({
+      port: 0, sessionsDir: dir, llm: scriptedLlm(), defaultConfig: config,
+      ...(scoped ? { deployment: DEDICATED_DEPLOYMENT } : {}),
+      assertSessionEffectOwner: async () => { if (!ownerCurrent) throw new Error('fixture owner moved') },
+    })
+    await server.store.create({ sessionId: 'direct-target', config, organizationId: 'org_fixture' })
+    await server.store.create({ sessionId: 'other-target', config, organizationId: 'org_fixture' })
+    const dashboard: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(`http://localhost:${server.port}/dashboard`, {
+      transports: ['websocket'], reconnection: false,
+      auth: { sessionId: 'direct-target', role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+      extraHeaders: {
+        'x-agent-runlab-principal': 'fixture-owner',
+        'x-agent-runlab-organization-id': 'org_fixture',
+        'x-agent-runlab-organization-role': 'owner',
+      },
+    })
+    try {
+      await new Promise<SessionReadyEvent>((resolve, reject) => {
+        dashboard.once('session:ready', resolve); dashboard.once('connect_error', reject)
+      })
+      expect(await dashboard.timeout(1_000).emitWithAck('client:rename_session', {
+        sessionId: 'direct-target', operationId: 'direct-rename', label: 'Scoped label',
+      })).toEqual({ ok: true, value: 'Scoped label' })
+      const crossTarget = await dashboard.timeout(1_000).emitWithAck('client:update_preferences', {
+        sessionId: 'other-target', operationId: 'other-preferences', preferences: { toolCardMode: 'dots' },
+      })
+      expect(crossTarget).toEqual(scoped ? { ok: false, error: 'session_route_mismatch' } : { ok: true })
+      ownerCurrent = false
+      expect(await dashboard.timeout(1_000).emitWithAck('client:update_preferences', {
+        sessionId: 'direct-target', operationId: 'stale-preferences', preferences: { toolCardMode: 'dots' },
+      })).toEqual({ ok: false, error: 'fixture owner moved' })
+      expect(server.store.get('direct-target')?.preferences.toolCardMode).not.toBe('dots')
     } finally { dashboard.close() }
   })
 

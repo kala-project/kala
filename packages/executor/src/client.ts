@@ -43,7 +43,7 @@ import { loadOrCreateWorkspaceId } from './workspace-id.js'
 import { collectIpAddresses, normalizeOs } from './announce-info.js'
 import { subscribeBackgroundTasks } from './tools/background-shell.js'
 import { createTerminalManager } from './terminal-manager.js'
-import { ExecutionReceiptStore } from './execution-receipts.js'
+import { ExecutionReceiptStore, unknownExecutionResult } from './execution-receipts.js'
 import type { RuntimeLogger } from './logger.js'
 import { executorReleaseVersion } from './build-info.js'
 import { failureForToolError } from './tool-failure.js'
@@ -168,9 +168,12 @@ export type ExecutorSharedExecution = {
 
 export function createExecutorSharedExecution(receiptStorePath: string | false): ExecutorSharedExecution {
   const receiptStore = receiptStorePath === false ? null : new ExecutionReceiptStore(receiptStorePath)
+  const receiptStoreReady = receiptStore?.load() ?? Promise.resolve()
+  // Retain the rejection for admission without an unhandled startup rejection.
+  void receiptStoreReady.catch(() => undefined)
   return {
     receiptStore,
-    receiptStoreReady: receiptStore?.load() ?? Promise.resolve(),
+    receiptStoreReady,
     completedCalls: new Map(),
     inFlight: new Map(),
     inFlightAcks: new Map(),
@@ -422,9 +425,25 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
   socket.on('tool:call', async (payload: ToolCallMessage, ack) => {
     const internal = payload.name.startsWith('__')
     // Internal control-plane reads must never depend on a writable workspace
-    // receipt directory. Agent tools keep the durable exactly-once barrier.
-    if (!internal) await receiptStoreReady
+    // receipt directory. Ordinary tools require a durable replay barrier.
+    if (!internal) {
+      try {
+        await receiptStoreReady
+      } catch (error) {
+        logger.warn({ err: error, sessionId: payload.sessionId, callId: payload.callId, tool: payload.name }, 'tool admission durability failed')
+        ack({ callId: payload.callId, ok: false, content: 'ERROR: EDURABILITY: execution journal is unavailable; tool was not started' })
+        return
+      }
+    }
     const key = receiptKey(payload.sessionId, payload.callId)
+    // A started record is unknown after process recovery, not while a surviving
+    // runner owns this call. Replica sockets must wait for that runner's result.
+    if (inFlight.has(key)) {
+      const waiters = inFlightAcks.get(key) ?? []
+      waiters.push(ack)
+      inFlightAcks.set(key, waiters)
+      return
+    }
     const cached = completedCalls.get(key) ?? (!internal ? receiptStore?.get(key) : undefined)
     if (cached) {
       logger.debug({ sessionId: payload.sessionId, callId: payload.callId, tool: payload.name }, 'tool result served from execution cache')
@@ -436,35 +455,31 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
       ack({ callId: payload.callId, ok: false, content: 'ERROR: EBUSY: executor is draining for a managed update; retry after reconnect' })
       return
     }
-    if (inFlight.has(key)) {
-      const waiters = inFlightAcks.get(key) ?? []
-      waiters.push(ack)
-      inFlightAcks.set(key, waiters)
-      return
-    }
-
     const controller = new AbortController()
     inFlight.set(key, controller)
     localInFlight.add(key)
     inFlightAcks.set(key, [ack])
     const started = performance.now()
     const desktopCall = payload.name === 'computer_use' || payload.name === '__computer_use'
-    logger.info({ sessionId: payload.sessionId, callId: payload.callId, tool: payload.name, internal, ...(!desktopCall && !knownMcpToolNames.has(payload.name) ? { input: safeToolInput(payload.input) } : {}), ...(payload.cwd ? { cwd: payload.cwd } : {}) }, 'tool execution started')
-    const rawResult = await runOne(tools, sandbox, controller.signal, payload, overflowConfig, options.networkPolicy, async (event) => {
-      await new Promise<void>((resolve, reject) => socket.timeout(5_000).emit('executor:network_audit', event, (error, result) => error || !result?.accepted ? reject(error ?? new Error('network audit rejected')) : resolve()))
-    })
-    const result = { ...rawResult, durationMs: Math.max(0, Math.round(performance.now() - started)) }
-    let replyResult = result
+    let executionStarted = false
+    let replyResult: ToolResultAck = unknownExecutionResult(payload.callId)
     try {
+      if (!internal) await receiptStore?.begin(key, payload.callId)
+      executionStarted = true
+      logger.info({ sessionId: payload.sessionId, callId: payload.callId, tool: payload.name, internal, ...(!desktopCall && !knownMcpToolNames.has(payload.name) ? { input: safeToolInput(payload.input) } : {}), ...(payload.cwd ? { cwd: payload.cwd } : {}) }, 'tool execution started')
+      const rawResult = await runOne(tools, sandbox, controller.signal, payload, overflowConfig, options.networkPolicy, async (event) => {
+        await new Promise<void>((resolve, reject) => socket.timeout(5_000).emit('executor:network_audit', event, (error, result) => error || !result?.accepted ? reject(error ?? new Error('network audit rejected')) : resolve()))
+      })
+      const result = { ...rawResult, durationMs: Math.max(0, Math.round(performance.now() - started)) }
+      replyResult = result
       if (!internal) await receiptStore?.set(key, result)
       if (payload.name !== '__computer_use') rememberCompleted(key, result)
     } catch (error) {
-      logger.warn({ err: error, sessionId: payload.sessionId, callId: payload.callId, tool: payload.name, durationMs: result.durationMs }, 'tool result durability failed; returning an explicit failure instead of timing out')
-      replyResult = {
+      logger.warn({ err: error, sessionId: payload.sessionId, callId: payload.callId, tool: payload.name, executionStarted }, 'tool execution durability failed; returning an explicit outcome instead of timing out')
+      replyResult = executionStarted ? unknownExecutionResult(payload.callId) : {
         callId: payload.callId,
         ok: false,
-        content: `ERROR: EDURABILITY: tool completed but its execution receipt could not be persisted: ${error instanceof Error ? error.message : String(error)}`,
-        durationMs: result.durationMs,
+        content: 'ERROR: EDURABILITY: started execution intent could not be persisted; tool was not started',
       }
       rememberCompleted(key, replyResult)
     } finally {
@@ -472,7 +487,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
       localInFlight.delete(key)
       const waiters = inFlightAcks.get(key) ?? []
       inFlightAcks.delete(key)
-      logger.info({ sessionId: payload.sessionId, callId: payload.callId, tool: payload.name, internal, ok: replyResult.ok, durationMs: result.durationMs, resultBytes: Buffer.byteLength(replyResult.content, 'utf8') }, 'tool execution completed')
+      logger.info({ sessionId: payload.sessionId, callId: payload.callId, tool: payload.name, internal, ok: replyResult.ok, durationMs: replyResult.durationMs, resultBytes: Buffer.byteLength(replyResult.content, 'utf8') }, 'tool execution completed')
       for (const reply of waiters) reply(replyResult)
     }
   })

@@ -247,68 +247,72 @@ integrationDescribe('Private Cloud PostgreSQL scheduled task store', () => {
     const first = new PostgresScheduledTaskStore(databaseA.database, organizationId, parallelOptions(ensureA, activeA))
     const second = new PostgresScheduledTaskStore(databaseB.database, organizationId, parallelOptions(ensureB, activeB))
     await first.start(unitId)
-    await second.start(unitId)
-    const legacy = new PostgresScheduledTaskStore(makeDatabase('parallel-legacy-conflict').database, organizationId)
-    await expect(legacy.start(unitId)).rejects.toBeInstanceOf(ScheduledTaskLeaseHeldError)
-
-    const [taskA, taskB] = await Promise.all([
-      first.create({ ownerKey: `organization:${organizationId}`, createdBy: 'alice', prompt: 'owned by a',
-        target: { kind: 'session', sessionId: sessionA }, schedule: { kind: 'once', at: '2038-01-01T00:01:00.000Z' } }),
-      second.create({ ownerKey: `organization:${organizationId}`, createdBy: 'bob', prompt: 'owned by b',
-        target: { kind: 'session', sessionId: sessionB }, schedule: { kind: 'once', at: '2038-01-01T00:01:00.000Z' } }),
-    ])
-    now = new Date('2038-01-01T00:02:00.000Z')
-    expect((await first.due(10)).map((task) => task.id)).toEqual([taskA.id])
-    expect((await second.due(10)).map((task) => task.id)).toEqual([taskB.id])
-    const [runA, runB] = await Promise.all([
-      first.claim(taskA.id, taskA.nextRunAt!),
-      second.claim(taskB.id, taskB.nextRunAt!),
-    ])
-    await Promise.all([
-      first.finish(runA!.occurrenceId, 'enqueued', { sessionId: sessionA }),
-      second.finish(runB!.occurrenceId, 'enqueued', { sessionId: sessionB }),
-    ])
-    expect((await second.history(taskA.ownerKey, taskA.id))?.[0]).toMatchObject({ status: 'enqueued' })
-
-    const takeoverTask = await first.create({ ownerKey: taskA.ownerKey, createdBy: 'alice', prompt: 'recover safely',
-      target: { kind: 'session', sessionId: sessionA }, schedule: { kind: 'once', at: '2038-01-01T00:03:00.000Z' } })
-    now = new Date('2038-01-01T00:04:00.000Z')
-    const uncertain = await first.claim(takeoverTask.id, takeoverTask.nextRunAt!)
-    await databaseA.database.query(`UPDATE scheduled_task_writer_leases
-      SET expires_at = clock_timestamp() - interval '1 millisecond'
-      WHERE namespace = $1 AND unit_id = $2`, [organizationId, unitId])
-    await ownerDbA.releaseResourceOwner(activeA.get(sessionA)!)
-    activeA.delete(sessionA)
-    expect(await second.claimedRuns()).toEqual([expect.objectContaining({ occurrenceId: uncertain!.occurrenceId })])
-    expect(activeB.get(sessionA)?.replicaId).toBe(replicaB.replicaId)
-    await first.close()
-    await second.close()
-
     let deliveries = 0
-    const replacement = new PostgresScheduledTaskStore(databaseB.database, organizationId, parallelOptions(ensureB, activeB))
-    const scheduler = new UnitScheduler(replacement, {
+    const scheduler = new UnitScheduler(second, {
       async validate() {},
       async receipt() { return 'unknown' },
       async enqueueSession() { deliveries += 1 },
       async createWorkspaceSession() { deliveries += 1 },
     }, { unitId, pollMs: 60_000 })
-    await scheduler.start()
-    expect(deliveries).toBe(0)
-    expect((await replacement.history(takeoverTask.ownerKey, takeoverTask.id))?.[0]).toMatchObject({
-      occurrenceId: uncertain!.occurrenceId, status: 'needs_review',
-    })
-    const legacyWhileShared = new PostgresScheduledTaskStore(makeDatabase('parallel-old-writer').database, organizationId)
-    await expect(legacyWhileShared.start(unitId)).rejects.toBeInstanceOf(ScheduledTaskLeaseHeldError)
-    await scheduler.stop()
+    try {
+      await scheduler.start()
+      const legacy = new PostgresScheduledTaskStore(makeDatabase('parallel-legacy-conflict').database, organizationId)
+      await expect(legacy.start(unitId)).rejects.toBeInstanceOf(ScheduledTaskLeaseHeldError)
 
-    const probe = new PostgresScheduledTaskStore(databaseA.database, organizationId, parallelOptions(ensureB, activeB))
-    await probe.start(unitId)
-    await expect(databaseA.database.query(`DELETE FROM tenant_runtime_unit_protocol_gates
-      WHERE organization_id = $1 AND unit_id = $2`, [organizationId, unitId]))
-      .rejects.toMatchObject({ code: '55006' })
-    expect((await probe.listTasks(taskA.ownerKey)).map((task) => task.id))
-      .toEqual(expect.arrayContaining([taskA.id, takeoverTask.id]))
-    await probe.close()
+      const [taskA, taskB] = await Promise.all([
+        first.create({ ownerKey: `organization:${organizationId}`, createdBy: 'alice', prompt: 'owned by a',
+          target: { kind: 'session', sessionId: sessionA }, schedule: { kind: 'once', at: '2038-01-01T00:01:00.000Z' } }),
+        second.create({ ownerKey: `organization:${organizationId}`, createdBy: 'bob', prompt: 'owned by b',
+          target: { kind: 'session', sessionId: sessionB }, schedule: { kind: 'once', at: '2038-01-01T00:01:00.000Z' } }),
+      ])
+      now = new Date('2038-01-01T00:02:00.000Z')
+      expect((await first.due(10)).map((task) => task.id)).toEqual([taskA.id])
+      expect((await second.due(10)).map((task) => task.id)).toEqual([taskB.id])
+      const [runA, runB] = await Promise.all([
+        first.claim(taskA.id, taskA.nextRunAt!),
+        second.claim(taskB.id, taskB.nextRunAt!),
+      ])
+      await Promise.all([
+        first.finish(runA!.occurrenceId, 'enqueued', { sessionId: sessionA }),
+        second.finish(runB!.occurrenceId, 'enqueued', { sessionId: sessionB }),
+      ])
+      expect((await second.history(taskA.ownerKey, taskA.id))?.[0]).toMatchObject({ status: 'enqueued' })
+
+      const takeoverTask = await first.create({ ownerKey: taskA.ownerKey, createdBy: 'alice', prompt: 'recover safely',
+        target: { kind: 'session', sessionId: sessionA }, schedule: { kind: 'once', at: '2038-01-01T00:03:00.000Z' } })
+      now = new Date('2038-01-01T00:04:00.000Z')
+      const uncertain = await first.claim(takeoverTask.id, takeoverTask.nextRunAt!)
+      await databaseA.database.query(`UPDATE scheduled_task_writer_leases
+        SET expires_at = clock_timestamp() - interval '1 millisecond'
+        WHERE namespace = $1 AND unit_id = $2`, [organizationId, unitId])
+      await ownerDbA.releaseResourceOwner(activeA.get(sessionA)!)
+      activeA.delete(sessionA)
+      await first.close()
+
+      // This scheduler was already serving before the claim and owner loss. Do
+      // not restart it or manually reconcile claims to make takeover succeed.
+      await scheduler.tick()
+      expect(deliveries).toBe(0)
+      expect((await second.history(takeoverTask.ownerKey, takeoverTask.id))?.[0]).toMatchObject({
+        occurrenceId: uncertain!.occurrenceId, operationId: uncertain!.operationId, status: 'needs_review',
+      })
+      expect(activeB.get(sessionA)?.replicaId).toBe(replicaB.replicaId)
+      const legacyWhileShared = new PostgresScheduledTaskStore(makeDatabase('parallel-old-writer').database, organizationId)
+      await expect(legacyWhileShared.start(unitId)).rejects.toBeInstanceOf(ScheduledTaskLeaseHeldError)
+      await scheduler.stop()
+
+      const probe = new PostgresScheduledTaskStore(databaseA.database, organizationId, parallelOptions(ensureB, activeB))
+      await probe.start(unitId)
+      await expect(databaseA.database.query(`DELETE FROM tenant_runtime_unit_protocol_gates
+        WHERE organization_id = $1 AND unit_id = $2`, [organizationId, unitId]))
+        .rejects.toMatchObject({ code: '55006' })
+      expect((await probe.listTasks(taskA.ownerKey)).map((task) => task.id))
+        .toEqual(expect.arrayContaining([taskA.id, takeoverTask.id]))
+      await probe.close()
+    } finally {
+      await scheduler.stop()
+      await first.close()
+    }
   }, 30_000)
 
   it('rejects a parallel-v1 client while a legacy writer is live', async () => {

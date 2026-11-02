@@ -124,6 +124,7 @@ export function createPublicApiHandler(deps: PublicApiDependencies) {
       }
       if (scheduledActionMatch && (scheduledActionMatch[2] === 'pause' || scheduledActionMatch[2] === 'resume') && request.method === 'POST') {
         requireWrite(actor); requireScheduledTasks(deps)
+        await requireScheduleMutation(deps, actor, decodePath(scheduledActionMatch[1]!), scheduledActionMatch[2] === 'pause')
         const task = await deps.scheduledTasks.pause(actor, decodePath(scheduledActionMatch[1]!), scheduledActionMatch[2] === 'pause')
         sendJson(response, 200, { task: publicScheduledTask(task) })
         return true
@@ -137,12 +138,14 @@ export function createPublicApiHandler(deps: PublicApiDependencies) {
       }
       if (scheduledTaskMatch && request.method === 'PATCH') {
         requireWrite(actor); requireScheduledTasks(deps)
+        await requireScheduleMutation(deps, actor, decodePath(scheduledTaskMatch[1]!))
         const task = await deps.scheduledTasks.update(actor, decodePath(scheduledTaskMatch[1]!), validateScheduledTaskPatch(await readJson(request)))
         sendJson(response, 200, { task: publicScheduledTask(task) })
         return true
       }
       if (scheduledTaskMatch && request.method === 'DELETE') {
         requireWrite(actor); requireScheduledTasks(deps)
+        await requireScheduleMutation(deps, actor, decodePath(scheduledTaskMatch[1]!), true)
         if (!await deps.scheduledTasks.delete(actor, decodePath(scheduledTaskMatch[1]!))) throw new ApiHttpError(404, 'not_found', 'scheduled task not found')
         response.writeHead(204); response.end()
         return true
@@ -415,6 +418,17 @@ function requiredOperationId(value: string | string[] | undefined): string {
 
 function requireWrite(actor: PublicApiActor): void {
   if (!actor.canWrite) throw new ApiHttpError(403, 'forbidden', 'workspace:write scope is required')
+}
+
+async function requireScheduleMutation(deps: PublicApiDependencies, actor: PublicApiActor, id: string, revoking = false): Promise<void> {
+  requireScheduledTasks(deps)
+  const task = await deps.scheduledTasks.get(actor, id)
+  if (!task) throw new ApiHttpError(404, 'not_found', 'scheduled task not found')
+  // Administrative revocation may reduce authority, not rewrite or reactivate
+  // another principal's delegated program. Create a new task under your identity.
+  if (task.createdBy !== actor.principal && !(revoking && (actor.role === 'owner' || actor.role === 'admin'))) {
+    throw new ApiHttpError(403, 'forbidden', 'only the original principal may change or resume delegated work')
+  }
 }
 
 function requireScheduledTasks(deps: PublicApiDependencies): asserts deps is PublicApiDependencies & { scheduledTasks: NonNullable<PublicApiDependencies['scheduledTasks']> } {

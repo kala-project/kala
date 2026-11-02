@@ -1,3 +1,4 @@
+import { BackgroundAuthorizationError } from './authorization.js'
 import { createHash } from 'node:crypto'
 
 import type { ScheduledTaskStorage } from './store.js'
@@ -25,7 +26,12 @@ export class UnitScheduler {
     await this.store.start(this.options.unitId)
     try {
       this.stopped = false
-      await this.recoverClaims()
+      try { await this.recoverClaims() } catch (error) {
+        // Control service may start after Runtime readiness. Preserve claims,
+        // but never start work without an affirmative current decision.
+        if (!(error instanceof BackgroundAuthorizationError) || error.reason !== 'unavailable') throw error
+        this.reportError(error)
+      }
       await this.tick()
     } catch (error) {
       this.stopped = true
@@ -56,6 +62,10 @@ export class UnitScheduler {
   }
 
   private async runTick(): Promise<void> {
+    // Ownership can move to an already-running replica. Claimed occurrences
+    // have advanced nextRunAt, so a due-only scan can never recover them.
+    await this.recoverClaims()
+    if (this.stopped) return
     const due = await this.store.due(this.options.catchupLimit ?? 10)
     for (const task of due) {
       if (this.stopped || !task.nextRunAt) break
@@ -66,13 +76,10 @@ export class UnitScheduler {
 
   private async recoverClaims(): Promise<void> {
     for (const run of await this.store.claimedRuns()) {
+      if (this.stopped) break
       const task = run.task
-      try {
-        await this.executor.validate(task)
-      } catch (error) {
-        await this.store.finish(run.occurrenceId, 'failed', { error: redact(error) })
-        continue
-      }
+      // A receipt describes past admission. Current target availability must
+      // not turn a confirmed admission into a failure or erase uncertainty.
       let receipt: OccurrenceReceipt
       try {
         receipt = await this.executor.receipt(run, task)
@@ -87,13 +94,18 @@ export class UnitScheduler {
   }
 
   private async execute(run: ScheduledRun): Promise<void> {
+    if (this.stopped) return
     const task = run.task
     try {
       await this.executor.validate(task)
     } catch (error) {
+      if (error instanceof BackgroundAuthorizationError && error.reason === 'unavailable') throw error
       await this.store.finish(run.occurrenceId, 'failed', { error: redact(error) })
       return
     }
+    // stop() may have begun while validation was awaiting authority/Workspace.
+    // Leave the claim intact for a later owner instead of starting new work.
+    if (this.stopped) return
     const sessionId = task.target.kind === 'session' ? task.target.sessionId : occurrenceSessionId(run.occurrenceId)
     try {
       if (task.target.kind === 'session') {
@@ -103,6 +115,11 @@ export class UnitScheduler {
       }
       await this.store.finish(run.occurrenceId, 'enqueued', { sessionId })
     } catch (error) {
+      if (error instanceof BackgroundAuthorizationError) {
+        if (error.reason === 'unavailable') throw error
+        await this.store.finish(run.occurrenceId, 'failed', { error: redact(error) })
+        return
+      }
       // Admission may have been persisted before the failure. Do not declare an
       // uncertain side effect safely failed or issue a new operation identity.
       let receipt: OccurrenceReceipt = 'unknown'

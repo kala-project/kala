@@ -13,6 +13,8 @@ import { permits, type OrganizationAccess, type OrganizationStore } from '../org
 import { browserDeviceFromUserAgent, browserSessionTokenHash, isLive, type BrowserSession, type BrowserSessionStore } from '../auth/browser-session-store.js'
 import type { SessionSecretBox } from '../auth/session-secret-box.js'
 import type { EnterpriseSsoResolver } from '../auth/enterprise-sso.js'
+import { handleBackgroundAuthority } from './background-authority.js'
+import type { BackgroundAuthority } from '../organizations/background-authority.js'
 import { ServiceAccountInputError, type ServiceAccountService, type ServiceAccountScope } from '../api/service-accounts.js'
 import { enterpriseManagementOpenApi } from '../api/openapi.js'
 import type { RateLimiter } from '../governance/rate-limit.js'
@@ -198,6 +200,7 @@ export async function startRuntimeIngressGateway(options: {
   serviceAccounts?: ServiceAccountService
   rateLimiter?: RateLimiter
   socketRecheckMs?: number
+  backgroundAuthority?: BackgroundAuthority
   provision?(unitId: string): Promise<void>
 }): Promise<RuntimeIngressGateway> {
   const recheckMs = options.socketRecheckMs ?? 15_000
@@ -1037,6 +1040,11 @@ export async function startRuntimeIngressGateway(options: {
     proxy.web(request, response, { target: runtimeOrigin, ...(replayBody ? { buffer: Readable.from(replayBody) } : {}) }, () => { if (!response.headersSent) response.writeHead(502); response.end() })
   }
   const http = createServer((request, response) => {
+    // Service-authenticated endpoint, never a browser-cookie or Runtime proxy route.
+    if (request.url?.split('?')[0] === '/internal/background-authority') {
+      void handleBackgroundAuthority(request, response, options.ingressSecret, options.backgroundAuthority)
+      return
+    }
     const access = validatePublicRequest(publicUrls!, request.headers.host, typeof request.headers.origin === 'string' ? request.headers.origin : undefined)
     if (!access.ok) {
       response.writeHead(access.status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })

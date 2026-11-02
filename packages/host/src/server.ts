@@ -127,6 +127,7 @@ import { resetCompactRuntime } from './extensions/compaction.js'
 import { StorageInventory } from './store/storage-inventory.js'
 import { SafeCleanupEngine } from './store/safe-cleanup.js'
 import { ScheduledTaskStore, type ScheduledTaskStorage } from './scheduled-tasks/store.js'
+import { BackgroundAuthorizationError, type ScheduledPrincipal, type ScheduledPrincipalAuthorizer } from './scheduled-tasks/authorization.js'
 import { occurrenceSessionId, UnitScheduler } from './scheduled-tasks/scheduler.js'
 import type { ScheduledTask, ScheduledTaskSnapshot } from './scheduled-tasks/types.js'
 
@@ -151,6 +152,7 @@ export type HostServerOptions = {
   dagStore?: DagStorage
   /** Scheduled-task authority. Omit to retain the local state.json backend. */
   scheduledTaskStore?: ScheduledTaskStorage
+  authorizeScheduledPrincipal?: ScheduledPrincipalAuthorizer
   /** Push subscription authority. Private Cloud must inject a tenant-scoped implementation. */
   pushStore?: PushSubscriptionStorage
   /** VAPID authority override. Pass null to explicitly disable push without generating local keys. */
@@ -344,6 +346,7 @@ export async function startHostServer(
   let detachPublicAccessGate: (() => void) | undefined
   let promptSynchronizationTimer: ReturnType<typeof setTimeout> | undefined
   let deletionRecoveryTimer: ReturnType<typeof setInterval> | undefined
+  let authorizationRetryTimer: ReturnType<typeof setInterval> | undefined
   let deletionRecoveryPass: Promise<void> | undefined
   const closeServer = async (): Promise<void> => {
     if (closed) return
@@ -355,6 +358,7 @@ export async function startHostServer(
     if (options.assertSessionEffectOwner) loop?.abortActiveEffects()
     if (promptSynchronizationTimer) clearTimeout(promptSynchronizationTimer)
     if (deletionRecoveryTimer) clearInterval(deletionRecoveryTimer)
+    if (authorizationRetryTimer) clearInterval(authorizationRetryTimer)
     if (deletionRecoveryPass) await deletionRecoveryPass
     detachPublicAccessGate?.()
     for (const batch of tokenDeltaBatches.values()) clearTimeout(batch.timer)
@@ -721,6 +725,7 @@ export async function startHostServer(
     operationId: requestedOperationId,
     mode = 'queue',
     content,
+    scheduledBy,
   }: {
     sessionId: string
     text: string
@@ -728,6 +733,7 @@ export async function startHostServer(
     operationId?: string
     mode?: 'queue' | 'steer'
     content?: readonly import('@agent-kernel/kernel').MessageContent[]
+    scheduledBy?: ScheduledPrincipal
   }): Promise<{ accepted?: boolean; committed: boolean; cursor?: number }> => {
     const operationId = requestedOperationId ?? ulid()
     let record = store.get(sessionId)
@@ -778,6 +784,7 @@ export async function startHostServer(
         mode,
         createdAt: new Date().toISOString(),
         ...(content ? { content } : {}),
+      ...(scheduledBy ? { scheduledBy } : {}),
         ...(effectiveModelForSession(sessionId) ? { model: effectiveModelForSession(sessionId) } : {}),
         ...(shell ? { shell: { ...shell, state: 'queued' as const } } : {}),
       }, mode === 'steer' ? 'front' : undefined, atomicAttachments ? 'atomic-attachments' : undefined)
@@ -806,6 +813,7 @@ export async function startHostServer(
       mode: effectiveMode,
       createdAt: new Date().toISOString(),
       ...(content ? { content } : {}),
+      ...(scheduledBy ? { scheduledBy } : {}),
       ...(shell ? { shell: { ...shell, state: 'queued' as const } } : {}),
     }, effectiveMode === 'steer' ? 'front' : undefined, atomicAttachments ? 'atomic-attachments' : undefined)
     if (effectiveMode === 'steer' && !isRestingStatus(record.state.status)) loop.requestStopAtBoundary(sessionId)
@@ -993,6 +1001,25 @@ export async function startHostServer(
   // A failed accepted operation is not an invitation to retry model/tool I/O.
   // Only a successfully persisted Stop clears the local suspension.
   const failedQueueDrains = new Map<string, string>()
+  const authorizationRetries = new Map<string, string>()
+  const retryBackgroundAuthorization = (sessionId: string, operationId: string): void => {
+    authorizationRetries.set(sessionId, operationId)
+    if (authorizationRetryTimer) return
+    authorizationRetryTimer = setInterval(() => {
+      if (closed) return
+      for (const [id, operation] of [...authorizationRetries].slice(0, 10)) {
+        authorizationRetries.delete(id)
+        if (failedQueueDrains.get(id) !== operation) continue
+        failedQueueDrains.delete(id)
+        void messageQueues.drain(id)
+      }
+      if (authorizationRetries.size === 0) {
+        clearInterval(authorizationRetryTimer)
+        authorizationRetryTimer = undefined
+      }
+    }, 5_000)
+    authorizationRetryTimer.unref?.()
+  }
   const queueLoads = new Map<string, Promise<PersistedMessageQueueState>>()
   const queueMutations = new Map<string, Promise<void>>()
 
@@ -1246,6 +1273,26 @@ export async function startHostServer(
     record: SessionRecord,
     claimed: QueuedUserMessage,
   ): Promise<{ text: string; operationId: string; content?: readonly import('@agent-kernel/kernel').MessageContent[] } | undefined> => {
+    const committedId = claimed.shell ? bangShellResultOperationId(claimed.operationId) : claimed.operationId
+    if ((claimed.scheduledBy || (deployment.architecture === 'platform' && claimed.operationId.startsWith('schedule_')))
+      && await sessionUserOperationCursor(store, sessionId, committedId) === undefined) {
+      try {
+        if (claimed.scheduledBy) {
+          if (record.organizationId !== claimed.scheduledBy.organizationId) throw new BackgroundAuthorizationError('denied')
+          await currentScheduledRole(claimed.scheduledBy)
+        } else if (deployment.architecture === 'platform' && claimed.operationId.startsWith('schedule_')) {
+          throw new BackgroundAuthorizationError('denied')
+        }
+        // Revocation checks are asynchronous; Stop/drain or owner loss may have
+        // invalidated this claim while control authority was being consulted.
+        if (closed || loop.isDraining() || !await isClaimedQueueHeadDispatchable(sessionId, claimed)) return undefined
+      } catch (error) {
+        // No shell/model was entered. Release the durable claim rather than
+        // manufacturing an unknown external effect on timeout or revocation.
+        await releaseQueueClaim(sessionId, claimed.id)
+        throw error
+      }
+    }
     if (!claimed.shell) {
       return { text: claimed.text, operationId: claimed.operationId, ...(claimed.content ? { content: claimed.content } : {}) }
     }
@@ -1452,6 +1499,7 @@ export async function startHostServer(
         if (index === -1) return
         const trimmed = text.trim()
         const current = queue[index]!
+        if (current.scheduledBy) throw new Error('Scheduled queue content is immutable; stop it and create a new operation')
         const nextContent = content ?? current.content
         const hasImages = nextContent?.some((part) => part.type === 'image') ?? false
         if (trimmed.length === 0 && !hasImages) return
@@ -1668,9 +1716,12 @@ export async function startHostServer(
         // this exact head, and isolate the failure from other Sessions/Units.
         const operationId = activeOperationId || queuedMessages.get(sessionId)?.[0]?.operationId || ''
         failedQueueDrains.set(sessionId, operationId)
+        if (error instanceof BackgroundAuthorizationError && error.reason === 'unavailable' && !closed) {
+          retryBackgroundAuthorization(sessionId, operationId)
+        }
         if (!closed) {
           console.warn('[queue] Session dispatch suspended', { sessionId, operationId, error: error instanceof Error ? error.name : 'unknown' })
-          broadcastError(sessionId, 'host', 'Session dispatch was suspended. The accepted operation is retained and will not be replayed automatically; inspect it or Stop before submitting a new operation.')
+          broadcastError(sessionId, 'host', error instanceof BackgroundAuthorizationError ? error.message : 'Session dispatch was suspended. The accepted operation is retained and will not be replayed automatically; inspect it or Stop before submitting a new operation.')
         }
       } finally {
         drainingQueues.delete(sessionId)
@@ -2157,18 +2208,31 @@ export async function startHostServer(
       if (!validation.ok) throw new Error(validation.reason)
     }
   }
-  const scheduledActor = (task: ScheduledTaskSnapshot): PublicApiActor => {
+  const currentScheduledRole = async (principal: ScheduledPrincipal): Promise<'owner' | 'admin' | 'member'> => {
+    if (options.authorizeScheduledPrincipal) return await options.authorizeScheduledPrincipal(principal)
+    if (deployment.architecture === 'platform') throw new BackgroundAuthorizationError('unavailable')
+    return 'member' // Existing Portable/local composition has no control plane.
+  }
+  const scheduledAttribution = (task: ScheduledTaskSnapshot): ScheduledPrincipal | undefined => {
+    if (!task.ownerKey.startsWith('organization:')) return undefined
+    const organizationId = task.ownerKey.slice('organization:'.length)
+    if (!organizationId) throw new BackgroundAuthorizationError('denied')
+    return { organizationId, principal: task.createdBy }
+  }
+  const scheduledActor = async (task: ScheduledTaskSnapshot): Promise<PublicApiActor> => {
     const organizationId = task.ownerKey.startsWith('organization:') ? task.ownerKey.slice('organization:'.length) : undefined
+    if (!organizationId && deployment.architecture === 'platform') throw new BackgroundAuthorizationError('denied')
+    const role = organizationId ? await currentScheduledRole({ organizationId, principal: task.createdBy }) : undefined
     return {
       principal: task.createdBy,
       canWrite: true,
-      ...(organizationId ? { organizationId, role: 'member' as const } : {}),
+      ...(organizationId && role ? { organizationId, role } : {}),
     }
   }
   const scheduledTaskStore = options.scheduledTaskStore ?? new ScheduledTaskStore(join(options.sessionsDir, '.scheduled-tasks'))
   scheduledTaskScheduler = new UnitScheduler(scheduledTaskStore, {
     async validate(task) {
-      await validateScheduledTarget(scheduledActor(task), task)
+      await validateScheduledTarget(await scheduledActor(task), task)
     },
     async receipt(run, task) {
       const sessionId = task.target.kind === 'session' ? task.target.sessionId : occurrenceSessionId(run.occurrenceId)
@@ -2181,18 +2245,20 @@ export async function startHostServer(
       return 'absent'
     },
     async enqueueSession(input) {
+      const actor = await scheduledActor(input.task)
       const organizationId = input.task.ownerKey.startsWith('organization:') ? input.task.ownerKey.slice('organization:'.length) : undefined
       if (options.queueQuota) {
         if (!organizationId) throw new Error('missing organization attribution for scheduled queue quota')
         await options.queueQuota.assertCanEnqueueMessage({
-          organizationId, principal: input.task.createdBy, role: 'member',
+          organizationId, principal: input.task.createdBy, role: actor.role ?? 'member',
           sessionId: input.sessionId, pendingMessages: messageQueues.pending(input.sessionId), mode: 'queue',
         })
       }
-      await enqueueUserMessage({ sessionId: input.sessionId, text: input.prompt, intent: 'text', operationId: input.operationId, mode: 'queue' })
+      await enqueueUserMessage({ sessionId: input.sessionId, text: input.prompt, intent: 'text', operationId: input.operationId, mode: 'queue', scheduledBy: scheduledAttribution(input.task) })
     },
     async createWorkspaceSession({ sessionId, task, operationId }) {
       if (task.target.kind !== 'workspace') throw new Error('invalid workspace occurrence target')
+      const actor = await scheduledActor(task)
       const target = task.target
       const executor = executors.snapshot().find((candidate) => candidate.workspaceId === target.workspaceId)
       if (!executor) throw new Error('workspace offline')
@@ -2205,23 +2271,23 @@ export async function startHostServer(
       const organizationId = task.ownerKey.startsWith('organization:') ? task.ownerKey.slice('organization:'.length) : undefined
       if (options.sessionQuota && !await loadApiRecord(sessionId)) {
         if (!organizationId) throw new Error('missing organization attribution for scheduled session quota')
-        await options.sessionQuota.assertCanCreateSession({ organizationId, principal: task.createdBy, role: 'member', sessionId })
+        await options.sessionQuota.assertCanCreateSession({ organizationId, principal: task.createdBy, role: actor.role ?? 'member', sessionId })
       }
       if (options.queueQuota) {
         if (!organizationId) throw new Error('missing organization attribution for scheduled queue quota')
         await options.queueQuota.assertCanEnqueueMessage({
-          organizationId, principal: task.createdBy, role: 'member', sessionId,
+          organizationId, principal: task.createdBy, role: actor.role ?? 'member', sessionId,
           pendingMessages: messageQueues.pending(sessionId), mode: 'queue',
         })
       }
       const config = deriveSessionConfig(mergeMcpTools(getDefaultConfig(organizationId
-        ? { kind: 'ingress', organizationId, principal: task.createdBy, role: 'member' }
+        ? { kind: 'ingress', organizationId, principal: task.createdBy, role: actor.role ?? 'member' }
         : undefined), mcpToolsForWorkspace(executors.snapshot(), target.workspaceId)), undefined, 'chat')
       const { record, created } = await store.ensure({
         sessionId, agentRuntime: 'kernel', executionMode: 'chat', defaultConfig: config, runtimeConfig: config,
         workspaceId: target.workspaceId,
         ...(target.workspaceName ? { workspaceName: target.workspaceName } : {}),
-        ...(organizationId ? { organizationId, principal: task.createdBy, organizationRole: 'member' as const } : {}),
+        ...(organizationId ? { organizationId, principal: task.createdBy, organizationRole: actor.role ?? 'member' } : {}),
         ...(cwd ? { initialCwd: cwd } : {}),
       })
       if (record.workspaceId !== target.workspaceId || (organizationId && record.organizationId !== organizationId)) throw new Error('scheduled occurrence Session conflict')
@@ -2229,7 +2295,7 @@ export async function startHostServer(
         await extensions.sessionCreated({ deps: loopDeps, record }).catch(() => undefined)
         scheduleSessionsBroadcast()
       }
-      await enqueueUserMessage({ sessionId, text: task.prompt, intent: 'text', operationId, mode: 'queue' })
+      await enqueueUserMessage({ sessionId, text: task.prompt, intent: 'text', operationId, mode: 'queue', scheduledBy: scheduledAttribution(task) })
     },
   }, { unitId: options.resourceUnitId ?? 'local', catchupLimit: 10 })
   publicApiHandler = createPublicApiHandler({
@@ -2479,6 +2545,7 @@ export async function startHostServer(
   })
 
   configureDashboardNamespace(dashboardNs, {
+    sessionScopedIngress: deployment.architecture === 'platform',
     store,
     loop,
     loopDeps,

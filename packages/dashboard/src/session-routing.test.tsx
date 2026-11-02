@@ -2,7 +2,7 @@ import { createElement } from 'react'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { createSessionWithAck, SessionInspectionContext, useDashboardControlSocket, useSession } from './session.js'
+import { createSessionWithAck, runSessionCommand, SessionInspectionContext, useDashboardControlSocket, useSession } from './session.js'
 import { useSubAgentSession } from './features/chat/useSubAgentSession.js'
 import { workspaceExec } from './lib/workspace-exec.js'
 
@@ -50,6 +50,139 @@ afterEach(() => {
   vi.unstubAllGlobals()
   sockets.length = 0
   socketOptions.length = 0
+})
+
+describe('target Session commands', () => {
+  it('waits for exact target readiness and keeps the ticket socket through the command ACK', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(routeResponse('target-ticket')))
+    const control = new FakeSocket()
+    let acknowledge!: (value: string) => void
+    const ack = new Promise<string>((resolve) => { acknowledge = resolve })
+    const command = vi.fn(() => ack)
+
+    const running = runSessionCommand({
+      host: window.location.origin,
+      sessionId: 'other-session',
+      sharedSocket: control as never,
+      sessionRouteTickets: true,
+    }, command as never)
+
+    await waitFor(() => expect(sockets).toHaveLength(1))
+    const target = sockets[0]!
+    expect(socketOptions[0]).toMatchObject({
+      query: { runtimeRouteTicket: 'target-ticket' },
+      auth: { sessionId: 'other-session' },
+      forceNew: true,
+      autoConnect: false,
+      reconnection: false,
+    })
+    act(() => target.serverEmit('connect'))
+    expect(command).not.toHaveBeenCalled()
+
+    act(() => target.serverEmit('session:ready', { sessionId: 'other-session' }))
+    await waitFor(() => expect(command).toHaveBeenCalledOnce())
+    expect(command).toHaveBeenCalledWith(target)
+    expect(target.closed).toBe(false)
+    act(() => target.serverEmit('session:ready', { sessionId: 'other-session' }))
+    await waitFor(() => expect(command).toHaveBeenCalledOnce())
+
+    acknowledge('renamed')
+    await expect(running).resolves.toBe('renamed')
+    expect(target.closed).toBe(true)
+    expect(control.emit).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['unavailable', new Response(JSON.stringify({ error: 'route_ticket_unavailable' }), { status: 404 })],
+    ['relocating', new Response(JSON.stringify({ error: 'session_relocating' }), { status: 503 })],
+  ])('rejects a %s route without falling back to the control socket', async (_kind, response) => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(response))
+    const control = new FakeSocket()
+    const command = vi.fn(async () => undefined)
+
+    await expect(runSessionCommand({
+      host: window.location.origin,
+      sessionId: 'unroutable',
+      sharedSocket: control as never,
+      sessionRouteTickets: true,
+    }, command as never)).rejects.toThrow()
+
+    expect(sockets).toHaveLength(0)
+    expect(command).not.toHaveBeenCalled()
+    expect(control.emit).not.toHaveBeenCalled()
+  })
+
+  it('opens a direct cookie-authenticated Dedicated Session without requesting a ticket', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+    vi.stubGlobal('fetch', fetchMock)
+    const control = new FakeSocket()
+    const command = vi.fn(async () => 'deleted')
+    const running = runSessionCommand({
+      host: window.location.origin,
+      sessionId: 'dedicated-target',
+      sharedSocket: control as never,
+      sessionScoped: true,
+    }, command as never)
+
+    expect(sockets).toHaveLength(1)
+    expect(socketOptions[0]).toMatchObject({
+      auth: { sessionId: 'dedicated-target' },
+      forceNew: true,
+      autoConnect: false,
+      reconnection: false,
+      transports: ['websocket'],
+      withCredentials: true,
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+    act(() => sockets[0]!.serverEmit('session:ready', { sessionId: 'dedicated-target' }))
+    await expect(running).resolves.toBe('deleted')
+    expect(sockets[0]!.closed).toBe(true)
+    expect(control.emit).not.toHaveBeenCalled()
+  })
+
+  it('closes owned command connections on wrong readiness, synchronous callback failure and disconnect before ACK', async () => {
+    const control = new FakeSocket()
+    const input = { host: window.location.origin, sessionId: 'target', sharedSocket: control as never, sessionScoped: true }
+    const wrongCommand = vi.fn(async () => undefined)
+    const wrong = runSessionCommand(input, wrongCommand)
+    sockets.at(-1)!.serverEmit('session:ready', { sessionId: 'wrong-target' })
+    await expect(wrong).rejects.toThrow('did not match')
+    expect(wrongCommand).not.toHaveBeenCalled()
+    expect(sockets.at(-1)!.closed).toBe(true)
+
+    const throwing = runSessionCommand(input, () => { throw new Error('fixture callback failure') })
+    const failing = sockets.at(-1)!
+    failing.serverEmit('session:ready', { sessionId: 'target' })
+    await expect(throwing).rejects.toThrow('fixture callback failure')
+    expect(failing.closed).toBe(true)
+    expect(failing.handlers.get('disconnect')).toHaveLength(0)
+
+    const command = vi.fn(() => new Promise<void>(() => {}))
+    const interrupted = runSessionCommand(input, command)
+    const interruptedSocket = sockets.at(-1)!
+    interruptedSocket.serverEmit('session:ready', { sessionId: 'target' })
+    await waitFor(() => expect(command).toHaveBeenCalledOnce())
+    interruptedSocket.serverEmit('disconnect', 'fixture transport loss')
+    await expect(interrupted).rejects.toThrow('fixture transport loss')
+    expect(interruptedSocket.closed).toBe(true)
+    expect(command).toHaveBeenCalledOnce()
+    expect(control.emit).not.toHaveBeenCalled()
+  })
+
+  it('uses the shared Portable socket without opening a target transport', async () => {
+    const control = new FakeSocket()
+    const command = vi.fn(async () => 'updated')
+
+    await expect(runSessionCommand({
+      host: window.location.origin,
+      sessionId: 'portable-target',
+      sharedSocket: control as never,
+    }, command as never)).resolves.toBe('updated')
+
+    expect(command).toHaveBeenCalledWith(control)
+    expect(sockets).toHaveLength(0)
+    expect(control.closed).toBe(false)
+  })
 })
 
 describe('routed Session hook', () => {
