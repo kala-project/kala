@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { observePostgresConnectionErrors, type PostgresConnectionErrorEvents } from '../postgres-connection-errors.js'
 
 import { tracePostgresQuery, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
 
@@ -14,7 +15,7 @@ export type SqlQueryResult<Row extends QueryResultRow = QueryResultRow> = {
   rowCount: number | null
 }
 type PgClient = HotStateSqlExecutor & { release(): void }
-type PgPool = HotStateSqlExecutor & { connect(): Promise<PgClient>; end(): Promise<void>; on(event: 'error', listener: (error: Error) => void): PgPool }
+type PgPool = HotStateSqlExecutor & { connect(): Promise<PgClient>; end(): Promise<void> } & PostgresConnectionErrorEvents
 const { Pool } = createRequire(import.meta.url)('pg') as {
   Pool: new (config: Record<string, unknown>) => PgPool
 }
@@ -346,11 +347,7 @@ export function createPostgresHotStateStore(options: {
     idleTimeoutMillis: 30_000,
     ...(options.ssl !== undefined ? { ssl: options.ssl } : {}),
   })
-  // pg emits 'error' for disconnected idle clients independently of query
-  // promises. Without a listener a network partition kills the entire Runtime
-  // before owner/membership renewal can suspend and fence only its Unit.
-  // pg evicts the broken client; subsequent queries still fail until restored.
-  pool.on('error', () => undefined)
+  observePostgresConnectionErrors(pool, 'hot-state')
   const placementTable = `${quoteIdentifier(options.schema ?? 'public')}.tenant_runtime_unit_placement_leases`
   const inTransaction = async <T>(operation: (transaction: HotStateSqlExecutor) => Promise<T>): Promise<T> => {
     const client = await pool.connect()

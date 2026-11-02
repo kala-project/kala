@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { observePostgresConnectionErrors, type PostgresConnectionErrorEvents } from '../postgres-connection-errors.js'
 
 import { tracePostgresQuery, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
 
@@ -14,7 +15,7 @@ export interface RuntimeUnitPlacementDatabase extends RuntimeUnitPlacementSqlExe
   connect(): Promise<PgClient>
   end(): Promise<void>
 }
-type PgPool = RuntimeUnitPlacementDatabase & { on(event: 'error', listener: (error: Error) => void): void }
+type PgPool = RuntimeUnitPlacementDatabase & PostgresConnectionErrorEvents
 const { Pool } = createRequire(import.meta.url)('pg') as { Pool: new (config: Record<string, unknown>) => PgPool }
 
 export type RuntimeUnitPlacementScope = {
@@ -351,8 +352,7 @@ export function createPostgresRuntimeUnitPlacementStore(options: {
     idleTimeoutMillis: 30_000,
     ...(options.ssl !== undefined ? { ssl: options.ssl } : {}),
   })
-  // Idle pg connections report partitions through EventEmitter, not query promises.
-  pool.on('error', () => undefined)
+  observePostgresConnectionErrors(pool, 'unit-placement')
   const database: RuntimeUnitPlacementDatabase = options.telemetry ? {
     query: (text, values) => tracePostgresQuery(options.telemetry, () => pool.query(text, values)),
     async connect() {

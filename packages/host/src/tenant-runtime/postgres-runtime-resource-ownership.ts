@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { observePostgresConnectionErrors, type PostgresConnectionErrorEvents } from '../postgres-connection-errors.js'
 
 import { tracePostgresQuery, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
 
@@ -18,7 +19,7 @@ export interface RuntimeResourceOwnershipDatabase extends RuntimeResourceOwnersh
 }
 
 const { Pool } = createRequire(import.meta.url)('pg') as {
-  Pool: new (config: Record<string, unknown>) => RuntimeResourceOwnershipDatabase & { on(event: 'error', listener: (error: Error) => void): void }
+  Pool: new (config: Record<string, unknown>) => RuntimeResourceOwnershipDatabase & PostgresConnectionErrorEvents
 }
 
 export type RuntimeUnitReplicaScope = {
@@ -387,8 +388,7 @@ export function createPostgresRuntimeResourceOwnershipStore(options: {
     idleTimeoutMillis: 30_000,
     ...(options.ssl !== undefined ? { ssl: options.ssl } : {}),
   })
-  // A partition can close an idle client before the owner renewal query runs.
-  pool.on('error', () => undefined)
+  observePostgresConnectionErrors(pool, 'resource-ownership')
   const database: RuntimeResourceOwnershipDatabase = options.telemetry ? {
     query: (text, values) => tracePostgresQuery(options.telemetry, () => pool.query(text, values)),
     async connect() {

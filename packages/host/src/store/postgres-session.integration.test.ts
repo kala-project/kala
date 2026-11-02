@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -113,6 +113,86 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     const repaired = await reader.hotState.database.query<{ version: string }>(`SELECT version
       FROM tenant_session_latest_projection WHERE tenant_id = $1 AND session_id = $2`, ['tenant-a', sessionId])
     expect(repaired.rows).toEqual([{ version: '4' }])
+  })
+
+  it('rejects a transaction whose checked-out connection dies between queries without crashing the Runtime', async () => {
+    const writer = makeAuthority('connection-gap-writer').hotState
+    const killer = makeAuthority('connection-gap-killer').hotState
+    await writer.database.query('CREATE TABLE connection_gap_probe (value integer NOT NULL)')
+    await expect(writer.database.transaction(async (transaction) => {
+      await transaction.query('INSERT INTO connection_gap_probe VALUES (1)')
+      const { rows } = await transaction.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+      await killer.database.query('SELECT pg_terminate_backend($1)', [rows[0]!.pid])
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      await transaction.query('SELECT 1')
+    })).rejects.toThrow()
+    const { rows } = await writer.database.query<{ count: string }>('SELECT count(*)::text AS count FROM connection_gap_probe')
+    expect(rows).toEqual([{ count: '0' }])
+  })
+
+  it('validates a tiny synthetic legacy mapping without modifying its JSONL source or dispatching effects', async () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), 'kala-synthetic-legacy-'))
+    roots.push(sourceRoot)
+    const source = new SessionStore(sourceRoot)
+    const sessionId = 'synthetic-legacy-mapping'
+    const record = await source.create({ sessionId, config, organizationId: 'org-a', workspaceId: 'workspace-a' })
+    const { logPath, memoryPolicy: _memoryPolicy, ...initialDocument } = structuredClone(record)
+    const events = [
+      { kind: 'user_message', text: 'synthetic only', operationId: 'legacy-request-1' },
+      {
+        kind: 'llm_response',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'synthetic response' }] },
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+    ] as const
+    for (const event of events) {
+      const transition = step(record.state, event, config)
+      await source.record(sessionId, event, transition.effects, transition.next)
+    }
+    await persistMessageQueueSnapshot(source, sessionId, [{
+      id: 'legacy-queue-1', operationId: 'legacy-queued-operation-1', text: 'not dispatched',
+      mode: 'queue', createdAt: '2026-10-30T00:00:00.000Z',
+    }], ['legacy-cancelled-operation-1'])
+    const sourceBytes = readFileSync(logPath)
+    const history = await source.readHistory(sessionId)
+    const queue = await loadPersistedMessageQueueState(source, sessionId)
+    const target = makeStore('synthetic-mapping-writer')
+    const mapFixture = async (): Promise<void> => {
+      await target.authority.create(initialDocument, 'synthetic-mapping:header')
+      let state = history.initialState
+      for (const entry of history.events) {
+        const transition = step(state, entry.event, history.config)
+        const next = transition.next
+        await target.authority.mutate(sessionId, {
+          mutationId: `synthetic-mapping:event:${entry.seq}`, eventType: 'session.imported_event', entry,
+          apply(current) {
+            if (!current) throw new Error('synthetic mapping lost its target header')
+            return { ...current, state: next, lastEventAt: entry.ts }
+          },
+        })
+        state = next
+      }
+      for (const [index, entry] of history.runtimeMetadata.entries()) {
+        await target.authority.mutate(sessionId, {
+          mutationId: `synthetic-mapping:metadata:${index}`, eventType: 'session.imported_metadata', entry,
+          apply: (current) => current,
+        })
+      }
+      await target.authority.messageQueue.loadOrInitialize(sessionId, async () => queue)
+    }
+    await mapFixture()
+    await mapFixture()
+    const reader = makeStore('synthetic-mapping-cold-reader')
+    const restored = await reader.store.load(sessionId, { recoverDangling: false })
+    expect(restored).toMatchObject({
+      sessionId, createdAt: record.createdAt, organizationId: 'org-a', workspaceId: 'workspace-a',
+      state: record.state, config: record.config, toolLock: record.toolLock,
+    })
+    expect(await reader.store.readHistory(sessionId)).toEqual(history)
+    expect(await reader.store.findOperation(sessionId, 'legacy-request-1')).toMatchObject({ kind: 'event', cursor: 1 })
+    expect(await reader.authority.messageQueue.load(sessionId)).toEqual(queue)
+    expect(readFileSync(logPath)).toEqual(sourceBytes)
+    expect(existsSync(reader.root)).toBe(false)
   })
 
   it('keeps long-Session audit growth proportional to deltas rather than repeated documents', async () => {

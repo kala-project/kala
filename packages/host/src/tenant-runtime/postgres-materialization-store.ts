@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { observePostgresConnectionErrors, type PostgresConnectionErrorEvents } from '../postgres-connection-errors.js'
 
 import type { RuntimeCapabilities } from '@agent-kernel/shared'
 import { tracePostgresQuery, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
@@ -11,7 +12,7 @@ type QueryResultRow = Record<string, unknown>
 type QueryResult<Row extends QueryResultRow = QueryResultRow> = { rows: Row[]; rowCount: number | null }
 type PgExecutor = { query<Row extends QueryResultRow = QueryResultRow>(text: string, values?: readonly unknown[]): Promise<QueryResult<Row>> }
 type PgClient = PgExecutor & { release(): void }
-type PgPool = PgExecutor & { connect(): Promise<PgClient>; end(): Promise<void>; on(event: 'error', listener: (error: Error) => void): void }
+type PgPool = PgExecutor & { connect(): Promise<PgClient>; end(): Promise<void> } & PostgresConnectionErrorEvents
 const { Pool } = createRequire(import.meta.url)('pg') as { Pool: new (config: Record<string, unknown>) => PgPool }
 
 type MaterializationRow = QueryResultRow & {
@@ -204,8 +205,7 @@ export function createPostgresRuntimeUnitMaterializationStore(options: {
     idleTimeoutMillis: 30_000,
     ...(options.ssl !== undefined ? { ssl: options.ssl } : {}),
   })
-  // pg emits idle connection errors outside outstanding operation promises.
-  pool.on('error', () => undefined)
+  observePostgresConnectionErrors(pool, 'unit-materialization')
   return new PostgresRuntimeUnitMaterializationStore(pool, {
     schema: options.schema,
     schemaManagement: options.schemaManagement,

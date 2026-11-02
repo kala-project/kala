@@ -13,11 +13,15 @@ const integrationDescribe = process.env.KALA_RUN_PRIVATE_CLOUD_STORAGE_INTEGRATI
 const nodeImage = 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392'
 const browserImage = 'ghcr.io/puppeteer/puppeteer@sha256:9665f5b57abc5cc7080a641878964018de219055a4d2c9d8d050ceb1161778ba'
 const siloImage = 'pgsty/silo@sha256:2636fc4155d9a7e41ff58cdb65ddd13ba9304e67184e13c25bc5cb34016269d7'
-const postgresImage = 'postgres:16-alpine'
+const postgresImage = 'postgres@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36'
 const parallelBarrier = 'kala-parallel-placement-barrier-v1'
 const parallelBarrierOrigin = 'https://parallel-placement-barrier.invalid'
+const acceptanceProduct = process.env.KALA_PARALLEL_ACCEPTANCE_PRODUCT ?? 'private-cloud'
+if (acceptanceProduct !== 'private-cloud' && acceptanceProduct !== 'dedicated') throw new Error('KALA_PARALLEL_ACCEPTANCE_PRODUCT must be private-cloud or dedicated')
+const dedicated = acceptanceProduct === 'dedicated'
+const deploymentPath = dedicated ? '/app/deploy/aspire/deployment.json' : '/app/deploy/private-cloud/deployment.json'
 
-integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () => {
+integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptance`, () => {
   const id = randomUUID()
   const project = `kala-pc-parallel-${id}`
   const network = `${project}-net`
@@ -30,7 +34,7 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
   const model = `${project}-model`
   const executor = `${project}-executor`
   const workspaceVolume = `${project}-workspace`
-  const containers = [executor, gateway, identity, runtimeA, runtimeB, model, silo, postgres]
+  const containers = [executor, gateway, ...(!dedicated ? [identity] : []), runtimeA, runtimeB, model, silo, postgres]
   const repository = resolve(import.meta.dirname, '../../../..')
   const ingressSecret = `ingress-${randomUUID()}-${randomUUID()}`
   const postgresPassword = `pg-${randomUUID()}`
@@ -39,17 +43,19 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
   const accessKeyId = `access-${randomUUID()}`
   const secretAccessKey = `secret-${randomUUID()}-${randomUUID()}`
   const database = 'kala_parallel_acceptance'
+  const controlDatabase = dedicated ? 'runlab_control' : database
   const bucket = 'kala-parallel-acceptance'
-  const unitId = `unit-${id}`
-  const organizationId = `org_${id}`
-  const principalId = `prn_${id}`
+  let unitId = `unit-${id}`
+  let organizationId = `org_${id}`
+  let principalId = `prn_${id}`
   const sessionX = `session-x-${id}`
   const sessionY = `session-y-${id}`
   const workspaceId = '01ARZ3NDEKTSV4RRFFQ69G5FAV'
   const marker = `parallel-executor-marker-${id}`
   const executorInvite = `ak_invite_${randomBytes(24).toString('base64url')}`
   const executorInviteId = `inv_${randomBytes(12).toString('base64url')}`
-  const browserToken = randomBytes(32).toString('base64url')
+  let browserToken = randomBytes(32).toString('base64url')
+  const ownerPassword = randomBytes(32).toString('base64url')
   const routingTicketKey = randomBytes(32).toString('base64url')
   const sessionSecret = `session-${randomUUID()}-${randomUUID()}`
   let gatewayReaderConnection = ''
@@ -60,6 +66,7 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
   let killedOwnerName: string | undefined
   let survivingOwnerName: string | undefined
   let receiptsBeforeRuntimeKill: ExecutionReceipts | undefined
+  let exportedArtifacts: ArtifactProof[] = []
 
   beforeAll(async () => {
     try {
@@ -106,6 +113,7 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
         await docker('exec', silo, 'mcli', 'alias', 'set', 'self', 'http://127.0.0.1:9000', accessKeyId, secretAccessKey)
       }, 30_000)
       await docker('exec', silo, 'mcli', 'mb', `self/${bucket}`)
+      if (dedicated) await initializeDedicatedClaims()
 
       await docker('exec', postgres, 'psql', '-U', 'postgres', '-d', database, '-v', 'ON_ERROR_STOP=1', '-c',
         `CREATE ROLE ${runtimeDatabaseRole} LOGIN PASSWORD '${runtimeDatabasePassword}'; REVOKE CREATE ON SCHEMA public FROM PUBLIC;`)
@@ -117,17 +125,20 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
       await docker('run', '--rm', '--network', network,
         '--mount', `type=bind,source=${repository},target=/app,readonly`,
         '--workdir', '/app/packages/runtime-ingress-gateway',
-        '--env', `KALA_INGRESS_DATABASE_URL=postgresql://postgres:${encodeURIComponent(postgresPassword)}@${postgres}:5432/${database}`,
+        '--env', `KALA_INGRESS_DATABASE_URL=postgresql://postgres:${encodeURIComponent(postgresPassword)}@${postgres}:5432/${controlDatabase}`,
         nodeImage, 'node', '--import', '/app/packages/host/node_modules/tsx/dist/loader.mjs', 'src/bin/migrate-control-plane.ts')
 
+      if (dedicated) await bootstrapDedicatedOwner()
       await installParallelGateAsOperator()
       await installGatewayAuthorityAndReader()
       await assertRuntimeCannotWriteGate()
       await startFakeOpenAi()
       await Promise.all([startRuntime(runtimeA), startRuntime(runtimeB)])
-      await startIdentityDiscovery()
+      if (dedicated) await Promise.all([provision(runtimeA, 'provision-unit'), provision(runtimeB, 'provision-unit')])
+      if (!dedicated) await startIdentityDiscovery()
       await startGateway()
-      await assertPrivateNetwork([postgres, silo, model, runtimeA, runtimeB, identity, gateway])
+      if (dedicated) await loginDedicatedOwner()
+      await assertPrivateNetwork([postgres, silo, model, runtimeA, runtimeB, ...(!dedicated ? [identity] : []), gateway])
       runtimeEvidence.push(await runtimeIdentity(runtimeA), await runtimeIdentity(runtimeB))
       expect(runtimeEvidence[0]?.pid).toBeGreaterThan(1)
       expect(runtimeEvidence[1]?.pid).toBeGreaterThan(1)
@@ -143,6 +154,10 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
   afterAll(async () => {
     if (!setupStarted) return
     const failures: string[] = []
+    const chromium = `${project}-chromium`
+    if (await dockerResourceExists('container', chromium)) {
+      await docker('rm', '--force', chromium).catch((error) => failures.push(`container ${chromium}: ${errorMessage(error)}`))
+    }
     for (const name of containers) {
       await docker('rm', '--force', name).catch((error) => failures.push(`container ${name}: ${errorMessage(error)}`))
     }
@@ -178,7 +193,7 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
         ].sort())
       }, 10_000)
       await startExternalExecutor()
-      await assertPrivateNetwork([postgres, silo, model, runtimeA, runtimeB, identity, gateway, executor])
+      await assertPrivateNetwork([postgres, silo, model, runtimeA, runtimeB, ...(!dedicated ? [identity] : []), gateway, executor])
 
       const initial = await runBrowserJourney('initial') as InitialGatewayResult
       expect(initial).toEqual({
@@ -220,6 +235,25 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
         x: { sessionId: sessionX, toolResultFound: true },
         y: { sessionId: sessionY, toolResultFound: true },
       })
+      const objectRequestsBefore = await objectRequestCounts()
+      exportedArtifacts = await runBrowserJourney('exports') as ArtifactProof[]
+      expect(exportedArtifacts).toHaveLength(14)
+      let objectRequestsAfter = objectRequestsBefore
+      await eventually(async () => {
+        objectRequestsAfter = await objectRequestCounts()
+        expect(objectRequestsAfter.put - objectRequestsBefore.put).toBe(exportedArtifacts.length)
+      }, 30_000)
+      console.info(`[parallel-object-workload] ${JSON.stringify({
+        product: acceptanceProduct, objects: exportedArtifacts.length,
+        bytes: exportedArtifacts.reduce((sum, artifact) => sum + artifact.bytes, 0),
+        putRequests: objectRequestsAfter.put - objectRequestsBefore.put,
+        getRequests: objectRequestsAfter.get - objectRequestsBefore.get,
+      })}`)
+      await measureWriteWorkload('two-runtime-short-history', 2)
+      expect(await runBrowserJourney('grow-history')).toEqual({ turns: 16 })
+      await measureWriteWorkload('two-runtime-extended-history', 2)
+      receiptsBeforeRuntimeKill = await executionReceipts()
+      expect(Object.keys(receiptsBeforeRuntimeKill)).toHaveLength(18)
     } catch (error) {
       await dumpLogs('Executor tool acceptance failure')
       throw error
@@ -280,6 +314,8 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
       killedOwnerName = xOwner
       survivingOwnerName = takeover
 
+      await docker('exec', xOwner, 'node', '--input-type=module', '--eval',
+        "import {writeFile} from 'node:fs/promises';await writeFile('/state/disposable-node-marker','must-not-survive')")
       await docker('kill', '--signal', 'KILL', xOwner)
       expect((await docker('inspect', '--format', '{{.State.Running}}', xOwner)).stdout.trim()).toBe('false')
 
@@ -302,6 +338,8 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
           }
         }, 15_000)
       }
+      expect(await runBrowserJourney('verify-exports')).toEqual({ verified: exportedArtifacts.length })
+      await measureWriteWorkload('one-runtime-extended-history', 1)
     } catch (error) {
       await dumpLogs('acceptance failure')
       throw error
@@ -311,12 +349,15 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
   it('fences the isolated owner after PostgreSQL network loss, takeover and restored connectivity', async () => {
     if (!killedOwnerName || !survivingOwnerName) throw new Error('SIGKILL prerequisite did not complete')
     try {
-      // Restart the killed replica with its ephemeral local state gone; the
+      // Recreate the killed replica with its ephemeral local state gone; the
       // logical Unit is reconstructed from the same versioned PG/S3 state.
-      await docker('start', killedOwnerName)
-      await eventually(async () => {
-        expect((await internalFetch(killedOwnerName!, '/internal/health')).status).toBe(200)
-      }, 20_000)
+      const previousIdentity = await runtimeIdentity(killedOwnerName)
+      await docker('rm', killedOwnerName)
+      await startRuntime(killedOwnerName)
+      const replacementIdentity = await runtimeIdentity(killedOwnerName)
+      expect(replacementIdentity.containerId).not.toBe(previousIdentity.containerId)
+      await docker('exec', killedOwnerName, 'node', '--input-type=module', '--eval',
+        "import {access} from 'node:fs/promises';try{await access('/state/disposable-node-marker');process.exitCode=1}catch(error){if(error.code!=='ENOENT')throw error}")
       await provision(killedOwnerName, 'provision-unit')
       await eventually(async () => {
         expect(await liveReplicaOrigins()).toEqual([
@@ -341,11 +382,101 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
       expect(await sessionOwner(sessionY)).toEqual({
         sessionId: sessionY, generation: 2, origin: `http://${killedOwnerName}:13002`,
       })
+      await runBrowserJourney('recover')
+      expect(await runBrowserJourney('verify-exports')).toEqual({ verified: exportedArtifacts.length })
     } catch (error) {
       await dumpLogs('network partition acceptance failure')
       throw error
     }
   }, 180_000)
+
+  it('does not publish a local success or a PG reference while S3 is unreachable', async () => {
+    const publicationCount = async (): Promise<number> => {
+      const { stdout } = await docker('exec', postgres, 'psql', '-U', 'postgres', '-d', database, '-A', '-t', '-c',
+        `SELECT count(*) FROM tenant_runtime_hot_events WHERE tenant_id='${organizationId}' AND event_type='session_artifact.registered'`)
+      return Number(stdout.trim())
+    }
+    const before = await publicationCount()
+    expect(before).toBe(exportedArtifacts.length)
+    await docker('network', 'disconnect', network, silo)
+    try {
+      await expect(runBrowserJourney('exports')).rejects.toThrow('Durable export failed')
+      expect(await publicationCount()).toBe(before)
+    } finally {
+      await docker('network', 'connect', network, silo)
+    }
+    expect(await runBrowserJourney('verify-exports')).toEqual({ verified: exportedArtifacts.length })
+    const recovered = await runBrowserJourney('exports') as ArtifactProof[]
+    expect(recovered.length).toBeGreaterThanOrEqual(14)
+    exportedArtifacts.push(...recovered)
+    expect(await publicationCount()).toBe(before + recovered.length)
+    expect(await runBrowserJourney('verify-exports')).toEqual({ verified: exportedArtifacts.length })
+  }, 180_000)
+
+  async function initializeDedicatedClaims(): Promise<void> {
+    if (!testKeyDirectory) throw new Error('test secret directory is unavailable')
+    await docker('exec', postgres, 'psql', '-U', 'postgres', '-d', database, '-v', 'ON_ERROR_STOP=1', '-c', 'CREATE DATABASE runlab_control')
+    const secretFiles: Record<string, string> = {
+      'installation-id': id,
+      'control-url': `postgresql://postgres:${encodeURIComponent(postgresPassword)}@${postgres}:5432/${controlDatabase}`,
+      'runtime-url': `postgresql://postgres:${encodeURIComponent(postgresPassword)}@${postgres}:5432/${database}`,
+      's3-access': accessKeyId,
+      's3-secret': secretAccessKey,
+      'owner-password': ownerPassword,
+    }
+    for (const [name, value] of Object.entries(secretFiles)) await writeFile(join(testKeyDirectory, name), value, { flag: 'wx', mode: 0o600 })
+    await docker('run', '--rm', '--network', network,
+      '--mount', `type=bind,source=${repository},target=/app,readonly`,
+      '--mount', `type=bind,source=${testKeyDirectory},target=/run/kala-test,readonly`,
+      '--workdir', '/app/packages/host',
+      '--env', 'KALA_INSTALLATION_ID_FILE=/run/kala-test/installation-id',
+      '--env', 'KALA_FRESH_CLAIM_CONTROL_DATABASE_URL_FILE=/run/kala-test/control-url',
+      '--env', 'KALA_FRESH_CLAIM_RUNTIME_DATABASE_URL_FILE=/run/kala-test/runtime-url',
+      '--env', 'KALA_FRESH_CLAIM_STATE_MASTER_KEY_FILE=/run/kala-test/master-key',
+      '--env', 'KALA_FRESH_CLAIM_S3_ACCESS_KEY_ID_FILE=/run/kala-test/s3-access',
+      '--env', 'KALA_FRESH_CLAIM_S3_SECRET_ACCESS_KEY_FILE=/run/kala-test/s3-secret',
+      '--env', `KALA_FRESH_CLAIM_S3_ENDPOINT=http://${silo}:9000`,
+      '--env', `KALA_FRESH_CLAIM_S3_BUCKET=${bucket}`,
+      '--env', 'KALA_FRESH_CLAIM_S3_REGION=us-east-1',
+      nodeImage, 'node', '--import', 'tsx', 'bin/kala-fresh-storage-claim.ts')
+  }
+
+  async function bootstrapDedicatedOwner(): Promise<void> {
+    if (!testKeyDirectory) throw new Error('test secret directory is unavailable')
+    const { stdout } = await docker('run', '--rm', '--network', network,
+      '--mount', `type=bind,source=${repository},target=/app,readonly`,
+      '--mount', `type=bind,source=${testKeyDirectory},target=/run/kala-test,readonly`,
+      '--workdir', '/app/packages/runtime-ingress-gateway',
+      '--env', `KALA_DEPLOYMENT_CONFIG=${deploymentPath}`,
+      '--env', `KALA_INGRESS_DATABASE_URL=postgresql://postgres:${encodeURIComponent(postgresPassword)}@${postgres}:5432/${controlDatabase}`,
+      '--env', 'KALA_DEDICATED_OWNER_PASSWORD_FILE=/run/kala-test/owner-password',
+      '--env', 'KALA_DEDICATED_ORGANIZATION_NAME=Isolated Dedicated parallel acceptance',
+      nodeImage, 'node', '--import', '/app/packages/host/node_modules/tsx/dist/loader.mjs', 'src/bin/bootstrap-dedicated-owner.ts')
+    const result = parseLastJson(stdout) as { organizationId: string; runtimeUnitId: string }
+    expect(result.organizationId).toMatch(/^org_[A-Za-z0-9_-]+$/u)
+    expect(result.runtimeUnitId).toMatch(/^tenant_[A-Za-z0-9_-]+$/u)
+    organizationId = result.organizationId
+    unitId = result.runtimeUnitId
+    const principal = await docker('exec', postgres, 'psql', '-U', 'postgres', '-d', controlDatabase, '-A', '-t', '-c',
+      "SELECT principal_id FROM dedicated_owner_credentials WHERE singleton=true")
+    principalId = principal.stdout.trim()
+    expect(principalId).toMatch(/^prn_[A-Za-z0-9_-]+$/u)
+  }
+
+  async function loginDedicatedOwner(): Promise<void> {
+    const script = `const origin=process.env.TEST_ORIGIN;
+      const response=await fetch(origin+'/auth/login',{method:'POST',redirect:'manual',
+        headers:{origin,'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({password:process.env.TEST_PASSWORD})});
+      const token=response.headers.get('set-cookie')?.match(/ak_session=([^;]+)/u)?.[1];
+      if(response.status!==303||!token)throw new Error('Dedicated Owner login failed: '+response.status);
+      console.log(JSON.stringify({token}));`
+    const { stdout } = await docker('run', '--rm', '--network', network,
+      '--env', `TEST_ORIGIN=http://${gateway}:13001`, '--env', `TEST_PASSWORD=${ownerPassword}`,
+      nodeImage, 'node', '--input-type=module', '--eval', script)
+    const result = parseLastJson(stdout) as { token: string }
+    expect(result.token).toMatch(/^[A-Za-z0-9_-]{43}$/u)
+    browserToken = result.token
+  }
 
   async function installParallelGateAsOperator(): Promise<void> {
     const sql = `BEGIN;
@@ -381,26 +512,38 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
       label: 'Parallel acceptance Executor',
     })
     const poolId = `pool_${id.replaceAll('-', '_')}`
-    const sql = `BEGIN;
+    const newOrganization = dedicated ? '' : `
       INSERT INTO organizations (id,name,status,runtime_unit_id) VALUES ('${organizationId}','Parallel Gateway acceptance','active','${unitId}');
+      INSERT INTO contract_entitlements (organization_id,contract_reference,support_tier,starts_at,ends_at,seat_limit,concurrent_session_limit,workspace_limit)
+        VALUES ('${organizationId}','isolated-parallel-acceptance','standard',clock_timestamp()-interval '1 hour',clock_timestamp()+interval '1 day',1,100,100);
       INSERT INTO runtime_unit_placements (runtime_unit_id,organization_id,desired_state,generation,last_operation_id)
         VALUES ('${unitId}','${organizationId}','ready',1,'acceptance-seed');
       INSERT INTO principals (id,kind,issuer,subject,display_name) VALUES ('${principalId}','human','${issuer}','browser-user','Gateway acceptance browser');
-      INSERT INTO organization_memberships (organization_id,principal_id,role,status) VALUES ('${organizationId}','${principalId}','owner','active');
+      INSERT INTO organization_memberships (organization_id,principal_id,role,status) VALUES ('${organizationId}','${principalId}','owner','active');`
+    const sql = `BEGIN;
+      ${newOrganization}
+      UPDATE runtime_unit_placements SET desired_state='ready',generation=1,last_operation_id='acceptance-seed'
+        WHERE runtime_unit_id='${unitId}';
       INSERT INTO executor_pools (id,organization_id,name,mode) VALUES ('${poolId}','${organizationId}','Parallel acceptance pool','organization');
       INSERT INTO executor_enrollment_tokens (id,organization_id,pool_id,token_hash,created_by,expires_at)
         VALUES ('enr_${id}','${organizationId}','${poolId}','${executorRouteHash}','${principalId}',clock_timestamp()+interval '1 hour');
-      INSERT INTO executor_identities (organization_id,unit_id,record_kind,record_id,record)
-        VALUES ('${organizationId}','${unitId}','invite','${executorInviteId}',$invite$${executorInviteRecord}$invite$::jsonb);
+      ${dedicated ? '' : `
       INSERT INTO browser_sessions (id,principal_id,organization_id,token_hash,cache_namespace,device,idle_expires_at,absolute_expires_at)
         VALUES ('bs_${id}','${principalId}','${organizationId}','${tokenHash}','acceptance-cache','{"label":"Browser-like Socket.IO client"}'::jsonb,
-          clock_timestamp()+interval '1 hour',clock_timestamp()+interval '1 day');
+          clock_timestamp()+interval '1 hour',clock_timestamp()+interval '1 day');`}
+      COMMIT;`
+    await docker('exec', postgres, 'psql', '-U', 'postgres', '-d', controlDatabase, '-v', 'ON_ERROR_STOP=1', '-c', sql)
+    const runtimeSql = `BEGIN;
+      INSERT INTO executor_identities (organization_id,unit_id,record_kind,record_id,record)
+        VALUES ('${organizationId}','${unitId}','invite','${executorInviteId}',$invite$${executorInviteRecord}$invite$::jsonb);
       CREATE ROLE ${readerRole} LOGIN PASSWORD '${readerPassword}';
       GRANT USAGE ON SCHEMA public TO ${readerRole};
       GRANT SELECT ON tenant_runtime_unit_placement_leases,tenant_runtime_unit_protocol_gates,
         tenant_runtime_unit_replica_memberships,tenant_runtime_resource_ownerships,tenant_session_latest_projection TO ${readerRole};
+      ${dedicated ? `GRANT USAGE ON SCHEMA kala_installation_claim TO ${readerRole},${runtimeDatabaseRole};
+      GRANT SELECT ON ALL TABLES IN SCHEMA kala_installation_claim TO ${readerRole},${runtimeDatabaseRole};` : ''}
       COMMIT;`
-    await docker('exec', postgres, 'psql', '-U', 'postgres', '-d', database, '-v', 'ON_ERROR_STOP=1', '-c', sql)
+    await docker('exec', postgres, 'psql', '-U', 'postgres', '-d', database, '-v', 'ON_ERROR_STOP=1', '-c', runtimeSql)
     gatewayReaderConnection = `postgresql://${readerRole}:${encodeURIComponent(readerPassword)}@${postgres}:5432/${database}`
   }
 
@@ -467,13 +610,16 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
       '--tmpfs', '/state:rw,nosuid,size=16m',
       '--tmpfs', '/tmp:rw,noexec,nosuid,size=32m',
       '--mount', `type=bind,source=${repository},target=/app,readonly`,
+      ...(dedicated ? ['--mount', `type=bind,source=${testKeyDirectory},target=/run/kala-test,readonly`] : []),
       '--workdir', '/app/packages/runtime-ingress-gateway',
+      '--env', `KALA_DEPLOYMENT_CONFIG=${deploymentPath}`,
+      ...(dedicated ? ['--env', 'KALA_INGRESS_REQUIRE_INSTALLATION_CLAIM=1', '--env', 'KALA_INSTALLATION_ID_FILE=/run/kala-test/installation-id'] : []),
       '--env', 'KALA_INGRESS_PORT=13001',
       '--env', 'KALA_INGRESS_LISTEN_HOST=0.0.0.0',
       '--env', `KALA_PUBLIC_URLS=http://${gateway}:13001`,
       '--env', `KALA_INGRESS_SESSION_SECRET=${sessionSecret}`,
       '--env', `KALA_INGRESS_SHARED_SECRET=${ingressSecret}`,
-      '--env', `KALA_INGRESS_DATABASE_URL=postgresql://postgres:${encodeURIComponent(postgresPassword)}@${postgres}:5432/${database}`,
+      '--env', `KALA_INGRESS_DATABASE_URL=postgresql://postgres:${encodeURIComponent(postgresPassword)}@${postgres}:5432/${controlDatabase}`,
       '--env', 'KALA_INGRESS_LOGIN_STATE_STORE=/state/login.json',
       '--env', `OIDC_ISSUER=http://${identity}:8080`,
       '--env', 'OIDC_CLIENT_ID=acceptance-client',
@@ -491,7 +637,7 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
       nodeImage, 'node', '--import', '/app/packages/host/node_modules/tsx/dist/loader.mjs', 'src/bin/kala-runtime-ingress.ts')
     await eventually(async () => {
       const logs = await docker('logs', gateway)
-      if (logs.stdout.includes('private_cloud_gateway_ready')) return
+      if (logs.stdout.includes(`${acceptanceProduct}_gateway_ready`)) return
       const running = (await docker('inspect', '--format', '{{.State.Running}}', gateway)).stdout.trim()
       if (running !== 'true') throw new Error(`${gateway} stopped:\n${logs.stdout}\n${logs.stderr}`)
       throw new Error('Gateway is not ready yet')
@@ -517,12 +663,14 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
       '--label', `dev.kala.test.project=${project}`,
       '--network', network,
       '--read-only',
-      '--tmpfs', '/state:rw,nosuid,size=128m',
+      '--tmpfs', '/state:rw,noexec,nosuid,nodev,size=128m',
       '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m',
       '--mount', `type=bind,source=${repository},target=/app,readonly`,
       '--mount', `type=bind,source=${testKeyPath},target=/run/kala-test-state-master-key,readonly`,
+      ...(dedicated ? ['--mount', `type=bind,source=${testKeyDirectory}/installation-id,target=/run/kala-test-installation-id,readonly`] : []),
       '--workdir', '/app/packages/host',
-      '--env', 'KALA_DEPLOYMENT_CONFIG=/app/deploy/private-cloud/deployment.json',
+      '--env', `KALA_DEPLOYMENT_CONFIG=${deploymentPath}`,
+      ...(dedicated ? ['--env', 'KALA_RUNTIME_REQUIRE_INSTALLATION_CLAIM=1', '--env', 'KALA_INSTALLATION_ID_FILE=/run/kala-test-installation-id'] : []),
       '--env', 'KALA_RUNTIME_HOST_DATA_ROOT=/state',
       '--env', 'KALA_RUNTIME_KALA_BIND_HOST=0.0.0.0',
       '--env', `KALA_INGRESS_SHARED_SECRET=${ingressSecret}`,
@@ -559,7 +707,7 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
     const result = await internalFetch(name, '/internal/runtime-units', {
       unitId,
       organizationId,
-      operationId: `${operation}-${id}`,
+      operationId: dedicated ? `host-materialize:${unitId}:1:ready` : `${operation}-${id}`,
       generation: 1,
       action: 'provision',
     })
@@ -641,7 +789,68 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
     return parseLastJson((await docker(...args)).stdout)
   }
 
-  async function runBrowserJourney(action: 'initial' | 'tools' | 'history' | 'recover' | 'recover-y'): Promise<unknown> {
+  async function measureWriteWorkload(label: string, replicas: number): Promise<void> {
+    expect(await liveReplicaOrigins()).toHaveLength(replicas)
+    const snapshot = async (): Promise<{ lsn: string; projectionBytes: number; auditBytes: number; auditEvents: number }> => {
+      const { stdout } = await docker('exec', postgres, 'psql', '-U', 'postgres', '-d', database, '-A', '-t', '-c',
+        `SELECT json_build_object('lsn',pg_current_wal_insert_lsn()::text,
+          'projectionBytes',(SELECT COALESCE(sum(octet_length(document::text)),0) FROM tenant_session_latest_projection WHERE tenant_id='${organizationId}'),
+          'auditBytes',(SELECT COALESCE(sum(pg_column_size(payload)),0) FROM tenant_runtime_hot_events WHERE tenant_id='${organizationId}'),
+          'auditEvents',(SELECT count(*) FROM tenant_runtime_hot_events WHERE tenant_id='${organizationId}'))`)
+      return JSON.parse(stdout.trim())
+    }
+    const before = await snapshot()
+    const lockSamples: number[] = []
+    let sampling = true
+    const sampler = (async () => {
+      while (sampling) {
+        const { stdout } = await docker('exec', postgres, 'psql', '-U', 'postgres', '-d', database, '-A', '-t', '-c',
+          "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'")
+        lockSamples.push(Number(stdout.trim()))
+        if (sampling) await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+    })()
+    let metrics: { writes: number; elapsedMs: number; writesPerSecond: number; p50Ms: number; p95Ms: number }
+    try {
+      metrics = await runBrowserJourney('benchmark') as typeof metrics
+    } finally {
+      sampling = false
+      await sampler
+    }
+    const after = await snapshot()
+    expect(metrics.writes).toBe(80)
+    expect(metrics.writesPerSecond).toBeGreaterThan(0)
+    expect(metrics.p95Ms).toBeGreaterThanOrEqual(metrics.p50Ms)
+    expect(after.auditEvents - before.auditEvents).toBe(80)
+    expect(before.lsn).toMatch(/^[0-9A-F]+\/[0-9A-F]+$/u)
+    const wal = await docker('exec', postgres, 'psql', '-U', 'postgres', '-d', database, '-A', '-t', '-c',
+      `SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(),'${before.lsn}'::pg_lsn)::text`)
+    console.info(`[parallel-write-workload] ${JSON.stringify({
+      product: acceptanceProduct, label, replicas, ...metrics,
+      projectionBytes: after.projectionBytes,
+      auditBytesAdded: after.auditBytes - before.auditBytes,
+      clusterWalBytesDuringWindow: Number(wal.stdout.trim()),
+      lockSamples: lockSamples.length,
+      samplesWithLockWaiters: lockSamples.filter((count) => count > 0).length,
+      peakSampledLockWaiters: Math.max(...lockSamples),
+      caveat: 'Bounded Session preference writes; cluster WAL includes leases/control activity; sampled lock waiters, not cumulative lock time or model-token throughput',
+    })}`)
+  }
+
+  async function objectRequestCounts(): Promise<{ put: number; get: number }> {
+    const { stdout } = await docker('exec', silo, 'mcli', 'admin', 'prometheus', 'metrics', 'self')
+    const counts = { put: 0, get: 0 }
+    const rows = [...stdout.matchAll(/^(?:minio_s3_requests_total|minio_api_requests_total)\{([^}]+)\}\s+(\d+(?:\.\d+)?)$/gmu)]
+    if (rows.length === 0) throw new Error('SILO metrics did not expose a recognized S3 request counter')
+    for (const [, labels = '', value = '0'] of rows) {
+      const api = /\bapi="([^"]+)"/u.exec(labels)?.[1]?.toLowerCase()
+      if (api === 'putobject') counts.put += Number(value)
+      if (api === 'getobject') counts.get += Number(value)
+    }
+    return counts
+  }
+
+  async function runBrowserJourney(action: 'initial' | 'tools' | 'history' | 'recover' | 'recover-y' | 'exports' | 'verify-exports' | 'benchmark' | 'grow-history'): Promise<unknown> {
     const client = `${project}-browser-${action}`
     const args = ['run', '--rm', '--name', client,
       '--label', `dev.kala.test.project=${project}`,
@@ -654,6 +863,7 @@ integrationDescribe('Private Cloud parallel-v1 real two-Runtime acceptance', () 
       '--env', `TEST_SESSION_Y=${sessionY}`,
       '--env', `TEST_WORKSPACE_ID=${workspaceId}`,
       '--env', `TEST_ACTION=${action}`,
+      '--env', `TEST_ARTIFACT_PROOFS=${JSON.stringify(exportedArtifacts)}`,
       nodeImage, 'node', '--input-type=module', '--eval', gatewayBrowserJourney]
     return parseLastJson((await docker(...args)).stdout)
   }
@@ -695,9 +905,11 @@ type HistoryGatewayResult = {
   y: { sessionId: string; toolResultFound: boolean }
 }
 type ExecutionReceipts = Record<string, { completedAt: number; result: { callId: string; ok: boolean; content: string } }>
+type ArtifactProof = { uri: string; sha256: string; bytes: number }
 
 function assertCompletedReceipt(receipts: ExecutionReceipts, sessionId: string, callId: string, marker: string): void {
   const receipt = receipts[`${sessionId}:${callId}`]
+  expect(receipt).toMatchObject({ ownerGeneration: '1' })
   expect(receipt?.result).toMatchObject({ callId, ok: true })
   expect(receipt?.result.content).toContain(marker)
 }
@@ -722,16 +934,19 @@ const server = http.createServer((request, response) => {
       return
     }
     const messages = Array.isArray(body.messages) ? body.messages : []
-    const hasToolResult = messages.some((message) => message?.role === 'tool')
+    const lastUser = messages.findLastIndex((message) => message?.role === 'user')
+    const hasToolResult = messages.slice(lastUser + 1).some((message) => message?.role === 'tool')
     const transcript = JSON.stringify(messages)
     const suffix = transcript.includes('marker read X') ? 'x' : transcript.includes('marker read Y') ? 'y' : 'unknown'
+    const userCount = messages.filter((message) => message?.role === 'user').length
+    const callId = 'call_' + suffix + (userCount > 1 ? '_' + userCount : '')
     const chunks = hasToolResult
       ? [
           { id: 'done_' + suffix, choices: [{ index: 0, delta: { content: 'done' }, finish_reason: 'stop' }] },
           { id: 'done_' + suffix, choices: [], usage: { prompt_tokens: 2, completion_tokens: 1 } },
         ]
       : [
-          { id: 'tool_' + suffix, choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_' + suffix, type: 'function', function: { name: 'read_file', arguments: '{"path":"/workspace/marker.txt"}' } }] }, finish_reason: 'tool_calls' }] },
+          { id: 'tool_' + suffix, choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: callId, type: 'function', function: { name: 'read_file', arguments: '{"path":"/workspace/marker.txt"}' } }] }, finish_reason: 'tool_calls' }] },
           { id: 'tool_' + suffix, choices: [], usage: { prompt_tokens: 1, completion_tokens: 1 } },
         ]
     response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'close' })
@@ -777,22 +992,26 @@ console.log(JSON.stringify({ outcome: result }))
 // history without treating a Node Socket.IO client as a browser engine.
 const chromiumBrowserJourney = String.raw`
 import puppeteer from 'puppeteer-core'
+const deadline = setTimeout(() => { console.error('Chromium journey exceeded its 45-second bound'); process.exit(1) }, 45000)
 const origin = process.env.TEST_GATEWAY_ORIGIN
 const browser = await puppeteer.launch({
   executablePath: process.env.HOME + '/.cache/puppeteer/chrome/linux-150.0.7871.24/chrome-linux64/chrome',
   headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'],
 })
 try {
+  console.log('Chromium launched')
   const page = await browser.newPage()
+  page.setDefaultNavigationTimeout(10000)
   await page.setCookie({ url: origin, name: 'ak_session', value: process.env.TEST_BROWSER_TOKEN, httpOnly: true, sameSite: 'Lax' })
   await page.goto(origin + '/signed-out', { waitUntil: 'domcontentloaded' })
+  console.log('Chromium same-origin page loaded')
   await page.addScriptTag({ path: '/app/node_modules/socket.io-client/dist/socket.io.min.js' })
   const results = {}
   for (const [label, callId] of [['x', 'call_x'], ['y', 'call_y']]) {
     const sessionId = process.env['TEST_SESSION_' + label.toUpperCase()]
     results[label] = await page.evaluate(async ({ origin, sessionId, callId, clientVersion }) => {
       const response = await fetch(origin + '/runtime/route-ticket', {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId }),
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId }), signal: AbortSignal.timeout(10000),
       })
       const { ticket } = await response.json()
       if (!response.ok || typeof ticket !== 'string') throw new Error('Chromium ticket request failed: ' + response.status)
@@ -814,17 +1033,22 @@ try {
   console.log(JSON.stringify({ browser: await browser.version(), ...results }))
 } finally {
   await browser.close()
+  clearTimeout(deadline)
 }
 `
 
 // Separate Node Socket.IO driver for fault drills; not a browser engine.
 const gatewayBrowserJourney = String.raw`
 import { io } from 'socket.io-client'
+import { createHash } from 'node:crypto'
 import { PROTOCOL_VERSION } from '@agent-kernel/shared'
 const origin = process.env.TEST_GATEWAY_ORIGIN
 const cookie = 'ak_session=' + process.env.TEST_BROWSER_TOKEN
 const browserHeaders = { Cookie: cookie, Origin: origin }
-const timeout = (message, ms = 10000) => new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms))
+const timeout = (message, ms = 10000) => new Promise((_, reject) => {
+  const timer = setTimeout(() => reject(new Error(message)), ms)
+  timer.unref()
+})
 
 async function openControl(label) {
   const socket = io(origin + '/dashboard', {
@@ -843,6 +1067,7 @@ async function createThroughFreshControl(sessionId, label) {
   try {
     const result = await socket.timeout(10000).emitWithAck('client:create_session', {
       sessionId, operationId: 'gateway-create-' + label,
+      agentRuntime: 'kernel',
       workspaceId: process.env.TEST_WORKSPACE_ID, workspaceName: 'Parallel acceptance workspace', cwd: '/workspace',
     })
     if (!result?.ok) throw new Error('Gateway Session creation failed: ' + JSON.stringify(result))
@@ -937,6 +1162,87 @@ if (process.env.TEST_ACTION === 'initial') {
     historyThroughOwnerTicket(process.env.TEST_SESSION_Y, 'call_y'),
   ])
   console.log(JSON.stringify({ x, y }))
+} else if (process.env.TEST_ACTION === 'benchmark') {
+  const sockets = await Promise.all([openOwnerTicket(process.env.TEST_SESSION_X), openOwnerTicket(process.env.TEST_SESSION_Y)])
+  const latencies = []
+  const batch = crypto.randomUUID()
+  const started = performance.now()
+  try {
+    await Promise.all(sockets.map(async (socket, sessionIndex) => {
+      for (let index = 0; index < 40; index++) {
+        const start = performance.now()
+        const ack = await socket.timeout(10000).emitWithAck('client:update_preferences', {
+          sessionId: process.env[sessionIndex === 0 ? 'TEST_SESSION_X' : 'TEST_SESSION_Y'],
+          operationId: 'benchmark-' + batch + '-' + sessionIndex + '-' + index,
+          preferences: { chapterReadingMode: index % 2 === 0 ? 'chapters' : 'continuous' },
+        })
+        if (!ack?.ok) throw new Error('Benchmark write was not committed: ' + JSON.stringify(ack))
+        latencies.push(performance.now() - start)
+      }
+    }))
+    const elapsedMs = performance.now() - started
+    latencies.sort((a, b) => a - b)
+    console.log(JSON.stringify({ writes: latencies.length, elapsedMs, writesPerSecond: latencies.length * 1000 / elapsedMs,
+      p50Ms: latencies[Math.ceil(latencies.length * 0.50) - 1], p95Ms: latencies[Math.ceil(latencies.length * 0.95) - 1] }))
+  } finally { for (const socket of sockets) socket.close() }
+} else if (process.env.TEST_ACTION === 'grow-history') {
+  for (const [label, sessionId] of [['x', process.env.TEST_SESSION_X], ['y', process.env.TEST_SESSION_Y]]) {
+    const socket = await openOwnerTicket(sessionId)
+    try {
+      for (let index = 0; index < 8; index++) {
+        const ack = await socket.timeout(10000).emitWithAck('client:user_message', {
+          sessionId, operationId: 'extended-history-' + label + '-' + index, intent: 'text', mode: 'queue',
+          text: 'Perform marker read ' + label.toUpperCase() + '\n' + 'bounded synthetic context '.repeat(330),
+        })
+        if (!ack?.ok) throw new Error('Extended history message was not admitted')
+        const callId = 'call_' + label + '_' + (index + 2)
+        const deadline = Date.now() + 10000
+        let completed = false
+        while (Date.now() < deadline) {
+          const history = await Promise.race([
+            new Promise((resolve) => { socket.once('server:history', resolve); socket.emit('client:load_history', { sessionId }) }),
+            timeout('Extended history read timeout'),
+          ])
+          const tool = history.entries.find((entry) => entry.event?.kind === 'tool_result' && entry.event.callId === callId && entry.event.ok)
+          completed = tool && history.entries.some((entry) => entry.seq > tool.seq && entry.event?.kind === 'llm_response'
+            && entry.event.message?.content?.some((part) => part.type === 'text' && part.text === 'done'))
+          if (completed) break
+          await new Promise((resolve) => setTimeout(resolve, 25))
+        }
+        if (!completed) throw new Error('Extended history tool turn did not complete: ' + callId)
+      }
+    } finally { socket.close() }
+  }
+  console.log(JSON.stringify({ turns: 16 }))
+} else if (process.env.TEST_ACTION === 'exports') {
+  const proofs = []
+  for (const sessionId of [process.env.TEST_SESSION_X, process.env.TEST_SESSION_Y]) {
+    for (const action of ['trace-export-session', 'profile-session', 'rollout-export-segments']) {
+      const response = await fetch(origin + '/enhancement/action', {
+        method: 'POST', headers: { ...browserHeaders, 'content-type': 'application/json' },
+        body: JSON.stringify({ action, sessionId }),
+      })
+      const result = await response.json()
+      if (!response.ok) throw new Error('Durable export failed: ' + response.status + ' ' + JSON.stringify(result))
+      for (const artifact of [result.artifact ?? result.traceArtifact, ...(result.llmArtifacts ?? [])]) {
+        if (!artifact?.uri?.startsWith('/session-artifacts/')) throw new Error('Export did not return an authoritative object reference')
+        proofs.push({ uri: artifact.uri, sha256: artifact.sha256, bytes: artifact.bytes })
+      }
+    }
+  }
+  console.log(JSON.stringify(proofs))
+} else if (process.env.TEST_ACTION === 'verify-exports') {
+  const proofs = JSON.parse(process.env.TEST_ARTIFACT_PROOFS)
+  for (const proof of proofs) {
+    const response = await fetch(origin + proof.uri, { headers: browserHeaders })
+    const data = Buffer.from(await response.arrayBuffer())
+    if (!response.ok || response.headers.get('content-type') !== 'application/json'
+      || data.byteLength !== proof.bytes || createHash('sha256').update(data).digest('hex') !== proof.sha256) {
+      throw new Error('Authoritative export failed integrity verification after takeover: ' + response.status)
+    }
+    JSON.parse(data.toString('utf8'))
+  }
+  console.log(JSON.stringify({ verified: proofs.length }))
 } else {
   const sessionId = process.env.TEST_ACTION === 'recover-y' ? process.env.TEST_SESSION_Y : process.env.TEST_SESSION_X
   const deadline = Date.now() + 45000

@@ -154,6 +154,34 @@ Runtime's probe uses the existing internal service credential and requires state
 
 On timeout/failure, the script returns nonzero and does not print readiness success. Containers and data are left intact for inspection; it does not prune, reset claims or automatically roll back unknown work. Stop/isolate application writers before an explicit continuation. After a successful install, ordinary restarts do not rerun bootstrap; use the same verified Compose graph and bounded `up --wait`. Do not use `--resume-initialized` to bypass a version upgrade/migration or recover an unknown password.
 
+## Isolated replaceable-Runtime and parallel-protocol acceptance
+
+This source-level acceptance explicitly opts into the existing PostgreSQL `parallel-v1` gate; it does **not** change the default single-Runtime Aspire publication or operate an existing installation:
+
+```bash
+KALA_RUN_PRIVATE_CLOUD_STORAGE_INTEGRATION=1 \
+KALA_PARALLEL_ACCEPTANCE_PRODUCT=dedicated \
+KALA_RUN_REAL_BROWSER_INTEGRATION=1 \
+pnpm --dir packages/host exec vitest run \
+  src/tenant-runtime/private-cloud-parallel-v1.integration.test.ts
+```
+
+Run from the repository root with the reviewed digest-pinned images available and permission for `sudo -n docker`. The harness owns fresh UUID-named containers/network/Workspace volume and temporary keys, uses separate newly claimed PG authorities, real Dedicated Owner authentication, two independently disposable Runtime directories, and a real external Executor. It removes its own resources afterward. Application code is mounted read-only from the selected worktree, so this is not immutable-release-image or production-deployment acceptance. Omitting the product selector retains Private Cloud coverage; genuine Chromium is separately opt-in, not implied by the Node fault driver.
+
+The five Dedicated cases cover real tool execution, genuine Chromium history, kill/takeover, cold container replacement plus PG partition/stale-writer rejection, and S3 outage/publication refusal/recovery. All returned export objects, including persisted inline LLM request/response artifacts, are hash-checked after failover. PG exports no longer depend on a Runtime output directory. External shell crash/receipt behavior is separately covered by the Executor's genuine SIGKILL suite; queue/native/DAG/scheduler owner and recovery semantics use the isolated PG suites.
+
+One bounded measurement on the shared test host used 80 committed preference writes across two owner-routed Sessions per window:
+
+| Window | Writes/s | p50 / p95 ms | Combined projection JSON bytes | Delta audit bytes added | Cluster WAL bytes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Two Runtime, short history | 148.37 | 13.30 / 16.78 | 114,928 | 14,141 | 2,202,120 |
+| Two Runtime, extended history | 116.74 | 16.13 / 21.18 | 261,686 | 14,240 | 3,054,656 |
+| One Runtime, same extended history | 90.05 | 21.48 / 28.56 | 261,686 | 14,240 | 2,654,360 |
+
+The extended fixture adds eight actual deterministic tool turns and about 8 KiB synthetic user context per turn to each Session. This run observed approximately 1.30x two-vs-one throughput, not 2x. Its 11/13/14 online lock-waiter samples saw no waiter; sampling can miss short waits and does not measure cumulative wait time. WAL covers the whole cluster during each window, including leases/control/checkpoints; the larger two-node window is not per-request WAL attribution. Initial export emitted 14 objects / 159,404 bytes and 14 actual SILO PutObject requests, with no GetObject requests in that publication window. Subsequent authenticated reads and retries are separate costs. Metrics are bounded fixture evidence, not provider-token throughput, billing prices, a soak test or a production capacity SLA.
+
+The measured long-history penalty is not hidden: Session projections are still full-document JSONB writes, while audit events are structural deltas and native SDK appends use immutable chunks. Splitting hot metadata from large Session state is a separate schema/compatibility change, not a reason to batch away committed acknowledgements or weaken owner checks. Default publication, release images, HA and operator-lifecycle limitations below remain in force.
+
 ## Known omissions and blockers
 
 This is a runnable **experimental single-host installation**, not a supported Dedicated release. Earlier schema-7 builds passed fresh PG/SILO provisioning, three-authority claims, Owner login, real Copilot/Executor tool execution and the isolated coordinated cold-recovery subset (see below). Those historical results do not certify the current schema-9 source or its complete image set. Ordinary same-schema and Dashboard tools still refuse migrations; a separate reviewed cold [control-schema 7→9 lane](lifecycle-operator.md) binds exact packaged migrations, atomic SQL/grants and original-predecessor recovery to durable receipts. Its real PG/S3/Owner component evidence is not current full business acceptance. A supported cross-platform release and complete production lifecycle have not passed. Remaining boundaries are:
