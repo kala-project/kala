@@ -9,16 +9,16 @@ export default defineConfig({
     singleFork: true,
   },
   resolve: {
-    alias: {
-      '@agent-kernel/host': resolve(__dirname, '../host/src/index.ts'),
-      '@agent-kernel/kernel': resolve(__dirname, '../kernel/src/index.ts'),
-      '@agent-kernel/shared/enhancement': resolve(__dirname, '../shared/src/enhancement.ts'),
-      '@agent-kernel/shared/context-policy': resolve(__dirname, '../shared/src/context-policy/index.ts'),
-      '@agent-kernel/shared/context-usage': resolve(__dirname, '../shared/src/context-usage/index.ts'),
-      '@agent-kernel/shared/push': resolve(__dirname, '../shared/src/push.ts'),
-      '@agent-kernel/shared/runtime-logger': resolve(__dirname, '../shared/src/runtime-logger.ts'),
-      '@agent-kernel/shared/token-estimation': resolve(__dirname, '../shared/src/token-estimation.ts'),
-      '@agent-kernel/shared': resolve(__dirname, '../shared/src/index.ts'),
-    },
+    alias: [
+      { find: '@agent-kernel/host', replacement: resolve(__dirname, '../host/src/index.ts') },
+      { find: '@agent-kernel/kernel', replacement: resolve(__dirname, '../kernel/src/index.ts') },
+      { find: '@agent-kernel/shared/enhancement', replacement: resolve(__dirname, '../shared/src/enhancement.ts') },
+      { find: '@agent-kernel/shared/context-policy', replacement: resolve(__dirname, '../shared/src/context-policy/index.ts') },
+      { find: '@agent-kernel/shared/context-usage', replacement: resolve(__dirname, '../shared/src/context-usage/index.ts') },
+      { find: '@agent-kernel/shared/push', replacement: resolve(__dirname, '../shared/src/push.ts') },
+      { find: '@agent-kernel/shared/runtime-logger', replacement: resolve(__dirname, '../shared/src/runtime-logger.ts') },
+      { find: '@agent-kernel/shared/token-estimation', replacement: resolve(__dirname, '../shared/src/token-estimation.ts') },
+      { find: /^@agent-kernel\/shared$/, replacement: resolve(__dirname, '../shared/src/index.ts') },
+    ],
   },
 })

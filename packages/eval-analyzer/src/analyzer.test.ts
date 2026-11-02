@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { zstdDecompressSync } from 'node:zlib'
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { AnalyzerInputSchema, DefectFindingSchema, StaticSigningKeyRegistry, parseTrialTraceJsonl, serializeTrialTraceJsonl, counterfactualFailureFingerprint, type AnalyzerInput, type DefectFinding, type NormalizedAgentEvent } from '@agent-kernel/eval-protocol'
 import { alignTraces, analyzeRequiredDetectors, buildVerifiedReproductionBundle, calibratedDetectorConfidence, clusterUnknownFailures, CommandCounterfactualContinuationHarness, continueCounterfactual, humanPromoteCluster, minimizeFailure, recordHumanClusterPromotion, requiredDetectorValidationCorpus, requiredDetectorValidationManifest, validateDetector, verifyReproductionBundleSignature, type DetectorValidationCase, type RequiredDetectorId } from './index.js'
@@ -178,9 +178,13 @@ describe('trace mining and minimization', () => {
         await writeFile(harnessPath, `import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs'; process.on('SIGTERM', () => {}); const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: 'ignore' }); writeFileSync(${JSON.stringify(pidPath)}, String(child.pid)); setInterval(() => {}, 1000)\n`)
         const controller = new AbortController()
         const running = continueCounterfactual(request, source, new CommandCounterfactualContinuationHarness([process.execPath, harnessPath], 5_000), passingCounterfactualVerifier, controller.signal)
-        await delay(50); controller.abort(new Error('fixture cancellation'))
+        const descendantPid = await vi.waitFor(async () => {
+          const pid = Number(await readFile(pidPath, 'utf8'))
+          expect(pid).toBeGreaterThan(0)
+          return pid
+        }, { timeout: 3_000, interval: 10 })
+        controller.abort(new Error('fixture cancellation'))
         await expect(running).rejects.toThrow('fixture cancellation')
-        const descendantPid = Number(await readFile(pidPath, 'utf8'))
         await delay(1_100)
         expect(() => process.kill(descendantPid, 0)).toThrow()
       }

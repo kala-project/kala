@@ -300,19 +300,23 @@ test('public v1 methods preserve exact payloads and promise errors', async () =>
   const { window, calls } = nativePage()
   const bridge = window.__KALA_DESKTOP_BRIDGE__
   assert.equal(bridge.version, 1)
-  assert.deepEqual(Object.keys(bridge).sort(), ['confirmConnection', 'getInfo', 'notify', 'readClipboardImage', 'setActivity', 'subscribe', 'version'])
+  assert.deepEqual(Object.keys(bridge).sort(), ['applicationDebugging', 'confirmConnection', 'getInfo', 'notify', 'readClipboardImage', 'setActivity', 'subscribe', 'version'])
+  assert.equal(bridge.applicationDebugging.version, 1)
+  assert.equal(Object.isFrozen(bridge.applicationDebugging), true)
   assert.equal((await bridge.getInfo()).version, '0.2.0-rc.5')
   const activity = { status: 'running', running: 1, attention: 0, completed: 0 }
   const notice = { id: 'done:abc.1', sessionId: 'session:abc.1', title: 'Kala', body: 'A session completed.', silent: true }
   await bridge.setActivity(activity)
   await bridge.notify(notice)
   await bridge.readClipboardImage()
+  await bridge.applicationDebugging.show()
   await bridge.confirmConnection()
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     { command: 'desktop_status' },
     { command: 'desktop_ui', args: { state: activity } },
     { command: 'desktop_notify', args: { notification: notice } },
     { command: 'desktop_clipboard_image' },
+    { command: 'application_debug', args: { request: { op: 'show' } } },
     { command: 'desktop_connection_ready' },
   ])
   window.__TAURI__.core.invoke = async () => { throw new Error('Native delivery unavailable') }
