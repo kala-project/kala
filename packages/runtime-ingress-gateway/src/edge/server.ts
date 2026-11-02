@@ -156,7 +156,7 @@ function signedOutPage(): string {
 }
 
 function dedicatedOwnerLoginPage(error = false): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>Owner sign in · Kala</title></head><body><main><h1>Owner sign in</h1>${error ? '<p role="alert">The password was not accepted.</p>' : ''}<form method="post" action="/auth/login"><label>Password <input name="password" type="password" required autocomplete="current-password" maxlength="1024"></label><button type="submit">Sign in</button></form></main></body></html>`
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="same-origin"><title>Owner sign in · Kala</title></head><body><main><h1>Owner sign in</h1>${error ? '<p role="alert">The password was not accepted.</p>' : ''}<form method="post" action="/auth/login"><label>Password <input name="password" type="password" required autocomplete="current-password" maxlength="1024"></label><button type="submit">Sign in</button></form></main></body></html>`
 }
 
 function inviteResultPage(kind: 'accepted' | 'verified_email_required' | 'email_mismatch' | 'unavailable'): string {

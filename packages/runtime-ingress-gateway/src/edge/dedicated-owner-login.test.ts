@@ -21,6 +21,19 @@ describe('Dedicated Owner browser login', () => {
     const gateway = await createDedicatedGateway(identity, access.organization.id, organizations)
     const origin = `http://127.0.0.1:${gateway.port}`
 
+    const form = await fetch(`${origin}/auth/login`)
+    expect(form.status).toBe(200)
+    // no-referrer makes a browser navigation POST send Origin: null.
+    expect(await form.text()).toContain('name="referrer" content="same-origin"')
+    for (const rejectedOrigin of ['null', 'https://evil.example.test']) {
+      const rejected = await fetch(`${origin}/auth/login`, {
+        method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', origin: rejectedOrigin },
+        body: new URLSearchParams({ password: 'never-verified' }), redirect: 'manual',
+      })
+      expect(rejected.status).toBe(403)
+      expect(rejected.headers.get('set-cookie')).toBeNull()
+    }
+
     const wrong = await fetch(`${origin}/auth/login`, {
       method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', origin }, body: 'password=wrong-password-value', redirect: 'manual',
     })

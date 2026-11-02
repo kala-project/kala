@@ -488,16 +488,18 @@ export function App(): JSX.Element {
 
   const controlSocket = useDashboardControlSocket(hostEndpoint.url, config.token, productAccessReady)
   const sessionRouteTickets = privateCloudMode && authSession.session?.authenticated === true
+  const sessionScoped = runtimeDeployment.product === 'dedicated'
   const sessionInspectionTransport = useMemo(() => ({
     host: hostEndpoint.url,
     socket: controlSocket,
-    sessionScoped: false,
+    sessionScoped,
     sessionRouteTickets,
     ...(config.token !== undefined ? { token: config.token } : {}),
-  }), [hostEndpoint.url, controlSocket, sessionRouteTickets, config.token])
+  }), [hostEndpoint.url, controlSocket, sessionScoped, sessionRouteTickets, config.token])
   const session = useSession({
     host: hostEndpoint.url,
     socket: controlSocket,
+    sessionScoped,
     sessionRouteTickets,
     sessionId: productAccessReady ? config.sessionId : null,
     cache: sessionViewCache,
@@ -507,10 +509,9 @@ export function App(): JSX.Element {
       setConfig((prev) => ({ ...prev, sessionId: p.sessionId, explicit: true }))
     },
   })
-  // Legacy sessions share the control transport. Private Cloud sessions instead
-  // report the owner-routed socket so a healthy control plane cannot mask a
-  // route-ticket or Session owner failure.
-  const transportSocket = sessionRouteTickets ? session.socket : controlSocket
+  // Dedicated effects require a Session-bound connection even without route
+  // tickets. Keep the control connection for legacy/unselected Dedicated views.
+  const transportSocket = sessionRouteTickets || (sessionScoped && config.sessionId) ? session.socket : controlSocket
   const connectedSocketRef = useRef<DashboardSocket | null>(null)
   if (transportSocket?.connected) connectedSocketRef.current = transportSocket
   const transportStatus = connectionStatusForTransport(transportSocket, session.status, connectedSocketRef.current === transportSocket)

@@ -125,6 +125,40 @@ describe('routed Session hook', () => {
     view.unmount()
   })
 
+  it('binds Dedicated Workspace effects to an independent Session without route tickets', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+    vi.stubGlobal('fetch', fetchMock)
+    const control = new FakeSocket()
+    control.connected = true
+    const view = renderHook(({ sessionId }) => useSession({
+      host: window.location.origin, sessionId, socket: control as never, sessionScoped: true,
+    }), { initialProps: { sessionId: 'dedicated-1' } })
+    expect(sockets).toHaveLength(1)
+    const bound = sockets[0]!
+    const options = socketOptions[0] as { auth: { sessionId: string; clientId?: string } }
+    expect(options).toMatchObject({ forceNew: true, withCredentials: true, transports: ['websocket'], auth: { sessionId: 'dedicated-1' } })
+    expect(options.auth.clientId).toBeUndefined()
+    Object.assign(bound, { auth: options.auth, connected: true })
+    bound.emit.mockImplementation((...args: unknown[]) => {
+      const [event, payload, ack] = args as [string, { requestId: string; generation: number; channels: string[] }, (result: unknown) => void]
+      if (event === 'client:subscribe_channels') ack({ requestId: payload.requestId, generation: payload.generation, accepted: payload.channels, rejected: [], cursors: {} })
+      if (event === 'workspace:exec') ack({ requestId: payload.requestId, stdout: 'repository', stderr: '', exitCode: 0, durationMs: 1 })
+      return bound
+    })
+    expect(view.result.current.socket).toBe(bound)
+    await expect(workspaceExec(view.result.current.socket!, 'workspace-1', ['git', 'status'])).resolves.toMatchObject({ exitCode: 0 })
+    expect(bound.emit).toHaveBeenCalledWith('client:subscribe_channels', expect.objectContaining({ channels: ['session:dedicated-1'] }), expect.any(Function))
+    expect(control.emit).not.toHaveBeenCalled()
+    view.rerender({ sessionId: 'dedicated-2' })
+    expect(bound.closed).toBe(true)
+    expect(view.result.current.socket).toBe(sockets[1])
+    expect(socketOptions[1]).toMatchObject({ auth: { sessionId: 'dedicated-2' } })
+    view.unmount()
+    expect(sockets[1]!.closed).toBe(true)
+    expect(control.closed).toBe(false)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('waits for its ticket, binds an independent websocket, then refreshes the ticket on disconnect', async () => {
     let deliver!: (response: Response) => void
     const fetchMock = vi.fn<typeof fetch>()
