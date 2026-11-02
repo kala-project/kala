@@ -315,11 +315,22 @@ export class PostgresSessionAuthority implements SessionAuthority {
       const admission = await lockNativeFsAdmission(transaction, this.#nativeFsAdmissionTable, this.tenantId, sessionId)
       if (admission.backend === 'posix') return
       const messages: unknown = Reflect.get(document.state, 'messages')
-      if (admission.backend !== 'text' || document.state.cursor !== 0
+      if (admission.backend !== 'text'
         || (messages !== undefined && !Array.isArray(messages))
         || (Array.isArray(messages) && messages.some(
           message => typeof message !== 'object' || message === null || !('role' in message) || message.role !== 'system'))) {
         throw new Error('Existing conversation requires explicit native filesystem import')
+      }
+      if (document.state.cursor !== 0) {
+        const history = await transaction.query<{ approval_count: string; other_count: string }>(`SELECT
+          count(*) FILTER (WHERE event_type = 'copilot.approval_mode_changed') AS approval_count,
+          count(*) FILTER (WHERE event_type NOT IN ('session.created', 'copilot.approval_mode_changed')) AS other_count
+          FROM ${this.#eventsTable} WHERE tenant_id=$1 AND scope_type='session' AND scope_id=$2`,
+        [this.tenantId, sessionId])
+        if (Number(history.rows[0]?.approval_count) !== document.state.cursor
+          || Number(history.rows[0]?.other_count) !== 0) {
+          throw new Error('Existing conversation requires explicit native filesystem import')
+        }
       }
       const existing = await transaction.query(`SELECT 1 FROM ${this.#nativeFsTables.nodes}
         WHERE tenant_id=$1 AND session_id=$2

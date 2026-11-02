@@ -212,6 +212,27 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     expect(admission.rows).toEqual([])
   })
 
+  it('admits an empty Copilot conversation after approval mode changes, but not after other events', async () => {
+    const authority = makeAuthority('posix-approval', 'posix-approval')
+    await authority.initialize()
+    const root = mkdtempSync(join(tmpdir(), 'kala-posix-approval-'))
+    roots.push(root)
+    const store = new SessionStore(root, { authority })
+    const sessionId = 'approval-before-first-turn'
+    const record = await store.create({ sessionId, agentRuntime: 'copilot', config })
+    await store.recordRuntimeProjection(sessionId, {
+      ...record.state, cursor: 1, approvalMode: 'ask',
+    }, 'copilot.approval_mode_changed', { mode: 'ask' })
+    await authority.initializeEmptyNativePosixSession(sessionId)
+    await authority.initializeEmptyNativePosixSession(sessionId)
+    const other = await store.create({ sessionId: 'other-before-first-turn', agentRuntime: 'copilot', config })
+    await store.recordRuntimeProjection(other.sessionId, {
+      ...other.state, cursor: 1,
+    }, 'copilot.other_event', {})
+    await expect(authority.initializeEmptyNativePosixSession(other.sessionId))
+      .rejects.toThrow('explicit native filesystem import')
+  })
+
   it('applies local cleanup leases and quarantine guards to binary native files', async () => {
     const root = mkdtempSync(join(tmpdir(), 'kala-posix-cleanup-'))
     roots.push(root)
