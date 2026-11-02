@@ -60,7 +60,7 @@ describe('PostgreSQL migrations', () => {
   it('applies the initial migration once under an advisory lock and is idempotent', async () => {
     const client = new FakeClient()
     const first = await runPostgresMigrations(pool(client))
-    expect(first).toEqual({ previousVersion: 0, currentVersion: 7, appliedVersions: [1, 2, 3, 4, 5, 6, 7] })
+    expect(first).toEqual({ previousVersion: 0, currentVersion: 8, appliedVersions: [1, 2, 3, 4, 5, 6, 7, 8] })
     expect(client.statements[0]).toContain('pg_advisory_lock')
     expect(client.statements).toContain('BEGIN')
     expect(client.statements).toContain('COMMIT')
@@ -72,10 +72,11 @@ describe('PostgreSQL migrations', () => {
     expect(client.statements.some((statement) => statement.includes('tenant_runtime_resource_ownerships_global_resource_uidx'))).toBe(true)
     expect(client.statements.some((statement) => statement.includes('tenant_runtime_unit_protocol_gates'))).toBe(true)
     expect(client.statements.some((statement) => statement.includes('tenant_session_native_fs_chunks'))).toBe(true)
+    expect(client.statements.some((statement) => statement.includes('tenant_agent_prompt_settings'))).toBe(true)
 
     client.statements.length = 0
     const second = await runPostgresMigrations(pool(client))
-    expect(second).toEqual({ previousVersion: 7, currentVersion: 7, appliedVersions: [] })
+    expect(second).toEqual({ previousVersion: 8, currentVersion: 8, appliedVersions: [] })
     expect(client.statements).not.toContain('BEGIN')
     expect(client.releaseCount).toBe(2)
   })
@@ -93,6 +94,20 @@ describe('PostgreSQL migrations', () => {
     await expect(assertPostgresSchemaCurrent(client)).rejects.toThrow('does not match this release')
   })
 
+  it('upgrades v7 with only the additive organization prompt table', async () => {
+    const client = new FakeClient()
+    await runPostgresMigrations(pool(client))
+    client.applied.pop()
+    client.statements.length = 0
+    await expect(runPostgresMigrations(pool(client))).resolves.toEqual({
+      previousVersion: 7, currentVersion: 8, appliedVersions: [8],
+    })
+    const changes = client.statements.filter((statement) => /^(CREATE|ALTER|DROP|DELETE|UPDATE)/u.test(statement)
+      && !statement.includes('kala_schema_migrations'))
+    expect(changes).toHaveLength(1)
+    expect(changes[0]).toContain('CREATE TABLE IF NOT EXISTS "public".tenant_agent_prompt_settings')
+  })
+
   it('grants DML only on migrated Runtime tables and SELECT only on migration history', async () => {
     const client = new FakeClient()
     await runPostgresMigrations(pool(client))
@@ -106,7 +121,8 @@ describe('PostgreSQL migrations', () => {
     expect(grants).toContain('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "public"."tenant_session_native_fs_nodes" TO "kala_runtime"')
     expect(grants).toContain('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "public"."tenant_session_native_fs_chunks" TO "kala_runtime"')
     expect(grants.some((statement) => statement.includes('ALL TABLES'))).toBe(false)
-    expect(grants.filter((statement) => statement.includes('SELECT, INSERT, UPDATE, DELETE'))).toHaveLength(24)
+    expect(grants).toContain('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "public"."tenant_agent_prompt_settings" TO "kala_runtime"')
+    expect(grants.filter((statement) => statement.includes('SELECT, INSERT, UPDATE, DELETE'))).toHaveLength(25)
     expect(client.statements.at(-1)).toBe('COMMIT')
     await expect(grantPostgresRuntimePrivileges(pool(client), { runtimeRole: 'invalid;role' })).rejects.toThrow('identifier')
   })

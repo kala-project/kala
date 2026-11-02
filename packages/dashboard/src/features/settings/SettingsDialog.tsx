@@ -203,7 +203,7 @@ export function SettingsDialog({ open, cacheNamespace = 'default', autoHideOffli
               ) : section === 'security' ? (
                 <SecuritySection payload={payload} />
               ) : section === 'socketAdmin' ? (
-                <SocketAdminSection payload={payload} onPayloadChange={applyPayload} />
+                <SocketAdminSection payload={payload} onPayloadChange={applyPayload} socket={storageSocket} />
               ) : section === 'executorAccess' ? (
                 <ExecutorAccessSection executors={executors} />
               ) : section === 'mcp' ? (

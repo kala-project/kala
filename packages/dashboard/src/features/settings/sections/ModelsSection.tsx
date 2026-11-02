@@ -163,6 +163,21 @@ export function ModelsSection({
     deleteProvider.mutate({ providerId: deleteProviderId })
   }
 
+  if (payload.deployment?.deployment.architecture === 'platform' && payload.runtimeManagement === 'external') {
+    return <div data-testid="settings-platform-models">
+      <SectionHeader title={t('settings.sections.models.label')} subtitle={t('settings.models.externallyManaged')} descriptionKind="notice" />
+      <div className="space-y-4">
+        {payload.agentRuntimes?.map(runtime => <div key={runtime.id} className="rounded-md bg-card/60 p-4">
+          <h4 className="font-medium">{runtime.label}</h4>
+          {runtime.reason ? <p className="text-sm text-destructive">{runtime.reason}</p> : null}
+          {runtime.models?.length ? <ul className="mt-2 space-y-2 text-sm">{runtime.models.map(model => <li key={model.ref} className="flex flex-wrap justify-between gap-2">
+            <span>{model.label}</span><code className="break-all text-xs text-muted-foreground">{model.ref}</code>
+          </li>)}</ul> : <p className="mt-2 text-sm text-muted-foreground">{t('settings.models.noRuntimeModels')}</p>}
+        </div>)}
+      </div>
+    </div>
+  }
+
   return (
     <div>
       <SectionHeader

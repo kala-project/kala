@@ -9,6 +9,8 @@ import { assertPostgresSchemaCurrent, grantPostgresGatewayRuntimeReader, grantPo
 import { createPostgresHotStateStore, type PostgresHotStateStore } from './tenant-runtime/postgres-hot-state.js'
 import { PostgresSessionAuthority } from './store/postgres-session-authority.js'
 import { PostgresTenantStateStore } from './tenant-runtime/postgres-state.js'
+import { PostgresAgentPromptSettingsStore } from './tenant-runtime/postgres-agent-settings.js'
+import { defaultAgentRuntimeSettings } from './runtime-config.js'
 
 const execFileAsync = promisify(execFile)
 const integrationDescribe = process.env.KALA_RUN_POSTGRES_MIGRATION_INTEGRATION === '1' ? describe : describe.skip
@@ -56,18 +58,18 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
   it('migrates from zero idempotently, then supports core DML while rejecting Runtime DDL', async () => {
     await expect(migratePostgres({ connectionString: adminUrl })).resolves.toMatchObject({
       previousVersion: 0,
-      currentVersion: 7,
-      appliedVersions: [1, 2, 3, 4, 5, 6, 7],
+      currentVersion: 8,
+      appliedVersions: [1, 2, 3, 4, 5, 6, 7, 8],
     })
     await expect(migratePostgres({ connectionString: adminUrl })).resolves.toMatchObject({
-      previousVersion: 7,
-      currentVersion: 7,
+      previousVersion: 8,
+      currentVersion: 8,
       appliedVersions: [],
     })
 
     const admin = new Pool({ connectionString: adminUrl })
     const tables = await admin.query("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")
-    expect(tables.rows.map((row) => row.tablename)).toHaveLength(26)
+    expect(tables.rows.map((row) => row.tablename)).toHaveLength(27)
     expect(tables.rows.map((row) => row.tablename)).toEqual(expect.arrayContaining([
       'tenant_object_capacity_accounts',
       'tenant_object_capacity_allocations',
@@ -77,6 +79,7 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
       'tenant_session_native_fs_usage',
       'tenant_session_native_fs_nodes',
       'tenant_session_native_fs_chunks',
+      'tenant_agent_prompt_settings',
     ]))
     await admin.query(`CREATE ROLE kala_runtime LOGIN PASSWORD '${runtimePassword.replaceAll("'", "''")}'`)
     await admin.query(`CREATE ROLE kala_gateway_reader LOGIN PASSWORD '${readerPassword.replaceAll("'", "''")}'`)
@@ -103,13 +106,14 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
       await expect(reader.query(`DELETE FROM ${table} WHERE false`)).rejects.toMatchObject({ code: '42501' })
     }
     await expect(reader.query('SELECT * FROM tenant_session_native_fs_chunks')).rejects.toMatchObject({ code: '42501' })
+    await expect(reader.query('SELECT * FROM tenant_agent_prompt_settings')).rejects.toMatchObject({ code: '42501' })
     await expect(reader.query('SELECT * FROM private_control_marker')).rejects.toMatchObject({ code: '42501' })
     await expect(reader.query('SELECT * FROM kala_schema_migrations')).rejects.toMatchObject({ code: '42501' })
     await expect(reader.query('CREATE TABLE gateway_must_not_create_tables (id integer)')).rejects.toMatchObject({ code: '42501' })
     await reader.end()
 
     const runtime = new Pool({ connectionString: runtimeUrl })
-    await expect(assertPostgresSchemaCurrent(runtime)).resolves.toBe(7)
+    await expect(assertPostgresSchemaCurrent(runtime)).resolves.toBe(8)
     await expect(runtime.query('SELECT * FROM tenant_runtime_unit_protocol_gates')).resolves.toMatchObject({ rowCount: 0 })
     await expect(runtime.query(`INSERT INTO tenant_runtime_unit_protocol_gates
       (organization_id, unit_id, feature_version, barrier_generation) VALUES ('org', 'unit', 1, 1)`))
@@ -137,6 +141,19 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
     const state = new PostgresTenantStateStore(hotState.database, 'org_test', new Uint8Array(32).fill(7))
     await state.writeMemo('user', { content: 'migrated schema DML works' })
     await expect(state.readMemo('user')).resolves.toMatchObject({ content: 'migrated schema DML works', revision: 1 })
+
+    const prompts = new PostgresAgentPromptSettingsStore(hotState.database, 'org_prompt_a')
+    const otherPrompts = new PostgresAgentPromptSettingsStore(hotState.database, 'org_prompt_b')
+    await expect(prompts.load()).resolves.toEqual(defaultAgentRuntimeSettings())
+    const updated = defaultAgentRuntimeSettings()
+    updated.selectedSlotId = 'slot-3'
+    updated.slots[2]!.prompt = 'organization prompt survives Runtime replacement'
+    await prompts.save(updated)
+    await expect(new PostgresAgentPromptSettingsStore(hotState.database, 'org_prompt_a').load()).resolves.toEqual(updated)
+    await expect(otherPrompts.load()).resolves.toEqual(defaultAgentRuntimeSettings())
+    await expect(prompts.save({ ...updated, slots: [] })).rejects.toThrow('invalid agent prompt settings')
+    await hotState.database.query("UPDATE tenant_agent_prompt_settings SET settings = '{}'::jsonb WHERE tenant_id = $1", ['org_prompt_a'])
+    await expect(prompts.load()).rejects.toThrow('Invalid persisted organization agent prompt settings')
   }, 120_000)
 
   it('refuses v3 to v4 when two Units already own the same resource, without deleting either row', async () => {

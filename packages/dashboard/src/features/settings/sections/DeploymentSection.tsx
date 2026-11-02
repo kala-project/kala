@@ -16,12 +16,12 @@ export function DeploymentSection({ payload, host, token }: { payload: ServerSet
   const statusQuery = useQuery({
     queryKey: ['dedicated-deployment-status', host],
     queryFn: async (): Promise<DedicatedDeploymentStatus | null> => {
-      const response = await fetch(`${host.replace(/\/$/u, '')}/runtime/deployment/status`, { cache: 'no-store', credentials: 'include', headers: token ? { authorization: `Bearer ${token}` } : undefined })
+      const response = await fetch(`${host.replace(/\/$/u, '')}/runtime/deployment/status`, { cache: 'no-store', credentials: 'include', signal: AbortSignal.timeout(10_000), headers: token ? { authorization: `Bearer ${token}` } : undefined })
       if (response.status === 404) return null
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       return await response.json() as DedicatedDeploymentStatus
     },
-    refetchInterval: 2_000,
+    refetchInterval: (query) => query.state.data === null ? false : 2_000,
   })
   const status = statusQuery.data
   const build = payload.versions?.build
@@ -32,7 +32,7 @@ export function DeploymentSection({ payload, host, token }: { payload: ServerSet
     <div>
       <SectionHeader title={t('settings.sections.deployment.label')} subtitle={t('settings.deployment.subtitle')} />
       <div className="grid gap-2 sm:grid-cols-2" data-testid="settings-deployment-overview">
-        <OverviewCard icon={overallHealthy ? CheckCircle2 : CircleAlert} label={t('settings.deployment.overallStatus')} value={overallHealthy ? t('settings.deployment.healthy') : t('settings.deployment.needsAttention')} tone={overallHealthy ? 'good' : 'warn'} />
+        <OverviewCard icon={status && overallHealthy ? CheckCircle2 : CircleAlert} label={t('settings.deployment.overallStatus')} value={!status && !statusQuery.isError ? t('settings.deployment.externalStatus') : overallHealthy ? t('settings.deployment.healthy') : t('settings.deployment.needsAttention')} tone={status && overallHealthy ? 'good' : 'warn'} />
         <OverviewCard icon={MonitorUp} label={t('settings.deployment.dashboardRelease')} value={status?.dashboard?.version ?? build?.releaseTag ?? DASHBOARD_VERSION} detail={status?.dashboard ? t('settings.deployment.generationValue', { generation: status.dashboard.generation }) : dashboardDeliveryLabel(build)} />
         <OverviewCard icon={Server} label={t('settings.deployment.runtimeRelease')} value={status?.route.activeReleaseId ?? build?.releaseTag ?? payload.versions?.host ?? '—'} detail={status ? t('settings.deployment.activeSlotValue', { slot: status.route.activeSlot }) : hostDeliveryLabel(build)} />
       </div>

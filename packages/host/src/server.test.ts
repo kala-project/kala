@@ -323,6 +323,29 @@ describe('wire protocol', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  it('terminates unknown Runtime routes without stealing API requests or Socket.IO acknowledgements', async () => {
+    const missing = await fetch(`${url}/runtime/deployment/status`, { signal: AbortSignal.timeout(2_000) })
+    expect(missing.status).toBe(404)
+    expect(await missing.json()).toEqual({ error: 'Runtime route not found' })
+    const models = await fetch(`${url}/models`, { signal: AbortSignal.timeout(2_000) })
+    expect(models.status).toBe(200)
+    const socket: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(`${url}/dashboard`, {
+      transports: ['websocket'],
+      auth: { sessionId: 'route-fallback-test', role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+      reconnection: false,
+    })
+    try {
+      await new Promise<void>((resolveConnect, reject) => {
+        socket.once('connect', resolveConnect)
+        socket.once('connect_error', reject)
+      })
+      const serverAt = await socket.timeout(2_000).emitWithAck('client:connection_ping', Date.now())
+      expect(Number.isFinite(serverAt)).toBe(true)
+    } finally {
+      socket.close()
+    }
+  })
+
   it('advertises Copilot as ready by default when the SDK starts successfully', async () => {
     const dashboard: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(`${url}/dashboard`, {
       transports: ['websocket'],
@@ -2582,6 +2605,7 @@ describe('wire protocol', () => {
 
   it('scopes agent prompt GET/POST and existing Session synchronization to the actor organization', async () => {
     const prompts = new Map([['org_a', 'old-a'], ['org_b', 'old-b']])
+    const providerMessages: string[] = []
     const slotsFor = (prompt: string) => [
       { id: 'slot-1' as const, name: 'One', prompt },
       { id: 'slot-2' as const, name: 'Two', prompt: `${prompt}-two` },
@@ -2591,9 +2615,16 @@ describe('wire protocol', () => {
     const localServer = await startHostServer({
       port: 0,
       sessionsDir: localSessionsDir,
-      llm: scriptedLlm(),
+      llm: {
+        name: 'authoritative-prompt-test',
+        async call(input) {
+          providerMessages.push(JSON.stringify(input.messages))
+          return { message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } }
+        },
+      },
       deployment: PRIVATE_CLOUD_DEPLOYMENT,
-      defaultConfig: (actor) => createConfig({ tools: [], systemPrompt: prompts.get(actor?.kind === 'ingress' ? actor.organizationId : '') ?? 'portable' }),
+      defaultConfig: () => createConfig({ tools: [], systemPrompt: 'stale local default' }),
+      resolveSystemPrompt: async (actor) => prompts.get(actor?.kind === 'ingress' ? actor.organizationId : '') ?? 'portable',
       settings: (actor) => ({
         providers: [],
         defaultModel: '',
@@ -2651,6 +2682,22 @@ describe('wire protocol', () => {
       expect(created.status).toBe(201)
       expect(localServer.store.get('org-a-api')?.config.systemPrompt).toBe('new-a')
       expect(localServer.store.get('org-a-api')?.organizationId).toBe('org_a')
+      const denied = await fetch(`http://localhost:${localServer.port}/settings/agent-prompt`, {
+        method: 'POST',
+        headers: { ...headers, 'x-agent-runlab-organization-role': 'member' },
+        body: JSON.stringify({ selectedSlotId: 'slot-1', slots: slotsFor('member-write') }),
+      })
+      expect(denied.status).toBe(403)
+      expect(prompts.get('org_a')).toBe('new-a')
+      prompts.set('org_a', 'replica-updated-a')
+      const sent = await fetch(`http://localhost:${localServer.port}/api/v1/sessions/org-a-api/messages`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ operationId: 'replica-prompt-turn', text: 'use the latest organization settings' }),
+      })
+      expect(sent.status).toBe(202)
+      await vi.waitFor(() => expect(providerMessages).toHaveLength(1))
+      expect(providerMessages[0]).toContain('replica-updated-a')
+      expect(localServer.store.get('org-a-api')?.config.systemPrompt).toBe('replica-updated-a')
     } finally {
       await localServer.close()
       rmSync(localSessionsDir, { recursive: true, force: true })

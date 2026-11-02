@@ -477,7 +477,7 @@ export function writeAgentRuntimeSettings(path: string, settings: AgentRuntimeSe
   renameSync(temporaryPath, path)
 }
 
-function parseAgentRuntimeSettings(value: unknown): AgentRuntimeSettings | undefined {
+export function parseAgentRuntimeSettings(value: unknown): AgentRuntimeSettings | undefined {
   if (!value || typeof value !== 'object') return undefined
   const candidate = value as { selectedSlotId?: unknown; slots?: unknown }
   const selectedSlotId = candidate.selectedSlotId

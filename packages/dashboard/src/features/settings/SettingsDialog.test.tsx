@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AttachedExecutor, ServerSettingsPayload } from '@agent-kernel/shared'
+import type { AttachedExecutor, DashboardClientToServerEvents, DashboardServerToClientEvents, ServerSettingsPayload } from '@agent-kernel/shared'
+import { COPILOT_AGENT_RUNTIME_CAPABILITIES, DEDICATED_DEPLOYMENT, FULL_RUNTIME_CAPABILITIES } from '@agent-kernel/shared'
+import { io as clientIO, type Socket } from 'socket.io-client'
 
 import { SettingsDialog } from './SettingsDialog.js'
 import { i18n } from '../../i18n/index.js'
@@ -103,6 +105,70 @@ describe('SettingsDialog', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals()
+  })
+
+  it('shows actual Platform Runtime models and centralized auth instead of Portable configuration instructions', async () => {
+    const platformPayload: ServerSettingsPayload = {
+      ...payload, providers: [], socketAdmin: undefined, hooks: [], runtimeManagement: 'external',
+      deployment: { product: 'dedicated', deployment: DEDICATED_DEPLOYMENT, capabilities: FULL_RUNTIME_CAPABILITIES },
+      agentRuntimes: [{
+        id: 'copilot', label: 'GitHub Copilot', description: '', available: true, status: 'ready',
+        capabilities: COPILOT_AGENT_RUNTIME_CAPABILITIES,
+        models: [{ ref: 'copilot:test', id: 'test', label: 'Actual Copilot model', provider: 'GitHub Copilot', providerId: 'copilot' }],
+      }],
+    }
+    fetchMock.mockResolvedValue(new Response(JSON.stringify(platformPayload), { status: 200 }))
+    render(<SettingsDialog open cacheNamespace="platform-model-auth" initialSection="models" onOpenChange={() => {}} />)
+    expect(await screen.findByText('Actual Copilot model')).toBeTruthy()
+    expect(screen.queryByTestId('settings-model-provider-id')).toBeNull()
+    expect(screen.getByText(/managed by the deployment operator, not local Dashboard files/)).toBeTruthy()
+    fireEvent.click(screen.getByTestId('settings-tab-security'))
+    expect(await screen.findByText(/browser sign-in uses shared OIDC/)).toBeTruthy()
+    expect(screen.queryByText('not required')).toBeNull()
+    fireEvent.click(screen.getByTestId('settings-tab-hooks'))
+    expect(await screen.findByText('This Runtime has not advertised any configured hooks.')).toBeTruthy()
+    expect(screen.queryByText('Example hook config')).toBeNull()
+  })
+
+  it('uses the live Platform socket for real ACK diagnostics and refreshes the authoritative snapshot', async () => {
+    const platformPayload: ServerSettingsPayload = {
+      ...payload, socketAdmin: undefined,
+      deployment: { product: 'dedicated', deployment: DEDICATED_DEPLOYMENT, capabilities: FULL_RUNTIME_CAPABILITIES },
+    }
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify(platformPayload), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...platformPayload, socketConnections: { ...payload.socketConnections, total: 4 } }), { status: 200 }))
+    const socket: Socket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO('http://localhost:3000/dashboard', { autoConnect: false })
+    socket.connected = true
+    vi.spyOn(socket, 'timeout').mockReturnValue(socket)
+    const acknowledge = vi.spyOn(socket, 'emitWithAck').mockResolvedValueOnce(Date.now()).mockRejectedValueOnce(new Error('ACK timed out'))
+    try {
+      render(<SettingsDialog open cacheNamespace="platform-socket" initialSection="socketAdmin" storageSocket={socket} onOpenChange={() => {}} />)
+      await screen.findByTestId('settings-platform-socket-diagnostics')
+      fireEvent.click(screen.getByTestId('settings-socket-ping'))
+      expect(await screen.findByTestId('settings-socket-ping-result')).toBeTruthy()
+      expect(acknowledge).toHaveBeenCalledWith('client:connection_ping', expect.any(Number))
+      fireEvent.click(screen.getByTestId('settings-socket-ping'))
+      expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'ACK timed out')
+      fireEvent.click(screen.getByTestId('settings-socket-refresh'))
+      expect(await screen.findByText('Connections: 4')).toBeTruthy()
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    } finally {
+      socket.connected = false
+      socket.disconnect()
+    }
+  })
+
+  it('does not claim healthy deployment or keep polling when no deployment controller exists', async () => {
+    fetchMock.mockImplementation(async (input) => String(input).endsWith('/runtime/deployment/status')
+      ? new Response(JSON.stringify({ error: 'Runtime route not found' }), { status: 404 })
+      : new Response(JSON.stringify(payload), { status: 200 }))
+    render(<SettingsDialog open cacheNamespace="unsupported-controller" initialSection="deployment" onOpenChange={() => {}} />)
+    expect(await screen.findByText('Deployment health not verified')).toBeTruthy()
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/runtime/deployment/status'))).toHaveLength(1))
+    await new Promise(resolve => setTimeout(resolve, 2_100))
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/runtime/deployment/status'))).toHaveLength(1)
+    expect(screen.queryByText('Healthy')).toBeNull()
   })
 
   it('does not render when closed', () => {

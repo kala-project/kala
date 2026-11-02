@@ -191,6 +191,8 @@ export type HostServerOptions = {
   /** Private Cloud persistent queue claim TTL; primarily configurable for fencing tests. */
   queueClaimTtlMs?: number
   defaultConfig: AgentConfig | ((actor?: DashboardActor) => AgentConfig)
+  /** Read authoritative tenant settings before Session creation and every model turn. */
+  resolveSystemPrompt?: (actor?: DashboardActor) => string | Promise<string>
   toolTimeoutMs?: number
   /**
    * Grace window after an executor disconnects before its "detached" event
@@ -453,6 +455,12 @@ export async function startHostServer(
   const getDefaultConfig = (actor?: DashboardActor): AgentConfig => typeof options.defaultConfig === 'function'
     ? options.defaultConfig(actor)
     : options.defaultConfig
+  const getEffectiveDefaultConfig = async (actor?: DashboardActor): Promise<AgentConfig> => {
+    const config = getDefaultConfig(actor)
+    return options.resolveSystemPrompt
+      ? { ...config, systemPrompt: await options.resolveSystemPrompt(actor) }
+      : config
+  }
   if (product !== 'portable' && options.sessionAuthority && !options.objectStorage) {
     throw new Error('Private Cloud session authority requires both externally backed artifact stores')
   }
@@ -637,7 +645,9 @@ export async function startHostServer(
       },
       runtime: restart?.status() ?? restartUnavailableStatus(),
       runtimeManagement: restart ? 'local' : 'external',
-      agentRuntimes: agentRuntimes?.catalog() ?? [],
+      agentRuntimes: agentRuntimes?.catalog().map((runtime) => runtime.id === 'kernel'
+        ? { ...runtime, models: typeof options.models === 'function' ? options.models() : options.models ?? [] }
+        : runtime) ?? [],
       socketConnections: socketConnectionAuditSnapshot(io),
     }
   }
@@ -658,7 +668,7 @@ export async function startHostServer(
   let startupPromptDiscoveryPending = true
   let promptSynchronizationRunning = false
   const ensureEffectiveSystemPrompt = async (record: SessionRecord): Promise<boolean> => {
-    const prompt = getDefaultConfig(actorForRecord(record)).systemPrompt ?? ''
+    const prompt = (await getEffectiveDefaultConfig(actorForRecord(record))).systemPrompt ?? ''
     const current = record.state.systemPromptOverride?.prompt
       ?? (record.state.messages[0]?.role === 'system'
         ? record.state.messages[0].content.filter((item) => item.type === 'text').map((item) => item.text).join('')
@@ -1026,6 +1036,13 @@ export async function startHostServer(
     attachEmbeddedStaticHandler(http, options.embeddedStaticAssets)
   } else if (hasReleaseAssets) {
     attachReleaseAssetsHandler(http, releaseAssetsDir, options.embeddedReleaseAssets)
+  }
+  if (!options.dashboardHandler && !options.staticDir && !options.embeddedStaticAssets?.length) {
+    attachRequestHandler(http, (request, response) => {
+      claimRoute(request)
+      response.writeHead(404, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      response.end(JSON.stringify({ error: 'Runtime route not found' }))
+    })
   }
 
   const queuedMessages = new Map<string, QueuedUserMessage[]>()
@@ -2321,7 +2338,7 @@ export async function startHostServer(
           pendingMessages: messageQueues.pending(sessionId), mode: 'queue',
         })
       }
-      const config = deriveSessionConfig(mergeMcpTools(getDefaultConfig(organizationId
+      const config = deriveSessionConfig(mergeMcpTools(await getEffectiveDefaultConfig(organizationId
         ? { kind: 'ingress', organizationId, principal: task.createdBy, role: actor.role ?? 'member' }
         : undefined), mcpToolsForWorkspace(executors.snapshot(), target.workspaceId)), undefined, 'chat')
       const { record, created } = await store.ensure({
@@ -2431,7 +2448,7 @@ export async function startHostServer(
           sessionId: input.sessionId,
         })
       }
-      const config = deriveSessionConfig(mergeMcpTools(getDefaultConfig(actor.organizationId && actor.role
+      const config = deriveSessionConfig(mergeMcpTools(await getEffectiveDefaultConfig(actor.organizationId && actor.role
         ? { kind: 'ingress', organizationId: actor.organizationId, principal: actor.principal, role: actor.role }
         : undefined), mcpToolsForWorkspace(executors.snapshot(), input.workspaceId)), undefined, executionMode)
       const { record, created } = await store.ensure({
@@ -2600,6 +2617,7 @@ export async function startHostServer(
     loopDeps,
     executors,
     defaultConfig: getDefaultConfig,
+    ...(options.resolveSystemPrompt ? { resolveSystemPrompt: options.resolveSystemPrompt } : {}),
     ...(auth ? { auth } : {}),
     audit,
     ...(options.sessionQuota !== undefined ? { sessionQuota: options.sessionQuota } : {}),

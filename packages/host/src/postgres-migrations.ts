@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 
 import { nativeFsSchemaStatements, type NativeFsTables } from './store/native-session-fs.js'
+import { agentSettingsSchemaStatements } from './tenant-runtime/postgres-agent-settings.js'
 
 export type PostgresSchemaManagement = 'initialize' | 'external'
 
@@ -81,6 +82,11 @@ const migrations: readonly PostgresMigration[] = [
     version: 7,
     name: 'native_copilot_session_filesystem',
     statements: nativeSessionFsStatements,
+  },
+  {
+    version: 8,
+    name: 'organization_agent_prompt_settings',
+    statements: agentSettingsSchemaStatements,
   },
 ]
 

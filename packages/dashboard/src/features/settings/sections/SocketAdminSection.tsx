@@ -1,13 +1,17 @@
-import type { ServerSettingsPayload } from '@agent-kernel/shared'
+import type { DashboardClientToServerEvents, DashboardServerToClientEvents, ServerSettingsPayload } from '@agent-kernel/shared'
+import type { Socket } from 'socket.io-client'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ExternalLink } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '../../../components/ui/button.js'
+import { ScrollArea } from '../../../components/ui/scroll-area.js'
 import { CopyButton, EmptyRow, SectionHeader } from '../controls.js'
 
-export function SocketAdminSection({ payload, onPayloadChange }: { payload: ServerSettingsPayload; onPayloadChange(payload: ServerSettingsPayload): void }): JSX.Element {
+type DashboardSocket = Socket<DashboardServerToClientEvents, DashboardClientToServerEvents>
+
+export function SocketAdminSection({ payload, onPayloadChange, socket }: { payload: ServerSettingsPayload; onPayloadChange(payload: ServerSettingsPayload): void; socket?: DashboardSocket }): JSX.Element {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [password, setPassword] = useState('')
@@ -55,6 +59,9 @@ export function SocketAdminSection({ payload, onPayloadChange }: { payload: Serv
     },
     onError: (err) => setError(err instanceof Error ? err.message : String(err)),
   })
+  if (payload.deployment?.deployment.architecture === 'platform') {
+    return <PlatformSocketDiagnostics payload={payload} onPayloadChange={onPayloadChange} socket={socket} />
+  }
   if (!admin) {
     return (
       <div>
@@ -62,6 +69,68 @@ export function SocketAdminSection({ payload, onPayloadChange }: { payload: Serv
         <EmptyRow>{t('settings.socketAdmin.unavailable')}</EmptyRow>
       </div>
     )
+  }
+
+  function PlatformSocketDiagnostics({ payload, onPayloadChange, socket }: {
+    payload: ServerSettingsPayload
+    onPayloadChange(payload: ServerSettingsPayload): void
+    socket?: DashboardSocket
+  }): JSX.Element {
+    const { t } = useTranslation()
+    const [connected, setConnected] = useState(Boolean(socket?.connected))
+    useEffect(() => {
+      const refresh = () => setConnected(Boolean(socket?.connected))
+      refresh()
+      socket?.on('connect', refresh)
+      socket?.on('disconnect', refresh)
+      return () => {
+        socket?.off('connect', refresh)
+        socket?.off('disconnect', refresh)
+      }
+    }, [socket])
+    const refresh = useMutation({
+      mutationFn: async () => {
+        const response = await fetch('/settings', { cache: 'no-store', signal: AbortSignal.timeout(10_000) })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const next = await response.json() as ServerSettingsPayload
+        if (!next.socketConnections) throw new Error(t('settings.socketAdmin.snapshotUnavailable'))
+        return next
+      },
+      onSuccess: onPayloadChange,
+    })
+    const ping = useMutation({
+      mutationFn: async () => {
+        if (!socket?.connected) throw new Error(t('settings.socketAdmin.disconnected'))
+        const started = performance.now()
+        const serverAt = await socket.timeout(5_000).emitWithAck('client:connection_ping', Date.now())
+        if (!Number.isFinite(serverAt)) throw new Error(t('settings.socketAdmin.invalidPing'))
+        return Math.round(performance.now() - started)
+      },
+    })
+    const snapshot = payload.socketConnections
+    const error = refresh.error ?? ping.error
+    return <div data-testid="settings-platform-socket-diagnostics">
+      <SectionHeader title={t('settings.sections.socketAdmin.label')} subtitle={t('settings.socketAdmin.scopedDescription')} descriptionKind="notice" />
+      <div className="space-y-4 rounded-md bg-card/60 p-4 text-sm">
+        <div>{connected ? t('settings.socketAdmin.connected') : t('settings.socketAdmin.disconnected')}</div>
+        <div>{t('settings.socketAdmin.transport')}: <code>{socket?.io.engine?.transport.name ?? '—'}</code></div>
+        {payload.storage ? <div className="break-all">{t('settings.socketAdmin.scope')}: <code>{payload.storage.organizationId}</code></div> : null}
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" onClick={() => refresh.mutate()} disabled={refresh.isPending} data-testid="settings-socket-refresh">{t('settings.socketAdmin.refresh')}</Button>
+          <Button type="button" variant="outline" onClick={() => ping.mutate()} disabled={!connected || ping.isPending} data-testid="settings-socket-ping">{t('settings.socketAdmin.ping')}</Button>
+        </div>
+        {ping.data !== undefined ? <p role="status" data-testid="settings-socket-ping-result">{t('settings.socketAdmin.pingSuccess', { ms: ping.data })}</p> : null}
+        {error ? <p role="alert" className="text-destructive">{error.message}</p> : null}
+        {snapshot ? <>
+          <p>{t('settings.socketAdmin.total')}: {snapshot.total}</p>
+          <p className="text-xs text-muted-foreground">{t('settings.socketAdmin.snapshotUpdated')}: {snapshot.updatedAt}</p>
+          <ScrollArea><table className="w-full text-left text-xs" data-testid="settings-socket-namespaces">
+            <thead><tr>{['namespace', 'total', 'dashboard', 'executor', 'other'].map(key => <th key={key} className="p-2">{t(`settings.socketAdmin.${key}`)}</th>)}</tr></thead>
+            <tbody>{snapshot.namespaces.map(entry => <tr key={entry.namespace}><td className="p-2 font-mono">{entry.namespace}</td><td>{entry.sockets}</td><td>{entry.dashboard}</td><td>{entry.executor}</td><td>{entry.other}</td></tr>)}</tbody>
+          </table></ScrollArea>
+        </> : <p role="status">{t('settings.socketAdmin.snapshotUnavailable')}</p>}
+      </div>
+    </div>
   }
   if (!admin.initialized) {
     return (

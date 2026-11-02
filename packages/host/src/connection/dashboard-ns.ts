@@ -236,6 +236,7 @@ export type DashboardDeps = {
   loopDeps: HostLoopDeps
   executors: ReturnType<typeof createExecutorRegistry>
   defaultConfig: AgentConfig | ((actor?: DashboardActor) => AgentConfig)
+  resolveSystemPrompt?: (actor?: DashboardActor) => string | Promise<string>
   auth?: AuthConfig
   audit?: AuditLogger
   sessionQuota?: TenantSessionQuotaEnforcer
@@ -1941,8 +1942,11 @@ export function configureDashboardNamespace(
             sessionId: p.sessionId,
           })
         }
+        const defaultConfig = getDefaultConfig(actor)
         const sessionBaseConfig = mergeMcpTools(
-          getDefaultConfig(actor),
+          deps.resolveSystemPrompt
+            ? { ...defaultConfig, systemPrompt: await deps.resolveSystemPrompt(actor) }
+            : defaultConfig,
           mcpToolsForWorkspace(executorSnapshotFor(deps), p.workspaceId),
         )
         const sessionConfig = deriveSessionConfig(sessionBaseConfig, p.tools, executionMode)

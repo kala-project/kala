@@ -4,13 +4,15 @@ import { mkdir, readFile, readdir, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import process from 'node:process'
 
-import { AGENT_RUNTIME_CAPABILITIES, FULL_RUNTIME_CAPABILITIES, PROTOCOL_VERSION, productVariant } from '@agent-kernel/shared'
+import { AGENT_RUNTIME_CAPABILITIES, FULL_RUNTIME_CAPABILITIES, PROTOCOL_VERSION, productVariant, type ServerSettingsPayload } from '@agent-kernel/shared'
 import { createConfiguredSecretResolver } from '@agent-kernel/shared/secret-resolver'
 import { createOnlineTelemetryFromEnv, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
 
 import { createScheduledPrincipalAuthorizer } from '../src/scheduled-tasks/authorization.js'
 import { startLoopbackHostRuntimeUnit } from '../src/tenant-runtime/loopback-host-unit.js'
 import { resolveBuiltinAgentModule } from '../src/builtin-tools.js'
+import type { DashboardActor } from '../src/auth-control.js'
+import { PostgresAgentPromptSettingsStore } from '../src/tenant-runtime/postgres-agent-settings.js'
 import { ExplicitLLMClientFactory } from '../src/llm/client-factory.js'
 import { startTenantRuntimeService } from '../src/tenant-runtime/service.js'
 import { readRequiredSecretEnv } from '../src/config/secret-env.js'
@@ -271,6 +273,26 @@ async function main(): Promise<void> {
         ? await createExperimentalUnitStorage(experimentalStorage, organizationId, id, experimentalStateMasterKey,
             placementLease, maxArtifactBytes, telemetry, sessionOwnership)
         : undefined
+      const agentSettings = persistentStorage?.agentSettings
+      let currentAgentSettings = persistentStorage?.initialAgentSettings
+      const assertActorOrganization = (actor?: DashboardActor): void => {
+        if (actor?.kind === 'ingress' && actor.organizationId !== organizationId) {
+          throw Object.assign(new Error('tenant_forbidden'), { status: 403 })
+        }
+      }
+      const refreshAgentSettings = async (actor?: DashboardActor) => {
+        assertActorOrganization(actor)
+        currentAgentSettings = await agentSettings?.load()
+        return currentAgentSettings
+      }
+      const currentAgentModule = () => {
+        const settings = currentAgentSettings
+        return settings
+          ? resolveBuiltinAgentModule({
+              systemPrompt: settings.slots.find((slot) => slot.id === settings.selectedSlotId)!.prompt,
+            })
+          : agentModule
+      }
       const resourceArtifactUsage = persistentStorage
         ? persistentStorage.objectStorage.resourceArtifactUsage
         : async () => await directoryBytes([
@@ -278,6 +300,36 @@ async function main(): Promise<void> {
             join(unitRoot, 'session-artifacts'),
             join(unitRoot, 'message-attachments'),
           ])
+      const makeSettings = async (actor: DashboardActor): Promise<ServerSettingsPayload> => {
+        const prompt = await refreshAgentSettings(actor)
+        const [identities, invites] = persistentStorage
+          ? await Promise.all([persistentStorage.executorIdentityStore.snapshot(), persistentStorage.executorIdentityStore.inviteSnapshot()])
+          : [[], []]
+        return {
+          providers: [], defaultModel: runtimeProvider.defaultModel, hooks: [],
+          versions: { host: packageJson.version, protocol: PROTOCOL_VERSION },
+          agentModule: currentAgentModule().metadata,
+          ...(prompt && agentSettings ? { agentPrompt: { ...prompt, configPath: agentSettings.configPath } } : {}),
+          ...(actor.kind === 'ingress' ? {
+            auth: {
+              dashboardAuthRequired: true,
+              githubOAuth: { required: false, configured: false, usernameWhitelistEnabled: false, usernameWhitelist: [] },
+              executorIdentity: { tokenScoped: true, tokenCount: identities.length, inviteCount: invites.filter((invite) => !invite.revoked).length },
+            },
+          } : {}),
+          mcp: { supported: false, note: 'MCP availability is resolved by the Runtime.' },
+          paths: { claudeSettings: '', codexConfig: '', manualModels: '', hooksConfig: '', sessionsDir: join(unitRoot, 'sessions') },
+          ...(persistentStorage && organizationId ? {
+            storage: {
+              kind: 'postgres-s3' as const,
+              organizationId,
+              objectBytes: await resourceArtifactUsage(),
+              objectLimitBytes: maxArtifactBytes,
+            },
+          } : {}),
+          ...(releaseAssetsDir ? { release: { bootstrapBaseUrl: '/release-assets', source: 'local' as const } } : {}),
+        }
+      }
       resourceGovernor.reconcile(id, { artifactBytes: await resourceArtifactUsage() })
       const webSearchCredentialStore = persistentStorage?.webSearchCredentialStore ?? localWebSearchCredentialStore
       const speechCredentialStore = persistentStorage?.speechCredentialStore ?? localSpeechCredentialStore
@@ -318,7 +370,18 @@ async function main(): Promise<void> {
           executorIdentityStorePath: join(unitRoot, 'executor-identities.json'),
         } : {}),
         llm: runtimeProvider.llm,
-        defaultConfig: agentModule.config,
+        defaultConfig: () => currentAgentModule().config,
+        ...(agentSettings ? {
+          resolveSystemPrompt: async (actor?: DashboardActor) => {
+            await refreshAgentSettings(actor)
+            return currentAgentModule().systemPrompt
+          },
+          updateAgentPrompt: async (input: Parameters<typeof agentSettings.save>[0], actor: DashboardActor) => {
+            assertActorOrganization(actor)
+            await agentSettings.save(input)
+            return makeSettings(actor)
+          },
+        } : {}),
         models: runtimeProvider.models,
         defaultModel: runtimeProvider.defaultModel,
         deployment,
@@ -335,27 +398,7 @@ async function main(): Promise<void> {
         ...(dashboardDir ? { staticDir: resolve(dashboardDir) } : {}),
         ...(docsDir ? { docsRootDir: resolve(docsDir) } : {}),
         ...(releaseAssetsDir ? { releaseAssetsDir: resolve(releaseAssetsDir) } : {}),
-        settings: async (actor) => {
-          if (actor.kind === 'ingress' && actor.organizationId !== organizationId) {
-            throw new Error('tenant_forbidden')
-          }
-          return {
-            providers: [], defaultModel: runtimeProvider.defaultModel, hooks: [],
-            versions: { host: packageJson.version, protocol: PROTOCOL_VERSION },
-            agentModule: agentModule.metadata,
-            mcp: { supported: false, note: 'MCP availability is resolved by the Runtime.' },
-            paths: { claudeSettings: '', codexConfig: '', manualModels: '', hooksConfig: '', sessionsDir: join(unitRoot, 'sessions') },
-            ...(persistentStorage && organizationId ? {
-              storage: {
-                kind: 'postgres-s3' as const,
-                organizationId,
-                objectBytes: await resourceArtifactUsage(),
-                objectLimitBytes: maxArtifactBytes,
-              },
-            } : {}),
-            ...(releaseAssetsDir ? { release: { bootstrapBaseUrl: '/release-assets', source: 'local' as const } } : {}),
-          }
-        },
+        settings: makeSettings,
       })
     },
   })
@@ -510,6 +553,7 @@ async function createExperimentalUnitStorage(
   try {
     if (config.schemaManagement !== 'external') await hotState.initialize()
     const tenantState = new PostgresTenantStateStore(hotState.database, organizationId, stateMasterKey)
+    const agentSettings = new PostgresAgentPromptSettingsStore(hotState.database, organizationId)
     const vapidPublic = process.env.KALA_PUSH_VAPID_PUBLIC?.trim()
     const vapidPrivate = process.env.KALA_PUSH_VAPID_PRIVATE?.trim()
     if (Boolean(vapidPublic) !== Boolean(vapidPrivate)) {
@@ -520,7 +564,11 @@ async function createExperimentalUnitStorage(
     const vapidKeys = vapidPublic && vapidPrivate ? loadOrCreateVapidKeys('') : null
     // Experimental bootstrap only. Production rollout must move this DDL into
     // an operator-run, versioned migration before runtime processes start.
-    if (config.schemaManagement !== 'external') await tenantState.initializeSchema()
+    if (config.schemaManagement !== 'external') {
+      await tenantState.initializeSchema()
+      await agentSettings.initializeSchema()
+    }
+    const initialAgentSettings = await agentSettings.load()
     const dagStore = new PostgresDagStore(hotState.database, organizationId, unitId, {
       schemaManagement: config.schemaManagement,
       ...(sessionOwnership ? {
@@ -603,6 +651,8 @@ async function createExperimentalUnitStorage(
       } : {}),
       objectStorage,
       memoStore: new PostgresMemoStore(tenantState),
+      agentSettings,
+      initialAgentSettings,
       dagStore,
       scheduledTaskStore,
       workspaceAliasStore,

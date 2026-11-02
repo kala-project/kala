@@ -9,16 +9,17 @@ export function HooksSection({
   payload: ServerSettingsPayload
 }): JSX.Element {
   const { t } = useTranslation()
+  const platform = payload.deployment?.deployment.architecture === 'platform'
   return (
     <div>
       <SectionHeader
         descriptionKind="notice"
         title={t('settings.sections.hooks.label')}
-        subtitle={t('settings.hooks.subtitle')}
+        subtitle={t(platform ? 'settings.hooks.externallyManaged' : 'settings.hooks.subtitle')}
       />
       {payload.hooks.length === 0 ? (
         <EmptyRow>
-          {t('settings.hooks.none', { path: payload.paths.hooksConfig })}
+          {t(platform ? 'settings.hooks.noneManaged' : 'settings.hooks.none', { path: payload.paths.hooksConfig })}
         </EmptyRow>
       ) : (
         <SettingsRecordList testId="settings-hooks-list">
@@ -35,7 +36,7 @@ export function HooksSection({
           ))}
         </SettingsRecordList>
       )}
-      <details className="mt-4 rounded-md border border-border bg-muted/30 p-3 text-xs">
+      {!platform ? <details className="mt-4 rounded-md border border-border bg-muted/30 p-3 text-xs">
         <summary className="cursor-pointer text-muted-foreground">{t('settings.hooks.example')}</summary>
         <pre className="mt-2 whitespace-pre-wrap font-mono text-caption text-foreground">
 {`[[hooks]]
@@ -43,7 +44,7 @@ event = "pre_tool_use"
 match = "bash"
 command = "/usr/local/bin/lint-shell.sh"`}
         </pre>
-      </details>
+      </details> : null}
     </div>
   )
 }
