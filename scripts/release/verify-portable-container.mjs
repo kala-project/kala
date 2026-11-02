@@ -86,7 +86,7 @@ async function main() {
     assert.equal(imageInfo.Os, 'linux', 'only the verified Linux Portable image is accepted')
     assert.equal(imageInfo.Architecture, 'amd64', 'only the verified linux/amd64 Portable image is accepted')
     assert.equal(imageInfo.Config?.User, '65532:65532', 'Portable image must run as the unprivileged distroless user')
-    assert.equal(imageInfo.Config?.Labels?.['io.kala.portable.runtime.source'], 'gcr.io/distroless/nodejs22-debian13@sha256:5ef534d3db0ac0c43bee379af4ae49cfbfc0ef38a46c94c52d87c68f32f34d8a', 'Portable runtime source must match the security-scanned pinned image')
+    assert.equal(imageInfo.Config?.Labels?.['io.kala.portable.runtime.source'], 'gcr.io/distroless/nodejs22-debian13@sha256:5e72a679e328276f6ffc3c4bb45c94f847f6abf0b424a1f8cc984f7f1c1daf47', 'Portable runtime source must match the security-scanned pinned image')
     assert.equal(imageInfo.Config?.Env?.some((entry) => entry === 'HOME=/var/lib/kala'), true, 'Portable home and settings must be persisted inside the volume')
     assert.equal(imageInfo.Config?.Labels?.['org.opencontainers.image.version'], versionFromTag(tag), 'image version label mismatch')
     assert.equal(imageInfo.Config?.Labels?.['org.opencontainers.image.revision'], revision, 'image revision label mismatch')
