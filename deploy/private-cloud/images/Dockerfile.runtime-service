@@ -27,9 +27,8 @@ ARG SOURCE_REVISION
 ARG RELEASE_TAG
 ARG RELEASE_REPOSITORY
 RUN node scripts/release/build-release-assets.mjs --no-native --repo "$RELEASE_REPOSITORY" --tag "$RELEASE_TAG" --skip-dashboard-build --skip-package-build --source-revision "$SOURCE_REVISION" \
- && cp /tmp/windows-assets/kala-executor-win32-x64.exe release/ \
  && cp /tmp/windows-assets/kala-executor-service-host-win32-x64.exe release/ \
- && chmod +x release/kala-executor-win32-x64.exe release/kala-executor-service-host-win32-x64.exe \
+ && chmod +x release/kala-executor-service-host-win32-x64.exe \
  && cp /tmp/windows-assets/node-pty-win32-x64.tar.gz release/ \
  && node scripts/release/embed-windows-assets-in-portable-host.mjs --directory release --repo "$RELEASE_REPOSITORY" --tag "$RELEASE_TAG" --expected-revision "$SOURCE_REVISION" \
  && node scripts/release/build-release-assets.mjs --finalize-only --repo "$RELEASE_REPOSITORY" --tag "$RELEASE_TAG" --source-revision "$SOURCE_REVISION" \

@@ -21,17 +21,18 @@ try {
     const me = await page.evaluate(() => fetch('/auth/me').then((response) => response.json()))
     const capabilities = await page.evaluate(() => fetch('/runtime/capabilities').then((response) => response.json()))
     const cookie = (await page.cookies()).map((entry) => entry.name + '=' + entry.value).join('; ')
-    const socket = io(origin + '/dashboard', { transports: ['websocket'], extraHeaders: { cookie }, auth: { role: 'dashboard', sessionId: 'isolation-' + user.name, clientVersion: '1' }, reconnection: false })
+    const sessionId = `tenant-${user.name}-${randomUUID()}`
+    const socket = io(origin + '/dashboard', { transports: ['websocket'], extraHeaders: { cookie }, auth: { role: 'dashboard', sessionId, clientVersion: '1' }, reconnection: false })
     await once(socket, 'session:ready', 15_000)
-    actors.push({ ...user, password, context, socket, organizationId: me.organization?.id, capabilities })
+    actors.push({ ...user, password, context, socket, sessionId, organizationId: me.organization?.id, capabilities })
   }
 
   const organizations = actors.map((actor) => actor.organizationId)
   if (organizations.some((id) => !id) || new Set(organizations).size !== actors.length) throw new Error('acceptance identities are not bound to distinct organizations')
   if (actors.some((actor) => actor.capabilities.product !== 'private-cloud' || actor.capabilities.deployment?.tenancy !== 'multi-tenant')) throw new Error('tenant Runtime capabilities are incorrect')
 
-  const aliceSession = 'tenant-alice-' + randomUUID()
-  const bobSession = 'tenant-bob-' + randomUUID()
+  const aliceSession = actors[0].sessionId
+  const bobSession = actors[1].sessionId
   assertAck(await ack(actors[0].socket, 'client:create_session', { operationId: 'operation-' + randomUUID(), sessionId: aliceSession }))
   assertAck(await ack(actors[1].socket, 'client:create_session', { operationId: 'operation-' + randomUUID(), sessionId: bobSession }))
   const aliceSessions = await listSessions(actors[0].socket)

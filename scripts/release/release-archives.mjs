@@ -45,6 +45,26 @@ export function verifyDashboardArchive(archivePath, options = {}) {
   return { manifest, manifestBytes, manifestSha256: sha256(manifestBytes), archiveSha256: sha256(readFileSync(archivePath)) }
 }
 
+export function verifyEmbeddedDashboard(hostBundle, manifest) {
+  const prefix = 'globalThis.__KALA_EMBEDDED_DASHBOARD__='
+  const start = hostBundle.indexOf(prefix)
+  const end = start < 0 ? -1 : hostBundle.indexOf(';\n', start + prefix.length)
+  if (end < 0) throw new Error('Portable Host is missing embedded Dashboard assets')
+  const embedded = JSON.parse(hostBundle.slice(start + prefix.length, end))
+  if (!Array.isArray(embedded) || embedded.length !== manifest.files.length) throw new Error('Portable Host Dashboard inventory differs from the release archive')
+  const expected = new Map(manifest.files.map((file) => [file.path, file]))
+  for (const asset of embedded) {
+    const file = expected.get(asset?.path)
+    if (!file || typeof asset.contentBase64 !== 'string') throw new Error('Portable Host has an unexpected embedded Dashboard asset')
+    const bytes = Buffer.from(asset.contentBase64, 'base64')
+    if (bytes.toString('base64') !== asset.contentBase64 || bytes.length !== file.bytes
+      || sha256(bytes) !== file.sha256) {
+      throw new Error(`Portable Host Dashboard asset differs from the release archive: ${file.path}`)
+    }
+    expected.delete(file.path)
+  }
+}
+
 export function verifyReleaseMetadataArchive(archivePath, { version, ...options } = {}) {
   const entries = readExactTarGz(archivePath, options)
   if (!sameNames([...entries.keys()].sort(), [...releaseMetadataFiles].sort())) throw new Error('Release metadata archive must contain exactly the SBOM, notices, and release notes')

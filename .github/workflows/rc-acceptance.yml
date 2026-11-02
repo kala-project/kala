@@ -44,9 +44,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04, target: linux-x64, asset: kala-dashboard-with-runtime.cjs, executor: kala-executor-linux-x64 }
-          - { os: macos-15-intel, target: darwin-x64, asset: kala-dashboard-with-runtime.cjs, executor: kala-executor-darwin-x64 }
-          - { os: macos-15, target: darwin-arm64, asset: kala-dashboard-with-runtime.cjs, executor: kala-executor-darwin-arm64 }
+          - { os: ubuntu-24.04, target: linux-x64, asset: kala-dashboard-with-runtime.cjs, executor: kala-executor.cjs }
+          - { os: macos-15-intel, target: darwin-x64, asset: kala-dashboard-with-runtime.cjs, executor: kala-executor.cjs }
+          - { os: macos-15, target: darwin-arm64, asset: kala-dashboard-with-runtime.cjs, executor: kala-executor.cjs }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -71,7 +71,7 @@ jobs:
           gh attestation verify acceptance/candidate/SHA256SUMS --repo "$GITHUB_REPOSITORY"
           node scripts/release/verify-checksum-index.mjs --index acceptance/candidate/SHA256SUMS --asset "acceptance/candidate/$ASSET" --manifest acceptance/candidate/manifest.json --revision '${{ needs.resolve.outputs.revision }}'
           node scripts/release/verify-checksum-index.mjs --index acceptance/candidate/SHA256SUMS --asset 'acceptance/candidate/${{ matrix.executor }}' --manifest acceptance/candidate/manifest.json --revision '${{ needs.resolve.outputs.revision }}'
-      - name: Prove native message/tools, restart recovery, and same-version reinstall
+      - name: Prove CJS Executor message/tools, restart recovery, and same-version reinstall
         shell: bash
         run: |
           node scripts/release/verify-portable-native.mjs \
@@ -110,7 +110,8 @@ jobs:
           New-Item -ItemType Directory -Force acceptance/candidate, acceptance/evidence | Out-Null
           $assets = @(
             'kala-dashboard-with-runtime.cjs',
-            'kala-executor-win32-x64.exe',
+            'kala-portable.ps1',
+            'kala-executor.cjs',
             'node-pty-win32-x64.tar.gz',
             'kala-executor-service-host-win32-x64.exe',
             'install-executor.ps1',
@@ -143,6 +144,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Failed to extract the accepted ConPTY companion' }
           New-Item -ItemType Directory -Force acceptance/candidate/prebuilds | Out-Null
           Move-Item acceptance/candidate/win32-x64 acceptance/candidate/prebuilds/win32-x64
+      - name: Install and uninstall the attested Windows Portable manager
+        env:
+          KALA_RELEASE_ASSETS_DIR: '${{ github.workspace }}\acceptance\candidate'
+        run: node --test scripts/release/portable-manager-windows.test.mjs
       - name: Prove Windows Node.js 22 Host and native temporary/service ConPTY lifecycles
         shell: pwsh
         env:

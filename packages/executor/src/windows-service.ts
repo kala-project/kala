@@ -10,6 +10,7 @@ export interface WindowsServiceLayout {
   installDir: string
   dataDir: string
   executablePath: string
+  nodeExecutablePath: string
   serviceHostPath: string
   serviceConfigPath: string
   configPath: string
@@ -30,6 +31,7 @@ export interface WindowsServicePlanOptions {
   serviceName: string
   displayName?: string
   executableName?: string
+  nodeExecutablePath?: string
   vendor?: string
   product?: string
   programFiles?: string
@@ -94,6 +96,9 @@ export function copyWindowsServiceHost(sourceRoot: string, destinationRoot: stri
     throw new Error('Windows service host SHA-256 mismatch')
   }
   copyFileSync(source, join(destinationRoot, 'kala-executor-service.exe'))
+  if (createHash('sha256').update(readFileSync(join(destinationRoot, 'kala-executor-service.exe'))).digest('hex') !== WINDOWS_SERVICE_HOST_SHA256) {
+    throw new Error('Windows service host copy SHA-256 mismatch')
+  }
 }
 
 function xml(value: string): string {
@@ -215,7 +220,7 @@ export async function registerWindowsSelfRemovalTask(
 }
 
 export function renderWindowsServiceConfig(layout: WindowsServiceLayout, serviceName: string, displayName: string): string {
-  return `<service>\n  <id>${xml(safeValue(serviceName, 'name'))}</id>\n  <name>${xml(safeValue(displayName, 'display name'))}</name>\n  <description>Kala native Executor</description>\n  <executable>%BASE%\\${xml(win32.basename(layout.executablePath))}</executable>\n  <arguments>--config ${xml(quoteWindowsArgument(layout.configPath))}</arguments>\n  <log mode="roll-by-size">\n    <sizeThreshold>10240</sizeThreshold>\n    <keepFiles>5</keepFiles>\n  </log>\n  <stoptimeout>15sec</stoptimeout>\n  <stopparentprocessfirst>true</stopparentprocessfirst>\n</service>\n`
+  return `<service>\n  <id>${xml(safeValue(serviceName, 'name'))}</id>\n  <name>${xml(safeValue(displayName, 'display name'))}</name>\n  <description>Kala Executor (Node.js)</description>\n  <executable>${xml(layout.nodeExecutablePath)}</executable>\n  <arguments>${xml(quoteWindowsArgument(layout.executablePath))} --config ${xml(quoteWindowsArgument(layout.configPath))}</arguments>\n  <log mode="roll-by-size">\n    <sizeThreshold>10240</sizeThreshold>\n    <keepFiles>5</keepFiles>\n  </log>\n  <stoptimeout>15sec</stoptimeout>\n  <stopparentprocessfirst>true</stopparentprocessfirst>\n</service>\n`
 }
 
 export async function assertElevatedWindowsAdministrator(
@@ -236,13 +241,27 @@ export async function secureWindowsServiceDataDir(
   dataDir: string,
   options: WindowsServiceExecutorOptions = {},
 ): Promise<void> {
+  await secureWindowsServiceDirectory(dataDir, 'credentials', options)
+}
+
+export async function secureWindowsServiceInstallDir(
+  installDir: string,
+  options: WindowsServiceExecutorOptions = {},
+): Promise<void> {
+  await secureWindowsServiceDirectory(installDir, 'installation', options)
+}
+
+async function secureWindowsServiceDirectory(
+  path: string,
+  label: string,
+  options: WindowsServiceExecutorOptions,
+): Promise<void> {
   if ((options.platform ?? process.platform) !== 'win32') throw new Error('Windows ACL hardening is unavailable on this platform')
-  // SID form is locale-independent: LocalSystem and built-in Administrators.
-  // Apply before writing any credential; strip inherited Users access.
+  // Strip inherited Users access before placing executable code or credentials.
   const result = await (options.runner ?? spawnWindowsCommand)('icacls.exe', [
-    dataDir, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F',
+    path, '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F',
   ])
-  if (result.exitCode !== 0) throw new Error(`Unable to secure Windows Executor credentials directory: ${result.stderr.trim() || result.stdout.trim()}`)
+  if (result.exitCode !== 0) throw new Error(`Unable to secure Windows Executor ${label} directory: ${result.stderr.trim() || result.stdout.trim()}`)
 }
 
 export const WINDOWS_NODE_PTY_RUNTIME_FILES = Object.freeze([
@@ -255,22 +274,78 @@ export const WINDOWS_NODE_PTY_RUNTIME_FILES = Object.freeze([
   'shared/conout.js',
 ])
 
-/** Copy only the verified node-pty runtime closure needed beside a Windows SEA. */
-export function copyWindowsNodePtyRuntime(sourceRoot: string, destinationRoot: string): void {
+/** Recheck the archive manifest before and after copying its runtime closure beside the CJS. */
+export function copyWindowsNodePtyRuntime(sourceRoot: string, destinationRoot: string, verifiedManifestDigest: string): void {
+  const manifestPath = join(sourceRoot, 'node-pty-companion.json')
+  if (!existsSync(manifestPath) || !lstatSync(manifestPath).isFile()) throw new Error('Windows node-pty companion manifest is missing')
+  if (!/^[0-9a-f]{64}$/u.test(verifiedManifestDigest)
+    || createHash('sha256').update(readFileSync(manifestPath)).digest('hex') !== verifiedManifestDigest) {
+    throw new Error('Windows node-pty companion manifest changed since installer verification')
+  }
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+    schemaVersion?: number; product?: string; target?: string; nodePtyVersion?: string
+    files?: { path: string; sha256: string; bytes: number }[]
+  }
+  if (manifest.schemaVersion !== 1 || manifest.product !== 'kala-executor-node-pty-companion'
+    || manifest.target !== 'win32-x64' || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(manifest.nodePtyVersion ?? '')
+    || !Array.isArray(manifest.files) || manifest.files.length !== WINDOWS_NODE_PTY_RUNTIME_FILES.length
+    || new Set(manifest.files.map((file) => file.path)).size !== WINDOWS_NODE_PTY_RUNTIME_FILES.length
+    || WINDOWS_NODE_PTY_RUNTIME_FILES.some((relative) => !manifest.files!.some((file) => file.path === relative))) {
+    throw new Error('Windows node-pty companion manifest inventory is invalid')
+  }
   const files = WINDOWS_NODE_PTY_RUNTIME_FILES.map((relative) => ({
     relative,
     source: join(sourceRoot, ...relative.split('/')),
     destination: join(destinationRoot, ...relative.split('/')),
+    metadata: manifest.files!.find((file) => file.path === relative)!,
   }))
   for (const file of files) {
-    if (!existsSync(file.source) || !lstatSync(file.source).isFile() || lstatSync(file.source).size === 0) {
-      throw new Error(`Windows node-pty runtime is missing ${file.relative}`)
-    }
+    if (!existsSync(file.source) || !lstatSync(file.source).isFile()) throw new Error(`Windows node-pty runtime is missing ${file.relative}`)
+    assertFileDigest(file.source, file.metadata.bytes, file.metadata.sha256, file.relative)
   }
   for (const file of files) {
     mkdirSync(dirname(file.destination), { recursive: true, mode: 0o700 })
     copyFileSync(file.source, file.destination)
+    assertFileDigest(file.destination, file.metadata.bytes, file.metadata.sha256, file.relative)
   }
+}
+
+function assertFileDigest(path: string, bytes: number, sha256: string, label: string): void {
+  if (!Number.isSafeInteger(bytes) || bytes <= 0 || !/^[0-9a-f]{64}$/u.test(sha256)
+    || !lstatSync(path).isFile() || lstatSync(path).size !== bytes
+    || createHash('sha256').update(readFileSync(path)).digest('hex') !== sha256) {
+    throw new Error(`Windows Executor integrity mismatch for ${label}`)
+  }
+}
+
+/** The installer verified signed SHA256SUMS; reject changes to the staged CJS at the service boundary. */
+export function copyWindowsExecutorCjs(sourceRoot: string, destinationPath: string, verifiedDigest: string): void {
+  const name = 'kala-executor.cjs'
+  const sumsPath = join(sourceRoot, 'SHA256SUMS')
+  const source = join(sourceRoot, name)
+  if (!existsSync(sumsPath) || !lstatSync(sumsPath).isFile() || !existsSync(source) || !lstatSync(source).isFile()) {
+    throw new Error('Verified Windows Executor CJS or SHA256SUMS is missing')
+  }
+  const entries = readFileSync(sumsPath, 'utf8').split(/\r?\n/u)
+    .map((line) => line.match(/^([0-9a-fA-F]{64})  kala-executor\.cjs$/u)?.[1]?.toLowerCase())
+    .filter((digest): digest is string => digest !== undefined)
+  if (entries.length !== 1) throw new Error('SHA256SUMS must contain exactly one Windows Executor CJS entry')
+  if (!/^[0-9a-f]{64}$/u.test(verifiedDigest) || entries[0] !== verifiedDigest) {
+    throw new Error('Windows Executor checksum changed since installer verification')
+  }
+  const bytes = lstatSync(source).size
+  assertFileDigest(source, bytes, entries[0]!, name)
+  copyFileSync(source, destinationPath)
+  assertFileDigest(destinationPath, bytes, entries[0]!, name)
+}
+
+export function windowsExecutorSourceRoot(execPath: string, scriptPath: string | undefined, nodeVersion: string): string {
+  if (!win32.isAbsolute(execPath) || win32.basename(execPath).toLowerCase() !== 'node.exe'
+    || !scriptPath || !win32.isAbsolute(scriptPath) || win32.basename(scriptPath).toLowerCase() !== 'kala-executor.cjs'
+    || Number(nodeVersion.split('.')[0]) < 22) {
+    throw new Error('Windows service mode requires Node.js 22+ running a verified kala-executor.cjs')
+  }
+  return win32.dirname(scriptPath)
 }
 
 function safeValue(value: string, label: string): string {
@@ -289,13 +364,18 @@ export function windowsServiceLayout(options: WindowsServicePlanOptions): Window
   const product = safeValue(options.product ?? DEFAULT_PRODUCT, 'product')
   const programFiles = safeValue(options.programFiles ?? 'C:\\Program Files', 'Program Files path')
   const programData = safeValue(options.programData ?? 'C:\\ProgramData', 'ProgramData path')
-  const executableName = safeValue(options.executableName ?? 'kala-executor.exe', 'executable name')
+  const executableName = safeValue(options.executableName ?? 'kala-executor.cjs', 'executable name')
+  const nodeExecutablePath = safeValue(options.nodeExecutablePath ?? (process.platform === 'win32' ? process.execPath : 'C:\\Program Files\\nodejs\\node.exe'), 'Node.js path')
+  if (!win32.isAbsolute(nodeExecutablePath) || win32.basename(nodeExecutablePath).toLowerCase() !== 'node.exe') {
+    throw new Error('Windows service requires an absolute Node.js executable path')
+  }
   const installDir = win32.join(programFiles, vendor, product)
   const dataDir = win32.join(programData, vendor, product)
   return {
     installDir,
     dataDir,
     executablePath: win32.join(installDir, executableName),
+    nodeExecutablePath,
     serviceHostPath: win32.join(installDir, 'kala-executor-service.exe'),
     serviceConfigPath: win32.join(installDir, 'kala-executor-service.xml'),
     configPath: win32.join(dataDir, 'config.json'),
@@ -317,7 +397,7 @@ export function createWindowsServicePlan(options: WindowsServicePlanOptions): Wi
   const serviceName = safeValue(options.serviceName, 'name')
   const displayName = safeValue(options.displayName ?? serviceName, 'display name')
   const layout = windowsServiceLayout(options)
-  // The Node SEA is a console program and cannot report SERVICE_RUNNING to SCM.
+  // Node.js is a console program and cannot report SERVICE_RUNNING to SCM.
   const binaryPath = quoteWindowsArgument(layout.serviceHostPath)
   const resetSeconds = options.recovery?.resetSeconds ?? 86_400
   const restartDelaysMs = options.recovery?.restartDelaysMs ?? [5_000, 30_000]

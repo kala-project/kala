@@ -14,7 +14,7 @@ const target = process.env.PRODUCT_E2E_WINDOWS_TARGET ?? 'executor'
 const hostBundle = join(hostRelease, 'kala-dashboard-with-runtime.cjs')
 const hostRuntime = join(hostRelease, 'kala-copilot-runtime-win32-x64')
 const hostRuntimeNode = join(hostRelease, 'kala-copilot-runtime-node-win32-x64.node')
-const executor = join(executorRelease, 'kala-executor-win32-x64.exe')
+const executor = join(executorRelease, 'kala-executor.cjs')
 const serviceHost = join(executorRelease, 'kala-executor-service-host-win32-x64.exe')
 const executorPrebuild = join(executorRelease, 'prebuilds', 'win32-x64')
 const stateRoot = mkdtempSync(join(tmpdir(), 'kala-windows-terminal-'))
@@ -85,7 +85,7 @@ async function verifyExecutorLifecycle() {
     ...['conpty.node', 'conpty_console_list.node', 'pty.node', 'winpty-agent.exe', 'winpty.dll'].map((name) => join(executorPrebuild, name)),
     join(executorRelease, 'worker', 'conoutSocketWorker.js'),
     join(executorRelease, 'shared', 'conout.js'),
-  ], 'Windows native Executor and complete node-pty companion')
+  ], 'Windows CJS Executor and complete node-pty companion')
 
   const capabilitiesResponse = await fetch(`${origin}/api/executor-install-capabilities`)
   if (!capabilitiesResponse.ok) throw new Error(`Windows install capabilities failed: ${capabilitiesResponse.status}`)
@@ -200,11 +200,11 @@ async function verifyExecutorLifecycle() {
   if (serviceMode) {
     const installDir = join(process.env.ProgramFiles, 'Kala', 'Executor')
     const dataDir = join(process.env.ProgramData, 'Kala', 'Executor')
-    const installedExecutor = join(installDir, 'kala-executor.exe')
+    const installedExecutor = join(installDir, 'kala-executor.cjs')
     assertFiles([installedExecutor, join(installDir, 'kala-executor-service.exe'), join(installDir, 'prebuilds', 'win32-x64', 'conpty.node'),
       join(installDir, 'worker', 'conoutSocketWorker.js'), join(installDir, 'shared', 'conout.js'),
       join(dataDir, 'config.json')], 'managed Windows service installation')
-    const uninstall = await run(installedExecutor, ['service', 'uninstall'])
+    const uninstall = await run(process.execPath, [installedExecutor, 'service', 'uninstall'])
     const statusName = uninstall.stdout.match(/Removal status file: (kala-executor-uninstall-[A-Za-z0-9]+\.status)/u)?.[1]
     if (uninstall.code !== 0 || !uninstall.stdout.includes('Kala Executor Windows service removal was scheduled') || !statusName) {
       const stage = /Unable to create Windows removal task/u.test(uninstall.stderr) ? 'register' : /Unable to start Windows removal task/u.test(uninstall.stderr) ? 'run' : /did not confirm startup/u.test(uninstall.stderr) ? 'startup-timeout' : /failed during startup/u.test(uninstall.stderr) ? 'startup-failed' : 'unknown'
@@ -227,7 +227,7 @@ async function verifyExecutorLifecycle() {
     }
     rmSync(removalStatus, { force: true })
   }
-  console.log(`PASS Windows native Executor ${serviceMode ? 'service' : 'temporary'} ConPTY create/input/resize/kill lifecycle`)
+  console.log(`PASS Windows CJS Executor ${serviceMode ? 'service' : 'temporary'} ConPTY create/input/resize/kill lifecycle`)
 }
 
 async function verifyInviteBootstrapSecurityBoundary() {
@@ -268,8 +268,21 @@ function stop(child) {
   })
 }
 function run(file, args, options = {}) { return new Promise((resolvePromise, reject) => { const child = spawn(file, args, { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], ...options, env: { ...process.env, ...options.env } }); let stdout = '', stderr = ''; child.stdout.on('data', (chunk) => { stdout += chunk }); child.stderr.on('data', (chunk) => { stderr += chunk }); child.once('error', reject); child.once('exit', (code) => resolvePromise({ code, stdout, stderr, pid: child.pid })) }) }
-function summarizeLogs(value) { return JSON.stringify({ bytes: Buffer.byteLength(value), downloadStarted: /\[1\/4\] Downloading verified installer/u.test(value), sessionClaimStarted: /\[2\/4\] Validating setup code/u.test(value), executorStarted: /\[3\/4\] Starting Executor/u.test(value), assetDownloadStarted: /Downloading verified Windows Executor assets/u.test(value), checksumDownloadStarted: /Fetching verified asset SHA256SUMS\.\.\./u.test(value), binaryDownloadStarted: /Fetching verified asset kala-executor-win32-x64\.exe\.\.\./u.test(value), companionDownloadStarted: /Fetching verified asset node-pty-win32-x64\.tar\.gz\.\.\./u.test(value), serviceHostDownloadStarted: /Fetching verified asset kala-executor-service-host-win32-x64\.exe\.\.\./u.test(value), serviceHostDownloadCompleted: /Asset download completed kala-executor-service-host-win32-x64\.exe/u.test(value), binaryHashStarted: /Verifying Windows Executor checksum/u.test(value), archiveHashStarted: /Verifying Windows ConPTY archive checksum/u.test(value), serviceHostHashStarted: /Verifying Windows service-host checksum/u.test(value), conptyValidationStarted: /Verifying Windows ConPTY companion/u.test(value), conptyInventoryStarted: /Checking Windows ConPTY tar inventory/u.test(value), conptyTarListed: /Windows ConPTY tar listed/u.test(value), conptyInventoryVerified: /Windows ConPTY inventory verified/u.test(value), conptyExtracted: /Windows ConPTY extracted/u.test(value), conptyManifestStarted: /Checking Windows ConPTY manifest/u.test(value), conptyFilesStarted: /Hashing Windows ConPTY files/u.test(value), conptyVerified: /Windows ConPTY archive verified/u.test(value), nativeLaunchStarted: /Starting verified Windows Executor/u.test(value), accessDenied: /access denied|UnauthorizedAccessException/iu.test(value), missingFile: /cannot find|not found|FileNotFoundException/iu.test(value), httpError: /remote server returned an error|response status code/iu.test(value), invalidSession: /invalid installation session|empty installation environment|setup code is invalid/iu.test(value), trustRejected: /Host-mediated release trust|redirected away from the trusted Host/iu.test(value), checksumError: /SHA256SUMS (?:must|exceeds|Sigstore)|Checksum mismatch/iu.test(value), archiveError: /unexpected file inventory|companion manifest|Failed to extract/iu.test(value), powershellBindingError: /ParameterBindingException|PropertyNotFoundException|MethodException/iu.test(value), configError: /Invalid Executor config|Invalid Executor credential/iu.test(value), identityRejected: /workspace_identity_mismatch|auth_failed|workspace_id_conflict/iu.test(value), nativeLoadFailure: /Failed to load native module/iu.test(value) }) }
-async function waitForHttp(url) { const deadline = Date.now() + 30_000; while (Date.now() < deadline) { try { if ((await fetch(url)).ok) return } catch {} if (host?.exitCode !== null) throw new Error(`Host exited before becoming available (${host.exitCode})`); await sleep(100) } throw new Error(`Host unavailable: ${url}`) }
+function summarizeLogs(value) { return JSON.stringify({ bytes: Buffer.byteLength(value), installerFailure: value.match(/Kala installer failure type: ([A-Za-z]{1,80}); line: ([0-9]{1,5})/u)?.slice(1) ?? null, downloadStarted: /\[1\/4\] Downloading verified installer/u.test(value), sessionClaimStarted: /\[2\/4\] Validating setup code/u.test(value), executorStarted: /\[3\/4\] Starting Executor/u.test(value), releaseTrustStarted: /Checking Windows Executor release trust/u.test(value), releaseTrustChecked: /Windows Executor release trust checked/u.test(value), nodeChecked: /Windows Executor Node\.js 22\+ checked/u.test(value), nodeVersionRejected: /Node\.js 22\+ is required for the Windows Executor/iu.test(value), nodeVersionInvalid: /Unable to determine Node\.js version/iu.test(value), architectureRejected: /This installer requires Windows(?: x64)?/iu.test(value), scriptParserError: /ParserError|Unexpected token/iu.test(value), assetDownloadStarted: /Downloading verified Windows Executor assets/u.test(value), checksumDownloadStarted: /Fetching verified asset SHA256SUMS\.\.\./u.test(value), binaryDownloadStarted: /Fetching verified asset kala-executor\.cjs\.\.\./u.test(value), companionDownloadStarted: /Fetching verified asset node-pty-win32-x64\.tar\.gz\.\.\./u.test(value), serviceHostDownloadStarted: /Fetching verified asset kala-executor-service-host-win32-x64\.exe\.\.\./u.test(value), serviceHostDownloadCompleted: /Asset download completed kala-executor-service-host-win32-x64\.exe/u.test(value), binaryHashStarted: /Verifying Windows Executor checksum/u.test(value), archiveHashStarted: /Verifying Windows ConPTY archive checksum/u.test(value), serviceHostHashStarted: /Verifying Windows service-host checksum/u.test(value), conptyValidationStarted: /Verifying Windows ConPTY companion/u.test(value), conptyInventoryStarted: /Checking Windows ConPTY tar inventory/u.test(value), conptyTarListed: /Windows ConPTY tar listed/u.test(value), conptyInventoryVerified: /Windows ConPTY inventory verified/u.test(value), conptyExtracted: /Windows ConPTY extracted/u.test(value), conptyManifestStarted: /Checking Windows ConPTY manifest/u.test(value), conptyFilesStarted: /Hashing Windows ConPTY files/u.test(value), conptyVerified: /Windows ConPTY archive verified/u.test(value), nativeLaunchStarted: /Starting verified Windows Executor/u.test(value), accessDenied: /access denied|UnauthorizedAccessException/iu.test(value), missingFile: /cannot find|not found|FileNotFoundException/iu.test(value), httpError: /remote server returned an error|response status code/iu.test(value), invalidSession: /invalid installation session|empty installation environment|setup code is invalid/iu.test(value), trustRejected: /Host-mediated release trust|redirected away from the trusted Host/iu.test(value), checksumError: /SHA256SUMS (?:must|exceeds|Sigstore)|Checksum mismatch/iu.test(value), archiveError: /unexpected file inventory|companion manifest|Failed to extract/iu.test(value), powershellBindingError: /ParameterBindingException|PropertyNotFoundException|MethodException/iu.test(value), configError: /Invalid Executor config|Invalid Executor credential/iu.test(value), identityRejected: /workspace_identity_mismatch|auth_failed|workspace_id_conflict/iu.test(value), nativeLoadFailure: /Failed to load native module/iu.test(value) }) }
+async function waitForHttp(url) {
+  const deadline = Date.now() + 90_000
+  let lastStatus
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(3_000) })
+      if (response.ok) return
+      lastStatus = response.status
+    } catch {}
+    if (host?.exitCode !== null) throw new Error(`Host exited before becoming available (${host.exitCode})`)
+    await sleep(100)
+  }
+  throw new Error(`Host unavailable: ${url} (last HTTP status: ${lastStatus ?? 'no response'})`)
+}
 function sleep(ms) { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)) }
 function once(socket, event) { return new Promise((resolvePromise, reject) => { const timer = setTimeout(() => reject(new Error(`${event} timed out`)), 15_000); socket.once(event, (payload) => { clearTimeout(timer); resolvePromise(payload) }) }) }
 function emitAck(socket, event, payload) { return new Promise((resolvePromise, reject) => { const timer = setTimeout(() => reject(new Error(`${event} ack timed out`)), 15_000); socket.emit(event, payload, (result) => { clearTimeout(timer); resolvePromise(result) }) }) }

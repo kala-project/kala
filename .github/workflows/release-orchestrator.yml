@@ -36,7 +36,8 @@ jobs:
           set -euo pipefail
           revision="$(git rev-parse HEAD)"
           wait_for_run() {
-            local workflow="$1" event="$2" minimum="$3" run status conclusion
+            local workflow="$1" event="$2" minimum="$3" run status conclusion jobs attempt run_id
+            local retries=0 retried_attempt=0 unsettled=0
             for ((attempt=0; attempt<660; attempt++)); do
               run="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs" \
                 -f branch="$TAG" -f event="$event" -f per_page=30 |
@@ -46,6 +47,42 @@ jobs:
                 status="$(jq -r .status <<< "$run")"
                 conclusion="$(jq -r .conclusion <<< "$run")"
                 if [[ "$status" == completed ]]; then
+                  if [[ "$conclusion" != success && ( "$workflow" == rc-acceptance.yml || "$workflow" == release.yml ) && "$retries" -lt 2 ]]; then
+                    attempt="$(jq -r .run_attempt <<< "$run")"
+                    if [[ "$attempt" == "$retried_attempt" ]]; then sleep 30; continue; fi
+                    run_id="$(jq -r .id <<< "$run")"
+                    jobs="$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs" -f filter=latest -f per_page=100)"
+                    if jq -e '
+                      .total_count == (.jobs | length)
+                      and ([.jobs[] | select(.conclusion == "cancelled")] | length | . >= 1 and . <= 2)
+                      and all(.jobs[] | select(.conclusion == "cancelled");
+                        (.runner_id == null or .runner_id == 0)
+                        and (.runner_name == null or .runner_name == "")
+                        and (.steps | length) == 0
+                        and (
+                          ((.labels | index("macos-15")) != null and (.name | contains("darwin-arm64")))
+                          or ((.labels | index("macos-15-intel")) != null and (.name | contains("darwin-x64")))
+                        )
+                      )
+                      and all(.jobs[]; .conclusion == "success" or .conclusion == "skipped" or .conclusion == "cancelled")
+                    ' <<< "$jobs" >/dev/null; then
+                      gh run rerun "$run_id" --failed
+                      retries=$((retries + 1))
+                      retried_attempt="$attempt"
+                      unsettled=0
+                      sleep 30
+                      continue
+                    fi
+                    if [[ "$unsettled" -lt 4 ]] && jq -e '
+                      (.total_count > (.jobs | length) or any(.jobs[]; .conclusion == null))
+                      and all(.jobs[]; .conclusion != "failure")
+                    ' <<< "$jobs" >/dev/null; then
+                      unsettled=$((unsettled + 1))
+                      sleep 30
+                      continue
+                    fi
+                    echo "Not retrying $workflow; jobs: $(jq -c '[.jobs[] | {name, conclusion, runner_id, runner_name, steps: (.steps | length)}]' <<< "$jobs")" >&2
+                  fi
                   test "$conclusion" = success || { echo "$workflow failed: $conclusion" >&2; return 1; }
                   jq -r .id <<< "$run"
                   return 0

@@ -10,8 +10,8 @@ import { verifyWindowsServiceHost, WINDOWS_SERVICE_HOST } from '../release/windo
 
 const hostDir = resolve(required('--host-release'))
 const executorDir = resolve(required('--executor-release'))
-if (hostDir === executorDir) throw new Error('Windows Host and native Executor build outputs must be separate')
-const windowsAssets = ['kala-executor-win32-x64.exe', 'node-pty-win32-x64.tar.gz', WINDOWS_SERVICE_HOST.asset, 'install-executor.ps1']
+if (hostDir === executorDir) throw new Error('Windows Host and companion build outputs must be separate')
+const windowsAssets = ['node-pty-win32-x64.tar.gz', WINDOWS_SERVICE_HOST.asset, 'install-executor.ps1']
 const checksumPath = join(hostDir, 'SHA256SUMS')
 const lines = readFileSync(checksumPath, 'utf8').trimEnd().split(/\r?\n/u)
 const names = new Set()
@@ -22,14 +22,18 @@ for (const line of lines) {
   const actual = createHash('sha256').update(readFileSync(join(hostDir, match[1]))).digest('hex')
   if (actual !== line.slice(0, 64)) throw new Error(`Host source-built asset checksum mismatch: ${match[1]}`)
 }
-if (!names.has('kala-dashboard-with-runtime.cjs')) throw new Error('Host CJS must already be in the local release checksum index')
+if (!names.has('kala-dashboard-with-runtime.cjs') || !names.has('kala-executor.cjs')) throw new Error('Host and Executor CJS must already be in the local release checksum index')
+if (createHash('sha256').update(readFileSync(join(hostDir, 'kala-executor.cjs'))).digest('hex')
+  !== createHash('sha256').update(readFileSync(join(executorDir, 'kala-executor.cjs'))).digest('hex')) {
+  throw new Error('Windows Executor CJS differs from the Host build')
+}
 verifyWindowsNodePtyCompanion(join(executorDir, 'node-pty-win32-x64.tar.gz'))
 verifyWindowsServiceHost(join(executorDir, WINDOWS_SERVICE_HOST.asset))
 for (const relative of WINDOWS_NODE_PTY_FILES) {
   const path = join(executorDir, ...relative.split('/'))
   if (!existsSync(path) || !lstatSync(path).isFile() || lstatSync(path).size === 0) throw new Error(`Windows source-built fixture is missing ${relative}`)
 }
-for (const name of windowsAssets.slice(0, 3)) copyFileSync(join(executorDir, name), join(hostDir, name))
+for (const name of windowsAssets.slice(0, 2)) copyFileSync(join(executorDir, name), join(hostDir, name))
 writeFileSync(join(hostDir, 'install-executor.ps1'), generateExecutorInstallerPowerShell({ repo: 'xingsy97/kala', tag: 'latest' }))
 for (const name of windowsAssets) {
   const file = join(hostDir, name)

@@ -119,34 +119,31 @@ job use a new GitHub-hosted `ubuntu-24.04` VM; no self-hosted runner or persiste
 installation is needed. They check Docker, the browser and the VM environment
 before running the actual signed-asset, browser, Executor and restore tests.
 
-The fresh candidate job runs for every release tag and is self-contained; it
-requires no repository Actions secrets or variables. Its success and digest-bound
-evidence are required for promotion even when the predecessor-upgrade job is
-disabled. Its explicit `--ephemeral-bundled-acceptance` path uses the verified
-candidate Operator to run `init-config` with bundled identity and local-volume
-storage. It starts only the signed candidate identity stack, uses the
-short-lived bootstrap PAT inside the signed identity helper to create two real
-verified password users, records each returned Zitadel `userId`
-as that user's exact OIDC `sub`, enrolls the web client, and deletes the PAT.
-The identity services are stopped without deleting their volumes; normal
-candidate installation then reuses the same identity database and enrollment
-files. Generated passwords, the model bearer credential, and bootstrap inputs
-exist only in process memory or mode-0600 files under the disposable scratch
-directory and are never uploaded.
-
-The same fresh job runs a minimal OpenAI-compatible fixture in the candidate's
-immutable digest-pinned Runtime image on the ephemeral Compose `egress` network.
-The fixture accepts only the random bearer credential mounted from the protected
-LLM key file, streams a real `write_file` tool call, and returns the final marker
-only after the Runtime sends the matching tool result. The Browser/Executor test
-still approves the tool, verifies the exact file on disk, verifies the final
-answer, and reloads the Session. The fixture container is always removed. The
-job also retains the two-tenant, unauthenticated-capability, mTLS rejection, Unit
-quota, Runtime restart/DAG recovery, and backup/restore assertions. It fails
-rather than emits passing evidence when the hosted VM has less than 10 GiB free
-after removing unused preinstalled SDKs. This threshold is a fail-fast guard,
-not proof of peak disk sufficiency; only a successful hosted run establishes
-that for the exact candidate image sizes.
+The fresh candidate job is mandatory for every release tag; its success and
+digest-bound evidence are required for promotion even when predecessor-upgrade
+acceptance is disabled. **A passing hosted acceptance has not yet been observed.** New
+configurations cannot use bundled identity or local-volume storage. The
+candidate harness now accepts only external OIDC plus PostgreSQL/S3 configuration
+and contains a separate restore check: snapshot both owner databases and S3
+objects after the browser/Executor/tenant/quota/recovery flows, stop workloads,
+delete application objects and database schemas, restore both authorities,
+compare object bytes, then authenticate and read the recovered business Session.
+An external-backup acknowledgement is never counted as restore proof, and the
+Operator's incompatible volume backup/restore is not invoked for this mode.
+The hosted job provisions separate OIDC, PostgreSQL and S3 Compose projects
+from exact official image digests, with short-lived private TLS authorities for
+the OIDC issuer and S3 endpoint. The signed candidate includes a bounded S3 CA
+projection for its fresh-storage-claim and Runtime; the hosted helper tests
+issuer TLS and browser trust without certificate bypass and tests restricted S3
+identities against the live bucket policy before running the installer. It
+passes enrolled users and disposable backup credentials only through private
+process environment/configuration, keeps authorities alive through destructive
+external restore, and tears them down afterward. Unsupported provider policy
+semantics, missing browser trust support, failed signature verification or
+failed business restore block evidence. **This path has not been run successfully
+on a GitHub-hosted runner; implementation and focused tests do not certify a
+release.** Neither a local bundled replay nor a backup acknowledgement can
+unblock promotion.
 
 ### Local published-asset replay (2026-10-21; not hosted certification)
 
@@ -156,7 +153,7 @@ revision `68f81b08660cbb435386055e426425881bd3a326`) and Linux x64
 Executor were downloaded and independently verified against the original
 `xingsy97/kala` Sigstore workflow identities; all three locked OCI image
 signatures were verified. On a local Linux host, the `--fresh-candidate
---ephemeral-bundled-acceptance` acceptance ran with Chromium and an isolated
+--ephemeral-bundled-acceptance` acceptance (now rejected) ran with Chromium and an isolated
 Docker Compose project, generated `linux-x64-compose-fresh` evidence, and
 passed the digest-bound evidence validator. This exercised bundled identity
 users, authenticated model/tool and Executor actions, two-tenant isolation,

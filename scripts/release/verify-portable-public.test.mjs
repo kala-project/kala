@@ -5,7 +5,7 @@ import { verifyPortablePublic } from './verify-portable-public.mjs'
 const tag = 'v0.3.0-beta.19'
 const revision = '0123456789abcdef0123456789abcdef01234567'
 const digest = 'sha256:' + 'a'.repeat(64)
-const image = `ghcr.io/xingsy97/kala-portable@${digest}`
+const image = `ghcr.io/kala-project/kala-portable@${digest}`
 const metadata = {
   schemaVersion: 1, status: 'isolated-vm-accepted', image, platform: 'linux/amd64', tag, revision,
   checks: { imageSignature: true, provenance: true, sbom: true, isolatedVmAcceptance: true }, publicPromotion: false,
@@ -15,7 +15,7 @@ const acceptance = {
     capabilities: true, dashboard: true, loopbackPublish: true, nonRoot: true, persistentVolume: true, sessionPersistence: true,
   }, image, imageId: 'sha256:' + 'b'.repeat(64), ok: true, revision, tag, version: tag.slice(1),
 }
-const request = (fetchImpl, overrides = {}) => verifyPortablePublic({ metadata, acceptance, tag, revision, repository: 'xingsy97/kala', fetchImpl, ...overrides })
+const request = (fetchImpl, overrides = {}) => verifyPortablePublic({ metadata, acceptance, tag, revision, repository: 'kala-project/kala', fetchImpl, ...overrides })
 
 test('only an anonymously retrievable immutable digest may pass without Packages API access', async () => {
   const urls = []
@@ -27,8 +27,9 @@ test('only an anonymously retrievable immutable digest may pass without Packages
   })
   assert.equal(result.anonymousDigest, digest)
   assert.equal(urls.length, 2)
+  assert.match(urls[0].url, /scope=repository:kala-project\/kala-portable:pull/u)
   assert.equal(urls[1].options.method, 'HEAD')
-  assert.equal(urls[1].url, `https://ghcr.io/v2/xingsy97/kala-portable/manifests/${digest}`)
+  assert.equal(urls[1].url, `https://ghcr.io/v2/kala-project/kala-portable/manifests/${digest}`)
 })
 
 test('a private package, stale digest, or mismatched VM evidence fails closed', async () => {
@@ -42,4 +43,10 @@ test('a private package, stale digest, or mismatched VM evidence fails closed', 
   await assert.rejects(request(async () => { throw new Error('network must not run') }, {
     acceptance: { ...acceptance, revision: 'd'.repeat(40) },
   }), /Expected values to be strictly equal/u)
+  await assert.rejects(request(async () => { throw new Error('network must not run') }, {
+    repository: 'xingsy97/kala',
+  }), /unexpected Portable package ownership/u)
+  await assert.rejects(request(async () => { throw new Error('network must not run') }, {
+    metadata: { ...metadata, image: image.replace('kala-project', 'xingsy97') },
+  }), /image must be the exact immutable Portable package digest/u)
 })

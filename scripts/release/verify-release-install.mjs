@@ -17,7 +17,7 @@ const releaseDir = join(repoRoot, 'release')
 const manifestPath = join(releaseDir, 'manifest.json')
 const hostAsset = 'kala-dashboard-with-runtime.cjs'
 const windowsAssets = [
-  'kala-executor-win32-x64.exe',
+  'kala-executor.cjs',
   'kala-executor-service-host-win32-x64.exe',
   'node-pty-win32-x64.tar.gz',
   'install-executor.ps1',
@@ -30,7 +30,7 @@ for (const asset of [hostAsset, DEDICATED_SUPPORT_ARCHIVE]) {
   if (!manifest.assets.includes(asset) || !existsSync(join(releaseDir, asset))) fail(`missing required manifest asset: ${asset}`)
 }
 const hasWindowsPayload = windowsAssets.every((asset) => manifest.assets.includes(asset) && existsSync(join(releaseDir, asset)))
-if (windowsAssets.some((asset) => manifest.assets.includes(asset) || existsSync(join(releaseDir, asset))) && !hasWindowsPayload) {
+if (windowsAssets.slice(1).some((asset) => manifest.assets.includes(asset) || existsSync(join(releaseDir, asset))) && !hasWindowsPayload) {
   fail('release contains an incomplete Windows installation payload')
 }
 

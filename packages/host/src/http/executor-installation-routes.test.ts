@@ -213,6 +213,7 @@ describe('executor installation routes', () => {
       ].join('\n')
       const result = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], {
         encoding: 'utf8',
+        timeout: 10_000,
         env: { ...process.env, KALA_INSTALL_MODE: scenario.mode, KALA_SETUP_CODE: 'ABCDEF1234' },
       })
       expect(result.status, result.stderr).not.toBe(0)
@@ -225,7 +226,7 @@ describe('executor installation routes', () => {
         expect(output).toContain('Reached installer download')
       }
     }
-  })
+  }, 30_000)
 
   it('rejects invalid input but never exposes server filesystem paths after a persistence fault', async () => {
     const { url, store } = await start()

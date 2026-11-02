@@ -112,6 +112,23 @@ function freshEvidence(archive) {
   })
 }
 
+test('fresh evidence cannot use bundled identity or an external-backup acknowledgement as restore proof', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'private-cloud-fresh-evidence-'))
+  const archive = join(scratch, 'kala-private-cloud-0.3.0-beta.18-linux-x64.tar.gz')
+  const evidence = join(scratch, 'fresh.rc-evidence.json')
+  writeFileSync(archive, 'signed draft bundle bytes')
+  const valid = freshEvidence(archive)
+  for (const check of ['isolatedExternalOidc', 'externalPostgresS3', 'verifiedExternalRestore']) {
+    const forged = { ...valid, checks: { ...valid.checks } }
+    delete forged.checks[check]
+    forged.checks.ephemeralBundledAcceptance = true
+    forged.checks.realBundledIdentities = true
+    writeFileSync(evidence, JSON.stringify(forged))
+    const rejected = verify(evidence, archive)
+    assert.notEqual(rejected.status, 0, `${check} must be mandatory`)
+  }
+})
+
 function verify(evidence, archive) {
   return spawnSync(process.execPath, [script, '--evidence', evidence, '--archive', archive, '--tag', tag, '--revision', revision], { cwd: root, encoding: 'utf8' })
 }

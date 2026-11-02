@@ -41,6 +41,15 @@ for (const [name, service] of Object.entries(postgresS3Base.services ?? {})) {
 }
 for (const name of ['compose.identity-local.yaml', 'identity-local.Caddyfile', 'bootstrap-private-cloud-identity.mjs']) if (!actualNames.includes(name)) fail(`bundled identity asset is missing: ${name}`)
 if (!actualNames.includes('compose.storage-postgres-s3.yaml')) fail('PostgreSQL/S3 evaluation overlay is missing')
+if (!actualNames.includes('compose.s3-private-ca.yaml')) fail('signed external S3 private CA overlay is missing')
+const s3Ca = yaml('compose.s3-private-ca.yaml')
+for (const name of ['fresh-storage-claim', 'runtime-host']) {
+  const service = s3Ca.services?.[name]
+  const expected = name === 'runtime-host' ? '/run/kala-storage/s3_ca.pem' : '/run/kala-s3-ca/ca.pem'
+  if (service?.environment?.NODE_EXTRA_CA_CERTS !== expected) fail(`signed external S3 CA does not extend Node trust in ${name}`)
+}
+if (!s3Ca.services?.['fresh-storage-claim']?.volumes?.includes('${KALA_S3_CA_FILE:?set KALA_S3_CA_FILE to the validated private S3 CA}:/run/kala-s3-ca/ca.pem:ro')
+  || !s3Ca.services?.['init-storage-secrets']?.command?.[2]?.includes('cp /run/secrets/s3_private_ca /runtime/s3_ca.pem')) fail('signed external S3 CA is not projected into claim and Runtime')
 const postgresS3ComposeSource = readFileSync(join(directory, 'compose.storage-postgres-s3.yaml'), 'utf8')
 for (const marker of ['!override', 'control_postgres_migration_owner_url', 'runtime_postgres_owner_url', 'runtime_state_master_key', 'KALA_INGRESS_LOGIN_STATE_STORE_KIND: postgres', 'fresh-storage-claim:', 'kala-fresh-storage-claim.js', 'KALA_INSTALLATION_ID_FILE:', 'service_completed_successfully', 'KALA_INSTALLATION_ID_FILE:?']) {
   if (!postgresS3ComposeSource.includes(marker)) fail(`PostgreSQL/S3 evaluation overlay is missing required marker: ${marker}`)

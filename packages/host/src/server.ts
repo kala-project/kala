@@ -2902,7 +2902,7 @@ export async function startHostServer(
 }
 
 const WINDOWS_INSTALL_RELEASE_ASSETS = Object.freeze([
-  'kala-executor-win32-x64.exe',
+  'kala-executor.cjs',
   'kala-executor-service-host-win32-x64.exe',
   'node-pty-win32-x64.tar.gz',
   'install-executor.ps1',

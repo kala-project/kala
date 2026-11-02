@@ -24,11 +24,6 @@ export function mapExecutorPlatform(os, arch) {
   return target && TARGETS.has(target) ? target : undefined
 }
 
-export function executorNativeAssetName(target) {
-  if (!TARGETS.has(target)) throw new Error(`unsupported executor target ${target}`)
-  return `kala-executor-${target}${target.startsWith('win32-') ? '.exe' : ''}`
-}
-
 export function windowsExecutorInstallerAssetName() {
   return 'install-executor.ps1'
 }
@@ -54,8 +49,7 @@ os=$(uname -s | tr '[:upper:]' '[:lower:]')
 arch=$(uname -m | tr '[:upper:]' '[:lower:]')
 case "$os" in linux) os=linux ;; darwin) os=darwin ;; *) fail "unsupported OS: $os (this release supports Linux and macOS only)" ;; esac
 case "$arch" in x86_64|amd64) arch=x64 ;; arm64|aarch64) arch=arm64 ;; *) fail "unsupported architecture: $arch" ;; esac
-target="$os-$arch"
-asset="kala-executor-$target"
+asset="kala-executor.cjs"
 download_file() {
   name="$1"
   if [ "$HTTPS_ONLY" = 1 ]; then
@@ -70,22 +64,14 @@ download_metadata() {
 }
 download_metadata SHA256SUMS
 expected=$(awk -v file="$asset" '$2 == file && $1 ~ /^[0-9a-fA-F]{64}$/ {print tolower($1)}' "$WORK_DIR/SHA256SUMS")
-use_node=0
-if [ -z "$expected" ]; then
-  asset="kala-executor.cjs"
-  expected=$(awk -v file="$asset" '$2 == file && $1 ~ /^[0-9a-fA-F]{64}$/ {print tolower($1)}' "$WORK_DIR/SHA256SUMS")
-  [ -n "$expected" ] || fail "SHA256SUMS has no valid entry for the native Executor or Node.js fallback"
-  command -v node >/dev/null 2>&1 || fail "No native Executor is published for $target. Install Node.js 22+ and retry."
-  node_major=$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || printf 0)
-  [ "$node_major" -ge 22 ] || fail "Node.js 22+ is required for the Executor fallback (found $(node --version 2>/dev/null || printf unknown))"
-  use_node=1
-fi
+[ -n "$expected" ] || fail "SHA256SUMS has no valid entry for kala-executor.cjs"
+command -v node >/dev/null 2>&1 || fail "Install Node.js 22+ and retry."
+node_major=$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || printf 0)
+[ "$node_major" -ge 22 ] || fail "Node.js 22+ is required for the Executor (found $(node --version 2>/dev/null || printf unknown))"
 download_file "$asset"
 if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$WORK_DIR/$asset" | awk '{print $1}'); elif command -v shasum >/dev/null 2>&1; then actual=$(shasum -a 256 "$WORK_DIR/$asset" | awk '{print $1}'); else fail "sha256sum or shasum is required"; fi
 [ "$actual" = "$expected" ] || fail "checksum mismatch for $asset"
-if [ "$use_node" = 1 ]; then exec node "$WORK_DIR/$asset" --internal-installer "$@"; fi
-chmod +x "$WORK_DIR/$asset"
-exec "$WORK_DIR/$asset" --internal-installer "$@"
+exec node "$WORK_DIR/$asset" --internal-installer "$@"
 `
 }
 
@@ -96,6 +82,7 @@ $ErrorActionPreference = 'Stop'
 $repo = '${repo}'
 $baseUrl = if ($env:KALA_RELEASE_BASE_URL) { $env:KALA_RELEASE_BASE_URL.TrimEnd('/') } else { '${base}' }
 $maxMetadataBytes = if ($env:KALA_INSTALLER_MAX_METADATA_BYTES) { [int64]$env:KALA_INSTALLER_MAX_METADATA_BYTES } else { 1048576 }
+Write-Host 'Checking Windows Executor release trust...'
 $uri = [Uri]$baseUrl
 $isLoopback = $uri.IsLoopback -and $uri.Scheme -eq 'http'
 $publicRelease = $uri.Scheme -eq 'https'
@@ -113,12 +100,20 @@ if ($env:KALA_RELEASE_TRUST -eq 'host') {
   $publicRelease = $false
   $hostRelease = $true
 }
+Write-Host 'Windows Executor release trust checked.'
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'This installer requires Windows' }
 # Windows PowerShell 5.1 can expose RuntimeInformation without OSArchitecture.
 # PROCESSOR_ARCHITEW6432 identifies the native OS when running under emulation.
 $nativeArchitecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
 if (-not [Environment]::Is64BitOperatingSystem -or $nativeArchitecture -ine 'AMD64') { throw "This installer requires Windows x64 (detected native architecture: $nativeArchitecture)" }
-$asset = 'kala-executor-win32-x64.exe'
+$node = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue
+if (-not $node) { throw 'Node.js 22+ is required for the Windows Executor' }
+$nodeVersion = node.exe --version
+$nodeVersionMatch = [regex]::Match($nodeVersion, '^v([0-9]+)\\.')
+if ($LASTEXITCODE -ne 0 -or -not $nodeVersionMatch.Success) { throw 'Unable to determine Node.js version' }
+if ([int]$nodeVersionMatch.Groups[1].Value -lt 22) { throw "Node.js 22+ is required for the Windows Executor (found $nodeVersion)" }
+Write-Host 'Windows Executor Node.js 22+ checked.'
+$asset = 'kala-executor.cjs'
 $companion = 'node-pty-win32-x64.tar.gz'
 $serviceHost = '${WINDOWS_SERVICE_HOST.asset}'
 $work = if ($env:KALA_INSTALLER_WORK_DIR) { $env:KALA_INSTALLER_WORK_DIR } else { Join-Path ([IO.Path]::GetTempPath()) ('kala-installer-' + [guid]::NewGuid()) }
@@ -127,7 +122,7 @@ function Download-ReleaseAsset([string]$name) {
   $destination = Join-Path $work $name
   Write-Host "Fetching verified asset $name..."
   if ($hostRelease) {
-    # PowerShell 5.1's Invoke-WebRequest can buffer large native payloads even
+    # PowerShell 5.1's Invoke-WebRequest can buffer large assets even
     # with -OutFile. Stream the exact Host URL directly, never following redirects.
     $url = "$baseUrl/$name"
     $request = [Net.HttpWebRequest]::Create($url)
@@ -162,12 +157,14 @@ function Read-ExpectedDigest([string]$name, [string[]]$sums) {
   if ($entries.Count -ne 1) { throw "SHA256SUMS must contain exactly one valid entry for $name" }
   return ([string]$entries[0]).ToLowerInvariant()
 }
-function Assert-Digest([string]$path, [string]$expected, [string]$name) {
+function Get-Digest([string]$path) {
   $stream = [IO.File]::OpenRead($path)
   $sha = [Security.Cryptography.SHA256]::Create()
-  try { $actual = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+  try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
   finally { $stream.Dispose(); $sha.Dispose() }
-  if ($actual -ne $expected) { throw "Checksum mismatch for $name" }
+}
+function Assert-Digest([string]$path, [string]$expected, [string]$name) {
+  if ((Get-Digest $path) -ne $expected) { throw "Checksum mismatch for $name" }
 }
 try {
   Write-Host 'Downloading verified Windows Executor assets...'
@@ -178,7 +175,8 @@ try {
     if ((Get-Item $bundlePath).Length -gt $maxMetadataBytes) { throw 'SHA256SUMS.sigstore.json exceeds metadata size limit' }
     $cosign = Get-Command cosign -ErrorAction SilentlyContinue
     if (-not $cosign) { throw 'cosign is required to verify public release signatures' }
-    & $cosign.Source verify-blob --bundle $bundlePath --certificate-identity-regexp "^https://github.com/$repo/.github/workflows/release\\.yml@refs/tags/v" --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' $sumsPath | Out-Null
+    $cosignPath = $cosign.Path
+    & $cosignPath verify-blob --bundle $bundlePath --certificate-identity-regexp "^https://github.com/$repo/.github/workflows/release\\.yml@refs/tags/v" --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' $sumsPath | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'SHA256SUMS Sigstore verification failed' }
   }
   $sums = @(Get-Content $sumsPath)
@@ -186,7 +184,8 @@ try {
   $archive = Download-ReleaseAsset $companion
   $serviceHostBinary = Download-ReleaseAsset $serviceHost
   Write-Host 'Verifying Windows Executor checksum...'
-  Assert-Digest $binary (Read-ExpectedDigest $asset $sums) $asset
+  $executorDigest = Read-ExpectedDigest $asset $sums
+  Assert-Digest $binary $executorDigest $asset
   Write-Host 'Verifying Windows ConPTY archive checksum...'
   Assert-Digest $archive (Read-ExpectedDigest $companion $sums) $companion
   Write-Host 'Verifying Windows service-host checksum...'
@@ -196,23 +195,26 @@ try {
   Write-Host 'Checking Windows ConPTY tar inventory...'
   $tar = Get-Command tar -ErrorAction SilentlyContinue
   if (-not $tar) { throw 'tar is required to install the ConPTY companion' }
+  $tarPath = $tar.Path
   # Use a fixed relative name inside the download directory: Git for Windows
   # GNU tar otherwise interprets a drive-letter archive path as host:archive.
   Push-Location -LiteralPath $work
   try {
-    $listed = @(& $tar.Source -tzf $companion | ForEach-Object { ($_ -replace '^\\./', '').TrimEnd([char]13) } | Where-Object { $_ })
+    $listed = @(& $tarPath -tzf $companion | ForEach-Object { ($_ -replace '^\\./', '').TrimEnd([char]13) } | Where-Object { $_ })
     if ($LASTEXITCODE -ne 0) { throw "Failed to inspect $companion" }
     Write-Host 'Windows ConPTY tar listed.'
     $expectedEntries = @('node-pty-companion.json', 'win32-x64/', 'win32-x64/conpty.node', 'win32-x64/conpty_console_list.node', 'win32-x64/pty.node', 'win32-x64/winpty-agent.exe', 'win32-x64/winpty.dll', 'worker/', 'worker/conoutSocketWorker.js', 'shared/', 'shared/conout.js')
     if (@($listed).Count -ne $expectedEntries.Count -or @($listed | Sort-Object -Unique).Count -ne $expectedEntries.Count -or @(Compare-Object ($listed | Sort-Object) ($expectedEntries | Sort-Object)).Count -ne 0) { throw "$companion contains an unexpected file inventory" }
     Write-Host 'Windows ConPTY inventory verified.'
-    & $tar.Source -xzf $companion
+    & $tarPath -xzf $companion
     if ($LASTEXITCODE -ne 0) { throw "Failed to extract $companion" }
     Write-Host 'Windows ConPTY extracted.'
   } finally { Pop-Location }
 
   Write-Host 'Checking Windows ConPTY manifest...'
-  $manifest = Get-Content -Raw (Join-Path $work 'node-pty-companion.json') | ConvertFrom-Json
+  $manifestPath = Join-Path $work 'node-pty-companion.json'
+  $companionManifestDigest = Get-Digest $manifestPath
+  $manifest = Get-Content -Raw $manifestPath | ConvertFrom-Json
   if ($manifest.schemaVersion -ne 1 -or $manifest.product -ne 'kala-executor-node-pty-companion' -or $manifest.target -ne 'win32-x64' -or [string]$manifest.nodePtyVersion -notmatch '^\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.-]+)?$') { throw 'ConPTY companion manifest identity is invalid' }
   if (@($manifest.files).Count -ne 7) { throw 'ConPTY companion manifest file inventory is invalid' }
   $manifestPaths = @($manifest.files | ForEach-Object { [string]$_.path })
@@ -233,7 +235,9 @@ try {
   New-Item -ItemType Directory -Path $prebuilds -Force | Out-Null
   Move-Item (Join-Path $work 'win32-x64') (Join-Path $prebuilds 'win32-x64') -Force
   Write-Host 'Starting verified Windows Executor...'
-  if ($hostRelease) { & $binary @args } else { & $binary --internal-installer @args }
+  $env:KALA_VERIFIED_EXECUTOR_SHA256 = $executorDigest
+  $env:KALA_VERIFIED_CONPTY_MANIFEST_SHA256 = $companionManifestDigest
+  if ($hostRelease) { node.exe $binary @args } else { node.exe $binary --internal-installer @args }
   if ($LASTEXITCODE -ne 0) { throw "Executor installer exited with code $LASTEXITCODE" }
 } finally {
   if (-not $env:KALA_INSTALLER_WORK_DIR) { Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue }

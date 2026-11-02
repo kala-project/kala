@@ -33,7 +33,7 @@ curl -fsSL 'https://HOST/install' | KALA_SETUP_CODE='ONE_TIME_CODE' sh
 
 ### Windows PowerShell
 
-The beta candidate supports Windows x64 native Executor in both temporary and SCM service modes through `GET /install.ps1`. The Host-issued one-time setup code is exchanged without embedding credentials in the command. The installer verifies the native SEA, the ConPTY companion and the separately pinned WinSW service host against the release checksum index before execution. Source-built Windows CI fixtures are **not** signed release evidence; formal RC acceptance must download and verify the tagged signed draft. No Windows beta has been promoted until that acceptance passes.
+The beta candidate supports Windows x64 CJS Executor with Node.js 22+ in both temporary and SCM service modes through `GET /install.ps1`. The Host-issued one-time setup code is exchanged without embedding credentials in the command. The installer verifies the CJS, the ConPTY companion and the separately pinned WinSW service host against the release checksum index before execution. Source-built Windows CI fixtures are **not** signed release evidence; formal RC acceptance must download and verify the tagged signed draft. No Windows beta has been promoted until that acceptance passes.
 
 The shell installer URL is stable and contains no Invite, bootstrap credential, installation ID, or query string. This is required so Cloudflare Access and other reverse proxies can allowlist exactly `/install`, and so credentials never enter browser history, proxy/CDN access logs, referrers, screenshots, or shell history.
 
@@ -226,8 +226,8 @@ The legacy `kala-executor.cjs` command remains compatible for at least one relea
 
 ### 7.3 Windows
 
-- beta candidate: WinSW v2.12.0 is pinned by SHA-256 and acts as the SCM service host for the native Executor, with automatic start and recovery actions;
-- native binary, service host and XML are under Program Files; config and credential are under ProgramData with inherited user ACLs removed before credentials are written;
+- beta candidate: WinSW v2.12.0 is pinned by SHA-256 and acts as the SCM service host for Node.js 22+ running the CJS Executor, with automatic start and recovery actions;
+- verified CJS, service host and XML are under Program Files with restricted ACLs; config and credential are under ProgramData with inherited user ACLs removed before credentials are written;
 - the installer persists the Workspace ID redeemed under the interactive account, so LocalSystem reconnects under the same identity;
 - arguments and paths with spaces are correctly quoted; WinSW writes bounded rolling files (`service logs` prints their paths), not the currently unimplemented Event Viewer sink;
 - DPAPI protection, native Authenticode/MSI/winget distribution and managed Windows updates remain requirements, **not** capabilities validated by checksum signing or source-built CI;

@@ -137,26 +137,26 @@ bundle is publicly downloadable and passed a local fresh-install replay; that
 is **not** a passing hosted clean-VM certification or production support for
 beta.19. The local evidence and its exact revision are recorded in the
 [Private Cloud release document](./private-cloud-release.md).
-Its proposed default asset contract is Linux x64 and macOS x64/arm64
-OS-native Executor plus Node.js 22+ CJS Portable Host and Dedicated components. Host and Dedicated
+Its proposed default asset contract is a Node.js 22+ CJS Executor on Linux x64,
+macOS x64/arm64 and Windows x64, plus CJS Portable Host and Dedicated components. Host and Dedicated
 self-contained native binaries are only manual qualification artifacts, not
 part of the signed default inventory. The Private Cloud signed bundle contains a Linux x64 native Operator and its
 three images are Linux amd64 only; Node.js is not required on the installation
 host. Linux arm64 Operator bundles and images are paused and unaccepted. The
 default is single-host `local-volume` storage. Local NFS requires an explicit
 experimental choice; there is no full-stack NFS acceptance evidence. Windows x64 Portable Host CJS
-and OS-native Executor with ConPTY are separate pending runner gates and must
+and CJS Executor with ConPTY are separate pending runner gates and must
 not be advertised as shipped until both their actual assets and end-to-end
 results pass. For the candidate, Windows Host is **Node.js 22+ CJS**, not an
 OS-native Host `.exe`: its matching `kala-copilot-runtime-win32-x64` and
 `kala-copilot-runtime-node-win32-x64.node` must be distributed alongside it.
-Windows Executor is the default OS-native `kala-executor-win32-x64.exe`,
+Windows Executor uses `kala-executor.cjs` with Node.js 22+,
 with the matching `node-pty-win32-x64.tar.gz` ConPTY companion and
 `install-executor.ps1`. A standalone Host CJS download alone does **not**
-contain the signed Windows Executor/ConPTY installer: Host-mediated Windows
+contain the signed Windows ConPTY/service-host installer: Host-mediated Windows
 installation stays disabled until the Host can serve these adjacent assets
 with matching SHA256SUMS entries from the exact release. Acceptance must
-cover both a fresh Windows Host and the native Executor temporary/service
+cover both a fresh Windows Host and the CJS Executor temporary/service
 terminal lifecycles using the downloaded release assets, not merely a
 source checkout.
 
@@ -182,8 +182,8 @@ These states are deliberately separate:
   remains unsupported even if it was built or accepted.
 
 For Linux x64 and macOS x64/arm64 Portable, `rc-acceptance.yml` now requires the
-exact CJS Host and matching OS-native Executor from the candidate release. On the
-matching hosted runner it submits a real Dashboard protocol message to the native
+exact CJS Host and CJS Executor from the candidate release. On the
+matching hosted runner it submits a real Dashboard protocol message to the
 Executor, runs a local terminal command, writes and reads a workspace file,
 checks the persisted terminal result, gracefully checkpoints the Host, replaces
 and restarts the CJS and Executor, reloads the Session, reads
@@ -194,7 +194,7 @@ requires a separately supplied, verified predecessor asset and explicit
 migration/rollback evidence.
 
 Windows acceptance is a separate real `windows-latest` gate over the downloaded
-Node.js 22 CJS Host, native Executor, ConPTY companion, installer, service Host,
+Node.js 22 CJS Host and Executor, ConPTY companion, installer, service Host,
 and Copilot runtime companions. It covers temporary and service terminal
 lifecycles. A Linux run cannot substitute for that evidence. The acceptance
 message intentionally uses the explicit shell intent and no model provider, so it

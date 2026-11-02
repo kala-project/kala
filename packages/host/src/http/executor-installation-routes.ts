@@ -305,7 +305,11 @@ try {
   if ($null -eq $properties -or $properties.Count -eq 0) { throw 'Kala Host returned an empty installation environment' }
   $properties | ForEach-Object { [Environment]::SetEnvironmentVariable($_.Name, [string]$_.Value, 'Process') }
   Write-Host '[3/4] Starting Executor...'
-  & $installer --internal-installer
+  try { & $installer --internal-installer }
+  catch {
+    Write-Host ("Kala installer failure type: {0}; line: {1}" -f $_.Exception.GetType().Name, $_.InvocationInfo.ScriptLineNumber)
+    throw
+  }
   if ($LASTEXITCODE -ne 0) { throw "Kala Executor installer exited with code $LASTEXITCODE" }
 } finally {
   Remove-Item $installer -Force -ErrorAction SilentlyContinue

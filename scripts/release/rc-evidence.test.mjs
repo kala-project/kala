@@ -33,16 +33,18 @@ test('predecessor evidence is formally validated as non-certifying and cannot en
   assert.throws(() => validateRcEvidence({ ...create('private-cloud', 'linux-x64-compose-fresh'), certifying: false, predecessorPolicy: 'unsupported-explicit-override' }), /must not declare predecessor/u)
 })
 
-test('fresh Private Cloud evidence requires candidate-first and digest-pinning checks without lifecycle claims', () => {
+test('fresh Private Cloud evidence requires external restore and identity proof without lifecycle claims', () => {
   const record = create('private-cloud', 'linux-x64-compose-fresh')
   assert.equal(validateRcEvidence(record), record)
   assert.equal(record.checks.freshCandidateInstall, true)
   assert.equal(record.checks.imageDigestPinning, true)
-  assert.equal(record.checks.realBundledIdentities, true)
+  assert.equal(record.checks.isolatedExternalOidc, true)
+  assert.equal(record.checks.externalPostgresS3, true)
+  assert.equal(record.checks.verifiedExternalRestore, true)
   assert.equal(record.checks.authenticatedModelFixture, true)
   assert.equal(record.checks.fullUpgrade, undefined)
   assert.equal(record.checks.rollback, undefined)
-  for (const check of ['freshCandidateInstall', 'imageDigestPinning', 'ephemeralBundledAcceptance', 'realBundledIdentities', 'authenticatedModelFixture', 'browser', 'executor', 'tenantIsolation', 'backupRestore']) {
+  for (const check of ['freshCandidateInstall', 'imageDigestPinning', 'isolatedExternalOidc', 'externalPostgresS3', 'verifiedExternalRestore', 'authenticatedModelFixture', 'browser', 'executor', 'tenantIsolation']) {
     assert.throws(() => validateRcEvidence({ ...record, checks: { ...record.checks, [check]: false } }), new RegExp(`did not prove ${check}`, 'u'))
   }
 })
@@ -69,7 +71,7 @@ test('rejects diagnostics, private locations, URLs, and sensitive fields', () =>
 
 function create(category, target) {
   const windowsNames = [
-    'kala-dashboard-with-runtime.cjs', 'kala-executor-win32-x64.exe', 'node-pty-win32-x64.tar.gz',
+    'kala-dashboard-with-runtime.cjs', 'kala-executor.cjs', 'node-pty-win32-x64.tar.gz',
     'kala-executor-service-host-win32-x64.exe', 'install-executor.ps1', 'kala-copilot-runtime-win32-x64', 'kala-copilot-runtime-node-win32-x64.node',
   ]
   const windows = category === 'portable' && target === 'win32-x64'

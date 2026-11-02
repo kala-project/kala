@@ -20,7 +20,7 @@ const executorRelease = resolve(process.env.PRODUCT_E2E_WINDOWS_EXECUTOR_RELEASE
 const runtimeService = join(root, 'packages', 'host', 'dist', 'bin', 'kala-runtime-service.js')
 const topologyPreflight = process.env.PRODUCT_E2E_PRIVATE_CLOUD_TOPOLOGY_PREFLIGHT === '1'
 const sourceRuntime = topologyPreflight && process.env.PRODUCT_E2E_PRIVATE_CLOUD_SOURCE_RUNTIME === '1'
-const executor = join(executorRelease, 'kala-executor-win32-x64.exe')
+const executor = join(executorRelease, 'kala-executor.cjs')
 const serviceHost = join(executorRelease, 'kala-executor-service-host-win32-x64.exe')
 const stateRoot = mkdtempSync(join(tmpdir(), 'kala-private-cloud-windows-invite-'))
 const hostDataRoot = join(stateRoot, 'host-data')
@@ -49,7 +49,7 @@ try {
     sourceRuntime ? join(root, 'packages', 'host', 'bin', 'kala-runtime-service.ts') : runtimeService,
     ...(topologyPreflight ? [] : [executor, serviceHost]),
     join(hostRelease, 'SHA256SUMS'),
-    join(hostRelease, 'kala-executor-win32-x64.exe'),
+    join(hostRelease, 'kala-executor.cjs'),
     join(hostRelease, 'kala-executor-service-host-win32-x64.exe'),
     join(hostRelease, 'node-pty-win32-x64.tar.gz'),
     join(hostRelease, 'install-executor.ps1'),
@@ -88,7 +88,6 @@ try {
     publicOrigin: origin,
     sessions,
     cacheNamespaceSecret: 'private-cloud-windows-e2e-cache-secret',
-    secretBox: createSessionSecretBox('e2e', [{ id: 'e2e', key: Buffer.alloc(32, 19) }]),
     ingressSecret,
     organizations,
     directory: {
@@ -98,12 +97,16 @@ try {
       findUnitByExecutorInvite: (token) => organizations.findUnitByExecutorInvite(token),
       findUnitByExecutorRouteHint: (hint) => organizations.findUnitByExecutorRouteHint(hint),
     },
-    loginStates: new MemoryLoginStates(),
-    oidc: {
-      async authorizationUrl() { return { url: new URL('http://identity.example/authorize'), codeVerifier: 'verifier', state: 'state' } },
-      async callback() { return { identity: { issuer: 'http://identity.example', subject: 'windows-e2e-owner', displayName: 'Windows E2E Owner', email: 'windows-e2e@example.test', emailVerified: true } } },
-      async refresh() { return {} },
-      async revokeRefreshToken() {},
+    authentication: {
+      kind: 'oidc',
+      loginStates: new MemoryLoginStates(),
+      secretBox: createSessionSecretBox('e2e', [{ id: 'e2e', key: Buffer.alloc(32, 19) }]),
+      oidc: {
+        async authorizationUrl() { return { url: new URL('http://identity.example/authorize'), codeVerifier: 'verifier', state: 'state' } },
+        async callback() { return { identity: { issuer: 'http://identity.example', subject: 'windows-e2e-owner', displayName: 'Windows E2E Owner', email: 'windows-e2e@example.test', emailVerified: true } } },
+        async refresh() { return {} },
+        async revokeRefreshToken() {},
+      },
     },
     provision: async (unitId) => {
       const response = await fetch(`${hostOrigin}/internal/runtime-units`, {
@@ -140,7 +143,7 @@ try {
     const bootstrap = await fetch(`${origin}/install/invite.ps1`)
     const script = await bootstrap.text()
     if (!bootstrap.ok || !script.includes(`${origin}/install/assets`) || script.includes(invite.token)) throw new Error(`Private Cloud public Windows bootstrap failed safety check (status=${bootstrap.status}, bytes=${Buffer.byteLength(script)}, expectedOrigin=${script.includes(origin)})`)
-    for (const name of ['SHA256SUMS', 'kala-executor-win32-x64.exe', 'kala-executor-service-host-win32-x64.exe', 'node-pty-win32-x64.tar.gz', 'install-executor.ps1']) {
+    for (const name of ['SHA256SUMS', 'kala-executor.cjs', 'kala-executor-service-host-win32-x64.exe', 'node-pty-win32-x64.tar.gz', 'install-executor.ps1']) {
       const asset = await fetch(`${origin}/install/assets/${name}`)
       const bytes = Buffer.from(await asset.arrayBuffer())
       if (!asset.ok || !bytes.equals(readFileSync(join(hostRelease, name)))) throw new Error(`Private Cloud public installer asset mismatch: ${name} (${asset.status})`)
@@ -208,7 +211,7 @@ async function verifyServiceInvite({ origin, unitId }) {
 
   const configPath = join(serviceDataDir, 'config.json')
   const credentialPath = join(serviceDataDir, 'credential')
-  assertFiles([configPath, credentialPath, join(serviceInstallDir, 'kala-executor.exe'), join(serviceInstallDir, 'kala-executor-service.exe')], 'managed invite service')
+  assertFiles([configPath, credentialPath, join(serviceInstallDir, 'kala-executor.cjs'), join(serviceInstallDir, 'kala-executor-service.exe')], 'managed invite service')
   const configText = readFileSync(configPath, 'utf8')
   const config = JSON.parse(configText)
   const credential = readFileSync(credentialPath, 'utf8').trim()
@@ -338,8 +341,8 @@ async function waitForServiceState(expected) {
 }
 
 async function uninstallService() {
-  const installedExecutor = join(serviceInstallDir, 'kala-executor.exe')
-  const result = await run(installedExecutor, ['service', 'uninstall'])
+  const installedExecutor = join(serviceInstallDir, 'kala-executor.cjs')
+  const result = await run(process.execPath, [installedExecutor, 'service', 'uninstall'])
   const statusName = result.stdout.match(/Removal status file: (kala-executor-uninstall-[A-Za-z0-9]+\.status)/u)?.[1]
   if (result.code !== 0 || !statusName) throw new Error(`managed service uninstall was not scheduled (${summarizeResult(result)})`)
   const statusPath = join(tmpdir(), statusName)
@@ -354,7 +357,7 @@ async function assertServiceAbsent() {
 
 async function emergencyServiceCleanup() {
   try {
-    if (existsSync(join(serviceInstallDir, 'kala-executor.exe'))) {
+    if (existsSync(join(serviceInstallDir, 'kala-executor.cjs'))) {
       try {
         await uninstallService()
         console.error('Private Cloud invite E2E used managed service cleanup after failure')

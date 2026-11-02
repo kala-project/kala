@@ -22,6 +22,21 @@ describe('installer flow', () => {
     }
   })
 
+  it('installs the verified CJS rather than copying Node.exe and defers removal when running the installed script', () => {
+    const cli = readFileSync(new URL('../bin/kala-executor.ts', import.meta.url), 'utf8')
+    const install = cli.slice(cli.indexOf('async function installWindowsService('), cli.indexOf('function writePrivateAtomic('))
+    expect(install).toContain('windowsExecutorSourceRoot(process.execPath, process.argv[1], process.versions.node)')
+    expect(install).toContain('nodeExecutablePath: process.execPath')
+    expect(install).toContain('await secureWindowsServiceInstallDir(plan.layout.installDir)')
+    expect(install).toContain('copyWindowsExecutorCjs(sourceRoot, plan.layout.executablePath, process.env.KALA_VERIFIED_EXECUTOR_SHA256')
+    expect(install).toContain('copyWindowsNodePtyRuntime(sourceRoot, plan.layout.installDir, process.env.KALA_VERIFIED_CONPTY_MANIFEST_SHA256')
+    expect(install).toContain('copyWindowsServiceHost(sourceRoot, plan.layout.installDir)')
+    expect(install).not.toContain('copyFileSync(process.execPath')
+    const uninstall = cli.slice(cli.indexOf('async function manageWindowsService('), cli.indexOf('async function scheduleWindowsSelfRemoval('))
+    expect(uninstall).toContain('resolve(process.argv[1] ?? \'\')')
+    expect(uninstall).toContain('scheduleWindowsSelfRemoval(plan.layout.installDir, plan.layout.dataDir)')
+  })
+
   it('validates environment and writes private sessions atomically', () => {
     const env = bootstrapEnvironment({ HOST_URL: 'https://host', EXECUTOR_INSTALL_ID: 'inst', EXECUTOR_INSTALL_BOOTSTRAP: 'boot', EXECUTOR_INSTALL_MODE: 'service', EXECUTOR_INSTALL_ROOT: '/repo', EXECUTOR_PRIVILEGE_MODE: 'privileged' })
     expect(env.EXECUTOR_INSTALL_MODE).toBe('service')

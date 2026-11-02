@@ -49,6 +49,7 @@ services:
     networks: [egress]
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE]
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
@@ -185,7 +186,9 @@ networks:
   runtime:
     internal: true
   edge: {}
-  egress: {}
+  egress:
+    name: ${KALA_RC_EGRESS_NETWORK:-${COMPOSE_PROJECT_NAME:-kala-private-cloud-pg-s3-eval}_egress}
+    external: ${KALA_RC_EGRESS_EXTERNAL:-false}
 
 volumes:
   host-secrets: {}
