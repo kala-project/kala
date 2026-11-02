@@ -3114,20 +3114,23 @@ export function App(): JSX.Element {
       <Toaster
         position="bottom-right"
         theme={effectiveTheme}
+        closeButton
         duration={4000}
         gap={8}
         offset={16}
         toastOptions={{
+          closeButtonAriaLabel: t('common.close'),
           // Match the app's flat, muted style instead of sonner's default
           // shouty `richColors` variants. A subtle left border carries the
           // severity, everything else stays bg-popover/text-foreground.
           unstyled: false,
           classNames: {
             toast:
-              'group toast pointer-events-none border border-border/70 bg-popover text-popover-foreground shadow-md rounded-md text-xs pl-3 pr-3 py-2 border-l-2',
+              'group toast pointer-events-none border border-border/70 bg-popover text-popover-foreground shadow-md rounded-md text-xs pl-3 pr-7 py-2 border-l-2',
             title: 'text-xs font-medium',
             description: 'text-caption text-muted-foreground mt-0.5',
             actionButton: 'pointer-events-auto text-caption px-2 py-0.5 rounded bg-accent text-accent-foreground hover:bg-accent/80',
+            closeButton: 'pointer-events-auto !left-auto !right-1 !top-1 !h-5 !w-5 !transform-none border-border/60 bg-popover text-muted-foreground hover:text-foreground',
             success: 'border-l-emerald-500/70',
             info: 'border-l-sky-500/70',
             warning: 'border-l-amber-500/70',
