@@ -236,9 +236,9 @@ This contract owns the following target decisions; schema/runbooks refine their 
 Platform releases have separate Runtime/control-plane and Dashboard artifacts. Stable
 Ingress serves or proxies the active Dashboard generation independently from active Runtime
 Units. A Dashboard-only activation changes no Runtime PID/container, Unit route generation,
-write lease, Session continuation marker, or Executor connection. Dedicated uses a
-versioned request/receipt protocol and atomic static-release route state; Private Cloud uses
-an independently replaceable Dashboard image. Portable alone embeds Dashboard assets in
+write lease, Session continuation marker, or Executor connection. Existing systemd Dedicated uses its versioned request/receipt protocol and atomic static-release route state. New Aspire/Compose Dedicated uses an outside operator to replace only the immutable Dashboard image; it must not invoke the legacy Supervisor or cold-stop the application graph. Private Cloud uses an independently replaceable Dashboard image. The new Dedicated Dashboard-only lane requires exact reviewed image pairs, unchanged resolved non-Dashboard configuration/project/authority, local image availability, a durable private operation receipt and bounded health verification. Only Dashboard may be recreated. The operator verifies every other container's identity/start/restart state before and after; failure records an uncertain operation, never an automatic whole-stack restart or external-effect replay. A separately requested rollback uses the frozen predecessor inputs and rechecks the live installation. An unchanged Runtime container is a bounded continuity result, not proof of all real Agent/Executor effects, protocol compatibility or uninterrupted static HTTP availability. Operator review and real business acceptance remain required.
+
+Portable alone embeds Dashboard assets in
 the CJS/native executable and upgrades them together. Long-lived browser tabs periodically
 check the Dashboard Service Worker, automatically activate a newly waiting generation, and
 perform one controlled reload; unsent Composer drafts survive that reload. A tab does not

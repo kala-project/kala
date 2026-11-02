@@ -1,6 +1,6 @@
 # Dedicated single-host lifecycle operator
 
-This is a **cold**, root-operated lifecycle for either the reviewed six-service `bundled-caddy` graph or five-service `external` ingress graph, with optional observability forms of nine or eight resources respectively. It is not a live backup, an HA failover system, or an external Executor-effects reconciler. Any command/tool effect not durably acknowledged before maintenance remains **unknown** and is never replayed by these tools.
+The backup/restore/full-upgrade lane is a **cold**, root-operated lifecycle for either the reviewed six-service `bundled-caddy` graph or five-service `external` ingress graph, with optional observability forms of nine or eight resources respectively. It is not a live backup, an HA failover system, or an external Executor-effects reconciler. Any command/tool effect not durably acknowledged before maintenance remains **unknown** and is never replayed by these tools.
 
 ## Boundary and protected inputs
 
@@ -133,3 +133,31 @@ Preflight requires one exact reviewed same-mode topology, reviewed immutable pre
 - automatic draining, settling, cancellation, or replay of external Executor/provider effects;
 - vendor-neutral SILO export or service-managed retention/replication proof;
 - automatic credential revocation, target Compose generation, or post-restore service start.
+
+
+## Independent Dashboard lane
+
+The deployment-mode SoT distinguishes this Compose lane from the old systemd Supervisor. Dashboard-only changes must not use full `upgrade`, cold backup or ingress fencing. `lifecycle_operator.py` checks exact reviewed immutable image pairs and equality of the complete resolved graph except `services.dashboard.image`, shares the host lifecycle lock, writes a private durable receipt before mutation, and recreates only Dashboard with `--no-deps --no-build --pull never --force-recreate --wait`. Both Dashboard digests must already be locally available; this lane does not build or pull images. The existing compatibility policy must enumerate the complete predecessor/target image maps with `migrationMode: none` and the unchanged PostgreSQL major.
+
+```bash
+sudo python3 ./lifecycle_operator.py dashboard-preflight \
+  --current-compose /secure/current/docker-compose.yaml --current-env /secure/current.env \
+  --target-compose /secure/target/docker-compose.yaml --target-env /secure/target.env \
+  --policy /secure/compatibility.json
+
+sudo python3 ./lifecycle_operator.py dashboard-upgrade \
+  --current-compose /secure/current/docker-compose.yaml --current-env /secure/current.env \
+  --target-compose /secure/target/docker-compose.yaml --target-env /secure/target.env \
+  --policy /secure/compatibility.json --receipt /secure/receipts/dashboard-forward.json \
+  --start-timeout 120
+
+sudo python3 ./lifecycle_operator.py dashboard-rollback \
+  --source-receipt /secure/receipts/dashboard-forward.json \
+  --receipt /secure/receipts/dashboard-rollback.json --start-timeout 120
+```
+
+Run from this directory. Inputs and receipts are root-private regular files; create the canonical receipt parent as root-owned mode `0700` beforehand, outside PG/SILO authority roots and the Docker data root (including Caddy volumes). Each operation requires a fresh absolute receipt path; existing evidence is never overwritten by another operation. The operation's own journal is atomically replaced and directory-fsynced through `prepared`, `applying`, and `completed` or `failed`, with a revision and phase history. The receipt contains private file paths/hashes and container continuity metadata, not resolved secrets or subprocess diagnostics. Interrupted `prepared`/`applying` is unverified, never implicit success. A receipt-write failure cannot promise a final `failed` phase; preserve its last durable phase and investigate. Root can bypass these checks; this is neither signed evidence nor malicious-root/HA fencing.
+
+Requires Docker Compose support for `config --hash`, `--no-build`, `--pull never` and `up --wait`. Non-Dashboard containers' `com.docker.compose.config-hash` labels must match the reviewed Compose service hashes, so an edited but unapplied baseline is rejected even when image pins and authority environment remain unchanged. This does not fingerprint mutable contents behind unchanged bind paths. Non-Dashboard services must be healthy at the before/after checks, with identical container IDs, PIDs, image references/IDs, configuration hashes, start times, restart counts, OOM/exit and health state. A completed observability-readiness job may remain exited successfully. These are boundary snapshots, not proof against every transient internal-process or network fault. Failure retains normalized `dashboard_operation_unverified` when journal storage remains writable; no automatic rollback or full-stack restart is allowed. Explicit rollback binds the original frozen config/env/policy paths and SHA-256 values and the predecessor image, tolerates a failed/missing Dashboard, and requires a separate receipt. Do not edit or delete those frozen files while rollback may be needed. After publication, subsequent status/backup/full-upgrade operations must use the actually active target Compose/env; after a successful rollback, use the predecessor inputs.
+
+Controlled Docker protocol acceptance is opt-in: `sudo env KALA_RUN_DASHBOARD_DOCKER=1 python3 -m unittest dashboard_operator_test.DashboardAdmissionTests dashboard_operator_test.DashboardDockerProtocolTests`. It uses only pre-existing local Node-image digests, a random disposable five-service project and a loopback-only random ingress port. Its services are controlled Node recipients, **not** real PG/SILO/Runtime, the production UI, Owner, Agent or Executor. It verifies actual Compose mutations, HTTP generation changes, a retained upgraded bidirectional connection, frozen-input rejection, failed-target recovery including absence, and detection of a non-Dashboard restart. No build/pull/prune or production deployment is performed. This does not certify front/back protocol compatibility, zero interruption of static HTTP, real business continuation, the latest full image set or a signed release.

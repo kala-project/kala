@@ -295,7 +295,7 @@ def require_local_docker() -> Path:
         context_host = json.loads(result.stdout)
     except json.JSONDecodeError:
         fail("Docker context endpoint is invalid")
-    host = explicit or context_host
+    host = context_host if os.environ.get("DOCKER_CONTEXT") else (explicit or context_host)
     if not isinstance(host, str) or not host.startswith("unix://"):
         fail("host filesystem lifecycle operations require a local Docker Unix-socket context")
     socket_path = Path(host[len("unix://"):])
@@ -628,9 +628,10 @@ def authority_configuration_sha256(config: dict[str, Any]) -> str:
     return sha256_bytes(json.dumps(values, sort_keys=True, separators=(",", ":")).encode())
 
 
-def verify_deployed_configuration(compose: Path, env: Path, config: dict[str, Any]) -> None:
+def verify_deployed_configuration(compose: Path, env: Path, config: dict[str, Any], *, dashboard_optional: bool = False) -> None:
     """A staged .env is not proof of what actually wrote the archived authorities."""
-    ids = container_ids(compose, env, tuple(sorted(config["services"])))
+    names = set(config["services"]) - ({"dashboard"} if dashboard_optional else set())
+    ids = container_ids(compose, env, tuple(sorted(names)))
     fingerprinted_services = set(AUTHORITY_ENV)
     if "otel-collector" in config["services"]:
         fingerprinted_services.add("otel-collector")
@@ -1053,6 +1054,167 @@ def upgrade(args: argparse.Namespace) -> dict[str, Any]:
             "externalEffects": "unknown-no-replay"}
 
 
+
+def dashboard_pair(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Path]]:
+    require_local_docker()
+    paths = {name: private_regular(Path(getattr(args, name)), name) for name in
+             ("current_compose", "current_env", "target_compose", "target_env", "policy")}
+    policy = load_policy(paths["policy"])
+    current, target = preflight_pair(paths["current_compose"], paths["current_env"],
+                                     paths["target_compose"], paths["target_env"], policy)
+    if not current.get("name") or current.get("name") != target.get("name"):
+        fail("Dashboard lane requires the exact same explicit Compose project")
+    frozen = json.loads(json.dumps(target))
+    frozen["services"]["dashboard"]["image"] = current["services"]["dashboard"]["image"]
+    if frozen != current or current["services"]["dashboard"]["image"] == target["services"]["dashboard"]["image"]:
+        fail("Dashboard lane permits only a changed dashboard image, no other resolved configuration change")
+    for config in (current, target):
+        run(["docker", "image", "inspect", config["services"]["dashboard"]["image"]], timeout=30)
+    return current, target, policy, paths
+
+
+def dashboard_preflight(args: argparse.Namespace) -> dict[str, Any]:
+    current, _, policy, paths = dashboard_pair(args)
+    verify_deployed_configuration(paths["current_compose"], paths["current_env"], current)
+    non_dashboard_snapshot(paths["current_compose"], paths["current_env"], current)
+    dashboard = dashboard_container(paths["current_compose"], paths["current_env"])
+    if not dashboard or dashboard["state"] != "running" or dashboard["health"] != "healthy":
+        fail("Dashboard publication requires a healthy predecessor")
+    return {"event": "dashboard_preflight_accepted", "reviewId": policy["reviewId"], "changedServices": ["dashboard"]}
+
+
+def dashboard_container(compose: Path, env: Path, *, optional: bool = False) -> dict[str, Any] | None:
+    ids = run(compose_command(compose, env) + ["ps", "--all", "-q", "dashboard"], timeout=30).stdout.split()
+    if optional and not ids:
+        return None
+    if len(ids) != 1:
+        fail("Dashboard must have exactly one container (or be absent during explicit recovery)")
+    return inspect_continuity(ids[0])
+
+
+def inspect_continuity(container_id: str) -> dict[str, Any]:
+    template = '{"id":{{json .Id}},"image":{{json .Config.Image}},"imageId":{{json .Image}},"configHash":{{json (index .Config.Labels "com.docker.compose.config-hash")}},"restarts":{{json .RestartCount}},"state":{{json .State.Status}},"pid":{{json .State.Pid}},"started":{{json .State.StartedAt}},"oom":{{json .State.OOMKilled}},"exit":{{json .State.ExitCode}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}}}'
+    return json.loads(run(["docker", "inspect", "--format", template, container_id], timeout=30).stdout)
+
+
+def non_dashboard_snapshot(compose: Path, env: Path, config: dict[str, Any]) -> dict[str, Any]:
+    expected = {}
+    for line in run(compose_command(compose, env) + ["config", "--hash", "*"], timeout=30).stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not re.fullmatch(r"[0-9a-f]{64}", parts[1]):
+            fail("Compose did not provide reviewed service configuration hashes")
+        expected[parts[0]] = parts[1]
+    if set(expected) != set(config["services"]):
+        fail("Compose configuration hash inventory is incomplete")
+    ids = container_ids(compose, env, tuple(sorted(set(config["services"]) - {"dashboard"})))
+    snapshot = {}
+    for name, container_id in ids.items():
+        row = inspect_continuity(container_id)
+        if row["configHash"] != expected[name]:
+            fail("non-Dashboard deployed configuration differs from reviewed Compose")
+        readiness = name == "observability-readiness" and row["state"] == "exited" and row["exit"] == 0
+        if row["image"] != config["services"][name]["image"] or row["oom"] or not (readiness or
+                (row["state"] == "running" and row["pid"] > 0 and row["health"] in (None, "healthy"))):
+            fail("non-Dashboard services must be stable and healthy before independent publication")
+        snapshot[name] = row
+    return snapshot
+
+
+def dashboard_receipt(path: Path, document: dict[str, Any], phase: str, *, initial: bool = False) -> None:
+    document["phase"] = phase
+    document["revision"] = document.get("revision", 0) + 1
+    document.setdefault("history", []).append({"phase": phase, "at": int(time.time())})
+    encoded = (json.dumps(document, sort_keys=True, indent=2) + "\n").encode()
+    if initial:
+        durable_write(path, encoded)
+    else:
+        private_regular(path, "Dashboard operation receipt")
+        temporary = path.with_name("." + path.name + "." + secrets.token_hex(8) + ".tmp")
+        durable_write(temporary, encoded)
+        os.replace(temporary, path)
+    fsync_dir(path.parent)
+
+
+def dashboard_apply(args: argparse.Namespace, *, rollback: bool = False) -> dict[str, Any]:
+    source = None
+    if rollback:
+        source_path = private_regular(Path(args.source_receipt), "source Dashboard receipt")
+        try:
+            source = json.loads(source_path.read_text())
+        except (ValueError, UnicodeError):
+            fail("invalid source Dashboard receipt")
+        if not isinstance(source, dict) or source.get("schemaVersion") != 1 or source.get("kind") != "dedicated-dashboard-upgrade":
+            fail("explicit Dashboard rollback requires an original upgrade receipt")
+        if not isinstance(source.get("operationId"), str) or not re.fullmatch(r"[0-9a-f]{32}", source["operationId"]):
+            fail("invalid source Dashboard operation identity")
+        inputs = source.get("inputs")
+        if not isinstance(inputs, dict) or set(inputs) != {"current_compose", "current_env", "target_compose", "target_env", "policy"}:
+            fail("Dashboard receipt has incomplete frozen inputs")
+        for name, item in inputs.items():
+            if (not isinstance(item, dict) or not isinstance(item.get("path"), str)
+                    or not Path(item["path"]).is_absolute() or not isinstance(item.get("sha256"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", item["sha256"])):
+                fail("invalid frozen Dashboard input")
+            path = private_regular(Path(item["path"]), "frozen Dashboard input")
+            if sha256_file(path) != item["sha256"]:
+                fail("frozen Dashboard input changed; a new reviewed release is required")
+            setattr(args, name, str(path))
+    current, target, policy, paths = dashboard_pair(args)
+    if rollback:
+        current, target = target, current
+        current_compose, current_env = paths["target_compose"], paths["target_env"]
+        target_compose, target_env = paths["current_compose"], paths["current_env"]
+    else:
+        current_compose, current_env = paths["current_compose"], paths["current_env"]
+        target_compose, target_env = paths["target_compose"], paths["target_env"]
+    receipt = Path(args.receipt)
+    if not receipt.is_absolute():
+        fail("Dashboard receipt must be an absolute private operator path")
+    safe_root(receipt.parent, "Dashboard receipt parent")
+    for root in (*data_roots(current), require_local_docker()):
+        if receipt == root or root in receipt.parents:
+            fail("Dashboard receipt must be outside application authority and Docker data roots")
+    if receipt.exists() or receipt.is_symlink():
+        fail("Dashboard receipt already exists; use a fresh path, never overwrite evidence")
+    verify_deployed_configuration(current_compose, current_env, current, dashboard_optional=True)
+    before = non_dashboard_snapshot(current_compose, current_env, current)
+    dashboard = dashboard_container(current_compose, current_env, optional=rollback)
+    allowed = {current["services"]["dashboard"]["image"], target["services"]["dashboard"]["image"]} if rollback else {current["services"]["dashboard"]["image"]}
+    if dashboard and dashboard["image"] not in allowed:
+        fail("live Dashboard does not match the reviewed release or predecessor")
+    if not rollback and (not dashboard or dashboard["state"] != "running" or dashboard["health"] != "healthy"):
+        fail("Dashboard publication requires a healthy predecessor")
+    document = {"schemaVersion": 1, "kind": "dedicated-dashboard-rollback" if rollback else "dedicated-dashboard-upgrade",
+        "operationId": secrets.token_hex(16), "reviewId": policy["reviewId"], "project": current["name"],
+        "inputs": {name: {"path": str(path), "sha256": sha256_file(path)} for name, path in paths.items()},
+        "before": before, "previousDashboard": dashboard, "targetImage": target["services"]["dashboard"]["image"]}
+    if source:
+        document["sourceReceiptSha256"] = sha256_file(source_path)
+        document["sourceOperationId"] = source["operationId"]
+    dashboard_receipt(receipt, document, "prepared", initial=True)
+    try:
+        dashboard_receipt(receipt, document, "applying")
+        run(compose_command(target_compose, target_env) + ["up", "-d", "--no-deps", "--no-build", "--pull", "never",
+            "--force-recreate", "--wait", "--wait-timeout", str(args.start_timeout), "dashboard"], timeout=args.start_timeout + 60)
+        after = non_dashboard_snapshot(target_compose, target_env, target)
+        if before != after:
+            fail("non-Dashboard container identity/start/restart state changed; continuity is not accepted")
+        installed = dashboard_container(target_compose, target_env)
+        if not installed or installed["state"] != "running" or installed["health"] != "healthy" or installed["image"] != document["targetImage"]:
+            fail("target Dashboard did not reach reviewed healthy state")
+        verify_deployed_configuration(target_compose, target_env, target)
+        document["after"] = after
+        document["dashboard"] = installed
+        dashboard_receipt(receipt, document, "completed")
+    except (OperatorError, OSError, ValueError):
+        document["error"] = "dashboard_operation_unverified"
+        dashboard_receipt(receipt, document, "failed")
+        fail("Dashboard operation not verified; private receipt retained, no automatic rollback or full-stack restart")
+    return {"event": "dashboard_rollback_completed" if rollback else "dashboard_upgrade_completed",
+        "operationId": document["operationId"], "receipt": str(receipt), "nonDashboardContainersUnchanged": True,
+        "businessEffects": "not-replayed-not-certified"}
+
+
 def status(args: argparse.Namespace) -> dict[str, Any]:
     compose = private_regular(Path(args.compose), "Compose file")
     env = private_regular(Path(args.env), "Compose parameter file")
@@ -1087,7 +1249,7 @@ def status(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="Dedicated cold backup/recovery and reviewed no-migration upgrade operator")
+    result = argparse.ArgumentParser(description="Dedicated cold lifecycle and independent Dashboard publication operator")
     result.add_argument("--lock-file", default="/run/kala-dedicated/lifecycle.lock")
     sub = result.add_subparsers(dest="command", required=True)
     def compose_args(item: argparse.ArgumentParser, prefix: str = "") -> None:
@@ -1116,6 +1278,15 @@ def parser() -> argparse.ArgumentParser:
     upgrade_parser.add_argument("--start-timeout", type=int, default=300, choices=range(10, 901), metavar="10..900")
     upgrade_parser.add_argument("--acknowledge-maintenance-and-unknown-effects", action="store_true")
     upgrade_parser.add_argument("--acknowledge-external-ingress-fenced", action="store_true")
+    for command in ("dashboard-preflight", "dashboard-upgrade", "dashboard-rollback"):
+        item = sub.add_parser(command)
+        if command != "dashboard-preflight":
+            item.add_argument("--receipt", required=True)
+        item.add_argument("--start-timeout", type=int, default=120, choices=range(10, 901), metavar="10..900")
+        if command != "dashboard-rollback":
+            compose_args(item, "current-"); compose_args(item, "target-"); item.add_argument("--policy", required=True)
+        else:
+            item.add_argument("--source-receipt", required=True)
     return result
 
 
@@ -1123,7 +1294,8 @@ def main() -> None:
     args = parser().parse_args()
     require_root()
     functions = {"status": status, "backup": backup, "restore": restore,
-                 "upgrade-preflight": upgrade_preflight, "upgrade": upgrade}
+                 "upgrade-preflight": upgrade_preflight, "upgrade": upgrade,
+                 "dashboard-preflight": dashboard_preflight, "dashboard-upgrade": dashboard_apply, "dashboard-rollback": lambda args: dashboard_apply(args, rollback=True)}
     try:
         with host_lock(Path(args.lock_file)):
             output = functions[args.command](args)
