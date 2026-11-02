@@ -2,6 +2,9 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 import { resolve } from 'node:path'
+import { serialWorkerPlugins } from './scripts/build-budget.mjs'
+import { monacoWorkerBuild } from './scripts/monaco-worker-build.mjs'
+import { lazyFeatureBuild } from './scripts/lazy-feature-build.mjs'
 
 function argValue(argv: readonly string[], name: string): string | undefined {
   for (let i = 0; i < argv.length; i++) {
@@ -36,8 +39,16 @@ export default defineConfig({
     // Profiling builds keep production minification/chunking while emitting maps
     // beside the artifact for local CDP attribution. Release builds remain map-free.
     sourcemap: process.env.KALA_PROFILE_SOURCEMAP === '1' ? 'hidden' : false,
+    reportCompressedSize: false,
+    rollupOptions: { maxParallelFileOps: 16 },
+  },
+  worker: {
+    plugins: serialWorkerPlugins({ report: process.env.KALA_BUILD_MEMORY_REPORT === '1' }),
+    rollupOptions: { maxParallelFileOps: 8 },
   },
   plugins: [
+    monacoWorkerBuild({ report: process.env.KALA_BUILD_MEMORY_REPORT === '1' }),
+    lazyFeatureBuild({ report: process.env.KALA_BUILD_MEMORY_REPORT === '1' }),
     react(),
     // Service worker for PWA installability + offline shell + Web Push handler.
     // - registerType: 'prompt' + skipWaiting: false keeps activation fenced by

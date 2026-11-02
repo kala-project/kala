@@ -1,6 +1,9 @@
 import { resolve } from 'node:path'
 import react from '@vitejs/plugin-react'
 import { defineConfig, type Plugin } from 'vite'
+import { serialWorkerPlugins } from './scripts/build-budget.mjs'
+import { monacoWorkerBuild } from './scripts/monaco-worker-build.mjs'
+import { lazyFeatureBuild } from './scripts/lazy-feature-build.mjs'
 
 function prototypeApi(): Plugin {
   return {
@@ -105,7 +108,11 @@ export default defineConfig({
   define: {
     'import.meta.env.VITE_KALA_PROTOTYPE': JSON.stringify('1'),
   },
-  plugins: [react(), prototypeApi()],
+  plugins: [monacoWorkerBuild(), lazyFeatureBuild(), react(), prototypeApi()],
+  worker: {
+    plugins: serialWorkerPlugins(),
+    rollupOptions: { maxParallelFileOps: 8 },
+  },
   resolve: {
     alias: {
       'virtual:pwa-register': resolve(__dirname, 'src/prototype/pwa-register-stub.ts'),
@@ -126,5 +133,8 @@ export default defineConfig({
   build: {
     outDir: resolve(__dirname, 'dist-prototype'),
     emptyOutDir: true,
+    reportCompressedSize: false,
+    rollupOptions: { maxParallelFileOps: 16 },
+    sourcemap: process.env.KALA_PROFILE_SOURCEMAP === '1' ? 'hidden' : false,
   },
 })

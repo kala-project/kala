@@ -81,8 +81,7 @@ async function main(): Promise<void> {
   await seedSessions()
   if (process.env.KALA_SHOWCASE_SKIP_BUILD !== '1') {
     const dashboardDir = join(ROOT, 'packages/dashboard')
-    await run(join(dashboardDir, 'node_modules/.bin/tsc'), ['-p', 'tsconfig.json'], 120_000, false, dashboardDir)
-    await run(process.execPath, ['--max-old-space-size=6144', join(dashboardDir, 'node_modules/vite/bin/vite.js'), 'build'], 180_000, false, dashboardDir)
+    await run(process.execPath, ['scripts/build.mjs'], 660_000, false, dashboardDir)
   }
   host = start(process.execPath, [tsxCli, 'packages/host/bin/kala-host.ts'], {
     KALA_PORT: String(PORT), KALA_SESSIONS_DIR: sessionsDir, KALA_DASHBOARD_DIR: join(ROOT, 'packages/dashboard/dist'),

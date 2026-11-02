@@ -20,8 +20,22 @@ const profiles = args.filter((arg, index) => !arg.startsWith('--') && args[index
 if (!existsSync(mapDir)) throw new Error(`source-map directory not found: ${mapDir}`)
 
 const maps = new Map()
-for (const file of readdirSync(mapDir).filter((name) => name.endsWith('.js.map'))) {
-  try { maps.set(file.slice(0, -4), await new SourceMapConsumer(JSON.parse(readFileSync(join(mapDir, file), 'utf8')))) } catch {}
+// Lazy feature graphs emit nested chunks. Preserve relative paths so two
+// independently bundled graphs may safely contain the same basename.
+const mapFiles = readdirSync(mapDir, { recursive: true }).filter((name) => name.endsWith('.js.map')).sort()
+for (const file of mapFiles) {
+  try {
+    maps.set(file.slice(0, -4).replaceAll('\\', '/'), await new SourceMapConsumer(JSON.parse(readFileSync(join(mapDir, file), 'utf8'))))
+  } catch (error) {
+    throw new Error(`Cannot read profiling source map ${join(mapDir, file)}. Rebuild the matching profiling assets before analysis.`, { cause: error })
+  }
+}
+const mapPaths = [...maps.keys()].sort((left, right) => right.length - left.length)
+const mapForUrl = (value) => {
+  let pathname
+  try { pathname = decodeURIComponent(new URL(value, 'https://profile.invalid/').pathname) } catch { return undefined }
+  const key = mapPaths.find((file) => pathname.endsWith(`/${file}`))
+  return key ? maps.get(key) : undefined
 }
 if (maps.size === 0) throw new Error(`no source maps found in ${mapDir}; rebuild with KALA_PROFILE_SOURCEMAP=1`)
 
@@ -35,7 +49,7 @@ for (const path of profiles) {
     const frame = nodes.get(profile.samples[index])
     if (!frame) continue
     const file = basename(frame.url ?? '')
-    const map = maps.get(file)
+    const map = mapForUrl(frame.url ?? '')
     let functionName = frame.functionName || '(anonymous)'
     let source = file || '(native)'
     let line = frame.lineNumber >= 0 ? frame.lineNumber + 1 : null
