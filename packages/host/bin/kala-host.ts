@@ -68,6 +68,13 @@ import {
   writeManualConfig,
 } from '../src/runtime-config.js'
 import { startHostServer } from '../src/server.js'
+import { selectPortableInstallation } from '../src/store/portable-installation.js'
+import { SqliteSessionAuthority } from '../src/store/sqlite-session-authority.js'
+import { SqliteMessageQueueStore } from '../src/store/sqlite-message-queue.js'
+import { SqliteLocalObjects } from '../src/store/sqlite-local-objects.js'
+import { SqliteSessionArtifactStore } from '../src/store/sqlite-session-artifact-store.js'
+import { SqliteMessageAttachmentStore } from '../src/store/sqlite-message-attachment-store.js'
+import { createScheduledTaskStorage } from '../src/scheduled-tasks/storage.js'
 import type { EmbeddedStaticAsset } from '../src/http/routes.js'
 import { loadSocketAdminConfig, type EmbeddedSocketAdminAsset } from '../src/socket-admin.js'
 import { loadProductDeploymentConfig } from '../src/deployment-config.js'
@@ -128,7 +135,8 @@ Options:
 
 Common environment:
   KALA_PORT                  Port used when --port is omitted.
-  KALA_SESSIONS_DIR               Session JSONL directory. Default: ~/.kala/sessions.
+  KALA_SESSIONS_DIR               Legacy Session JSONL directory / new SQLite state root parent.
+  KALA_PORTABLE_SQLITE_FRESH       Set to 1 only on first launch with a nonexistent state root.
   KALA_ARTIFACTS_DIR Artifact root. Set to 0 to disable artifact writes.
   KALA_DASHBOARD_DIR              Static dashboard directory override.
   KALA_AUTH_TOKEN            Optional shared token required by clients.
@@ -182,6 +190,18 @@ async function main(): Promise<void> {
     process.env.KALA_SESSIONS_DIR ?? join(homedir(), '.kala', 'sessions')
   const expectedDeployment = parseExpectedDeployment(process.env.KALA_EXPECTED_DEPLOYMENT)
   const stateRoot = dirname(sessionsDir)
+  const portableAuthority = product === 'portable'
+    ? selectPortableInstallation(stateRoot, process.env.KALA_PORTABLE_SQLITE_FRESH === '1')
+    : 'legacy'
+  if (process.env.KALA_PORTABLE_SQLITE_FRESH === '1' && product !== 'portable') {
+    throw new Error('Portable SQLite fresh installation is only valid for the Portable product')
+  }
+  const portableDatabasePath = join(stateRoot, 'state.sqlite')
+  const sqliteSessions = portableAuthority === 'sqlite' ? new SqliteSessionAuthority(portableDatabasePath) : undefined
+  const sqliteQueue = portableAuthority === 'sqlite' ? new SqliteMessageQueueStore(portableDatabasePath) : undefined
+  const localObjects = portableAuthority === 'sqlite' ? new SqliteLocalObjects(stateRoot) : undefined
+  const sqliteArtifacts = localObjects ? new SqliteSessionArtifactStore(stateRoot, { objects: localObjects }) : undefined
+  const sqliteAttachments = localObjects ? new SqliteMessageAttachmentStore(stateRoot, { objects: localObjects }) : undefined
   const stateStore = new KalaStateStore(stateRoot, {
     ...(process.env.KALA_STATE_MASTER_KEY_PATH ? { keyPath: process.env.KALA_STATE_MASTER_KEY_PATH } : {}),
     legacyMemoDirectory: join(stateRoot, 'memos'),
@@ -318,6 +338,15 @@ async function main(): Promise<void> {
     capabilities,
     ...(evaluationUrl ? { evaluationUrl } : {}),
     sessionsDir,
+    ...(sqliteSessions && sqliteQueue ? {
+      sessionAuthority: sqliteSessions,
+      messageQueueAuthority: sqliteQueue,
+      scheduledTaskStore: createScheduledTaskStorage({ kind: 'portable-sqlite', databasePath: portableDatabasePath }),
+      objectStorage: {
+        sessionArtifacts: sqliteArtifacts!,
+        messageAttachments: sqliteAttachments!,
+      },
+    } : {}),
     ...(expectedDeployment ? { expectedDeployment } : {}),
     ...((processReadinessPath || process.env.KALA_RUNTIME_READINESS?.trim()) ? {
       invalidateReadiness: () => {

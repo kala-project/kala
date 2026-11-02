@@ -2481,15 +2481,16 @@ export async function handleUserMessage(
   const hostQueueIdle = deps.messageQueues.pending(p.sessionId) === 0
   if (
     record.agentRuntime !== 'kernel'
+    && !deps.store.usesExternalAuthority
     && requestedMode === 'steer'
     && !shell
     && isRestingStatus(record.state.status)
     && hostQueueIdle
   ) {
-    // An idle external runtime can accept the steer immediately. When it is
-    // busy, use the durable front queue below: calling send here would start a
-    // new runtime generation while the previous generation's tools may still
-    // be running.
+    // Keep the legacy direct-send behavior only for existing local installations.
+    // A durable Session authority must atomically admit even the first idle
+    // message into its queue before ACK; otherwise a crash between Socket ACK
+    // and the SDK's user-event commit loses an acknowledged prompt.
     await deps.loopDeps.messageAttachments?.commitReferences(p.sessionId, p.content)
     await runtime.send(record, {
       text: p.text,

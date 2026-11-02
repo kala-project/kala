@@ -41,7 +41,12 @@ import type { HostExtension } from './extensions/registry.js'
 import { createSkillManager, defaultSkillRoots, discoverSkills, type SkillManager, type SkillRegistry } from './extensions/skills.js'
 import { SessionNotFoundError, SessionStore, type SessionRecord } from './store/session.js'
 import { slimEffect, type SessionOperationMatch } from './store/log.js'
-import type { PostgresSessionAuthority } from './store/postgres-session-authority.js'
+import type { SessionAuthority } from './store/session-authority.js'
+import { PostgresSessionAuthority } from './store/postgres-session-authority.js'
+import { SqliteSessionAuthority } from './store/sqlite-session-authority.js'
+import { SqliteMessageQueueStore } from './store/sqlite-message-queue.js'
+import { SqliteSessionArtifactStore } from './store/sqlite-session-artifact-store.js'
+import { SqliteMessageAttachmentStore } from './store/sqlite-message-attachment-store.js'
 import type { ExecutorIdentityStorage } from './store/executor-identity.js'
 import { WorkspaceAliasStore, type WorkspaceAliasStorage } from './store/workspace-alias.js'
 import { PushSubscriptionStore, type PushSubscriptionStorage } from './push/store.js'
@@ -94,7 +99,8 @@ import { defaultRestartStatePath, RestartCoordinator } from './restart-coordinat
 import { inspectUnitQuiescence } from './tenant-runtime/quiescence.js'
 import { socketConnectionAuditSnapshot } from './connection/socket-audit.js'
 import { loadPersistedMessageQueueState, persistMessageQueueSnapshot, type PersistedMessageQueueState } from './message-queue-store.js'
-import { QueueClaimFencedError, type PostgresMessageQueueClaim } from './postgres-message-queue.js'
+import { QueueClaimFencedError, type MessageQueueAuthority, type MessageQueueClaim } from './message-queue-authority.js'
+import type { PostgresMessageQueueStore } from './postgres-message-queue.js'
 import { messageOperationFingerprint } from './message-operation-fingerprint.js'
 import { bangShellCallId, bangShellResultOperationId, bangShellResultState, formatBangShellResult, isBangShellResultForCommand, parseBangShellRequest } from './bang-shell.js'
 import { modelIdFromRef, resolveModelContextWindow } from './model-capabilities.js'
@@ -129,8 +135,10 @@ export type HostServerOptions = {
   listenHost?: string
   publicUrls?: readonly PublicUrlPattern[]
   sessionsDir: string
-  /** Private Cloud Session authority. Omit to retain the local JSONL backend. */
-  sessionAuthority?: PostgresSessionAuthority
+  /** Durable Session authority. Omit only for existing JSONL installations. */
+  sessionAuthority?: SessionAuthority
+  /** Durable queue paired with the Session authority; never silently use JSONL snapshots. */
+  messageQueueAuthority?: MessageQueueAuthority
   /** Optional SQL-checked Session owner gate before external model and tool effects. */
   assertSessionEffectOwner?: (sessionId: string) => Promise<void>
   /** Workspace alias authority. Omit to retain workspace-aliases.json. */
@@ -283,6 +291,13 @@ export async function startHostServer(
     : configuredAuth
   const deployment = options.deployment ?? PORTABLE_DEPLOYMENT
   const product = productVariant(deployment)
+  // Existing PG callers supply their paired queue through the PG Session authority.
+  // SQLite must supply its own queue explicitly; a durable Session cannot fall back to JSONL snapshots.
+  const durableQueue = options.messageQueueAuthority ?? (options.sessionAuthority instanceof PostgresSessionAuthority
+    ? options.sessionAuthority.messageQueue : undefined)
+  if (Boolean(options.sessionAuthority) !== Boolean(durableQueue)) {
+    throw new Error('Durable Session and message queue authorities must be configured together')
+  }
   const tenancy = effectiveTenancy(deployment)
   const metrics = new OperationalMetrics()
   metrics.increment('agent_kernel_process_starts_total', 'Host process starts', { component: 'host', deployment_mode: product })
@@ -371,6 +386,10 @@ export async function startHostServer(
       await new Promise<void>((resolve) => setTimeout(resolve, 10))
     }
     storageInventory?.close()
+    if (options.messageQueueAuthority instanceof SqliteMessageQueueStore) await options.messageQueueAuthority.close()
+    if (options.objectStorage?.sessionArtifacts instanceof SqliteSessionArtifactStore) await options.objectStorage.sessionArtifacts.close()
+    if (options.objectStorage?.messageAttachments instanceof SqliteMessageAttachmentStore) await options.objectStorage.messageAttachments.close()
+    if (options.sessionAuthority instanceof SqliteSessionAuthority) await options.sessionAuthority.close()
     if (ownsStateStore) stateStore.close()
   }
   let activeSocketAdmin: SocketAdminConfig | undefined
@@ -391,7 +410,7 @@ export async function startHostServer(
   const getDefaultConfig = (actor?: DashboardActor): AgentConfig => typeof options.defaultConfig === 'function'
     ? options.defaultConfig(actor)
     : options.defaultConfig
-  if (options.sessionAuthority && !options.objectStorage) {
+  if (product !== 'portable' && options.sessionAuthority && !options.objectStorage) {
     throw new Error('Private Cloud session authority requires both externally backed artifact stores')
   }
   const sessionArtifacts = options.objectStorage?.sessionArtifacts
@@ -471,7 +490,7 @@ export async function startHostServer(
     legacyMemoDirectory: join(options.sessionsDir, '..', 'memos'),
   })
   const memoStore = options.memoStore ?? new MemoStore(stateStore)
-  if (options.sessionAuthority && !options.dagStore) {
+  if (product !== 'portable' && options.sessionAuthority && !options.dagStore) {
     throw new Error('Private Cloud session authority requires an explicitly tenant/unit-scoped DAG store')
   }
   const dagStore = options.dagStore ?? stateStore.dagStore()
@@ -494,10 +513,10 @@ export async function startHostServer(
   // Web Push (see docs/planning/roadmap-notes/pwa-mobile-and-push.md §5).
   // Private Cloud must provide both authorities so a tmpfs restart can never
   // silently fall back to local subscriptions or auto-generated VAPID keys.
-  if (options.sessionAuthority && !options.pushStore) {
+  if (product !== 'portable' && options.sessionAuthority && !options.pushStore) {
     throw new Error('Private Cloud session authority requires an explicitly tenant-scoped push store')
   }
-  if (options.sessionAuthority && options.vapidKeys === undefined) {
+  if (product !== 'portable' && options.sessionAuthority && options.vapidKeys === undefined) {
     throw new Error('Private Cloud session authority requires externally supplied VAPID keys or explicit null')
   }
   const localPushStore = options.pushStore ? undefined : new PushSubscriptionStore(join(options.sessionsDir, '..', 'push-subscriptions.jsonl'))
@@ -868,7 +887,7 @@ export async function startHostServer(
     },
     restartStatus: () => restart?.status() ?? restartUnavailableStatus(),
     requestRestart: (input) => {
-      if (!restart) throw new Error(options.sessionAuthority ? 'Private Cloud Runtime restart must be managed by the orchestrator' : 'restart coordinator is not ready')
+      if (!restart) throw new Error(product !== 'portable' ? 'Private Cloud Runtime restart must be managed by the orchestrator' : 'restart coordinator is not ready')
       return restart.request(input)
     },
     commitRestartActivation: (attemptId) => restart?.commitActivation(attemptId) ?? null,
@@ -960,8 +979,9 @@ export async function startHostServer(
   const queuedMessages = new Map<string, QueuedUserMessage[]>()
   const cancelledQueueOperations = new Map<string, Set<string>>()
   const claimedQueueOperations = new Map<string, QueuedUserMessage>()
-  const persistentQueue = options.sessionAuthority?.messageQueue
-  const persistentQueueClaims = new Map<string, PostgresMessageQueueClaim>()
+  const persistentQueue = durableQueue
+  if (persistentQueue) await persistentQueue.initialize()
+  const persistentQueueClaims = new Map<string, MessageQueueClaim>()
   const queueClaimOwner = `host:${randomUUID()}`
   const queueClaimTtlMs = options.queueClaimTtlMs ?? 30_000
   const drainingQueues = new Set<string>()
@@ -1035,7 +1055,9 @@ export async function startHostServer(
     let pending = queueLoads.get(sessionId)
     if (!pending) {
       pending = (persistentQueue
-        ? persistentQueue.loadOrInitialize(sessionId, async () => await loadPersistedMessageQueueState(store, sessionId))
+        ? product === 'portable'
+          ? persistentQueue.load(sessionId)
+          : persistentQueue.loadOrInitialize(sessionId, async () => await loadPersistedMessageQueueState(store, sessionId))
         : loadPersistedMessageQueueState(store, sessionId)).catch((error) => {
         // Dashboard sockets may subscribe before creating their Session. Preserve
         // that empty-queue behavior, but fail closed for all actual read errors
@@ -1055,7 +1077,7 @@ export async function startHostServer(
   }
 
   const persistQueue = async (sessionId: string, queue: readonly QueuedUserMessage[], cancelled = cancelledQueueOperations.get(sessionId) ?? new Set<string>()): Promise<void> => {
-    if (persistentQueue) throw new Error('Private Cloud queue mutations must use PostgreSQL transactional operations')
+    if (persistentQueue) throw new Error('Durable queue mutations must use transactional operations')
     await persistMessageQueueSnapshot(store, sessionId, queue, [...cancelled])
     if (queue.length === 0) queuedMessages.delete(sessionId)
     else queuedMessages.set(sessionId, [...queue])
@@ -1343,8 +1365,10 @@ export async function startHostServer(
             const result = attachmentAdmission === 'atomic-attachments'
               ? await (async () => {
                   if (!(messageAttachments instanceof S3MessageAttachmentStore) || !msg.content) throw new Error('PG/S3 atomic attachment admission is unavailable')
+                  if (product === 'portable') throw new Error('PG/S3 attachment admission cannot be used in Portable')
+                  const pgQueue = persistentQueue as PostgresMessageQueueStore
                   const admitted = await messageAttachments.admitQueuedMessage(sessionId, msg.content, msg.operationId,
-                    async (transaction) => await persistentQueue.enqueueWithinTransaction(transaction, sessionId, msg, priority === 'front' ? 'front' : 'back'))
+                    async (transaction) => await pgQueue.enqueueWithinTransaction(transaction, sessionId, msg, priority === 'front' ? 'front' : 'back'))
                   return admitted ?? { state: await persistentQueue.loadOrInitialize(sessionId,
                     async () => await loadPersistedMessageQueueState(store, sessionId)), changed: false }
                 })()
@@ -2399,7 +2423,7 @@ export async function startHostServer(
     },
   })
   await scheduledTaskScheduler.start()
-  if (!options.sessionAuthority) restart = new RestartCoordinator({
+  if (product === 'portable') restart = new RestartCoordinator({
     store,
     loop,
     statePath: defaultRestartStatePath(options.sessionsDir),
