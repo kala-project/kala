@@ -2001,7 +2001,16 @@ describe('wire protocol', () => {
     })
     url = `http://localhost:${server.port}`
 
-    const settings = await fetch(`${url}/settings`).then((r) => r.json() as Promise<ServerSettingsPayload>)
+    if (deployment) expect((await fetch(`${url}/settings`)).status).toBe(401)
+    const settingsResponse = await fetch(`${url}/settings`, deployment ? {
+      headers: {
+        'x-agent-runlab-principal': 'owner@example.test',
+        'x-agent-runlab-organization-id': 'org_settings',
+        'x-agent-runlab-organization-role': 'owner',
+      },
+    } : {})
+    expect(settingsResponse.status).toBe(200)
+    const settings = await settingsResponse.json() as ServerSettingsPayload
     expect(settings.runtime?.pid).toBe(process.pid)
     expect(settings.runtime?.current).toBeNull()
     expect(settings.runtimeManagement).toBe(deployment ? 'external' : 'local')
@@ -4524,11 +4533,14 @@ describe('wire protocol', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ action, rootDir: join(dir, 'scratch') }),
     })
-    for (const action of ['memory-index', 'tool-catalog-diff', 'profile-session', 'artifacts-prune']) {
+    for (const action of ['memory-index', 'tool-catalog-diff', 'artifacts-prune']) {
       const response = await request(action)
       expect(response.status).toBe(409)
       expect(await response.text()).toContain('unavailable with PostgreSQL Session authority')
     }
+    const unscopedProfile = await request('profile-session')
+    expect(unscopedProfile.status).toBe(400)
+    expect(await unscopedProfile.text()).toContain('sessionId')
   })
 
   it("rejects removed product evaluation entry points after the clean cutover", async () => {

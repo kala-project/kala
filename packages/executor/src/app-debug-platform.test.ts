@@ -10,8 +10,7 @@ import { ulid } from 'ulid'
 import { startExecutor } from './client.js'
 import type { HostServerOptions } from '../../host/src/server.js'
 import { startDedicatedRuntimeUnit } from '../../host/src/tenant-runtime/dedicated-unit.js'
-import { startDedicatedIngress } from '../../host/src/tenant-runtime/dedicated-ingress.js'
-import { writeDedicatedRouteState } from '../../host/src/tenant-runtime/dedicated-slot-state.js'
+import { readDedicatedRouteState, writeDedicatedRouteState } from '../../host/src/tenant-runtime/dedicated-slot-state.js'
 import { startLoopbackHostRuntimeUnit } from '../../host/src/tenant-runtime/loopback-host-unit.js'
 import { parseTenantRuntimeUnitId } from '../../host/src/tenant-runtime/unit.js'
 import { startTenantRuntimeService } from '../../host/src/tenant-runtime/service.js'
@@ -93,21 +92,46 @@ async function open(socket: Dashboard, grantId: string, port: number) {
 }
 const data = (grantId: string, seq: number): AppDebugFrame => ({ op: 'data', grantId, streamId: 'live', seq, data: Buffer.from(`effect-${seq}`).toString('base64') })
 
-it('pins real Dedicated ingress connections across route publication, revokes on actual cutover and before blocked shutdown', async () => {
-  const f = await fixture()
-  const candidate = await fixture()
+it('pins authenticated Dedicated Gateway connections across route publication, revokes on actual cutover and before blocked shutdown', async () => {
+  const identity = { issuer: 'http://identity.example', subject: 'fixture-owner' }
+  const organizations = new MemoryOrganizationStore()
+  const ownerOrganization = await organizations.getOrCreateForIdentity(identity)
+  const organizationId = ownerOrganization.organization.id
+  const f = await fixture({ organizationId })
+  const candidate = await fixture({ organizationId })
   const routePath = join(f.root, 'route.json')
   const publish = (generation: number, activeSlot: 'blue' | 'green') => writeDedicatedRouteState(routePath, {
     schemaVersion: 1, generation, activeSlot,
     slots: { blue: { origin: f.unit.origin, releaseId: 'old' }, green: { origin: candidate.unit.origin, releaseId: 'next' } }, updatedAt: new Date().toISOString(),
   })
   await publish(1, 'blue')
-  const ingress = await startDedicatedIngress({ port: 0, unitOrigin: f.unit.origin, routeStatePath: routePath })
+  const sessions = new FileBrowserSessionStore(join(f.root, 'browser-sessions.json')); await sessions.load()
+  const loginStates = new FileLoginStateStore(join(f.root, 'login-states.json')); await loginStates.load()
+  const ingress = await startRuntimeIngressGateway({
+    port: 0, publicOrigin: 'http://127.0.0.1:0', hostOrigin: f.unit.origin,
+    ingressSecret: 'fixture-ingress-secret', cacheNamespaceSecret: 'fixture-session-secret-with-sufficient-entropy',
+    singleTenantOwner: true, organizations, directory: new MemoryRuntimeAssignmentStore(), sessions,
+    runtimeOriginResolver: { async resolve() {
+      const state = await readDedicatedRouteState(routePath)
+      return state.slots[state.activeSlot].origin
+    } },
+    authentication: {
+      kind: 'oidc', loginStates, secretBox: createSessionSecretBox('fixture', [{ id: 'fixture', key: Buffer.alloc(32, 17) }]),
+      oidc: { async authorizationUrl() { return { url: new URL('http://identity.example/authorize'), codeVerifier: 'fixture', state: 'fixture' } }, async callback() { return { identity } }, async refresh() { return {} }, async revokeRefreshToken() {} },
+    },
+  })
   cleanup.push(() => ingress.close())
-  // DedicatedIngress.origin is the initial private Unit target, not its public listener.
   const publicOrigin = `http://127.0.0.1:${ingress.port}`
-  const executor = await f.attachExecutor(publicOrigin)
-  const owner = await dashboard(publicOrigin)
+  const executor = await f.attachExecutor(f.unit.origin)
+  await expect(dashboard(publicOrigin)).rejects.toThrow()
+  const login = await fetch(`${publicOrigin}/auth/login`, { redirect: 'manual' })
+  const loginCookie = login.headers.getSetCookie().find(value => value.startsWith('ak_login='))?.split(';')[0]
+  if (!loginCookie) throw new Error('Missing fixture login cookie')
+  const callback = await fetch(`${publicOrigin}/auth/callback?code=fixture`, { redirect: 'manual', headers: { cookie: loginCookie } })
+  const sessionCookie = callback.headers.getSetCookie().find(value => value.startsWith('ak_session='))?.split(';')[0]
+  if (!sessionCookie) throw new Error('Missing fixture session cookie')
+  const ownerHeaders = { cookie: sessionCookie, origin: publicOrigin }
+  const owner = await dashboard(publicOrigin, { extraHeaders: ownerHeaders })
   const grantId = await start(owner.socket, executor.executorId!, f.port)
   await open(owner.socket, grantId, f.port)
   expect(await frame(owner.socket, data(grantId, 0))).toMatchObject({ ok: true })
@@ -115,7 +139,7 @@ it('pins real Dedicated ingress connections across route publication, revokes on
   expect((await fetch(`${f.unit.origin}/internal/runtime/quiescence`)).status).toBe(200)
   expect(f.unit.server.loop.isDraining()).toBe(false)
   await publish(2, 'green') // Staging/publication is not drain and does not migrate a live Engine.IO connection.
-  const fresh = await dashboard(publicOrigin)
+  const fresh = await dashboard(publicOrigin, { extraHeaders: ownerHeaders })
   expect(candidate.unit.origin).not.toBe(f.unit.origin)
   expect([...candidate.unit.server.io.of('/dashboard').sockets.keys()]).toContain(fresh.socket.id)
   expect(f.unit.server.io.of('/dashboard').sockets.has(owner.socket.id!)).toBe(true)
@@ -188,10 +212,13 @@ it('uses actual signed Gateway Session routing, pins healthy local owner activat
   const fallback = vi.fn(async () => runtimeOrigin)
   const gateway = await startRuntimeIngressGateway({
     port: 0, hostOrigin: runtimeOrigin, runtimeOriginResolver: { resolve: fallback }, runtimeRoutingTicketResolver: resolver,
-    organizations, directory: new MemoryRuntimeAssignmentStore(), sessions, loginStates,
-    cacheNamespaceSecret: 'fixture-session-secret-with-sufficient-entropy', secretBox: createSessionSecretBox('fixture', [{ id: 'fixture', key }]),
+    organizations, directory: new MemoryRuntimeAssignmentStore(), sessions,
+    cacheNamespaceSecret: 'fixture-session-secret-with-sufficient-entropy',
     publicOrigin: 'http://127.0.0.1:0', ingressSecret: 'fixture-ingress-secret', socketRecheckMs: 20,
-    oidc: { async authorizationUrl() { return { url: new URL('http://identity.example/authorize'), codeVerifier: 'fixture', state: 'fixture' } }, async callback() { return { identity: alice } }, async refresh() { return {} }, async revokeRefreshToken() {} },
+    authentication: {
+      kind: 'oidc', loginStates, secretBox: createSessionSecretBox('fixture', [{ id: 'fixture', key }]),
+      oidc: { async authorizationUrl() { return { url: new URL('http://identity.example/authorize'), codeVerifier: 'fixture', state: 'fixture' } }, async callback() { return { identity: alice } }, async refresh() { return {} }, async revokeRefreshToken() {} },
+    },
   })
   cleanup.push(() => gateway.close())
   const origin = `http://127.0.0.1:${gateway.port}`
