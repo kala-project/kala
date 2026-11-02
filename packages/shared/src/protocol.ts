@@ -2098,6 +2098,7 @@ export type DashboardClientToServerEvents = {
   'app_debug:frame': (payload: AppDebugFrame, ack: (result: AppDebugReply) => void) => void
   'computer:request': (payload: ComputerRequest, ack: (result: ComputerResponse) => void) => void
   'client:connection_ping': (sentAt: number, ack: (serverAt: number) => void) => void
+  'client:push_activity': (payload: { deviceId: string; active: boolean }, ack: (result: RpcAck) => void) => void
   'client:executor_ping': (workspaceId: string, ack: (result: { rttMs?: number; error?: string }) => void) => void
   'client:user_message': (payload: ClientUserMessage, ack?: (result: RpcAck) => void) => void
   'client:user_approve': (payload: ClientUserApprove, ack?: (result: RpcAck) => void) => void

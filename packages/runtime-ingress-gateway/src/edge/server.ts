@@ -87,6 +87,7 @@ const DASHBOARD_API_PREFIXES = [
 
 function telemetryRoute(pathname: string): string {
   if (pathname === '/healthz') return 'gateway.health'
+  if (pathname === '/auth/me') return 'gateway.account-status'
   if (pathname.startsWith('/auth/')) return 'gateway.auth'
   if (pathname.startsWith('/api/')) return 'gateway.api'
   if (pathname.startsWith('/runtime/')) return 'gateway.runtime'
@@ -97,6 +98,7 @@ function telemetryRoute(pathname: string): string {
   if (pathname === '/memo') return 'gateway.memo'
   if (pathname === '/metrics') return 'gateway.metrics'
   if (pathname === '/settings' || pathname.startsWith('/settings/')) return 'gateway.settings'
+  if (pathname === '/push/activity') return 'gateway.activity'
   if (pathname.startsWith('/push/')) return 'gateway.push'
   if (pathname === '/organization' || pathname.startsWith('/organization/')) return 'gateway.organization'
   if (['/assets/', '/icons/', '/brand/', '/downloads/', '/themes/'].some(prefix => pathname.startsWith(prefix))
@@ -1223,7 +1225,7 @@ export async function startRuntimeIngressGateway(options: {
   const http = createServer((request, response) => {
     const pathname = (request.url ?? '/').split('?', 1)[0] ?? '/'
     // Socket.IO polling and upgrades are long-lived transports, not short commands.
-    const span = pathname.startsWith('/socket.io/') ? undefined : telemetry?.startHttpSpan(request.method, telemetryRoute(pathname), request.headers.traceparent)
+    const span = pathname.startsWith('/socket.io/') ? undefined : telemetry?.startHttpSpan(request.method, telemetryRoute(pathname), request.headers.traceparent, pathname === '/push/activity' || pathname === '/auth/me')
     if (span) {
       // The context is request-owned and invalidated on finish/close. Upgrade and
       // Socket.IO paths never activate it, preventing websocket context retention.

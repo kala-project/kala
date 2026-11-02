@@ -121,7 +121,61 @@ const DERIVATION_DOMAIN = /^[a-z][a-z0-9_.-]{0,63}$/u
 const SERVICE_VERSION = /^[a-zA-Z0-9][a-zA-Z0-9._+-]{0,63}$/u
 const EXPLICIT_SPAN_NAMES = new Set(['agent.turn', 'agent.llm', 'agent.tool', 'agent.approval', 'agent.compaction', 'agent.retry', 'agent.recovery'])
 const EXPLICIT_SPAN_STATUSES = new Set(['ok', 'error', 'unset'])
+const HTTP_TITLES: Readonly<Record<string, string>> = {
+  'gateway.assets': 'Page resources',
+  'gateway.account-status': 'Account status check',
+  'gateway.auth': 'Authentication flow',
+  'gateway.activity': 'Browser activity report',
+  'gateway.api': 'App API',
+  'gateway.frontend': 'Open app',
+  'gateway.install': 'Install workspace',
+  'gateway.internal': 'Internal service request',
+  'gateway.metrics': 'Service metrics',
+  'gateway.models': 'Model settings',
+  'gateway.memo': 'Saved notes',
+  'gateway.organization': 'Organization settings',
+  'gateway.push': 'Push notification API',
+  'gateway.runtime': 'Agent request',
+  'gateway.session-tabs': 'Session tabs',
+  'gateway.settings': 'App settings',
+  'runtime.api': 'Session API',
+  'runtime.activity': 'Browser activity report',
+  'runtime.artifact': 'Session files',
+  'runtime.command': 'Agent command',
+  'runtime.dashboard': 'Dashboard request',
+  'runtime.internal': 'Internal service request',
+  'runtime.session-tabs': 'Session tabs',
+}
+const AGENT_TITLES: Readonly<Record<ExplicitTelemetrySpan['name'], string>> = {
+  'agent.turn': 'Assistant turn',
+  'agent.llm': 'Model request',
+  'agent.tool': 'Tool execution',
+  'agent.approval': 'Waiting for approval',
+  'agent.compaction': 'Context compaction',
+  'agent.retry': 'Retry',
+  'agent.recovery': 'Recovery',
+}
+const OUTCOME_TITLES: Readonly<Record<string, string>> = {
+  completed: 'completed',
+  succeeded: 'completed',
+  failed: 'failed',
+  cancelled: 'cancelled',
+  interrupted: 'interrupted',
+}
+const LOG_TITLES: Readonly<Record<TelemetryLogMessage, string>> = {
+  'HTTP request failed': 'HTTP request failed',
+  'Runtime operation failed': 'Agent service operation failed',
+  'Service telemetry initialized': 'Monitoring started',
+  'Agent turn started': 'Agent turn started',
+  'Agent turn completed': 'Agent turn completed',
+  'Agent turn failed': 'Agent turn failed',
+  'Agent turn cancelled': 'Agent turn cancelled',
+  'Agent turn interrupted': 'Agent turn interrupted',
+}
+type TelemetryLogMessage = 'HTTP request failed' | 'Runtime operation failed' | 'Service telemetry initialized' |
+  'Agent turn started' | 'Agent turn completed' | 'Agent turn failed' | 'Agent turn cancelled' | 'Agent turn interrupted'
 const HISTOGRAM_BOUNDS_MS = [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000, 60_000, 300_000]
+const SLOW_QUERY_THRESHOLD_NS = 100_000_000n
 const HISTOGRAM_BOUNDS_COUNT = [0, 1, 2, 5, 10, 25, 50, 100]
 type ClientAggregate = { attributes: Partial<SafeTelemetryAttributes>; count: number; sum: number; min: number; max: number; buckets: number[] }
 type ActiveRequestTrace = { traceId: string; spanId: string; active: boolean }
@@ -171,7 +225,7 @@ export class OnlineTelemetry {
     this.timer.unref()
   }
 
-  startHttpSpan(method: string | undefined, route: string, incomingTraceparent?: string | string[]): HttpSpan {
+  startHttpSpan(method: string | undefined, route: string, incomingTraceparent?: string | string[], errorsOnly = false): HttpSpan {
     const normalizedMethod = METHOD.test(method ?? '') ? method! : 'OTHER'
     const normalizedRoute = ROUTE.test(route) ? route : 'other'
     const parsed = typeof incomingTraceparent === 'string' ? TRACEPARENT.exec(incomingTraceparent.trim().toLowerCase()) : null
@@ -183,7 +237,7 @@ export class OnlineTelemetry {
     const startedMono = process.hrtime.bigint()
     let ended = false
     const assets = normalizedRoute === 'gateway.assets'
-    const metricsOnly = normalizedRoute === 'gateway.health' || normalizedRoute === 'runtime.health' || assets
+    const metricsOnly = normalizedRoute === 'gateway.health' || normalizedRoute === 'runtime.health' || assets || errorsOnly
     const context: ActiveRequestTrace = { traceId, spanId, active: !metricsOnly }
     return {
       traceparent: `00-${traceId}-${spanId}-${metricsOnly ? '00' : '01'}`,
@@ -195,22 +249,25 @@ export class OnlineTelemetry {
         context.active = false
         const safeStatus = Number.isInteger(statusCode) && statusCode >= 100 && statusCode <= 599 ? statusCode : 500
         const statusClass = `${Math.floor(safeStatus / 100)}xx`
+        const durationMs = Number(process.hrtime.bigint() - startedMono) / 1_000_000
         const attributes = safeAttributes({
           'http.request.method': normalizedMethod,
           'http.route': normalizedRoute,
           'http.response.status_code': safeStatus,
           'status.class': statusClass,
           outcome: safeStatus >= 500 ? 'error' : safeStatus >= 400 ? 'rejected' : 'ok',
+          'duration.ms': Math.round(durationMs),
         })
-        const recordSpan = !metricsOnly || (assets && safeStatus >= 400)
+        const recordSpan = !metricsOnly || ((assets || errorsOnly) && safeStatus >= 400)
         if (recordSpan) this.enqueue({ kind: 'span', value: {
-          traceId, spanId, ...(parentSpanId ? { parentSpanId } : {}), name: `http ${normalizedRoute}`, kind: 2,
+          traceId, spanId, ...(parentSpanId ? { parentSpanId } : {}),
+          name: HTTP_TITLES[normalizedRoute] ?? 'HTTP request', kind: 2,
           startTimeUnixNano: startedAt,
           endTimeUnixNano: (BigInt(startedAt) + (process.hrtime.bigint() - startedMono)).toString(),
           attributes,
           status: { code: safeStatus >= 500 ? 2 : 1 },
         } })
-        this.counter('kala_http_server_duration_ms_total', Number(process.hrtime.bigint() - startedMono) / 1_000_000, {
+        this.counter('kala_http_server_duration_ms_total', durationMs, {
           'http.request.method': normalizedMethod, 'http.route': normalizedRoute, 'status.class': statusClass,
         })
         this.counter('kala_http_server_requests_total', 1, {
@@ -218,6 +275,7 @@ export class OnlineTelemetry {
         })
         if (safeStatus >= 500) this.log('error', 'HTTP request failed', {
           'http.request.method': normalizedMethod, 'http.route': normalizedRoute, 'status.class': statusClass,
+          'duration.ms': Math.round(durationMs),
         }, recordSpan ? traceId : undefined, recordSpan ? spanId : undefined)
       },
     }
@@ -272,15 +330,17 @@ export class OnlineTelemetry {
       }
       // A low-level dependency call is not a business root. In particular,
       // idle heartbeat BEGIN/query/COMMIT must not become separate traces.
-      if (traceId && parentSpanId) this.enqueue({ kind: 'span', value: {
+      if (traceId && parentSpanId && (client.provider !== 'postgresql' || status === 2 || durationNs >= SLOW_QUERY_THRESHOLD_NS)) this.enqueue({ kind: 'span', value: {
         traceId,
         spanId: randomHex(8),
         parentSpanId,
-        name: client.provider === 'postgresql' ? 'postgresql.query' : `s3.${client.operation}`,
+        name: client.provider === 'postgresql' ? 'Database query'
+          : client.operation === 'get' ? 'Read stored file'
+            : client.operation === 'put' ? 'Save stored file' : 'Delete stored file',
         kind: 3,
         startTimeUnixNano: startedAt,
         endTimeUnixNano: (BigInt(startedAt) + durationNs).toString(),
-        attributes: safeAttributes(attributes),
+        attributes: safeAttributes({ ...attributes, 'duration.ms': Math.round(Number(durationNs) / 1_000_000) }),
         status: { code: status },
       } })
     }
@@ -306,15 +366,17 @@ export class OnlineTelemetry {
     const startTimeUnixNano = unixMsToNano(span.startedAtUnixMs)
     const endTimeUnixNano = unixMsToNano(span.completedAtUnixMs)
     if (!startTimeUnixNano || !endTimeUnixNano) return
+    const outcome = span.attributes?.outcome
+    const outcomeTitle = typeof outcome === 'string' ? OUTCOME_TITLES[outcome] : undefined
     this.enqueue({ kind: 'span', value: {
       traceId: span.traceId,
       spanId: span.spanId,
       ...(span.parentSpanId ? { parentSpanId: span.parentSpanId } : {}),
-      name: span.name,
+      name: outcomeTitle ? `${AGENT_TITLES[span.name]} - ${outcomeTitle}` : AGENT_TITLES[span.name],
       kind: 1,
       startTimeUnixNano,
       endTimeUnixNano,
-      attributes: safeAttributes(span.attributes ?? {}),
+      attributes: safeAttributes({ ...span.attributes, 'duration.ms': Math.round(span.completedAtUnixMs - span.startedAtUnixMs) }),
       status: { code: span.status === 'ok' ? 1 : span.status === 'error' ? 2 : 0 },
     } })
   }
@@ -352,13 +414,12 @@ export class OnlineTelemetry {
     } })
   }
 
-  log(severity: 'info' | 'warn' | 'error', message: 'HTTP request failed' | 'Runtime operation failed' | 'Service telemetry initialized' |
-    'Agent turn started' | 'Agent turn completed' | 'Agent turn failed' | 'Agent turn cancelled' | 'Agent turn interrupted',
+  log(severity: 'info' | 'warn' | 'error', message: TelemetryLogMessage,
   attributes: Partial<SafeTelemetryAttributes> = {}, traceId?: string, spanId?: string): void {
     const levels = { info: 9, warn: 13, error: 17 } as const
     this.enqueue({ kind: 'log', value: {
       timeUnixNano: nowNano(), severityNumber: levels[severity], severityText: severity.toUpperCase(),
-      body: { stringValue: message }, attributes: safeAttributes(attributes),
+      body: { stringValue: humanLogMessage(message, attributes['duration.ms']) }, attributes: safeAttributes(attributes),
       ...(traceId && /^[0-9a-f]{32}$/u.test(traceId) ? { traceId } : {}),
       ...(spanId && /^[0-9a-f]{16}$/u.test(spanId) ? { spanId } : {}),
     } })
@@ -470,6 +531,13 @@ export function createOnlineTelemetryFromEnv(serviceName: string, env: NodeJS.Pr
   const telemetry = new OnlineTelemetry({ serviceName, endpoint, authToken, ...(serviceVersion ? { serviceVersion } : {}) })
   telemetry.log('info', 'Service telemetry initialized', { component: serviceName })
   return telemetry
+}
+
+function humanLogMessage(message: TelemetryLogMessage, durationMs: number | string | undefined): string {
+  const title = LOG_TITLES[message]
+  if (typeof durationMs !== 'number' || !Number.isFinite(durationMs) || durationMs < 0) return title
+  const elapsed = durationMs < 1_000 ? `${Math.round(durationMs)} ms` : `${(durationMs / 1_000).toFixed(1)} s`
+  return `${title} · ${elapsed}`
 }
 
 function safeAttributes(attributes: Partial<SafeTelemetryAttributes>): OtlpAttribute[] {

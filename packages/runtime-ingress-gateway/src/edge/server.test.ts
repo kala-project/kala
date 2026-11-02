@@ -172,9 +172,9 @@ describe('Private Cloud edge request path', () => {
     const telemetry = new OnlineTelemetry({ serviceName: 'kala-gateway', endpoint: 'http://localhost:4318', authToken: 't'.repeat(32), fetch: async () => new Response('', { status: 200 }) })
     const spy = vi.spyOn(telemetry, 'startHttpSpan')
     const gateway = await createGateway('http://127.0.0.1:9', undefined, { telemetry })
-    for (const [path, route] of [['/settings/speech', 'gateway.settings'], ['/user/session-tabs', 'gateway.session-tabs'], ['/assets/private-name.js', 'gateway.assets'], ['/push/activity', 'gateway.push'], ['/models', 'gateway.models']]) {
-      await fetch(`http://127.0.0.1:${gateway.port}${path}`)
-      expect(spy).toHaveBeenLastCalledWith('GET', route, undefined)
+    for (const [path, route] of [['/settings/speech', 'gateway.settings'], ['/user/session-tabs', 'gateway.session-tabs'], ['/assets/private-name.js', 'gateway.assets'], ['/push/activity', 'gateway.activity'], ['/push/subscribe', 'gateway.push'], ['/auth/me', 'gateway.account-status'], ['/auth/login', 'gateway.auth'], ['/models', 'gateway.models']]) {
+      await fetch(`http://127.0.0.1:${gateway.port}${path}`, { redirect: 'manual' })
+      expect(spy).toHaveBeenLastCalledWith('GET', route, undefined, path === '/push/activity' || path === '/auth/me')
     }
     await telemetry.close()
   })

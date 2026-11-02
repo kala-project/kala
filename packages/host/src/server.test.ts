@@ -350,6 +350,24 @@ describe('wire protocol', () => {
     }
   })
 
+  it('accepts authenticated Dashboard presence over Socket.IO and rejects invalid payloads', async () => {
+    const socket: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(`${url}/dashboard`, {
+      transports: ['websocket'],
+      auth: { sessionId: 'presence-test', role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+      reconnection: false,
+    })
+    try {
+      await new Promise<void>((resolveConnect, reject) => {
+        socket.once('connect', resolveConnect)
+        socket.once('connect_error', reject)
+      })
+      expect(await socket.timeout(2_000).emitWithAck('client:push_activity', { deviceId: 'browser-tab-1', active: true })).toEqual({ ok: true })
+      expect(await socket.timeout(2_000).emitWithAck('client:push_activity', { deviceId: '', active: true })).toEqual({
+        ok: false, error: 'invalid_activity_payload',
+      })
+    } finally { socket.close() }
+  })
+
   it('advertises Copilot as ready by default when the SDK starts successfully', async () => {
     const dashboard: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(`${url}/dashboard`, {
       transports: ['websocket'],

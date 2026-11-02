@@ -23,10 +23,63 @@ describe('OnlineTelemetry', () => {
     const spans = requests.filter(request => request.url.endsWith('/traces'))
       .flatMap(request => JSON.parse(request.body).resourceSpans[0].scopeSpans[0].spans)
     expect(spans).toHaveLength(1)
-    expect(spans[0]).toMatchObject({ name: 'http gateway.assets' })
+    expect(spans[0]).toMatchObject({ name: 'Page resources' })
     expect(spans[0].attributes).toContainEqual({ key: 'http.response.status_code', value: { intValue: '404' } })
     expect(requests.some(request => request.url.endsWith('/metrics'))).toBe(true)
   })
+
+  it('aggregates successful browser activity on both HTTP hops while retaining failed activity traces', async () => {
+    const requests: Array<{ url: string; body: string }> = []
+    const telemetry = new OnlineTelemetry({
+      serviceName: 'kala-gateway', endpoint: 'http://localhost:4318', authToken: TOKEN, flushIntervalMs: 60_000,
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), body: String(init?.body) })
+        return new Response('', { status: 200 })
+      },
+    })
+    const activity = telemetry.startHttpSpan('POST', 'gateway.activity', undefined, true)
+    expect(activity.traceparent).toMatch(/-00$/u)
+    activity.end(200)
+    telemetry.startHttpSpan('POST', 'runtime.activity', activity.traceparent, true).end(200)
+    telemetry.startHttpSpan('POST', 'gateway.activity', undefined, true).end(503)
+    telemetry.startHttpSpan('POST', 'runtime.activity', activity.traceparent, true).end(400)
+    telemetry.startHttpSpan('POST', 'gateway.push').end(200)
+    await telemetry.close()
+
+    const spans = requests.filter((request) => request.url.endsWith('/traces'))
+      .flatMap((request) => JSON.parse(request.body).resourceSpans[0].scopeSpans[0].spans)
+    expect(spans.map((span: { name: string }) => span.name)).toEqual([
+      'Browser activity report', 'Browser activity report', 'Push notification API',
+    ])
+    expect(spans.map((span: { attributes: Array<{ key: string; value: { intValue?: string } }> }) =>
+      span.attributes.find((attribute) => attribute.key === 'http.response.status_code')?.value.intValue)).toEqual(['503', '400', '200'])
+    expect(requests.some((request) => request.url.endsWith('/metrics') && request.body.includes('kala_http_server_requests_total'))).toBe(true)
+    expect(requests.some((request) => request.url.endsWith('/logs') && request.body.includes('HTTP request failed'))).toBe(true)
+  })
+
+  it('counts account checks without reporting successful checks as sign-ins', async () => {
+    const requests: Array<{ url: string; body: string }> = []
+    const telemetry = new OnlineTelemetry({
+      serviceName: 'kala-gateway', endpoint: 'http://localhost:4318', authToken: TOKEN, flushIntervalMs: 60_000,
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), body: String(init?.body) })
+        return new Response('', { status: 200 })
+      },
+    })
+    telemetry.startHttpSpan('GET', 'gateway.account-status', undefined, true).end(200)
+    telemetry.startHttpSpan('GET', 'gateway.account-status', undefined, true).end(503)
+    telemetry.startHttpSpan('POST', 'gateway.auth').end(302)
+    await telemetry.close()
+    const spans = requests.filter((request) => request.url.endsWith('/traces'))
+      .flatMap((request) => JSON.parse(request.body).resourceSpans[0].scopeSpans[0].spans)
+    expect(spans.map((span: { name: string }) => span.name)).toEqual(['Account status check', 'Authentication flow'])
+    expect(spans[0].attributes).toContainEqual({ key: 'http.route', value: { stringValue: 'gateway.account-status' } })
+    expect(spans[0].attributes).toContainEqual({ key: 'http.response.status_code', value: { intValue: '503' } })
+    const metrics = requests.find((request) => request.url.endsWith('/metrics'))!.body
+    expect(metrics).toContain('gateway.account-status')
+    expect(metrics).toContain('gateway.auth')
+  })
+
   it('is explicit opt-in and requires endpoint plus a protected token', () => {
     expect(createOnlineTelemetryFromEnv('kala-test', {})).toBeUndefined()
     const original = Promise.resolve({ rows: [] })
@@ -66,7 +119,10 @@ describe('OnlineTelemetry', () => {
     expect(exported.attributes).toEqual(expect.arrayContaining([
       { key: 'http.route', value: { stringValue: 'runtime.command' } },
       { key: 'http.response.status_code', value: { intValue: '503' } },
+      { key: 'duration.ms', value: { intValue: expect.any(String) } },
     ]))
+    const failure = JSON.parse(requests.find((request) => request.url.endsWith('/logs'))!.body).resourceLogs[0].scopeLogs[0].logRecords[0]
+    expect(failure.body.stringValue).toMatch(/^HTTP request failed · \d+ (?:ms|s)$/u)
   })
 
   it('exports explicit timestamped spans and typed histograms with anonymous stable IDs', async () => {
@@ -95,7 +151,9 @@ describe('OnlineTelemetry', () => {
 
     const traces = JSON.parse(requests.find((request) => request.url.endsWith('/traces'))!.body)
     const exported = traces.resourceSpans[0].scopeSpans[0].spans[0]
-    expect(exported).toMatchObject({ traceId, spanId, parentSpanId, name: 'agent.llm', status: { code: 1 } })
+    expect(exported).toMatchObject({ traceId, spanId, parentSpanId, name: 'Model request - completed', status: { code: 1 } })
+    expect(exported.name).toMatch(/^[\x20-\x7e]+$/u)
+    expect(exported.attributes).toContainEqual({ key: 'duration.ms', value: { intValue: '1250' } })
     expect(exported.startTimeUnixNano).toBe('1767225600000000000')
     expect(traces.resourceSpans[0].resource.attributes).toContainEqual({ key: 'service.version', value: { stringValue: '9c04a7ea' } })
     const metrics = JSON.parse(requests.find((request) => request.url.endsWith('/metrics'))!.body)
@@ -136,10 +194,9 @@ describe('OnlineTelemetry', () => {
 
     const body = requests.find((entry) => entry.url.endsWith('/traces'))!.body
     const spans = JSON.parse(body).resourceSpans[0].scopeSpans[0].spans
-    const pg = spans.find((span: { name: string }) => span.name === 'postgresql.query')
-    const s3 = spans.find((span: { name: string }) => span.name === 's3.put')
-    const requestSpan = spans.find((span: { name: string }) => span.name === 'http runtime.command')
-    expect(pg).toMatchObject({ traceId: requestSpan.traceId, parentSpanId: requestSpan.spanId, kind: 3, status: { code: 1 } })
+    const s3 = spans.find((span: { name: string }) => span.name === 'Save stored file')
+    const requestSpan = spans.find((span: { name: string }) => span.name === 'Agent command')
+    expect(spans.some((span: { name: string }) => span.name === 'Database query')).toBe(false)
     expect(s3).toMatchObject({ kind: 3, status: { code: 2 } })
     expect(s3.parentSpanId).toBe(requestSpan.spanId)
     expect(s3.traceId).toBe(requestSpan.traceId)
@@ -148,7 +205,38 @@ describe('OnlineTelemetry', () => {
       { key: 'operation', value: { stringValue: 'put' } },
       { key: 'error.type', value: { stringValue: 'client_error' } },
     ]))
+    expect(requests.find((entry) => entry.url.endsWith('/metrics'))!.body).toContain('kala_client_duration_ms')
     expect(body).not.toMatch(/SELECT secret|private_table|password|credential|db\.internal|bucket-sensitive|key-sensitive|raw S3 failure/u)
+  })
+
+  it('retains failed and slow PostgreSQL calls with real timing while aggregating routine successes', async () => {
+    const requests: Array<{ url: string; body: string }> = []
+    const telemetry = new OnlineTelemetry({
+      serviceName: 'kala-runtime', endpoint: 'http://localhost:4318', authToken: TOKEN, flushIntervalMs: 60_000,
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), body: String(init?.body) })
+        return new Response('', { status: 200 })
+      },
+    })
+    const request = telemetry.startHttpSpan('POST', 'runtime.command')
+    request.activate()
+    await telemetry.traceClientCall({ provider: 'postgresql', operation: 'query' }, async () => undefined)
+    const clock = vi.spyOn(process.hrtime, 'bigint')
+      .mockReturnValueOnce(0n).mockReturnValueOnce(150_000_000n)
+    await telemetry.traceClientCall({ provider: 'postgresql', operation: 'query' }, async () => undefined)
+    clock.mockRestore()
+    await expect(telemetry.traceClientCall({ provider: 'postgresql', operation: 'query' },
+      async () => { throw new Error('private query failure') })).rejects.toThrow('private query failure')
+    request.end(200)
+    await telemetry.close()
+    const traces = requests.find((entry) => entry.url.endsWith('/traces'))!.body
+    const pg = JSON.parse(traces).resourceSpans[0].scopeSpans[0].spans
+      .filter((span: { name: string }) => span.name === 'Database query')
+    expect(pg).toHaveLength(2)
+    expect(pg[0].attributes).toContainEqual({ key: 'duration.ms', value: { intValue: '150' } })
+    expect(pg[1].status.code).toBe(2)
+    expect(traces).not.toContain('private query failure')
+    expect(requests.find((entry) => entry.url.endsWith('/metrics'))!.body).toContain('kala_client_calls_total')
   })
 
   it('aggregates idle calls and failures without creating root traces or per-call metric signals', async () => {

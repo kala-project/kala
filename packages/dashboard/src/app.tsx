@@ -706,7 +706,7 @@ export function App(): JSX.Element {
     if (optimisticSelectedSessionId === null || activeSessionId !== optimisticSelectedSessionId) return
     setOptimisticSelectedSessionId(null)
   }, [activeSessionId, optimisticSelectedSessionId])
-  usePushActivityHeartbeat(productAccessReady)
+  usePushActivityHeartbeat(productAccessReady, controlSocket)
   // useSession updates its projection in an effect after selection changes.
   // During that render gap, the unified activity projection rejects all live
   // signals from the previous session and falls back to the selected summary.

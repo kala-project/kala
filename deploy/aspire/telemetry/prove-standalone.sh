@@ -123,7 +123,7 @@ assert(resources.includes('kala-agent-timing-fixture'))
 JS
 cat "$TMP"/{resources,traces,spans,logs}.json >"$TMP/all"
 grep -q 'kala-acceptance-fixture' "$TMP/all"
-grep -q 'http other' "$TMP/all"
+grep -q 'HTTP request' "$TMP/all"
 grep -q 'HTTP request failed' "$TMP/all"
 grep -q '"hasMetrics":true' "$TMP/resources.json"
 ! grep -q 'SENSITIVE_FIXTURE_9b1f' "$TMP/all"

@@ -147,6 +147,7 @@ import type { SafeCleanupEngine } from '../store/safe-cleanup.js'
 import { DAG_PLANNER_INSTRUCTION, DAG_PLAN_TOOL } from '../dag/tool.js'
 import { parseBangShellRequest } from '../bang-shell.js'
 import { mcpToolsForWorkspace, mergeMcpTools } from '../mcp-tools.js'
+import type { PushActivityTracker } from '../push/activity.js'
 
 export type QueuedUserMessage = {
   id: string
@@ -243,6 +244,7 @@ export type DashboardDeps = {
   resolveSystemPrompt?: (actor?: DashboardActor) => string | Promise<string>
   auth?: AuthConfig
   audit?: AuditLogger
+  pushActivity?: PushActivityTracker
   sessionQuota?: TenantSessionQuotaEnforcer
   queueQuota?: TenantQueueQuotaEnforcer
   modelPolicy?: TenantModelPolicyEnforcer
@@ -303,7 +305,7 @@ export type TenantModelPolicyEnforcer = {
 }
 
 const READ_ONLY_DASHBOARD_EVENTS = new Set([
-  'client:connection_ping', 'client:executor_ping', 'client:list_executors', 'client:list_sessions',
+  'client:connection_ping', 'client:push_activity', 'client:executor_ping', 'client:list_executors', 'client:list_sessions',
   'client:load_history', 'client:load_log_artifact', 'client:get_session_storage', 'client:get_global_storage', 'client:subscribe_channels', 'client:refresh_channels', 'client:restore_subscriptions',
   'client:unsubscribe_channels', 'subscribe', 'unsubscribe', 'client:list_dirs', 'client:list_files',
   'workspace:read_binary', 'client:read_overflow', 'client:get_dag_run', 'client:list_dag_runs', 'bg:list', 'bg:output', 'sub_agent:list', 'agent_types:list',
@@ -461,6 +463,19 @@ export function configureDashboardNamespace(
       next()
     })
     socket.on('client:connection_ping', (_sentAt, ack) => ack(Date.now()))
+    socket.on('client:push_activity', (payload, ack) => {
+      if (!payload || typeof payload.deviceId !== 'string' || payload.deviceId.length < 8
+        || payload.deviceId.length > 128 || typeof payload.active !== 'boolean') {
+        ack({ ok: false, error: 'invalid_activity_payload' })
+        return
+      }
+      if (!deps.pushActivity) {
+        ack({ ok: false, error: 'activity_unavailable' })
+        return
+      }
+      deps.pushActivity.update(payload.deviceId, payload.active)
+      ack({ ok: true })
+    })
 
     // Local `vparse` — closes over `socket.id` + the connected sessionId so
     // handlers can call `vparse(schema.X, raw, 'client:x')` in one line.

@@ -88,10 +88,10 @@ try {
   }
   assert.notEqual(responses[0][1], responses[1][1])
   assert(clients.some(s => s.status.code === 1))
-  assert(clients.some(s => s.name === 'postgresql.query' && s.status.code === 2))
+  assert(clients.some(s => s.name === 'Database query' && s.status.code === 2))
   assert(clients.some(s => !s.parentSpanId), 'expired HTTP parent leaked')
-  if (runtime) for (const name of ['s3.put', 's3.get', 's3.delete']) assert(clients.some(s => s.name === name))
-  if (runtime) assert(clients.some(s => s.name === 's3.get' && s.status.code === 2))
+  if (runtime) for (const name of ['Save stored file', 'Read stored file', 'Delete stored file']) assert(clients.some(s => s.name === name))
+  if (runtime) assert(clients.some(s => s.name === 'Read stored file' && s.status.code === 2))
   const text = JSON.stringify(sent)
   const privateValues = [canary, org, key, 'private_client_sql_canary', `missing_proof_${suffix}`,
     ...Object.entries(process.env).filter(([k]) => /DATABASE_URL|CONNECTION_STRING|ACCESS_KEY|SECRET|TOKEN/u.test(k)).map(([,v]) => v)]

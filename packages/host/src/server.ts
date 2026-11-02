@@ -306,6 +306,8 @@ function telemetryRoute(pathname: string): string {
   if (pathname.startsWith('/runtime/')) return 'runtime.command'
   if (pathname.startsWith('/api/')) return 'runtime.api'
   if (pathname.startsWith('/artifacts/') || pathname.startsWith('/session-artifacts/')) return 'runtime.artifact'
+  if (pathname === '/push/activity') return 'runtime.activity'
+  if (pathname === '/user/session-tabs') return 'runtime.session-tabs'
   return 'runtime.dashboard'
 }
 
@@ -353,7 +355,7 @@ export async function startHostServer(
     const pathname = (request.url ?? '/').split('?', 1)[0] ?? '/'
     // Socket.IO polling and upgrades are long-lived transports, not short commands.
     if (pathname.startsWith('/socket.io/')) return
-    const span = telemetry?.startHttpSpan(request.method, telemetryRoute(pathname), request.headers.traceparent)
+    const span = telemetry?.startHttpSpan(request.method, telemetryRoute(pathname), request.headers.traceparent, pathname === '/push/activity')
     if (!span) return
     // This request-owned store is invalidated when the response ends; Socket.IO
     // transports are excluded above, so long-lived websocket work cannot inherit it.
@@ -2770,6 +2772,7 @@ export async function startHostServer(
 
   configureDashboardNamespace(dashboardNs, {
     sessionScopedIngress: deployment.architecture === 'platform',
+    pushActivity,
     store,
     loop,
     loopDeps,

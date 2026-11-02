@@ -70,17 +70,28 @@ models, browser activity and organization APIs have distinct fixed route labels.
 
 ### Reading operational activity
 
-In Aspire **Structured logs**, filter `kala-runtime` to see `Agent turn started`,
-`Agent turn completed`, `Agent turn failed` and `Agent turn cancelled`. Inspect
-`agent.runtime`, `provider`, `outcome` and `duration.ms`; the log's trace link opens
-the corresponding `agent.turn`. Gateway and Runtime also emit a fixed `Service
-telemetry initialized` log, which does not assert service readiness. These are bounded first-party events, not arbitrary console-log
+In Aspire **Structured logs**, filter `kala-runtime` to see assistant
+start/completion/failure/cancellation summaries, with measured elapsed time on
+terminal events. The log's trace link opens the corresponding assistant-turn
+span, whose details include actual start/end time, elapsed milliseconds, and
+outcome. Gateway request spans have concise English action titles; `http.route`
+keeps a bounded machine-readable route for diagnostics. A push-notification API
+request is not proof that a notification was delivered. Gateway and Runtime
+also emit a monitoring-start log, which does not assert service readiness.
+These are bounded first-party events, not arbitrary console-log
 forwarding or fabricated heartbeat activity.
+Successful `/push/activity` browser heartbeats contribute HTTP metrics without
+creating Gateway or Runtime traces; rejected and failed heartbeats retain spans.
+Successful `/auth/me` checks also contribute metrics without being mistaken for
+sign-ins; failed checks retain a distinct account-status trace. A 200 response
+from `/auth/me` does not itself establish that the visitor is authenticated.
 
 Copilot observations are emitted only after the actual durable projection
 commits. They measure the accepted turn through its terminal Runtime projection,
 including SDK setup, model work, tools and waits. They do **not** invent internal
 SDK LLM/tool spans, token counts, phase breakdowns or remote Executor spans.
+The single Copilot assistant-turn span reports only total elapsed time; a blank
+phase timeline does not imply that the model or tools did nothing.
 An interrupted process need not emit a terminal observation. Traces use
 anonymous Unit/Session/turn-derived identifiers; prompts, replies, raw errors
 and raw Session identifiers are not exported.
@@ -90,9 +101,11 @@ outcomes; `kala_agent_turn_duration_ms` measures wall time, not just model
 latency. `kala_runtime_queue_depth` is waiting messages, not running turns.
 `kala_client_calls_total` and `kala_client_duration_ms` show actual PostgreSQL/S3
 operation counts and latency. These metrics include descriptions and units in
-OTLP. Kernel-only phase metrics explicitly describe that boundary. In **Traces**,
-filter `agent.turn` for business execution instead of treating
-`postgresql.query` spans as evidence of Agent execution.
+OTLP. Routine successful PostgreSQL calls are aggregated rather than each
+becoming a child span; failed calls and successful calls lasting at least 100 ms
+retain measured spans. Kernel-only phase metrics explicitly describe that boundary. In **Traces**,
+filter `Assistant turn` for business execution instead of treating
+`Database query` spans as evidence of Agent execution.
 
 When replacing a service image, update `KALA_OTEL_SERVICE_VERSION` to that exact
 image digest as well; retaining the previous image's version produces misleading
