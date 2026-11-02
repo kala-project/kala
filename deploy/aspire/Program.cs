@@ -26,6 +26,9 @@ var observabilityEnabled = Environment.GetEnvironmentVariable("KALA_ASPIRE_OBSER
 var observabilityManagementPort = PositivePort("KALA_ASPIRE_OBSERVABILITY_PORT", 18888);
 var runtimeLlmModel = Required("KALA_RUNTIME_LLM_MODEL");
 var runtimeLlmBaseUrl = Required("KALA_RUNTIME_LLM_BASE_URL");
+var copilotAuthMode = Environment.GetEnvironmentVariable("KALA_COPILOT_AUTH_MODE")?.Trim() ?? "unconfigured";
+if (copilotAuthMode is not ("unconfigured" or "github-token"))
+    throw new InvalidOperationException("KALA_COPILOT_AUTH_MODE must be unconfigured or github-token.");
 
 var edgeImage = bundledIngress ? RequiredDigestImage("KALA_EDGE_IMAGE") : null;
 var gatewayImage = RequiredDigestImage("KALA_GATEWAY_IMAGE");
@@ -63,6 +66,8 @@ var siloRootSecretKey = builder.AddParameter("silo-root-secret-key", secret: tru
 var runtimeS3AccessKey = builder.AddParameter("runtime-s3-access-key", secret: true);
 var runtimeS3SecretKey = builder.AddParameter("runtime-s3-secret-key", secret: true);
 var llmApiKey = builder.AddParameter("llm-api-key", secret: true);
+// Deliberate opt-in only: never inherit the deployer's GitHub environment or SDK HOME.
+var copilotGitHubToken = copilotAuthMode == "github-token" ? builder.AddParameter("dedicated-copilot-github-token", secret: true) : null;
 var observabilityBrowserToken = observabilityEnabled ? builder.AddParameter("observability-browser-token", secret: true) : null;
 var observabilityOtlpApiKey = observabilityEnabled ? builder.AddParameter("observability-otlp-api-key", secret: true) : null;
 var observabilityIngestToken = observabilityEnabled ? builder.AddParameter("observability-ingest-token", secret: true) : null;
@@ -181,6 +186,11 @@ var runtime = builder.AddContainer("runtime", runtimeImage)
     .WaitFor(postgres)
     .WaitFor(silo)
     .WithImagePullPolicy(ImagePullPolicy.Missing);
+if (copilotGitHubToken is not null)
+{
+    runtime.WithEnvironment("KALA_DEDICATED_COPILOT_AUTH_MODE", "github-token")
+        .WithEnvironment("COPILOT_GITHUB_TOKEN", copilotGitHubToken);
+}
 if (otelCollector is not null && observabilityReadiness is not null)
 {
     runtime.WithEnvironment("KALA_OTEL_ENABLED", "1")

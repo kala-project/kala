@@ -47,6 +47,18 @@ def check(compose: Path, env: Path) -> None:
     if external and (json.loads(result.stdout).get('volumes') or any(
             mount.get('type') == 'volume' for service in services.values() for mount in service.get('volumes', []))):
         raise ValueError('External ingress must not declare or mount named application/certificate volumes')
+    # Runtime identity is deliberately separate from app/data/telemetry credentials.
+    runtime_auth = services['runtime'].get('environment', {})
+    auth_mode = runtime_auth.get('KALA_DEDICATED_COPILOT_AUTH_MODE')
+    if auth_mode is not None:
+        token = runtime_auth.get('COPILOT_GITHUB_TOKEN')
+        if auth_mode != 'github-token' or not isinstance(token, str) or not token.strip():
+            raise ValueError('Selected Copilot authentication requires an explicit Runtime GitHub token')
+        if runtime_auth.get('GH_TOKEN') or runtime_auth.get('GITHUB_TOKEN'):
+            raise ValueError('Selected Copilot authentication refuses ambiguous fallback credentials')
+    for name, service in services.items():
+        if name != 'runtime' and any(service.get('environment', {}).get(key) for key in ('COPILOT_GITHUB_TOKEN','GH_TOKEN','GITHUB_TOKEN')):
+            raise ValueError('Copilot credentials may be supplied only to Runtime')
     observability = OBSERVABILITY <= service_names
     for name, service in services.items():
         if not IMAGE.fullmatch(service.get('image', '')):

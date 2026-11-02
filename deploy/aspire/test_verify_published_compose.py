@@ -164,6 +164,31 @@ class PublishedTopology(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'fixed monitor authority'):
             self.check()
 
+    def test_copilot_authentication_requires_runtime_only_explicit_credentials(self):
+        self.check()  # Original unconfigured graphs remain valid.
+        environment = self.services['runtime']['environment']
+        environment['KALA_DEDICATED_COPILOT_AUTH_MODE'] = 'github-token'
+        for token in (None, '', '  '):
+            environment['COPILOT_GITHUB_TOKEN'] = token
+            with self.assertRaisesRegex(ValueError, 'explicit Runtime GitHub token'):
+                self.check()
+        environment['COPILOT_GITHUB_TOKEN'] = 'fixture-token-not-a-real-credential'
+        self.check()
+        environment['KALA_DEDICATED_COPILOT_AUTH_MODE'] = 'ambient'
+        with self.assertRaisesRegex(ValueError, 'explicit Runtime GitHub token'):
+            self.check()
+        environment['KALA_DEDICATED_COPILOT_AUTH_MODE'] = 'github-token'
+        environment['GH_TOKEN'] = 'ambiguous-fixture-token'
+        with self.assertRaisesRegex(ValueError, 'ambiguous fallback'):
+            self.check()
+        del environment['GH_TOKEN']
+        for service in ('gateway', 'dashboard', 'postgres', 'silo'):
+            for key in ('COPILOT_GITHUB_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN'):
+                self.services[service].setdefault('environment', {})[key] = 'fixture-leak'
+                with self.assertRaisesRegex(ValueError, 'only to Runtime'):
+                    self.check()
+                del self.services[service]['environment'][key]
+
     def test_external_profiles_require_explicit_custody_and_loopback_handoff(self):
         self.services.pop('ingress')
         with self.assertRaisesRegex(ValueError, 'marker must agree'):

@@ -129,6 +129,15 @@ class LifecycleIntegrationBoundaryTests(unittest.TestCase):
         config = {"services": {name: {"environment": {key: "synthetic-value" for key in keys}}
                                for name, keys in op.AUTHORITY_ENV.items()}}
         before = op.authority_configuration_sha256(config)
+        legacy = {name: {key: "synthetic-value" for key in keys} for name, keys in op.AUTHORITY_ENV.items()}
+        self.assertEqual(before, op.sha256_bytes(json.dumps(legacy, sort_keys=True, separators=(",", ":")).encode()))
+        runtime = config["services"]["runtime"]["environment"]
+        for key in ('KALA_DEDICATED_COPILOT_AUTH_MODE', 'COPILOT_GITHUB_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN'):
+            runtime[key] = ''
+            self.assertEqual(op.authority_configuration_sha256(config), before)
+            runtime[key] = 'explicit-fixture-identity'
+            self.assertNotEqual(op.authority_configuration_sha256(config), before)
+            del runtime[key]
         config["services"]["gateway"]["environment"]["KALA_PUBLIC_URLS"] = "https://relocated.invalid"
         self.assertEqual(op.authority_configuration_sha256(config), before)
         config["services"]["gateway"]["environment"]["KALA_INGRESS_SESSION_SECRET"] = "different-value"
@@ -148,6 +157,10 @@ class LifecycleIntegrationBoundaryTests(unittest.TestCase):
         with mock.patch.object(op, "container_ids", return_value={name: name for name in documents}), \
              mock.patch.object(op, "run", side_effect=inspect):
             op.verify_deployed_configuration(Path("/compose"), Path("/env"), config)
+            documents['runtime']['env'].append('COPILOT_GITHUB_TOKEN=unexpected-fixture-identity')
+            with self.assertRaisesRegex(op.OperatorError, 'deployed authority credentials differ'):
+                op.verify_deployed_configuration(Path('/compose'), Path('/env'), config)
+            documents['runtime']['env'].pop()
             documents["postgres"]["image"] = "different@sha256:" + "b" * 64
             with self.assertRaisesRegex(op.OperatorError, "deployed images differ"):
                 op.verify_deployed_configuration(Path("/compose"), Path("/env"), config)

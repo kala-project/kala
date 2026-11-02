@@ -625,6 +625,12 @@ def authority_configuration_sha256(config: dict[str, Any]) -> str:
         if any(not isinstance(environment.get(key), str) or not environment[key] for key in keys):
             fail("authority credentials must use the reviewed explicit Dedicated configuration")
         values[service] = {key: environment[key] for key in keys}
+    runtime_auth = config['services']['runtime'].get('environment', {})
+    copilot = {key: runtime_auth[key] for key in ('KALA_DEDICATED_COPILOT_AUTH_MODE', 'COPILOT_GITHUB_TOKEN', 'GH_TOKEN', 'GITHUB_TOKEN')
+               if runtime_auth.get(key)}
+    # Preserve pre-authentication artifact fingerprints when no identity was configured.
+    if copilot:
+        values['runtime']['copilotAuthentication'] = copilot
     return sha256_bytes(json.dumps(values, sort_keys=True, separators=(",", ":")).encode())
 
 

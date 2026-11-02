@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 1,
+  "kind": "dedicated-native-control-and-authentication-publication",
+  "overallAcceptance": "blocked",
+  "nativeControl": {
+    "sourceRevision": "ff516cdd4326929e9735b752ad56674a08167301",
+    "workingTreePaths": [
+      "deploy/aspire/Program.cs",
+      "deploy/aspire/README.md",
+      "deploy/aspire/lifecycle_operator.py",
+      "deploy/aspire/lifecycle_operator_test.py",
+      "deploy/aspire/test_verify_published_compose.py",
+      "deploy/aspire/verify-published-compose.py"
+    ],
+    "project": "kala-dedicated-proof-c73be15db2e4",
+    "images": {
+      "runtime": "kala-dedicated-parented-runtime@sha256:f608d94689aeb5a97e0803ef0f9976569d954835f383144af31f699ec3d6f3dd",
+      "gateway": "kala-dedicated-schema-candidate-20261030@sha256:45dbf1e1e0004bc87ac9db1c14b7045f0044af1d2c9524a8b7c210306904e79b",
+      "dashboard": "kala-dedicated-lifecycle-dashboard@sha256:2a4ffff831fc37d620bbfc6c802246a930cd94c5f68565a8d7b9b7f11f35429c",
+      "postgres": "postgres@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36",
+      "silo": "pgsty/silo@sha256:2636fc4155d9a7e41ff58cdb65ddd13ba9304e67184e13c25bc5cb34016269d7"
+    },
+    "imageProvenance": {
+      "runtimeSource": "2d04bcea",
+      "dashboardSource": "c948fe30",
+      "gatewayProvenance": "Experimental local overlay: current cf27bf49 Gateway emitted code and unchanged migrations over cached 2d04bcea base; not a full release build or signed artifact."
+    },
+    "phases": [
+      "real_aspire_publish_default_and_runtime_only_opt_in_auth_gate",
+      "five_native_services_initialized_claimed_and_healthy",
+      "native_ui_verified_tls_owner_identity_and_business_socket_ready",
+      "native_user_state_writes_revision_conflicts_and_authority_rejection",
+      "native_app_containers_recreated_owner_cookie_and_pg_state_persisted"
+    ],
+    "kind": "native-control-only",
+    "overallAcceptance": "blocked",
+    "agentExecutorGate": "blocked-no-independent-copilot-authentication",
+    "modelRequestsInitiatedByHarness": 0,
+    "kernelProvider": "placeholder-key-and-unreachable-endpoint-infrastructure-only",
+    "resourceBudgetOverrideOnly": true,
+    "driverSha256": "a718358166ad83347e1935ab94dfeca720972d273a69b19b8c404d01331829de",
+    "socketBefore": {
+      "authenticatedSessionListRoundTrip": true,
+      "runtimes": [
+        {
+          "id": "kernel",
+          "available": true,
+          "status": "ready"
+        },
+        {
+          "id": "copilot",
+          "available": false,
+          "status": "unavailable"
+        }
+      ]
+    },
+    "socketAfter": {
+      "authenticatedSessionListRoundTrip": true,
+      "runtimes": [
+        {
+          "id": "kernel",
+          "available": true,
+          "status": "ready"
+        },
+        {
+          "id": "copilot",
+          "available": false,
+          "status": "unavailable"
+        }
+      ]
+    },
+    "nativeControlGate": "passed",
+    "cookieSha256": "ab0b5361d9e939ce49dad7a32db0cf7e1b2730988172dc00873262d1bfb0b262",
+    "externalCertificateSha256": "35854aae48d63e0ad67987c12e94d0f401c9c6dff874314582af2d3173d7105d",
+    "documents": {
+      "/memo": {
+        "revision": 1,
+        "contentSha256": "d3f2c902b47eec094ecdd5873cf33bb86cdf627a6ff4b6236414b08ce2644eed"
+      },
+      "/user/session-tabs": {
+        "revision": 1,
+        "contentSha256": "3a69668245bc682d76570637a23a95f70a0b8aabfc843a5c9b41a9b1e1cb85b5"
+      }
+    },
+    "cleanupContainersConfirmed": true
+  },
+  "finalAuthenticationPublication": {
+    "sourceRevision": "ff516cdd4326929e9735b752ad56674a08167301",
+    "workingTreePaths": [
+      "deploy/aspire/Program.cs",
+      "deploy/aspire/README.md",
+      "deploy/aspire/lifecycle_operator.py",
+      "deploy/aspire/lifecycle_operator_test.py",
+      "deploy/aspire/test_verify_published_compose.py",
+      "deploy/aspire/verify-published-compose.py"
+    ],
+    "project": "kala-dedicated-proof-302a95ab9d1e",
+    "images": {
+      "runtime": "kala-dedicated-parented-runtime@sha256:f608d94689aeb5a97e0803ef0f9976569d954835f383144af31f699ec3d6f3dd",
+      "gateway": "kala-dedicated-schema-candidate-20261030@sha256:45dbf1e1e0004bc87ac9db1c14b7045f0044af1d2c9524a8b7c210306904e79b",
+      "dashboard": "kala-dedicated-lifecycle-dashboard@sha256:2a4ffff831fc37d620bbfc6c802246a930cd94c5f68565a8d7b9b7f11f35429c",
+      "postgres": "postgres@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36",
+      "silo": "pgsty/silo@sha256:2636fc4155d9a7e41ff58cdb65ddd13ba9304e67184e13c25bc5cb34016269d7"
+    },
+    "imageProvenance": {
+      "runtimeSource": "2d04bcea",
+      "dashboardSource": "c948fe30",
+      "gatewayProvenance": "Experimental local overlay: current cf27bf49 Gateway emitted code and unchanged migrations over cached 2d04bcea base; not a full release build or signed artifact."
+    },
+    "phases": [
+      "real_aspire_publish_default_and_runtime_only_opt_in_auth_gate"
+    ],
+    "kind": "publication-only",
+    "overallAcceptance": "blocked",
+    "agentExecutorGate": "blocked-no-independent-copilot-authentication",
+    "modelRequestsInitiatedByHarness": 0,
+    "kernelProvider": "placeholder-key-and-unreachable-endpoint-infrastructure-only",
+    "resourceBudgetOverrideOnly": true,
+    "driverSha256": "f11d080840ed07dbe28be2de959da80151384611b35aa134cfc2556f261b9486",
+    "copilotParameterEnvironment": "DEDICATED_COPILOT_GITHUB_TOKEN",
+    "ambientSdkVariablesIgnored": true,
+    "nativeControlGate": "not_run",
+    "cleanupContainersConfirmed": true
+  },
+  "finalSourceSha256": {
+    "deploy/aspire/Program.cs": "83310f7eea5b06e05afb22863d36b08fa0df8a383421441d90d68a5c522195f4",
+    "deploy/aspire/verify-published-compose.py": "3191941a3c6997de00f769e4d156b38de4bf31536b484d0cac1ec3a68ded322c",
+    "deploy/aspire/lifecycle_operator.py": "8a4bbf67bd6a84c860be97ae6a95b62b1676e730050ece5f2fa455b834708349",
+    "deploy/aspire/native-control-acceptance.py": "f11d080840ed07dbe28be2de959da80151384611b35aa134cfc2556f261b9486"
+  },
+  "verification": {
+    "pythonTestsPassed": 40,
+    "appHostBuild": "passed",
+    "retainedBuildWarning": "ASPIRE010"
+  },
+  "boundaries": [
+    "Native control-container proof precedes the final Dedicated parameter namespace hardening; final publication-only evidence covers that auth-only change. No application image or default application graph changed in that follow-up.",
+    "Kernel provider uses an explicitly labelled fixture placeholder key and unreachable loopback endpoint. No model turn or Executor was requested; the kernel ready catalog entry does not prove a valid provider.",
+    "Gateway is an experimental local emitted-code overlay, not a full release build or signed artifact. Cached Runtime/UI source equivalence was checked.",
+    "Independent Copilot authentication, real model/Executor receipts and continuation across reconstruction remain blocked, not passed."
+  ],
+  "earlierAttempts": [
+    {
+      "reason": "Native Runtime correctly refused an empty mandatory Kernel LLM key",
+      "cleanupContainersConfirmed": true
+    },
+    {
+      "reason": "Harness incorrectly awaited single-session ready on a multiplexed control Socket; corrected to real Session-list roundtrip",
+      "cleanupContainersConfirmed": true
+    }
+  ]
+}
