@@ -1,3 +1,10 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { createServer } from 'node:http'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { createConfig, step } from '@agent-kernel/kernel'
+import { PRIVATE_CLOUD_DEPLOYMENT } from '@agent-kernel/shared'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { ArtifactObject, ArtifactObjectStore } from './object-store.js'
@@ -5,6 +12,9 @@ import type { ObjectMetadataEvent, ObjectMetadataLog, ObjectOrphanIntent } from 
 import type { HotStateSqlExecutor } from '../tenant-runtime/postgres-hot-state.js'
 import { S3SessionArtifactRegistry } from './s3-session-artifact-registry.js'
 import { S3MessageAttachmentStore } from '../message-attachments/s3-message-attachment-store.js'
+import { SessionStore } from '../store/session.js'
+import { SqliteSessionAuthority } from '../store/sqlite-session-authority.js'
+import { attachJsonRoutes } from '../http/routes.js'
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64')
 
@@ -58,6 +68,77 @@ class MemoryMetadata implements ObjectMetadataLog {
 }
 
 describe('Private Cloud S3-backed stores', () => {
+  it('exports authoritative history to durable JSON objects and serves them after Runtime replacement without JSONL', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kala-durable-exports-'))
+    const authority = new SqliteSessionAuthority(join(root, 'authority.sqlite'))
+    const sessionsDir = join(root, 'runtime-scratch-must-not-exist')
+    const sessions = new SessionStore(sessionsDir, { authority })
+    const config = createConfig({ tools: [], systemPrompt: 'export' })
+    const session = await sessions.create({ sessionId: 'session-export', config, organizationId: 'org_acme' })
+    const event = { kind: 'user_message', text: 'durable input' } as const
+    const transition = step(session.state, event, config)
+    await sessions.record(session.sessionId, event, transition.effects, transition.next)
+    const objects = new MemoryObjects()
+    const metadata = new MemoryMetadata()
+    const first = new S3SessionArtifactRegistry('org_acme', objects, metadata)
+    const server = createServer()
+    attachJsonRoutes(server, { deployment: PRIVATE_CLOUD_DEPLOYMENT, sessions, sessionArtifacts: first })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('test server did not bind')
+      const base = `http://127.0.0.1:${address.port}`
+      const headers = {
+        'content-type': 'application/json',
+        'x-agent-runlab-principal': 'owner@example.test',
+        'x-agent-runlab-organization-id': 'org_acme',
+        'x-agent-runlab-organization-role': 'owner',
+      }
+      for (const action of ['trace-export-session', 'profile-session', 'rollout-export-segments']) {
+        const foreign = await fetch(`${base}/enhancement/action`, {
+          method: 'POST', headers: { ...headers, 'x-agent-runlab-organization-id': 'org_foreign' },
+          body: JSON.stringify({ action, sessionId: session.sessionId }),
+        })
+        expect(foreign.status).toBe(403)
+        const localPath = await fetch(`${base}/enhancement/action`, {
+          method: 'POST', headers, body: JSON.stringify({ action, sessionId: session.sessionId, rootDir: '/must-not-write' }),
+        })
+        expect(localPath.status).toBe(400)
+        const response = await fetch(`${base}/enhancement/action`, {
+          method: 'POST', headers, body: JSON.stringify({ action, sessionId: session.sessionId }),
+        })
+        expect(response.status).toBe(200)
+        const result = await response.json() as { artifact?: { uri: string }; traceArtifact?: { uri: string } }
+        const uri = (result.artifact ?? result.traceArtifact)?.uri
+        expect(uri).toMatch(/^\/session-artifacts\//u)
+        const download = await fetch(`${base}${uri}`, { headers })
+        expect(download.status).toBe(200)
+        expect(download.headers.get('content-type')).toBe('application/json')
+        expect(JSON.stringify(await download.json())).toContain(session.sessionId)
+      }
+      expect(existsSync(sessionsDir)).toBe(false)
+      const restarted = new S3SessionArtifactRegistry('org_acme', objects, metadata)
+      const events = await metadata.replay<{ kind: string; record: { artifactId: string } }>(session.sessionId)
+      expect(events).toHaveLength(3)
+      for (const event of events) {
+        const record = await restarted.get(session.sessionId, event.payload.record.artifactId)
+        expect(record?.mediaType).toBe('application/json')
+        expect(JSON.parse((await record!.read()).toString())).toBeTruthy()
+      }
+      metadata.failNextAppend = true
+      const failed = await fetch(`${base}/enhancement/action`, {
+        method: 'POST', headers, body: JSON.stringify({ action: 'trace-export-session', sessionId: session.sessionId }),
+      })
+      expect(failed.status).not.toBe(200)
+      expect(metadata.intents.size).toBe(1)
+      expect(await metadata.replay(session.sessionId)).toHaveLength(3)
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      await authority.close()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('publishes Artifact metadata only after object put and verifies reads after restart', async () => {
     const objects = new MemoryObjects()
     const metadata = new MemoryMetadata()

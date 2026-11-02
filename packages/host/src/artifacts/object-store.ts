@@ -21,7 +21,14 @@ export class S3ArtifactObjectStore implements ArtifactObjectStore {
     endpoint?: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string
     maxObjectBytes: number; forcePathStyle?: boolean; telemetry?: OnlineTelemetry
   }) {
-    this.client = new S3Client({ region: options.region, ...(options.endpoint ? { endpoint: options.endpoint } : {}), forcePathStyle: options.forcePathStyle ?? true, credentials: { accessKeyId: options.accessKeyId, secretAccessKey: options.secretAccessKey } })
+    this.client = new S3Client({
+      region: options.region,
+      ...(options.endpoint ? { endpoint: options.endpoint } : {}),
+      forcePathStyle: options.forcePathStyle ?? true,
+      credentials: { accessKeyId: options.accessKeyId, secretAccessKey: options.secretAccessKey },
+      maxAttempts: 3,
+      requestHandler: { connectionTimeout: 5_000, requestTimeout: 15_000, throwOnRequestTimeout: true },
+    })
   }
   async put(object: ArtifactObject): Promise<void> {
     if (object.body.byteLength > this.options.maxObjectBytes) throw new Error('artifact quota exceeded')

@@ -49,6 +49,7 @@ import {
 } from '../rl-export.js'
 import { verifyReward } from '../rl-reward.js'
 import { exportSessionTraceArtifacts } from '../session-export.js'
+import { exportDurableSession } from '../durable-session-export.js'
 import { profileSession } from '../session-profile.js'
 import { exportTraceOtlp, loadHeadersFile } from '../trace-otlp-export.js'
 import { buildMemoryIndex } from '../memory-index.js'
@@ -1184,9 +1185,30 @@ export function attachJsonRoutes(
     if (path === '/enhancement/action' && req.method === 'POST') {
       claimRoute(req)
       void readJson(req)
-        .then((body) => {
+        .then(async (body) => {
           const request = body as EnhancementActionRequest
           requiredString(request.action, 'action')
+          if (payloads.sessions?.usesPostgresAuthority && (
+            request.action === 'trace-export-session' || request.action === 'profile-session' || request.action === 'rollout-export-segments'
+          )) {
+            const sessionId = requiredString(request.sessionId, 'sessionId')
+            for (const field of ['rootDir', 'sessionLogPath', 'sessionLogPaths', 'workspaceRoot', 'pricingPath', 'pricingContent'] as const) {
+              if (request[field] !== undefined) throw new HttpRouteError(400, `${field} is not supported for authoritative Session exports`)
+            }
+            const session = await payloads.sessions.load(sessionId)
+            const accessError = httpSessionAccessError(req, session)
+            if (accessError) throw new HttpRouteError(accessError.status, accessError.message)
+            if (!payloads.sessionArtifacts?.registerJson) throw new HttpRouteError(503, 'durable JSON artifact storage is unavailable')
+            return exportDurableSession({
+              action: request.action,
+              sessionId,
+              sessions: payloads.sessions,
+              artifacts: payloads.sessionArtifacts,
+              runId: cleanString(request.runId),
+              evalInstanceId: cleanString(request.evalInstanceId),
+              assertCanStore: (bytes) => assertTenantStorageQuota(payloads.storageQuota, session, 'session_artifact', bytes),
+            })
+          }
           return runEnhancementAction(request, payloads)
         })
         .then((result) => {

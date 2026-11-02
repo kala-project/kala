@@ -8,6 +8,7 @@ export type ResolvedSessionArtifact = SessionArtifactRecord & { read(): Promise<
 export type SessionArtifactStorage = {
   load(): Promise<void>
   registerImage(input: { sessionId: string; title?: string; fileName: string; data: Buffer }): Promise<SessionArtifactRecord>
+  registerJson?(input: { sessionId: string; title: string; data: Buffer }): Promise<SessionArtifactRecord>
   get(sessionId: string, artifactId: string): ResolvedSessionArtifact | undefined | Promise<ResolvedSessionArtifact | undefined>
   deleteSession(sessionId: string): Promise<void>
 }

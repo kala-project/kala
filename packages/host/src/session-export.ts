@@ -11,10 +11,11 @@ import {
   createArtifactStore,
   exportSessionSpans,
   type ArtifactRef,
+  type ArtifactStore,
 } from '@agent-kernel/shared/enhancement'
 
 import { readSessionLog } from './store/log.js'
-import type { LLMTrace } from '@agent-kernel/shared'
+import type { EventEntry, HeaderEntry, LLMTrace } from '@agent-kernel/shared'
 
 export type ExportSessionTraceInput = {
   rootDir: string
@@ -38,31 +39,48 @@ export async function exportSessionTraceArtifacts(
   const store = createArtifactStore(input.rootDir, {
     ...(input.workspaceRoot ? { workspaceRoot: input.workspaceRoot } : {}),
   })
-  const spans = exportSessionSpans({
-    header: parsed.header,
-    events: parsed.events,
+  return writeSessionTraceArtifacts({
+    ...parsed,
+    store,
     runId: input.runId,
     evalInstanceId: input.evalInstanceId,
+    loadTrace: (entry) => loadEntryTrace(input.sessionLogPath, entry),
   })
-  const sessionId = parsed.header.sessionId
+}
+
+export async function writeSessionTraceArtifacts(input: {
+  header: HeaderEntry
+  events: readonly EventEntry[]
+  store: Pick<ArtifactStore, 'writeJson'>
+  runId?: string
+  evalInstanceId?: string
+  loadTrace?: (entry: EventEntry) => Promise<LLMTrace | undefined>
+}): Promise<ExportSessionTraceResult> {
+  const { header, events, store } = input
+  const traces: Array<{ seq: number; trace: LLMTrace }> = []
+  for (const entry of events) {
+    if (entry.llmTraceArtifact && !input.loadTrace) throw new Error('Session trace references require an authoritative artifact resolver')
+    const trace = input.loadTrace ? await input.loadTrace(entry) : entry.llmTrace
+    if (trace) traces.push({ seq: entry.seq, trace })
+  }
+  const spans = exportSessionSpans(input)
+  const sessionId = header.sessionId
   const traceArtifact = await store.writeJson(
     'trace',
     `traces/${sessionId}.openinference.json`,
     { spans },
   )
   const llmArtifacts: ArtifactRef[] = []
-  for (const entry of parsed.events) {
-    const trace = await loadEntryTrace(input.sessionLogPath, entry)
-    if (!trace) continue
+  for (const { seq, trace } of traces) {
     llmArtifacts.push(await store.writeJson(
       'llm_request',
-      `llm/${sessionId}/${entry.seq}.request.json`,
+      `llm/${sessionId}/${seq}.request.json`,
       trace.request,
     ))
     if (trace.response) {
       llmArtifacts.push(await store.writeJson(
         'llm_response',
-        `llm/${sessionId}/${entry.seq}.response.json`,
+        `llm/${sessionId}/${seq}.response.json`,
         trace.response,
       ))
     }

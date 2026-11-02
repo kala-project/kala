@@ -132,7 +132,7 @@ class SessionHttpInputError extends Error {
 /** Owner-sensitive public APIs only; generic Unit APIs and internal handoffs stay separate. */
 async function sessionHttpScope(request: IncomingMessage, url: URL): Promise<{ sessionId: string; body?: Buffer } | undefined> {
   const read = request.method === 'GET' || request.method === 'HEAD'
-  const json = request.method === 'POST' && ['/runtime/admission/messages', '/runtime/attachments/release', '/session-artifacts/register'].includes(url.pathname)
+  const json = request.method === 'POST' && ['/runtime/admission/messages', '/runtime/attachments/release', '/session-artifacts/register', '/enhancement/action'].includes(url.pathname)
   const query = (request.method === 'POST' && url.pathname === '/runtime/attachments')
     || (read && (/^\/runtime\/attachments\/[^/]+$/u.test(url.pathname) || /^\/session-artifacts\/[^/]+$/u.test(url.pathname)))
   const path = (read && /^\/runtime\/sessions\/([^/]+)\/tool-result\/[^/]+$/u.exec(url.pathname))

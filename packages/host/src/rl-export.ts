@@ -283,7 +283,7 @@ function blockedAdapter(
   }
 }
 
-function createRolloutSegmentsArtifact(
+export function createRolloutSegmentsArtifact(
   header: Awaited<ReturnType<typeof readSessionLog>>['header'],
   initialMessages: readonly Message[],
   events: Awaited<ReturnType<typeof readSessionLog>>['events'],

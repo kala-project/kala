@@ -24,7 +24,8 @@ describe('artifact object store', () => {
       expect(send).toHaveBeenCalledOnce()
       await telemetry.flush()
       const body = exported.join('\n')
-      expect(body).toContain('s3.put')
+      expect(body).toContain('kala_client_calls_total')
+      expect(body).toContain('"key":"operation","value":{"stringValue":"put"}')
       expect(body).not.toMatch(/minio-sensitive|bucket-sensitive|key-sensitive|secret-sensitive|org_sensitive|private\/key/u)
     } finally {
       send.mockRestore()

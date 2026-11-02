@@ -38,8 +38,18 @@ export class S3SessionArtifactRegistry implements SessionArtifactStorage {
     const mediaType = detectImageMime(input.data, input.fileName)
     if (!mediaType) throw new Error('unsupported image type')
     if (input.data.length === 0 || input.data.length > MAX_IMAGE_BYTES) throw new Error(`image must be between 1 byte and ${MAX_IMAGE_BYTES} bytes`)
+    return this.register(input, mediaType, extensionForMime(mediaType))
+  }
+
+  async registerJson(input: { sessionId: string; title: string; data: Buffer }): Promise<SessionArtifactRecord> {
+    if (input.data.length === 0 || input.data.length > MAX_IMAGE_BYTES) throw new Error(`JSON artifact must be between 1 byte and ${MAX_IMAGE_BYTES} bytes`)
+    JSON.parse(input.data.toString('utf8'))
+    return this.register({ ...input, fileName: input.title }, 'application/json', '.json')
+  }
+
+  private async register(input: { sessionId: string; title?: string; fileName: string; data: Buffer }, mediaType: string, extension: string): Promise<SessionArtifactRecord> {
     const artifactId = randomUUID()
-    const fileName = `${artifactId}${extensionForMime(mediaType)}`
+    const fileName = `${artifactId}${extension}`
     const record: StoredArtifact = {
       artifactId,
       sessionId: input.sessionId,

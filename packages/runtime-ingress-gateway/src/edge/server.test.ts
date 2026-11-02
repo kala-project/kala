@@ -861,6 +861,7 @@ describe('Private Cloud edge request path', () => {
       ['POST', '/runtime/admission/messages', raw],
       ['POST', '/runtime/attachments/release', raw],
       ['POST', '/session-artifacts/register', raw],
+      ['POST', '/enhancement/action', raw],
       ['POST', '/runtime/attachments?sessionId=session_a', 'raw-upload\u0000bytes'],
       ['GET', '/runtime/attachments/attachment_a?sessionId=session_a'],
       ['HEAD', '/runtime/attachments/attachment_a?sessionId=session_a'],
