@@ -42,7 +42,7 @@ import { createSkillManager, defaultSkillRoots, discoverSkills, type SkillManage
 import { SessionNotFoundError, SessionStore, type SessionRecord } from './store/session.js'
 import { slimEffect, type SessionOperationMatch } from './store/log.js'
 import type { SessionAuthority } from './store/session-authority.js'
-import { PostgresSessionAuthority } from './store/postgres-session-authority.js'
+import type { PostgresSessionAuthority } from './store/postgres-session-authority.js'
 import { SqliteSessionAuthority } from './store/sqlite-session-authority.js'
 import { SqliteMessageQueueStore } from './store/sqlite-message-queue.js'
 import { SqliteSessionArtifactStore } from './store/sqlite-session-artifact-store.js'
@@ -293,8 +293,10 @@ export async function startHostServer(
   const product = productVariant(deployment)
   // Existing PG callers supply their paired queue through the PG Session authority.
   // SQLite must supply its own queue explicitly; a durable Session cannot fall back to JSONL snapshots.
-  const durableQueue = options.messageQueueAuthority ?? (options.sessionAuthority instanceof PostgresSessionAuthority
-    ? options.sessionAuthority.messageQueue : undefined)
+  // Use the PG authority capability without importing the PG implementation at
+  // runtime: Portable's single CJS bundle must not eagerly load PG-only code.
+  const durableQueue = options.messageQueueAuthority ?? (options.sessionAuthority && 'messageQueue' in options.sessionAuthority
+    ? (options.sessionAuthority as PostgresSessionAuthority).messageQueue : undefined)
   if (Boolean(options.sessionAuthority) !== Boolean(durableQueue)) {
     throw new Error('Durable Session and message queue authorities must be configured together')
   }
