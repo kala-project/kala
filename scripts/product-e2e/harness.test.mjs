@@ -21,9 +21,8 @@ test('records task evidence and cleans resources in reverse order', async () => 
 })
 
 test('coverage ledger accounts for every normative critical user journey', async () => {
-  const docs = new URL('../../docs/testing/', import.meta.url)
-  const matrix = await readFile(new URL('critical-user-action-matrix.md', docs), 'utf8')
-  const ledger = await readFile(new URL('system-e2e-coverage-ledger.md', docs), 'utf8')
+  const matrix = await readFile(new URL('../../docs/development/testing/critical-user-action-matrix.md', import.meta.url), 'utf8')
+  const ledger = await readFile(new URL('../../docs/testing/system-e2e-coverage-ledger.md', import.meta.url), 'utf8')
   const mappings = new Map([
     ['Private Cloud::Register/sign in', ['Private Cloud identity/isolation']],
     ['Private Cloud::Sign out', ['Private Cloud identity/isolation']],
