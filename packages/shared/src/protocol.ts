@@ -1925,6 +1925,16 @@ export type ExternalDeploymentHealth = {
   checks: readonly { component: 'gateway' | 'runtime' | 'dashboard'; ready: boolean }[]
 }
 
+export type DeploymentServices = { identityConsoleUrl?: string; observability: boolean }
+export type OperatorObservabilitySnapshot = {
+  checkedAt: string
+  retainedLogs: number
+  retainedSpans: number
+  resources: { name: string; hasLogs: boolean; hasTraces: boolean; hasMetrics: boolean }[]
+  logs: { message: string; service: string; timestamp?: string; traceId?: string; attributes: Record<string, string> }[]
+  spans: { name: string; service: string; timestamp?: string; durationMs: number; traceId?: string; attributes: Record<string, string> }[]
+}
+
 export type ServerSettingsPayload = {
   deployment?: RuntimeCapabilitiesPayload
   providers: readonly SettingsProviderSummary[]

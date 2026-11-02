@@ -1,9 +1,10 @@
 import { useTranslation } from 'react-i18next'
-import { BookOpen, Bot, Boxes, ChevronDown, ChevronUp, CircleHelp, Download, ExternalLink, FolderOpen, LogOut, NotebookPen, PanelLeftClose, PanelLeftOpen, Plus, Settings as SettingsIcon, Sparkles, UserRound, Workflow } from 'lucide-react'
-import { type ReactNode, useCallback, useLayoutEffect, useRef, useState } from 'react'
+import { Activity, BookOpen, Bot, Boxes, ChevronDown, ChevronUp, CircleHelp, Download, ExternalLink, FolderOpen, LogOut, NotebookPen, PanelLeftClose, PanelLeftOpen, Plus, Settings as SettingsIcon, Sparkles, UserRound, Workflow } from 'lucide-react'
+import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
 import { Button } from '../components/ui/button.js'
+import { ScrollArea } from '../components/ui/scroll-area.js'
 import { cn } from '../lib/utils.js'
 import type { AccountProfile } from '../auth-session.js'
 import type { AppSection } from './section.js'
@@ -365,6 +366,7 @@ type GlobalActionProps = {
   onSignOut?(): void | Promise<void>
   onOpenAccount?(): void
   onOpenAdmin?(): void
+  onOpenDeployment?(): void
   evaluationUrl?: string
   collapseControl?: { kind: 'collapse' | 'expand'; onClick(): void; sidebar?: boolean }
 }
@@ -381,6 +383,7 @@ export function SidebarGlobalActions({
   onSignOut,
   onOpenAccount,
   onOpenAdmin,
+  onOpenDeployment,
   evaluationUrl,
   collapseControl,
   orientation = 'horizontal',
@@ -396,7 +399,7 @@ export function SidebarGlobalActions({
   )
   const iconActionClass = cn(vertical ? 'h-10 w-10 rounded-xl' : 'h-8 w-8', 'text-muted-foreground hover:text-foreground')
   return (
-    <div className={cn('flex flex-none gap-1', vertical ? 'flex-col items-center' : expandedFooter ? 'w-full items-center rounded-lg border border-border/35 bg-muted/25 p-1' : 'ml-auto items-center')} data-testid={vertical ? 'sidebar-global-actions' : 'app-shell-global-actions'} data-orientation={orientation} data-presentation={expandedFooter ? 'expanded-footer' : undefined}>
+    <div className={cn('flex flex-none gap-1', vertical ? 'flex-col items-center' : expandedFooter ? 'w-full flex-wrap items-center rounded-lg border border-border/35 bg-muted/25 p-1' : 'ml-auto items-center')} data-testid={vertical ? 'sidebar-global-actions' : 'app-shell-global-actions'} data-orientation={orientation} data-presentation={expandedFooter ? 'expanded-footer' : undefined}>
       {!isDesktopClient() ? legacyTopbar ? <DesktopDownloadDialog /> : <DesktopDownloadDialog trigger={<Button variant="ghost" size={expandedFooter ? 'sm' : 'icon'} className={actionClass} data-testid="app-shell-download-desktop" title={t('desktopDownload.title')} aria-label={t('desktopDownload.open')}><Download className="h-4 w-4 flex-none" aria-hidden />{expandedFooter ? <span className="truncate">{t('desktopDownload.action')}</span> : null}</Button>} /> : <DesktopUpdateEntry />}
       {evaluationUrl ? (
         <Button variant="ghost" size="icon" asChild className={iconActionClass}>
@@ -415,6 +418,9 @@ export function SidebarGlobalActions({
         <SettingsIcon className="h-4 w-4 flex-none" aria-hidden />
         {expandedFooter ? <span className="truncate">{t('common.settings')}</span> : null}
       </Button>
+      {onOpenDeployment ? <Button variant="ghost" size={expandedFooter ? 'sm' : 'icon'} className={expandedFooter ? 'h-10 w-full basis-full justify-start gap-2 px-2.5 text-foreground' : iconActionClass} onClick={onOpenDeployment} title={t('deploymentCenter.title')} aria-label={t('deploymentCenter.title')} data-testid="app-shell-deployment-center">
+        <Activity className="h-4 w-4 flex-none" aria-hidden />{expandedFooter ? <span className="min-w-0 truncate">{t('deploymentCenter.title')}</span> : null}
+      </Button> : null}
       {account || accountLoading ? <AccountMenu account={account} loading={accountLoading} onSignOut={onSignOut} onOpenAccount={onOpenAccount} onOpenAdmin={onOpenAdmin} placement={accountPlacement ?? (vertical ? 'rail' : 'default')} /> : null}
       {connectionStatus}
       {collapseControl ? (
@@ -437,7 +443,52 @@ export function SidebarGlobalActions({
 function AccountMenu({ account, loading, onSignOut, onOpenAccount, onOpenAdmin, placement = 'default' }: { account?: AccountProfile; loading: boolean; onSignOut?(): void | Promise<void>; onOpenAccount?(): void; onOpenAdmin?(): void; placement?: 'default' | 'rail' | 'footer' }): JSX.Element {
   const { t } = useTranslation()
   const detailsRef = useRef<HTMLDetailsElement | null>(null)
-  const close = (): void => { if (detailsRef.current) detailsRef.current.open = false }
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const [open, setOpen] = useState(false)
+  const [position, setPosition] = useState({ left: 0, top: 0 })
+  const close = (): void => { setOpen(false) }
+  useLayoutEffect(() => {
+    if (!open) return
+    const positionMenu = (): void => {
+      const anchor = detailsRef.current?.querySelector('summary')?.getBoundingClientRect()
+      const menu = menuRef.current
+      if (!anchor || !menu) return
+      const width = Math.min(288, window.innerWidth - 16)
+      const height = menu.getBoundingClientRect().height
+      const left = placement === 'rail' ? anchor.right + 8 : anchor.right - width
+      const top = placement === 'default' ? anchor.bottom + 8 : anchor.top - height - 8
+      setPosition({
+        left: Math.max(8, Math.min(left, window.innerWidth - width - 8)),
+        top: Math.max(8, Math.min(top, window.innerHeight - height - 8)),
+      })
+    }
+    positionMenu()
+    window.addEventListener('resize', positionMenu)
+    window.addEventListener('scroll', positionMenu, true)
+    return () => {
+      window.removeEventListener('resize', positionMenu)
+      window.removeEventListener('scroll', positionMenu, true)
+    }
+  }, [open, placement])
+  useEffect(() => {
+    if (!open) return
+    menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus()
+    const dismiss = (event: PointerEvent): void => {
+      if (event.target instanceof Node && !detailsRef.current?.contains(event.target) && !menuRef.current?.contains(event.target)) setOpen(false)
+    }
+    const escape = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        setOpen(false)
+        detailsRef.current?.querySelector('summary')?.focus()
+      }
+    }
+    document.addEventListener('pointerdown', dismiss)
+    document.addEventListener('keydown', escape)
+    return () => {
+      document.removeEventListener('pointerdown', dismiss)
+      document.removeEventListener('keydown', escape)
+    }
+  }, [open])
   const prepareNativeSignOut = (): void => {
     // Changing auth state during submit can unmount the form before the browser
     // commits its authoritative POST navigation. Clean up only after pagehide.
@@ -445,12 +496,14 @@ function AccountMenu({ account, loading, onSignOut, onOpenAccount, onOpenAdmin, 
     window.addEventListener('pagehide', () => { void onSignOut() }, { once: true })
   }
   return (
-    <details ref={detailsRef} className="relative" data-testid="account-menu">
-      <summary className="flex h-8 min-w-8 cursor-pointer list-none items-center justify-center gap-2 rounded-md px-1 text-sm text-muted-foreground hover:bg-accent hover:text-foreground [&::-webkit-details-marker]:hidden" aria-label={account ? t('appShell.account.trigger', { name: account.displayName }) : t('appShell.account.loading')} data-testid="account-menu-trigger">
-        <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/15 text-caption font-semibold text-primary">{loading ? '…' : account?.initials ?? <UserRound className="h-3.5 w-3.5" aria-hidden />}</span>
-        {account ? <span className="hidden max-w-32 truncate lg:inline">{account.displayName}</span> : null}
+    <details ref={detailsRef} open={open} className={cn('relative min-w-0', placement === 'footer' && 'mt-1 w-full basis-full rounded-md bg-card/50 pt-1')} data-testid="account-menu">
+      <summary onClick={(event) => { event.preventDefault(); setOpen(!open) }} className={cn('flex cursor-pointer list-none items-center gap-2 rounded-md text-sm text-muted-foreground hover:bg-accent hover:text-foreground [&::-webkit-details-marker]:hidden', placement === 'footer' ? 'min-h-12 w-full justify-start px-2 py-1.5' : 'h-8 min-w-8 justify-center px-1')} aria-haspopup="menu" aria-expanded={open} aria-label={account ? t('appShell.account.trigger', { name: account.displayName }) : t('appShell.account.loading')} data-testid="account-menu-trigger">
+        <span className="flex h-6 w-6 flex-none items-center justify-center rounded-full bg-primary/15 text-caption font-semibold text-primary">{loading ? '…' : account?.initials ?? <UserRound className="h-3.5 w-3.5" aria-hidden />}</span>
+        {account ? placement === 'footer' ? <span className="min-w-0 flex-1 text-left"><span className="block truncate text-sm font-medium text-foreground">{account.displayName}</span>{account.email ? <span className="block truncate text-xs">{account.email}</span> : null}</span> : <span className="hidden max-w-32 truncate lg:inline">{account.displayName}</span> : null}
+        {placement === 'footer' ? <ChevronUp className="h-4 w-4 flex-none" aria-hidden /> : null}
       </summary>
-      <div className={cn('absolute z-50 w-72 overflow-hidden rounded-xl border border-border/45 bg-popover text-popover-foreground shadow-lg', placement === 'rail' ? 'bottom-0 left-full ml-2' : placement === 'footer' ? 'bottom-full right-0 mb-2' : 'right-0 top-full mt-2')} role="menu">
+      {open ? createPortal(<div ref={menuRef} style={{ ...position, width: 'min(18rem, calc(100vw - 1rem))', maxHeight: 'calc(100dvh - 1rem)' }} className="fixed z-50 overflow-hidden rounded-xl border border-border/45 bg-popover text-popover-foreground shadow-lg" role="menu">
+        <ScrollArea viewportClassName="max-h-[calc(100dvh-1rem)]">
         <div className="border-b border-border/60 px-4 py-3" data-testid="account-identity-summary"><div className="truncate text-sm font-semibold">{account?.displayName ?? t('appShell.account.loadingLong')}</div>{account?.email ? <div className="mt-0.5 truncate text-xs text-muted-foreground">{account.email}</div> : null}</div>
         <div className="p-1.5">
           <a href="#/docs" role="menuitem" onClick={close} className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm hover:bg-accent"><CircleHelp className="h-4 w-4" aria-hidden />{t('appShell.account.help')}</a>
@@ -461,7 +514,8 @@ function AccountMenu({ account, loading, onSignOut, onOpenAccount, onOpenAdmin, 
             <button type="submit" role="menuitem" data-testid="account-sign-out" className="flex min-h-11 w-full items-center gap-2 rounded-md px-3 text-left text-sm text-destructive hover:bg-destructive/10"><LogOut className="h-4 w-4" aria-hidden />{t('appShell.account.signOut')}</button>
           </form>
         </div>
-      </div>
+        </ScrollArea>
+      </div>, document.body) : null}
     </details>
   )
 }

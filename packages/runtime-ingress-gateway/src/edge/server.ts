@@ -4,7 +4,7 @@ import { Agent as HttpsAgent, request as httpsRequest } from 'node:https'
 import { Readable, type Duplex } from 'node:stream'
 
 import httpProxy from 'http-proxy'
-import { parsePublicUrls, validatePublicRequest, type ExternalDeploymentHealth, type PublicUrlPattern } from '@agent-kernel/shared'
+import { parsePublicUrls, validatePublicRequest, type ExternalDeploymentHealth, type OperatorObservabilitySnapshot, type PublicUrlPattern } from '@agent-kernel/shared'
 import { createOnlineTelemetryFromEnv, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
 
 import type { LoginStateStore } from '../auth/login-state-store.js'
@@ -23,6 +23,7 @@ import { isOwnerBootstrapToken, ownerBootstrapHash, type OwnerBootstrapGateway }
 import type { RuntimeOriginResolver } from '../runtime-origin/postgres-runtime-origin-resolver.js'
 import type { RuntimeRoutingTicketResolver } from '../runtime-origin/runtime-routing-ticket-resolver.js'
 import type { DedicatedOwnerAuthenticator } from '../auth/dedicated-owner.js'
+import { loadOperatorObservability } from './observability.js'
 
 export type RuntimeIngressGateway = { readonly http: HttpServer; readonly port: number; close(): Promise<void> }
 export type { RuntimeOriginResolver } from '../runtime-origin/postgres-runtime-origin-resolver.js'
@@ -79,6 +80,15 @@ function telemetryRoute(pathname: string): string {
   if (pathname.startsWith('/runtime/')) return 'gateway.runtime'
   if (pathname.startsWith('/internal/')) return 'gateway.internal'
   if (pathname.startsWith('/install')) return 'gateway.install'
+  if (pathname === '/user/session-tabs') return 'gateway.session-tabs'
+  if (pathname === '/models') return 'gateway.models'
+  if (pathname === '/memo') return 'gateway.memo'
+  if (pathname === '/metrics') return 'gateway.metrics'
+  if (pathname === '/settings' || pathname.startsWith('/settings/')) return 'gateway.settings'
+  if (pathname.startsWith('/push/')) return 'gateway.push'
+  if (pathname === '/organization' || pathname.startsWith('/organization/')) return 'gateway.organization'
+  if (['/assets/', '/icons/', '/brand/', '/downloads/', '/themes/'].some(prefix => pathname.startsWith(prefix))
+      || ['/sw.js', '/manifest.webmanifest', '/favicon.ico'].includes(pathname)) return 'gateway.assets'
   return 'gateway.frontend'
 }
 
@@ -221,6 +231,10 @@ export async function startRuntimeIngressGateway(options: {
   telemetry?: OnlineTelemetry
   authentication: GatewayAuthentication
   singleTenantOwner?: boolean
+  operatorServices?: {
+    identityConsoleUrl?: string
+    observability?: { origin: string; apiKey: string }
+  }
   directory: RuntimeAssignmentStore
   organizations?: OrganizationStore
   hostOrigin: string
@@ -605,6 +619,12 @@ export async function startRuntimeIngressGateway(options: {
       response.end(JSON.stringify(session ? {
         authenticated: true,
         profile: publicProfile(session.identity),
+        ...(options.singleTenantOwner && access?.membership.role === 'owner' && options.operatorServices ? {
+          deploymentServices: {
+            ...(options.operatorServices.identityConsoleUrl ? { identityConsoleUrl: options.operatorServices.identityConsoleUrl } : {}),
+            observability: Boolean(options.operatorServices.observability),
+          },
+        } : {}),
         ...(access ? { organization: { id: access.organization.id, name: access.organization.name, status: access.organization.status, role: access.membership.role } } : {}),
         cacheNamespace: session.cacheNamespace,
         expiresAt: new Date(Math.min(session.idleExpiresAt, session.absoluteExpiresAt)).toISOString(),
@@ -889,6 +909,29 @@ export async function startRuntimeIngressGateway(options: {
       // Unit. Private Cloud enrollment uses a short-lived, organization-bound invite.
       response.writeHead(409, { 'content-type': 'application/json', 'cache-control': 'no-store' })
       response.end(JSON.stringify({ error: 'executor_invite_required', message: 'Create an Executor invite in the authenticated workspace and reconnect with --invite.' }))
+      return
+    }
+    if (url.pathname === '/organization/observability') {
+      if (!session) { response.writeHead(401, { 'cache-control': 'no-store' }); response.end(); return }
+      if (!options.singleTenantOwner || organizationAccess?.membership.role !== 'owner') { response.writeHead(403, { 'cache-control': 'no-store' }); response.end(); return }
+      if (request.method !== 'GET') { response.writeHead(405, { allow: 'GET', 'cache-control': 'no-store' }); response.end(); return }
+      const observation = options.operatorServices?.observability
+      if (!observation) { response.writeHead(503, { 'cache-control': 'no-store' }); response.end(JSON.stringify({ error: 'observability_not_configured' })); return }
+      try {
+        const snapshot: OperatorObservabilitySnapshot = await loadOperatorObservability(async path => {
+          const upstream = await requestRuntime(observation.origin, `/api/telemetry/${path}`, 'GET',
+            { 'x-api-key': observation.apiKey }, undefined, undefined,
+            { signal: AbortSignal.timeout(3_000), maxResponseBytes: 2_097_152 })
+          if (upstream.status !== 200) throw new Error('observability_upstream_unavailable')
+          return JSON.parse(upstream.body.toString('utf8')) as unknown
+        })
+        response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        response.end(JSON.stringify(snapshot))
+      } catch (error) {
+        process.stderr.write(`${JSON.stringify({ event: 'operator_observability_unavailable', errorType: error instanceof Error ? error.name : 'unknown' })}\n`)
+        response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        response.end(JSON.stringify({ error: 'observability_unavailable' }))
+      }
       return
     }
     if (url.pathname === '/organization' && request.method === 'GET' && organizationAccess && options.organizations) {

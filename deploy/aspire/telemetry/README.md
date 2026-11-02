@@ -45,6 +45,63 @@ The emitted allowlist contains service name, coarse reviewed route class, HTTP m
 
 ## Agent business timing
 
+### Owner entry in Kala
+
+Dedicated operators can configure Gateway with `KALA_IDENTITY_CONSOLE_URL` (for
+example `/ui/console/instance`), `KALA_OBSERVABILITY_API_ORIGIN` (the private
+Dashboard frontend origin), and `KALA_OBSERVABILITY_API_KEY` or its `_FILE`
+equivalent. Use the existing protected Dashboard API key, not its browser token.
+Keep the origin on the private deployment network; no additional browser-facing
+port is required.
+
+The authenticated Dedicated Owner then sees **Management & observability** in
+the homepage sidebar. Its read-only snapshot uses the existing Kala browser
+session. Gateway fetches three fixed, size/time-bounded Aspire API resources;
+API credentials and arbitrary telemetry attributes are never returned to the
+browser. Private Cloud tenants and non-Owners cannot use this instance-wide
+endpoint. Identity-console access is still separately authorized by the IdP.
+
+Refresh is manual. Recent logs and at most 500 recent spans are a sample, not a
+complete request-rate measurement or billing ledger. This view does not replace
+the complete local Aspire UI or expose its administration/API credentials.
+Successful static assets contribute HTTP and database metrics without one trace
+tree per font/script/image. Failed assets retain their HTTP span. Tabs, settings,
+models, browser activity and organization APIs have distinct fixed route labels.
+
+### Reading operational activity
+
+In Aspire **Structured logs**, filter `kala-runtime` to see `Agent turn started`,
+`Agent turn completed`, `Agent turn failed` and `Agent turn cancelled`. Inspect
+`agent.runtime`, `provider`, `outcome` and `duration.ms`; the log's trace link opens
+the corresponding `agent.turn`. Gateway and Runtime also emit a fixed `Service
+telemetry initialized` log, which does not assert service readiness. These are bounded first-party events, not arbitrary console-log
+forwarding or fabricated heartbeat activity.
+
+Copilot observations are emitted only after the actual durable projection
+commits. They measure the accepted turn through its terminal Runtime projection,
+including SDK setup, model work, tools and waits. They do **not** invent internal
+SDK LLM/tool spans, token counts, phase breakdowns or remote Executor spans.
+An interrupted process need not emit a terminal observation. Traces use
+anonymous Unit/Session/turn-derived identifiers; prompts, replies, raw errors
+and raw Session identifiers are not exported.
+
+In **Metrics**, `kala_agent_turns_total` distinguishes completed/failed/cancelled
+outcomes; `kala_agent_turn_duration_ms` measures wall time, not just model
+latency. `kala_runtime_queue_depth` is waiting messages, not running turns.
+`kala_client_calls_total` and `kala_client_duration_ms` show actual PostgreSQL/S3
+operation counts and latency. These metrics include descriptions and units in
+OTLP. Kernel-only phase metrics explicitly describe that boundary. In **Traces**,
+filter `agent.turn` for business execution instead of treating
+`postgresql.query` spans as evidence of Agent execution.
+
+When replacing a service image, update `KALA_OTEL_SERVICE_VERSION` to that exact
+image digest as well; retaining the previous image's version produces misleading
+provenance. Do not clear Aspire history merely to make a deployment look new.
+The standalone viewer can retain earlier resource metadata for the same service
+name: its returned `service.version` is not proof of the current container image.
+Check the deployed image, configured version and actual outgoing OTLP resource
+together when diagnosing a replacement.
+
 Runtime's authoritative `LoopBroadcast.onEvent` forwards its existing persisted `EventTimingMetadata` to a stateless export bridge. It does not scan historical Sessions, replay effects, duplicate conversations, or create another business authority. Completed LLM, tool, approval, compaction, retry and recovery observations become children of an `agent.turn` span; the root is exported only when the turn has a terminal summary. Children may therefore be visible before their root finishes, as with ordinary long-running traces.
 
 Trace/span IDs are domain-separated HMACs of the authoritative Unit scope plus internal identifiers using the high-entropy ingestion token; raw Unit/Session/turn/call IDs never leave Runtime. Reusing the same Session/turn IDs in different Units cannot merge their traces. Ingestion-token rotation intentionally changes this anonymous correlation namespace. Duplicate/out-of-order observations retain the same IDs without an unbounded per-Session map. The metrics are best-effort observations, not an exactly-once billing ledger; retries/re-observation can duplicate metric samples.

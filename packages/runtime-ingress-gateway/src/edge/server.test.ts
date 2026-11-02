@@ -17,6 +17,7 @@ import type { SqlExecutor, SqlQueryResult } from '../persistence/postgres.js'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
 
 class MemoryLoginStates implements LoginStateStore {
   private readonly values = new Map<string, LoginState>()
@@ -42,6 +43,69 @@ const running: Array<{ close(): Promise<void> }> = []
 afterEach(async () => { await Promise.all(running.splice(0).map((server) => server.close())) })
 
 describe('Private Cloud edge request path', () => {
+  it('keeps global observations Dedicated-Owner-only and never exposes the Aspire credential', async () => {
+    let reads = 0
+    let fail = false
+    const upstream = createServer((request, response) => {
+      reads++
+      expect(request.headers['x-api-key']).toBe('protected-aspire-key')
+      if (fail) { response.writeHead(503); response.end(); return }
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify(request.url?.endsWith('/resources')
+        ? [{ name: 'kala-runtime', hasLogs: true, hasMetrics: true, hasTraces: true }]
+        : { totalCount: 0, data: {} }))
+    })
+    await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
+    running.push({ close: () => new Promise<void>(resolve => upstream.close(() => resolve())) })
+    const address = upstream.address()
+    const observationOrigin = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`
+    const organizations = new TestOrganizationStore()
+    await organizations.getOrCreateForIdentity({ issuer: 'http://identity.example', subject: 'alice' })
+    const operatorServices = { identityConsoleUrl: '/ui/console/instance', observability: { origin: observationOrigin, apiKey: 'protected-aspire-key' } }
+    const gateway = await createGateway(observationOrigin, undefined, { organizations, singleTenantOwner: true, operatorServices })
+    const origin = `http://127.0.0.1:${gateway.port}`
+    expect((await fetch(`${origin}/organization/observability`)).status).toBe(401)
+    expect(reads).toBe(0)
+    const login = await fetch(`${origin}/auth/login`, { redirect: 'manual' })
+    const callback = await fetch(`${origin}/auth/callback?code=ok`, { headers: { cookie: `ak_login=${cookieValue(login.headers.getSetCookie(), 'ak_login')}` }, redirect: 'manual' })
+    const headers = { cookie: `ak_session=${cookieValue(callback.headers.getSetCookie(), 'ak_session')}` }
+    const profile = await (await fetch(`${origin}/auth/me`, { headers })).json()
+    expect(profile.deploymentServices).toEqual({ identityConsoleUrl: '/ui/console/instance', observability: true })
+    expect(JSON.stringify(profile)).not.toContain('protected-aspire-key')
+    const observed = await (await fetch(`${origin}/organization/observability`, { headers })).json()
+    expect(observed.resources[0].name).toBe('kala-runtime')
+    expect(observed.logs).toEqual([])
+    expect(JSON.stringify(observed)).not.toContain('protected-aspire-key')
+    expect(reads).toBe(3)
+    expect((await fetch(`${origin}/organization/observability`, { method: 'POST', headers })).status).toBe(405)
+    fail = true
+    expect((await fetch(`${origin}/organization/observability`, { headers })).status).toBe(503)
+    const findAccess = organizations.findAccess.bind(organizations)
+    const roleOverride = vi.spyOn(organizations, 'findAccess').mockImplementation(async identity => {
+      const access = await findAccess(identity)
+      return access ? { ...access, membership: { ...access.membership, role: 'viewer' } } : undefined
+    })
+    const readsBeforeRevocation = reads
+    expect([401, 403]).toContain((await fetch(`${origin}/organization/observability`, { headers })).status)
+    expect(reads).toBe(readsBeforeRevocation)
+    roleOverride.mockRestore()
+    const shared = await createGateway(observationOrigin, undefined, { organizations, operatorServices })
+    const sharedOrigin = `http://127.0.0.1:${shared.port}`
+    const sharedLogin = await fetch(`${sharedOrigin}/auth/login`, { redirect: 'manual' })
+    const sharedCallback = await fetch(`${sharedOrigin}/auth/callback?code=ok`, { headers: { cookie: `ak_login=${cookieValue(sharedLogin.headers.getSetCookie(), 'ak_login')}` }, redirect: 'manual' })
+    const sharedHeaders = { cookie: `ak_session=${cookieValue(sharedCallback.headers.getSetCookie(), 'ak_session')}` }
+    expect((await fetch(`${sharedOrigin}/organization/observability`, { headers: sharedHeaders })).status).toBe(403)
+  })
+  it('distinguishes safe endpoint classes without exporting raw paths', async () => {
+    const telemetry = new OnlineTelemetry({ serviceName: 'kala-gateway', endpoint: 'http://localhost:4318', authToken: 't'.repeat(32), fetch: async () => new Response('', { status: 200 }) })
+    const spy = vi.spyOn(telemetry, 'startHttpSpan')
+    const gateway = await createGateway('http://127.0.0.1:9', undefined, { telemetry })
+    for (const [path, route] of [['/settings/speech', 'gateway.settings'], ['/user/session-tabs', 'gateway.session-tabs'], ['/assets/private-name.js', 'gateway.assets'], ['/push/activity', 'gateway.push'], ['/models', 'gateway.models']]) {
+      await fetch(`http://127.0.0.1:${gateway.port}${path}`)
+      expect(spy).toHaveBeenLastCalledWith('GET', route, undefined)
+    }
+    await telemetry.close()
+  })
   it('binds OIDC callback URLs, redirects and cookie security to the validated browser origin', async () => {
     const gateway = await createGateway('http://127.0.0.1:9', undefined, {
       publicUrls: 'https://dashboard.example.test,http://local.example.test',
@@ -1297,6 +1361,9 @@ async function createGateway(
     runtimeRoutingTicketResolver?: RuntimeRoutingTicketResolver
     socketRecheckMs?: number
     publicUrls?: string
+    singleTenantOwner?: boolean
+    operatorServices?: Parameters<typeof startRuntimeIngressGateway>[0]['operatorServices']
+    telemetry?: OnlineTelemetry
   },
 ): Promise<RuntimeIngressGateway> {
   const dir = mkdtempSync(join(tmpdir(), 'gateway-sessions-'))
@@ -1306,6 +1373,9 @@ async function createGateway(
     port: 0,
     listenHost: '127.0.0.1',
     hostOrigin,
+    ...(auth?.singleTenantOwner ? { singleTenantOwner: true } : {}),
+    ...(auth?.operatorServices ? { operatorServices: auth.operatorServices } : {}),
+    ...(auth?.telemetry ? { telemetry: auth.telemetry } : {}),
     ...(auth?.runtimeOriginResolver ? { runtimeOriginResolver: auth.runtimeOriginResolver } : {}),
     ...(auth?.runtimeRoutingTicketResolver ? { runtimeRoutingTicketResolver: auth.runtimeRoutingTicketResolver } : {}),
     ...(auth?.dashboardOrigin ? { dashboardOrigin: auth.dashboardOrigin } : {}),

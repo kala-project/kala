@@ -232,12 +232,23 @@ async function main(): Promise<void> {
     migrationsDirectory: resolve(process.env.KALA_INGRESS_MIGRATIONS_DIR ?? 'migrations'), telemetry,
     installationId: retentionFlag === '1' ? (await readFile(process.env.KALA_INSTALLATION_ID_FILE ?? '', 'utf8')).trim() : '',
   })
+  const observationOrigin = process.env.KALA_OBSERVABILITY_API_ORIGIN
+  if (observationOrigin) {
+    const url = new URL(observationOrigin)
+    if (!dedicated || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('invalid Dedicated observability origin')
+  }
+  const identityConsoleUrl = process.env.KALA_IDENTITY_CONSOLE_URL
+  const operatorServices = dedicated && (observationOrigin || identityConsoleUrl) ? {
+    ...(identityConsoleUrl ? { identityConsoleUrl } : {}),
+    ...(observationOrigin ? { observability: { origin: new URL(observationOrigin).origin, apiKey: await readRequiredSecretEnv('KALA_OBSERVABILITY_API_KEY') } } : {}),
+  } : undefined
   const gateway = await startRuntimeIngressGateway({
     port,
     telemetry,
     listenHost: process.env.KALA_INGRESS_LISTEN_HOST ?? '127.0.0.1',
     authentication,
     singleTenantOwner: dedicated,
+    ...(operatorServices ? { operatorServices } : {}),
     organizations,
     directory: {
       getOrCreateForIdentity: async (identity) => { const access = await organizations.getOrCreateForIdentity(identity); return { unitId: access.organization.unitId, identity } },

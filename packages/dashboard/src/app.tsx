@@ -218,6 +218,7 @@ import { useNativeDesktop } from './lib/use-native-desktop.js'
 import { isDesktopClient } from './lib/desktop.js'
 import { AccountCenter } from './features/account/AccountCenter.js'
 import { AdminCenter } from './features/admin/AdminCenter.js'
+import { DeploymentCenter } from './features/admin/DeploymentCenter.js'
 import { usePushActivityHeartbeat } from './lib/push-activity.js'
 import { useRunningTitleIndicator } from './lib/running-title.js'
 import { useTheme, type Theme } from './lib/theme.js'
@@ -280,6 +281,7 @@ export function App(): JSX.Element {
   const authSession = useAuthSession(platformMode)
   const productAccessReady = runtimeDeployment.loaded && !runtimeDeployment.error && (!platformMode || authSession.session?.authenticated === true)
   const account = authSession.session?.authenticated ? authSession.session.profile : undefined
+  const deploymentServices = authSession.session?.authenticated ? authSession.session.deploymentServices : undefined
   useEffect(() => {
     if (!platformMode || !authSession.checked || authSession.session?.authenticated !== false) return
     window.location.replace('/signed-out')
@@ -303,6 +305,7 @@ export function App(): JSX.Element {
   const [settingsInitialSection, setSettingsInitialSection] = useState<'connection' | 'speech'>('connection')
   const [accountCenterOpen, setAccountCenterOpen] = useState(false)
   const [adminCenterOpen, setAdminCenterOpen] = useState(false)
+  const [deploymentCenterOpen, setDeploymentCenterOpen] = useState(false)
   const [metadataOpen, setMetadataOpen] = useState(false)
   const [metadataSessionId, setMetadataSessionId] = useState<string | null>(null)
   const [slashDelete, setSlashDelete] = useState<SlashDeleteState | null>(null)
@@ -1687,6 +1690,7 @@ export function App(): JSX.Element {
       setExplorerDrawerOpen(false)
       setAccountCenterOpen(false)
       setAdminCenterOpen(false)
+      setDeploymentCenterOpen(false)
       setSettingsOpen(false)
       setSection('agent')
     },
@@ -1704,7 +1708,7 @@ export function App(): JSX.Element {
   useNativeDesktop({
     sessions: nativeSessions,
     activeSessionId,
-    viewedSessionId: section === 'agent' && !accountCenterOpen && !adminCenterOpen && !settingsOpen ? activeSessionId : null,
+    viewedSessionId: section === 'agent' && !accountCenterOpen && !adminCenterOpen && !deploymentCenterOpen && !settingsOpen ? activeSessionId : null,
     socket: controlSocket,
     ready: productAccessReady && control.sessionsLoaded,
     workspaceOnline: hasSelectedSession && control.executorsLoaded ? sessionWorkspaceOnline : null,
@@ -1712,6 +1716,7 @@ export function App(): JSX.Element {
       selectSession(sessionId)
       setAccountCenterOpen(false)
       setAdminCenterOpen(false)
+      setDeploymentCenterOpen(false)
       setSettingsOpen(false)
       setSection('agent')
     },
@@ -2103,6 +2108,7 @@ export function App(): JSX.Element {
 
   const openAccount = platformMode ? () => setAccountCenterOpen(true) : undefined
   const openAdmin = authSession.session?.authenticated && (authSession.session.organization?.role === 'owner' || authSession.session.organization?.role === 'admin') ? () => setAdminCenterOpen(true) : undefined
+  const openDeployment = deploymentServices ? () => { setExplorerDrawerOpen(false); setDeploymentCenterOpen(true) } : undefined
   const announceSignOut = platformMode ? () => {
     authSession.announceLogout()
     void sessionViewCache.clearDurable()
@@ -2121,7 +2127,7 @@ export function App(): JSX.Element {
           onExpand={section === 'agent' ? () => setExplorerOpen(true) : undefined}
           onNewSession={newSession}
           onConnectWorkspace={runtimeCapabilities.workspace ? openConnectWorkspaceDialog : undefined}
-          globalActions={<SidebarGlobalActions orientation="vertical" onOpenSettings={() => setSettingsOpen(true)} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />}
+          globalActions={<SidebarGlobalActions orientation="vertical" onOpenSettings={() => setSettingsOpen(true)} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onOpenDeployment={openDeployment} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />}
         />
       ) : null}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -2130,6 +2136,7 @@ export function App(): JSX.Element {
       ) : null}
       {accountCenterOpen && account ? <AccountCenter profile={account} organization={authSession.session?.authenticated ? authSession.session.organization : undefined} onClose={() => setAccountCenterOpen(false)} /> : null}
       {adminCenterOpen ? <AdminCenter onClose={() => setAdminCenterOpen(false)} /> : null}
+      {deploymentCenterOpen && deploymentServices ? <DeploymentCenter services={deploymentServices} onClose={() => setDeploymentCenterOpen(false)} /> : null}
       <PwaUpdateGlobalBanner />
       <div className="min-h-0 min-w-0 max-w-full flex-1 overflow-hidden">
       <div className="hidden" data-testid="login-column-hidden" />
@@ -2188,7 +2195,7 @@ export function App(): JSX.Element {
                         <Explorer executors={control.executors} sessions={control.sessions} loading={sessionDirectoryLoadingOwner === 'explorer'} autoHideOfflineWorkspacesByDefault={!platformMode} selectedSessionId={explorerSelectedSessionId} sessionStatuses={sessionStatuses} onSelect={selectSession} onClearSelection={clearSessionSelection} onNewSession={newSession} onConnectWorkspace={runtimeCapabilities.workspace ? openConnectWorkspaceDialog : undefined} onDelete={deleteSessionAt} onRename={renameSessionAt} onRenameWorkspace={renameWorkspaceAt} embeddedHeader headerLeading={explorerHeaderLeading} fontSizePx={sessionExplorerFontSizePx} previewStore={previewStore} onOpenSessionInfo={openSessionInfoDialog} onWorkspaceInfo={setWorkspaceInfoId} onOpenWorkspaceTerminal={openWorkspaceTerminal} />
                       </div>
                       <div className="flex flex-none justify-end border-t border-border/35 px-3 py-2" data-testid="desktop-sidebar-footer">
-                        <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => setSettingsOpen(true)} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />
+                        <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => setSettingsOpen(true)} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onOpenDeployment={openDeployment} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />
                       </div>
                     </div>
                   </div>
@@ -2777,7 +2784,7 @@ export function App(): JSX.Element {
               </div>
             ) : <div className="min-h-0 flex-1" />}
             <div className="flex min-h-14 flex-none items-center justify-end border-t border-border/35 px-3 py-2" data-testid="narrow-drawer-footer">
-              <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => { setExplorerDrawerOpen(false); setSettingsOpen(true) }} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />
+              <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => { setExplorerDrawerOpen(false); setSettingsOpen(true) }} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onOpenDeployment={openDeployment} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />
             </div>
           </div>
         </DialogContent>

@@ -1,6 +1,18 @@
 export const resources = {
   en: {
     translation: {
+      deploymentCenter: {
+        title: 'Management & observability', scope: 'Dedicated Owner tools. Data is read-only and uses your existing Kala login; monitoring credentials stay on the server.',
+        identity: 'Identity administration', identityHelp: 'Manage identities and authentication in ZITADEL. This is separate from Kala organization settings.',
+        openIdentity: 'Open identity administration', observability: 'Aspire observations', observabilityHelp: 'Live data from the private Aspire API, without exposing another port. Refresh is manual; this page does not poll.',
+        refresh: 'Refresh observations', loading: 'Loading observations…', loadFailed: 'Observations are unavailable (HTTP {{status}}).', notConfigured: 'The operator has not configured the observation source.',
+        updated: 'Snapshot fetched: {{time}}', logs: 'Structured logs', traces: 'Traces', metrics: 'Metrics',
+        logHelp: '{{count}} log records retained by Aspire; showing up to 100 recent records.', correlation: 'Trace correlation ID', empty: 'No records in the current sample.',
+        requests: 'Recent HTTP request sample', sampleHelp: 'Grouped by method, fixed endpoint class and HTTP status from at most 500 recent spans, not a complete request-rate measurement. Successful static asset requests contribute metrics rather than individual traces; asset failures remain traceable.',
+        requestSummary: '{{count}} requests · mean {{duration}} ms', turns: 'Agent turn timing', turnHelp: 'Runtime-observed wall time for the whole turn, including model work, tools and waits; not model latency alone.',
+        noRecentTurns: 'No Agent turn in this recent span sample. This does not mean no turns ran; earlier records may be outside the sample.',
+        routes: { frontend: 'Application page', assets: 'Static assets', 'session-tabs': 'Session tabs', settings: 'Settings', push: 'Browser activity / notifications', models: 'Model catalog', memo: 'Notes', metrics: 'Runtime metrics', organization: 'Organization / observations', runtime: 'Runtime API', api: 'Versioned API', auth: 'Authentication', health: 'Gateway health', install: 'Installation' },
+      },
       desktopUpdate: {
         title: 'Desktop client',
         installed: 'Installed version: {{version}}',
@@ -2079,6 +2091,18 @@ export const resources = {
   },
   zh: {
     translation: {
+      deploymentCenter: {
+        title: '管理与观测', scope: 'Dedicated Owner 管理工具。观测数据只读，复用现有 Kala 登录，监控凭据始终保留在服务端。',
+        identity: '身份认证管理', identityHelp: '在 ZITADEL 中管理身份和认证。这里与 Kala 的组织设置是不同的管理范围。',
+        openIdentity: '进入身份认证后台', observability: 'Aspire 观测数据', observabilityHelp: '通过内部 Aspire API 获取真实数据，不额外开放端口。仅手动刷新，不会自动轮询。',
+        refresh: '刷新观测数据', loading: '正在读取观测数据…', loadFailed: '观测数据暂不可用（HTTP {{status}}）。', notConfigured: '部署管理员尚未配置观测数据来源。',
+        updated: '快照获取时间：{{time}}', logs: '结构化日志', traces: '调用追踪', metrics: '指标',
+        logHelp: 'Aspire 当前保留 {{count}} 条日志，此处最多展示最近 100 条。', correlation: '关联 Trace ID', empty: '当前样本中没有记录。',
+        requests: '最近 HTTP 请求样本', sampleHelp: '按请求方法、固定接口分类和 HTTP 状态汇总，来源为最近至多 500 个跨度，并非完整请求率。成功的静态资源请求仅计入指标，不再逐个产生 Trace；资源加载失败仍保留追踪。',
+        requestSummary: '{{count}} 次请求 · 平均 {{duration}} 毫秒', turns: 'Agent 回合耗时', turnHelp: 'Runtime 观测到的整轮实际耗时，包含模型、工具和等待，并非单独的模型响应延迟。',
+        noRecentTurns: '最近的跨度样本中没有 Agent 回合。这不代表没有执行过回合，较早记录可能已超出本次样本范围。',
+        routes: { frontend: '应用页面', assets: '静态资源', 'session-tabs': '会话标签页', settings: '设置', push: '浏览器活动与通知', models: '模型目录', memo: '备忘录', metrics: 'Runtime 指标', organization: '组织与观测', runtime: 'Runtime API', api: '版本化 API', auth: '认证', health: '网关健康检查', install: '安装下载' },
+      },
       desktopUpdate: {
         title: '桌面客户端',
         installed: '已安装版本：{{version}}',

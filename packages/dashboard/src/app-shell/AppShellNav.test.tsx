@@ -74,6 +74,24 @@ describe('sidebar shell controls', () => {
     expect(settings.textContent).toBe('Settings')
     expect(download.compareDocumentPosition(settings) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
+
+  it('gives the footer profile its own row and keeps its menu outside clipped sidebars', () => {
+    const openDeployment = vi.fn()
+    const { container } = render(<div className="overflow-hidden">
+      <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => {}} onOpenDeployment={openDeployment} account={{ displayName: 'Production Owner', email: 'owner@example.test', initials: 'PO' }} />
+    </div>)
+    fireEvent.click(screen.getByTestId('app-shell-deployment-center'))
+    expect(openDeployment).toHaveBeenCalledOnce()
+    expect(screen.getByTestId('account-menu').className).toContain('basis-full')
+    expect(screen.getByTestId('account-menu-trigger').textContent).toContain('owner@example.test')
+    fireEvent.click(screen.getByTestId('account-menu-trigger'))
+    const menu = screen.getByRole('menu')
+    expect(menu.parentElement).toBe(document.body)
+    expect(container.contains(menu)).toBe(false)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('menu')).toBeNull()
+    expect(document.activeElement).toBe(screen.getByTestId('account-menu-trigger'))
+  })
 })
 
 describe('AppShellNav', () => {
@@ -145,6 +163,7 @@ describe('AppShellNav', () => {
   it('does not unmount the native logout form before navigation commits', () => {
     const onSignOut = vi.fn()
     renderNav({ section: 'agent', account: { displayName: 'Demo', initials: 'D' }, onSignOut })
+    fireEvent.click(screen.getByTestId('account-menu-trigger'))
     const form = screen.getByTestId('account-sign-out').closest('form')!
     fireEvent.submit(form)
     expect(form.isConnected).toBe(true)
