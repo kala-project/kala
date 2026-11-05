@@ -98,6 +98,14 @@ describe('createSessionWithAck', () => {
     await expect(createSessionWithAck(socket as never, { sessionId: 'chat-1', tools: ['websearch'] })).resolves.toBeUndefined()
     expect(emitWithAck).toHaveBeenCalledWith('client:create_session', expect.objectContaining({ sessionId: 'chat-1', operationId: expect.any(String), tools: ['websearch'] }))
   })
+
+  it('sends Goal settings in the create-session RPC', async () => {
+    const emitWithAck = vi.fn().mockResolvedValue({ ok: true })
+    const socket = { connected: true, active: true, timeout: vi.fn(() => ({ emitWithAck })), connect: vi.fn() }
+    const goal = { objective: 'Ship the feature', successCriteria: 'Tests pass', maxTurns: 5 }
+    await createSessionWithAck(socket as never, { sessionId: 'goal-1', executionMode: 'chat', goal })
+    expect(emitWithAck).toHaveBeenCalledWith('client:create_session', expect.objectContaining({ sessionId: 'goal-1', goal }))
+  })
 })
 
 describe('deleteSession', () => {

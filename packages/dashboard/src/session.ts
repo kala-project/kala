@@ -1430,6 +1430,7 @@ export function createSession(
     cwd?: string
     tools?: readonly string[]
     selectedModel?: string
+    goal?: { objective: string; successCriteria: string; maxTurns?: number }
   },
 ): void {
   socket.emit('client:create_session', {
@@ -1441,6 +1442,7 @@ export function createSession(
     ...(input.cwd !== undefined && input.cwd.length > 0 ? { cwd: input.cwd } : {}),
     ...(input.tools !== undefined ? { tools: input.tools } : {}),
     ...(input.selectedModel !== undefined && input.selectedModel.length > 0 ? { selectedModel: input.selectedModel } : {}),
+    ...(input.goal ? { goal: input.goal } : {}),
   })
 }
 
@@ -1455,6 +1457,7 @@ export async function createSessionWithAck(
     cwd?: string
     tools?: readonly string[]
     selectedModel?: string
+    goal?: { objective: string; successCriteria: string; maxTurns?: number }
   },
   timeoutMs = 10_000,
   placement?: { host: string; token?: string },
@@ -1498,6 +1501,7 @@ export async function createSessionWithAck(
         ...(input.cwd !== undefined && input.cwd.length > 0 ? { cwd: input.cwd } : {}),
         ...(input.tools !== undefined ? { tools: input.tools } : {}),
         ...(input.selectedModel !== undefined && input.selectedModel.length > 0 ? { selectedModel: input.selectedModel } : {}),
+        ...(input.goal ? { goal: input.goal } : {}),
       }, { timeoutMs })
       return
     } finally {
@@ -1513,6 +1517,7 @@ export async function createSessionWithAck(
     ...(input.cwd !== undefined && input.cwd.length > 0 ? { cwd: input.cwd } : {}),
     ...(input.tools !== undefined ? { tools: input.tools } : {}),
     ...(input.selectedModel !== undefined && input.selectedModel.length > 0 ? { selectedModel: input.selectedModel } : {}),
+    ...(input.goal ? { goal: input.goal } : {}),
   }, { timeoutMs })
 }
 

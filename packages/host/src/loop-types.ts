@@ -187,6 +187,11 @@ export type ModelResolver = {
 
 export type HostLoopDeps = {
   store: SessionStore
+  /** Called after a fully settled Kernel turn, never for a pending approval. */
+  onGoalTurnSettled?: (sessionId: string) => Promise<void>
+  onGoalStateChanged?: (sessionId: string) => Promise<void>
+  /** Re-drive only a durably settled Goal when an authorized Session is reattached. */
+  onGoalReconnected?: (sessionId: string) => Promise<void>
   llm: LLMAdapter
   tools: ToolDispatcher
   /** Optional fail-closed check immediately before each model or tool effect. */

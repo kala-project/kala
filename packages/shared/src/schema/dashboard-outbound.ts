@@ -530,6 +530,16 @@ export const SessionSummarySchema = z.object({
   firstUserMessage: z.string().optional(),
   label: z.string().optional(),
   preferences: StoredSessionPreferencesSchema.optional(),
+  goal: z.object({
+    objective: z.string(),
+    successCriteria: z.string(),
+    maxTurns: z.number().int().positive(),
+    turns: z.number().int().nonnegative(),
+    status: z.enum(['active', 'paused', 'completed', 'cancelled', 'budget_exhausted']),
+    completionSource: z.enum(['model', 'user']).optional(),
+    lastTerminalCursor: z.number().int().nonnegative(),
+    lastControl: z.object({ operationId: z.string(), action: z.enum(['pause', 'resume', 'cancel', 'complete']) }).optional(),
+  }).optional(),
 }) satisfies z.ZodType<SessionSummary>
 
 // ============================================================================

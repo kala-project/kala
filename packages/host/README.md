@@ -16,6 +16,34 @@ Host is the only process with a public IP. It owns:
 6. **Provider/model auto-import** (`src/runtime-config.ts`) — reads `~/.claude/settings.json` and `~/.codex/config.toml`, then merges manual model ids from `~/.config/kala/models.json`.
 7. **Agent module assembly** (`src/agent-modules/`) — renders the default `SystemPromptPlugin` plus built-in `ToolsetPlugin[]` into the kernel config, settings metadata, and session artifacts.
 
+## Single-Session Goals
+
+`client:create_session` optionally accepts `goal: { objective, successCriteria, maxTurns? }`
+for **Kernel Chat** Sessions only (Copilot and DAG Goals are rejected). `maxTurns`
+defaults to 12 and must be 1–100. Creation durably stores one Goal before ACK;
+a retry with the same Session ID and matching Goal preserves its lifecycle,
+while a conflicting Goal is rejected. Creation does not send a user message:
+the client separately admits the objective using a stable message operation ID.
+
+`SessionSummary.goal` exposes the objective, success criteria, turn budget,
+counted turns, last terminal cursor, and status (`active`, `paused`, `completed`,
+`cancelled`, or `budget_exhausted`). Model-declared completion carries
+`completionSource: 'model'`, which does **not** mean the criteria were
+independently verified and can be presented as pending user acceptance. A
+`complete` control on model-declared completion durably records acceptance
+by switching the source to `'user'` without starting another turn. User
+completion carries `'user'`. The Host broadcasts
+Goal changes as `server:control_update` / `session_summary_changed`.
+`client:goal_control` accepts `{ sessionId, operationId, action }` with
+`action: 'pause' | 'resume' | 'cancel' | 'complete'` and returns the normal
+`RpcAck`. Stop pauses an active Goal. An interrupted or uncertain turn must
+be reconciled/stopped before resume; restart never replays Goal tool effects.
+When an authorized dashboard reattaches to an owner after restart, a Goal
+whose last turn is durably `done` can continue from its counted checkpoint
+(or count a committed terminal response missed by the previous Host). A
+nonterminal interrupted turn instead becomes `paused` on reattachment.
+There is no unconditional startup scan of Sessions before a dashboard reattaches.
+
 ## Dedicated model settings
 
 Dedicated Runtime Units with the PostgreSQL authority and an operator provider

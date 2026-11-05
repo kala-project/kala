@@ -18,6 +18,7 @@ import type {
   ClientCompact,
   ClientConsolidateMemory,
   ClientCreateSession,
+  ClientGoalControl,
   ClientCreateDirectory,
   ClientDeleteSession,
   ClientFork,
@@ -386,6 +387,69 @@ export function configureDashboardNamespace(
     ? deps.defaultConfig(actor)
     : deps.defaultConfig
   const mutableRuntimeReady = (): boolean => deps.mutableReady?.() !== false
+  const publishGoal = async (sessionId: string): Promise<void> => {
+    const [summary] = await deps.store.listSummaries({ sessionIds: [sessionId] })
+    if (summary) deps.dashboardNs.to(sessionRoom(sessionId)).emit('server:control_update', {
+      kind: 'session_summary_changed', session: summary,
+    })
+  }
+  deps.loopDeps.onGoalStateChanged = publishGoal
+  const continueGoal = (sessionId: string, turn: number): void => {
+    void deps.loop.waitForActiveTurn(sessionId).then(async () => {
+      if (!mutableRuntimeReady() || deps.loop.isDraining() || deps.loop.hasActiveTurn(sessionId)
+        || deps.messageQueues.pending(sessionId) > 0) {
+        await deps.loopDeps.assertSessionEffectOwner?.(sessionId)
+        const paused = await deps.store.updateGoal(sessionId, (goal, record) =>
+          goal.status === 'active' && goal.turns === turn && record.state.status === 'done'
+            ? { ...goal, status: 'paused' } : undefined)
+        if (paused) await publishGoal(sessionId)
+        return
+      }
+      await deps.loopDeps.assertSessionEffectOwner?.(sessionId)
+      const record = deps.store.get(sessionId) ?? await deps.store.load(sessionId, { recoverDangling: false })
+      if (!record.goal || record.goal.status !== 'active' || record.goal.turns !== turn
+        || record.state.status !== 'done' || record.state.pendingCalls.length > 0) return
+      await deps.loop.dispatch(sessionId, {
+        kind: 'user_message',
+        text: `Continue the Goal: ${record.goal.objective}\nSuccess criteria: ${record.goal.successCriteria}\nIf fully satisfied, finish with GOAL_COMPLETE on its own final line.`,
+        operationId: `goal:${sessionId}:${turn + 1}`,
+      })
+    }).catch((error) => deps.broadcastError(sessionId, 'host', error instanceof Error ? error.message : String(error)))
+  }
+  deps.loopDeps.onGoalTurnSettled = async (sessionId) => {
+    const record = deps.store.get(sessionId)
+    if (!record?.goal || record.goal.status !== 'active' || record.state.status !== 'done') return
+    await deps.loopDeps.assertSessionEffectOwner?.(sessionId)
+    const assistant = [...record.state.messages].reverse().find((message) => message.role === 'assistant')
+    const text = assistant?.content.filter((block) => block.type === 'text').map((block) => block.text).join('') ?? ''
+    const completed = /(?:^|\n)GOAL_COMPLETE\s*$/.test(text)
+    const updated = await deps.store.updateGoal(sessionId, (goal, latest) => {
+      if (goal.status !== 'active' || goal.lastTerminalCursor >= latest.state.cursor
+        || latest.state.status !== 'done') return undefined
+      const turns = goal.turns + 1
+      return {
+        ...goal, turns, lastTerminalCursor: latest.state.cursor,
+        status: completed ? 'completed' : turns >= goal.maxTurns ? 'budget_exhausted' : 'active',
+        ...(completed ? { completionSource: 'model' as const } : {}),
+      }
+    })
+    if (!updated) return
+    await publishGoal(sessionId)
+    if (updated.status === 'active') continueGoal(sessionId, updated.turns)
+  }
+  deps.loopDeps.onGoalReconnected = async (sessionId) => {
+    const record = deps.store.get(sessionId) ?? await deps.store.load(sessionId, { recoverDangling: false })
+    if (!record.goal || record.goal.status !== 'active' || record.state.status !== 'done'
+      || record.state.pendingCalls.length > 0 || !mutableRuntimeReady()
+      || deps.loop.isDraining() || deps.loop.hasActiveTurn(sessionId)
+      || deps.messageQueues.pending(sessionId) > 0) return
+    await deps.loopDeps.assertSessionEffectOwner?.(sessionId)
+    if (record.state.cursor > record.goal.lastTerminalCursor) {
+      await deps.loopDeps.onGoalTurnSettled?.(sessionId)
+    } else if (record.goal.turns > 0 && record.goal.turns < record.goal.maxTurns) {
+      continueGoal(sessionId, record.goal.turns)
+    }
+  }
   ns.use((socket, nextFn) => {
     const auth = socket.handshake.auth as HandshakeAuth | undefined
     if (!auth || auth.role !== 'dashboard') {
@@ -569,7 +633,7 @@ export function configureDashboardNamespace(
     }
     if (socket.data.readOnly === true) {
       const writeEvents = [
-        'client:user_message', 'client:user_approve', 'client:user_reject', 'client:ask_user_choice', 'client:cancel', 'client:interrupt_sub_agent',
+        'client:user_message', 'client:user_approve', 'client:user_reject', 'client:ask_user_choice', 'client:cancel', 'client:goal_control', 'client:interrupt_sub_agent',
         'client:clear', 'client:compact', 'client:cancel_stream', 'client:set_approval_mode', 'client:fork',
         'client:create_session', 'client:delete_session', 'client:prepare_storage_cleanup', 'client:execute_storage_cleanup', 'client:update_preferences', 'client:set_cwd',
         'client:prepare_session_route', 'app_debug:control',
@@ -1092,6 +1156,8 @@ export function configureDashboardNamespace(
     // resumeSession is idempotent while a live serialized turn exists.
     if (mutableRuntimeReady()) {
       if (record?.agentRuntime === 'kernel' && !isRestingStatus(record.state.status)) void deps.loop.resumeSession(sessionId)
+      else if (record?.goal) void deps.loopDeps.onGoalReconnected?.(sessionId).catch((error: unknown) =>
+        deps.broadcastError(sessionId, 'host', error instanceof Error ? error.message : String(error)))
       void deps.messageQueues.drain(sessionId)
     }
 
@@ -1128,6 +1194,8 @@ export function configureDashboardNamespace(
       socket.emit('server:message_queue', deps.messageQueues.snapshot(sessionId))
       if (mutableRuntimeReady()) {
         if (target?.agentRuntime === 'kernel' && !isRestingStatus(target.state.status)) void deps.loop.resumeSession(sessionId)
+        else if (target?.goal) void deps.loopDeps.onGoalReconnected?.(sessionId).catch((error: unknown) =>
+          deps.broadcastError(sessionId, 'host', error instanceof Error ? error.message : String(error)))
         void deps.messageQueues.drain(sessionId)
       }
     })
@@ -1223,6 +1291,10 @@ export function configureDashboardNamespace(
       const p = vparse(schema.ClientCancelSchema, raw, 'client:cancel', (raw as ClientCancel | undefined)?.sessionId)
       if (!p) { ack?.({ ok: false, error: 'invalid cancel payload' }); return }
       const result = await runOperation('client:cancel', p.sessionId, p.operationId, p, async () => {
+        if (deps.store.get(p.sessionId)?.goal) {
+          await deps.store.updateGoal(p.sessionId, (goal) => goal.status === 'active' ? { ...goal, status: 'paused' } : undefined)
+          await publishGoal(p.sessionId)
+        }
         // Establish the queue boundary before cancelling the turn. Otherwise the
         // queue drainer can observe the resulting resting state and immediately
         // start a queued steer/follow-up, making Stop appear ineffective.
@@ -1234,10 +1306,79 @@ export function configureDashboardNamespace(
         const record = await loadRecordForDashboard(deps, p.sessionId)
         if (!record) throw new Error('unknown session')
         await deps.agentRuntimes.require(record.agentRuntime).cancel(record)
+        if (record.goal) {
+          await deps.store.updateGoal(p.sessionId, (goal, latest) =>
+            goal.status === 'paused' && latest.state.cursor > goal.lastTerminalCursor
+              ? { ...goal, lastTerminalCursor: latest.state.cursor } : undefined)
+          await publishGoal(p.sessionId)
+        }
       })
       ack?.(result)
       if (!result.ok) deps.broadcastError(p.sessionId, 'host', result.error)
     })
+    socket.on('client:goal_control', async (raw: ClientGoalControl, ack?: (result: RpcAck) => void) => {
+        const p = vparse(schema.ClientGoalControlSchema, raw, 'client:goal_control', (raw as ClientGoalControl | undefined)?.sessionId)
+        if (!p) { ack?.({ ok: false, error: 'invalid Goal control request' }); return }
+        const result = await runOperation('client:goal_control', p.sessionId, p.operationId, p, async () => {
+          const record = await loadRecordForDashboard(deps, p.sessionId)
+          if (!record?.goal) throw new Error('Session has no Goal')
+          await deps.loopDeps.assertSessionEffectOwner?.(p.sessionId)
+          const acceptingModelCompletion = p.action === 'complete'
+            && record.goal.status === 'completed' && record.goal.completionSource === 'model'
+          if (record.goal.lastControl?.operationId === p.operationId) {
+            if (record.goal.lastControl.action !== p.action) throw new Error('Goal operation ID conflict')
+            if ((p.action === 'cancel' || p.action === 'complete')
+              && !acceptingModelCompletion && !isRestingStatus(record.state.status)) {
+              await deps.agentRuntimes.require(record.agentRuntime).cancel(record)
+            }
+            return
+          }
+          if (p.action === 'resume') {
+            if (record.goal.status !== 'paused') throw new Error('Goal is not paused')
+            if ((record.state.status !== 'idle' && record.state.status !== 'done') || record.state.pendingCalls.length > 0
+              || deps.loop.hasActiveTurn(p.sessionId) || deps.loop.isDraining()
+              || deps.messageQueues.pending(p.sessionId) > 0) {
+              throw new Error('Goal cannot resume until pending work is safely settled or stopped')
+            }
+          }
+          const updated = await deps.store.updateGoal(p.sessionId, (goal, latest) => {
+            if (goal.lastControl?.operationId === p.operationId) {
+              if (goal.lastControl.action !== p.action) throw new Error('Goal operation ID conflict')
+              return undefined
+            }
+            if (p.action === 'resume') {
+              if (goal.status !== 'paused' || (latest.state.status !== 'idle' && latest.state.status !== 'done')
+                || latest.state.pendingCalls.length > 0) return undefined
+              return { ...goal, status: 'active', lastControl: { operationId: p.operationId, action: p.action } }
+            }
+            if (goal.status === 'completed') {
+              return p.action === 'complete' && goal.completionSource === 'model'
+                ? { ...goal, completionSource: 'user', lastControl: { operationId: p.operationId, action: p.action } }
+                : undefined
+            }
+            if (goal.status === 'cancelled' || goal.status === 'budget_exhausted') return undefined
+            return {
+              ...goal, status: p.action === 'pause' ? 'paused' : p.action === 'complete' ? 'completed' : 'cancelled',
+              ...(p.action === 'complete' ? { completionSource: 'user' as const } : {}),
+              lastControl: { operationId: p.operationId, action: p.action },
+            }
+          })
+          if (!updated) throw new Error('Goal state changed or action is not available')
+          await publishGoal(p.sessionId)
+          if ((p.action === 'cancel' || p.action === 'complete')
+            && !acceptingModelCompletion && !isRestingStatus(record.state.status)) {
+            await deps.agentRuntimes.require(record.agentRuntime).cancel(record)
+          }
+          if (p.action === 'resume' && record.state.status === 'done') {
+            if (record.state.cursor > updated.lastTerminalCursor) {
+              await deps.loopDeps.onGoalTurnSettled?.(p.sessionId)
+            } else if (updated.turns > 0 && updated.turns < updated.maxTurns) {
+              continueGoal(p.sessionId, updated.turns)
+            }
+          }
+        })
+        ack?.(result)
+      })
     socket.on('client:interrupt_sub_agent', async (raw: ClientInterruptSubAgent) => {
       const p = vparse(schema.ClientInterruptSubAgentSchema, raw, 'client:interrupt_sub_agent')
       if (!p) return
@@ -1944,6 +2085,10 @@ export function configureDashboardNamespace(
       try {
         const agentRuntime = p.agentRuntime ?? 'kernel'
         const executionMode = p.executionMode ?? 'chat'
+        if (p.goal && (agentRuntime !== 'kernel' || executionMode !== 'chat')) {
+          ack?.({ ok: false, error: 'Goal mode currently supports Kernel Chat Sessions only' })
+          return
+        }
         const registeredMode = deps.loopDeps.extensions?.getSessionMode(executionMode)
         if (!registeredMode) {
           ack?.({ ok: false, error: `unsupported session execution mode: ${executionMode}` })
@@ -1997,7 +2142,11 @@ export function configureDashboardNamespace(
             : defaultConfig,
           mcpToolsForWorkspace(executorSnapshotFor(deps), p.workspaceId),
         )
-        const sessionConfig = deriveSessionConfig(sessionBaseConfig, p.tools, executionMode)
+        const baseConfig = deriveSessionConfig(sessionBaseConfig, p.tools, executionMode)
+        const sessionConfig = p.goal ? {
+          ...baseConfig,
+          systemPrompt: `${baseConfig.systemPrompt}\n\nGoal: ${p.goal.objective}\nSuccess criteria: ${p.goal.successCriteria}\nWork toward the Goal within the bounded Session. When and only when the criteria are satisfied, end your final answer with GOAL_COMPLETE on its own line.`,
+        } : baseConfig
         const { record, created } = await deps.store.ensure({
           sessionId: p.sessionId,
           agentRuntime,
@@ -2006,6 +2155,14 @@ export function configureDashboardNamespace(
           ...(agentRuntime === 'copilot' ? { externalSessionId: p.sessionId } : {}),
           defaultConfig: sessionConfig,
           runtimeConfig: sessionConfig,
+          ...(p.goal ? { goal: {
+            objective: p.goal.objective,
+            successCriteria: p.goal.successCriteria,
+            maxTurns: p.goal.maxTurns ?? 12,
+            turns: 0,
+            status: 'active' as const,
+            lastTerminalCursor: 0,
+          } } : {}),
           ...(p.workspaceId !== undefined ? { workspaceId: p.workspaceId } : {}),
           ...(p.workspaceName !== undefined
             ? { workspaceName: p.workspaceName }
@@ -2029,7 +2186,10 @@ export function configureDashboardNamespace(
             await refreshSessionSkillsIfNeeded(deps, record)
             await socket.join(sessionRoom(record.sessionId))
             await emitSessionReady(readyEventFor(record, effectiveModelForRecord(deps, record), created ? 'created' : 'load', contextWindowForSession(deps, record), runtimeCompactionPolicyFor(deps, record), runtimeCompactStatusFor(deps, record)), record)
-            if (!created) return
+            if (!created) {
+              if (record.goal) await publishGoal(record.sessionId)
+              return
+            }
             deps.audit?.log({ action: 'dashboard.session_create', actor: auditActor(socket), target: { sessionId: record.sessionId, workspaceId: record.workspaceId }, outcome: 'ok', metadata: { cwd: record.state.cwd } })
             await broadcastSessionList(deps)
             void Promise.resolve(deps.onSessionCreated?.(record)).catch(() => {})

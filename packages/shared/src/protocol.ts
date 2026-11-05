@@ -693,6 +693,26 @@ export type ClientCreateSession = {
    */
   tools?: readonly string[]
   selectedModel?: string
+  goal?: { objective: string; successCriteria: string; maxTurns?: number }
+}
+
+export type SessionGoal = {
+  objective: string
+  successCriteria: string
+  maxTurns: number
+  turns: number
+  status: 'active' | 'paused' | 'completed' | 'cancelled' | 'budget_exhausted'
+  /** Declared completion, not independently verified against success criteria. */
+  completionSource?: 'model' | 'user'
+  /** Last settled Agent cursor counted against the budget. */
+  lastTerminalCursor: number
+  lastControl?: { operationId: string; action: ClientGoalControl['action'] }
+}
+
+export type ClientGoalControl = {
+  sessionId: string
+  operationId: string
+  action: 'pause' | 'resume' | 'cancel' | 'complete'
 }
 
 export type ClientGetDagRun = {
@@ -1563,6 +1583,7 @@ export type SessionSummary = {
    */
   label?: string
   preferences?: SessionPreferences
+  goal?: SessionGoal
 }
 
 export type ServerSessionsPayload = {
@@ -2112,6 +2133,7 @@ export type DashboardClientToServerEvents = {
   'client:set_approval_mode': (payload: ClientSetApprovalMode, ack?: (result: RpcAck) => void) => void
   'client:fork': (payload: ClientFork) => void
   'client:create_session': (payload: ClientCreateSession, ack?: (result: RpcAck) => void) => void
+  'client:goal_control': (payload: ClientGoalControl, ack?: (result: RpcAck) => void) => void
   'client:get_dag_run': (payload: ClientGetDagRun, ack: (result: RpcAck<DagRun | null>) => void) => void
   'client:list_dag_runs': (payload: ClientListDagRuns, ack: (result: RpcAck<readonly DagRun[]>) => void) => void
   'client:initialize_dag': (payload: ClientInitializeDag, ack: (result: RpcAck<DagRun>) => void) => void

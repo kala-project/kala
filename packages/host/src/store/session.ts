@@ -28,6 +28,7 @@ import type {
   SessionExecutionMode,
   SessionPreferences,
   SessionPreferencesPatch,
+  SessionGoal,
   SnapshotEntry,
 } from '@agent-kernel/shared'
 import { createInitialState, fold } from '@agent-kernel/kernel'
@@ -62,6 +63,7 @@ import type { SessionFsProvider } from '@github/copilot-sdk'
 
 export type SessionRecord = {
   readonly sessionId: string
+  goal?: SessionGoal
   readonly agentRuntime: AgentRuntimeId
   readonly executionMode: SessionExecutionMode
   readonly agentRuntimeVersion?: string
@@ -387,6 +389,7 @@ export type CreateSessionParams = {
   initialApprovalMode?: import('@agent-kernel/kernel').ApprovalMode
   memoryPolicy?: SessionMemoryPolicy
   preferences?: SessionPreferences
+  goal?: SessionGoal
 }
 
 export type ForkSessionParams = {
@@ -425,6 +428,7 @@ const SESSION_ARTIFACT_KINDS = [
 
 export class SessionStore {
   private readonly records = new Map<string, SessionRecord>()
+  private readonly goalTails = new Map<string, Promise<unknown>>()
   private readonly recordOwnerCacheKeys = new Map<string, string>()
   private readonly summaryCache = new Map<string, CachedSessionSummary>()
   private readonly summaryLoads = new Map<string, {
@@ -626,6 +630,54 @@ export class SessionStore {
       }
     }
     return appended
+  }
+
+  /** Compare-and-set Goal state in the same authority as the Session. */
+  async updateGoal(
+    sessionId: string,
+    change: (goal: SessionGoal, record: SessionRecord) => SessionGoal | undefined,
+  ): Promise<SessionGoal | undefined> {
+    const previous = this.goalTails.get(sessionId) ?? Promise.resolve()
+    const current = previous.catch(() => undefined).then(() => this.updateGoalInner(sessionId, change))
+    this.goalTails.set(sessionId, current)
+    try {
+      return await current
+    } finally {
+      if (this.goalTails.get(sessionId) === current) this.goalTails.delete(sessionId)
+    }
+  }
+
+  private async updateGoalInner(
+    sessionId: string,
+    change: (goal: SessionGoal, record: SessionRecord) => SessionGoal | undefined,
+  ): Promise<SessionGoal | undefined> {
+    this.assertStorageWritable(sessionId)
+    const record = this.get(sessionId) ?? await this.load(sessionId, { recoverDangling: false })
+    if (!record.goal) throw new Error('Session has no Goal')
+    if (this.options.authority) {
+      await this.authorityReady
+      let updated: SessionGoal | undefined
+      const persisted = await this.options.authority.mutate(sessionId, {
+        mutationId: `goal:${randomMutationId()}`,
+        eventType: 'goal.changed',
+        apply(current) {
+          if (!current) throw new SessionNotFoundError(sessionId)
+          const currentRecord = restoreSessionRecord(current, record.logPath)
+          if (!currentRecord.goal) throw new Error('Session has no Goal')
+          updated = change(currentRecord.goal, currentRecord)
+          return updated ? { ...current, goal: updated } : current
+        },
+      })
+      if (!persisted) throw new SessionNotFoundError(sessionId)
+      record.goal = (persisted as SessionRecord).goal
+      return updated
+    }
+    const updated = change(record.goal, record)
+    if (!updated) return undefined
+    await this.appendRuntimeMetadata(sessionId, { action: 'goal.state', payload: { goal: updated } }, { durable: true })
+    record.goal = updated
+    this.summaryCache.delete(record.logPath)
+    return updated
   }
 
   /** Read the latest Host metadata without exposing a JSONL path to callers. */
@@ -838,6 +890,7 @@ export class SessionStore {
     const header = await writeHeader({
       path: logPath,
       sessionId,
+      ...(params.goal ? { goal: params.goal } : {}),
       agentRuntime: params.agentRuntime ?? 'kernel',
       executionMode: params.executionMode ?? 'chat',
       ...(params.agentRuntimeVersion ? { agentRuntimeVersion: params.agentRuntimeVersion } : {}),
@@ -881,6 +934,7 @@ export class SessionStore {
     })
     const record: SessionRecord = {
       sessionId,
+      ...(params.goal ? { goal: params.goal } : {}),
       agentRuntime: params.agentRuntime ?? 'kernel',
       executionMode: params.executionMode ?? 'chat',
       ...(params.agentRuntimeVersion ? { agentRuntimeVersion: params.agentRuntimeVersion } : {}),
@@ -1184,10 +1238,12 @@ export class SessionStore {
     initialCwd?: string
     preferences?: SessionPreferences
     runtimeConfig?: AgentConfig
+    goal?: SessionGoal
   }): Promise<{ record: SessionRecord; created: boolean }> {
     this.assertStorageWritable(params.sessionId)
     const cached = this.records.get(params.sessionId)
     if (cached) {
+      assertMatchingGoal(cached.goal, params.goal)
       this.applyRuntimeConfig(cached, this.resolveRuntimeConfig(params.runtimeConfig ?? params.defaultConfig, cached.executionMode))
       await this.applyMissingCreateMetadata(cached, params)
       return { record: cached, created: false }
@@ -1195,6 +1251,7 @@ export class SessionStore {
     const inflight = this.inFlight.get(params.sessionId)
     if (inflight) {
       const record = await inflight
+      assertMatchingGoal(record.goal, params.goal)
       this.applyRuntimeConfig(record, this.resolveRuntimeConfig(params.runtimeConfig ?? params.defaultConfig, record.executionMode))
       await this.applyMissingCreateMetadata(record, params)
       return { record, created: false }
@@ -1214,6 +1271,7 @@ export class SessionStore {
       params.executionMode,
       params.agentRuntimeVersion,
       params.externalSessionId,
+      params.goal,
       this.resolveRuntimeConfig(params.runtimeConfig, params.executionMode ?? 'chat') ?? params.defaultConfig,
       () => { created = true },
     ).finally(() => {
@@ -1221,6 +1279,7 @@ export class SessionStore {
     })
     this.inFlight.set(params.sessionId, promise)
     const record = await promise
+    assertMatchingGoal(record.goal, params.goal)
     return { record, created }
   }
 
@@ -1238,11 +1297,13 @@ export class SessionStore {
     executionMode: SessionExecutionMode | undefined,
     agentRuntimeVersion: string | undefined,
     externalSessionId: string | undefined,
+    goal: SessionGoal | undefined,
     runtimeConfig: AgentConfig,
     markCreated: () => void,
   ): Promise<SessionRecord> {
     try {
       const record = await this.loadInner(sessionId, { recoverDangling: true, runtimeConfig })
+      assertMatchingGoal(record.goal, goal)
       await this.applyMissingCreateMetadata(record, {
         sessionId,
         defaultConfig,
@@ -1253,9 +1314,11 @@ export class SessionStore {
         ...(organizationRole !== undefined ? { organizationRole } : {}),
         ...(initialCwd !== undefined ? { initialCwd } : {}),
         ...(preferences !== undefined ? { preferences } : {}),
+        ...(goal !== undefined ? { goal } : {}),
       })
       return record
-    } catch {
+    } catch (error) {
+      if (!(error instanceof SessionNotFoundError)) throw error
       // No existing log — create a fresh one. `create` itself performs a
       // single writeHeader() which is the atomic commit point; if it
       // throws the sessionId stays uninstalled and the next caller can
@@ -1275,6 +1338,7 @@ export class SessionStore {
         ...(organizationRole !== undefined ? { organizationRole } : {}),
         ...(initialCwd !== undefined ? { initialCwd } : {}),
         ...(preferences !== undefined ? { preferences } : {}),
+        ...(goal !== undefined ? { goal } : {}),
       })
     }
   }
@@ -2282,6 +2346,7 @@ export class SessionStore {
     if (
       options.recoverDangling &&
       agentRuntime === 'kernel' &&
+      !parsed.header.goal &&
       (finalState.status === 'awaiting_approval' ||
         finalState.status === 'executing_tools') &&
       finalState.pendingCalls.length > 0
@@ -2346,6 +2411,7 @@ export class SessionStore {
     if (
       options.recoverDangling &&
       agentRuntime === 'kernel' &&
+      !parsed.header.goal &&
       !recoveredPending &&
       finalState.status === 'thinking' &&
       finalState.pendingCalls.length === 0
@@ -2420,6 +2486,7 @@ export class SessionStore {
 
     const record: SessionRecord = {
       sessionId,
+      ...(latestGoal(parsed.header.goal, parsed.runtimeMetadata) ? { goal: latestGoal(parsed.header.goal, parsed.runtimeMetadata) } : {}),
       agentRuntime,
       executionMode: parsed.header.executionMode ?? 'chat',
       ...(parsed.header.agentRuntimeVersion ? { agentRuntimeVersion: parsed.header.agentRuntimeVersion } : {}),
@@ -2630,6 +2697,7 @@ function recordForCreate(
 ): SessionRecord {
   return {
     sessionId,
+    ...(params.goal ? { goal: params.goal } : {}),
     agentRuntime: params.agentRuntime ?? 'kernel',
     executionMode: params.executionMode ?? 'chat',
     ...(params.agentRuntimeVersion ? { agentRuntimeVersion: params.agentRuntimeVersion } : {}),
@@ -2737,9 +2805,34 @@ function randomMutationId(): string {
   return ulid()
 }
 
+function assertMatchingGoal(existing: SessionGoal | undefined, requested: SessionGoal | undefined): void {
+  if (!requested) return
+  if (!existing || existing.objective !== requested.objective
+    || existing.successCriteria !== requested.successCriteria || existing.maxTurns !== requested.maxTurns) {
+    throw new Error('Session Goal creation conflicts with an existing Session')
+  }
+}
+
+function latestGoal(initial: SessionGoal | undefined, entries: readonly RuntimeMetadataEntry[]): SessionGoal | undefined {
+  let goal = initial
+  for (const entry of entries) {
+    if (entry.action !== 'goal.state') continue
+    const candidate = entry.payload.goal as SessionGoal | undefined
+    if (candidate && typeof candidate.objective === 'string'
+      && typeof candidate.successCriteria === 'string'
+      && Number.isSafeInteger(candidate.maxTurns) && Number.isSafeInteger(candidate.turns)
+      && Number.isSafeInteger(candidate.lastTerminalCursor)
+      && ['active', 'paused', 'completed', 'cancelled', 'budget_exhausted'].includes(candidate.status)) {
+      goal = candidate
+    }
+  }
+  return goal
+}
+
 function summarizeRecord(record: SessionRecord): SessionSummary {
   return {
     sessionId: record.sessionId,
+    ...(record.goal ? { goal: record.goal } : {}),
     agentRuntime: record.agentRuntime,
     executionMode: record.executionMode,
     ...(record.agentRuntimeVersion ? { agentRuntimeVersion: record.agentRuntimeVersion } : {}),
@@ -2883,6 +2976,7 @@ function summarizeLog(
   )
   return {
     sessionId: header.sessionId,
+    ...(latestGoal(header.goal, parsed.runtimeMetadata) ? { goal: latestGoal(header.goal, parsed.runtimeMetadata) } : {}),
     agentRuntime,
     executionMode: header.executionMode ?? 'chat',
     createdAt: header.ts,

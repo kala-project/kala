@@ -195,7 +195,18 @@ export const ClientCreateSessionSchema = z.object({
   cwd: z.string().optional(),
   tools: z.array(z.string()).readonly().optional(),
   selectedModel: z.string().optional(),
+  goal: z.object({
+    objective: z.string().trim().min(1).max(20_000),
+    successCriteria: z.string().trim().min(1).max(20_000),
+    maxTurns: z.number().int().min(1).max(100).optional(),
+  }).strict().optional(),
 }) satisfies z.ZodType<ClientCreateSession>
+
+export const ClientGoalControlSchema = z.object({
+  sessionId: SessionIdSchema,
+  operationId: z.string().min(1).max(128),
+  action: z.enum(['pause', 'resume', 'cancel', 'complete']),
+}).strict() satisfies z.ZodType<import('../protocol.js').ClientGoalControl>
 
 const DagPlanNodeInputSchema = z.object({
   id: NonEmptyStringSchema.max(128),

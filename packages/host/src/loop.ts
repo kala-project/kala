@@ -216,7 +216,10 @@ export function runHostLoop(deps: HostLoopDeps): LoopHandle {
     },
     async dispatch(sessionId, event, options) {
       if (effectsStopped && event.kind !== 'cancel') throw new Error('Unit is closing; effects are stopped')
-      if (event.kind === 'user_message' || event.kind === 'clear') explicitStopSessions.delete(sessionId)
+      const goalContinuation = event.kind === 'user_message'
+        && event.operationId?.startsWith(`goal:${sessionId}:`)
+      if (goalContinuation && explicitStopSessions.has(sessionId)) return
+      if ((event.kind === 'user_message' && !goalContinuation) || event.kind === 'clear') explicitStopSessions.delete(sessionId)
       if (event.kind === 'cancel' && !options?.internalBoundaryCancel) explicitStopSessions.add(sessionId)
       if (drainMode !== 'none' && event.kind !== 'cancel') {
         if (event.kind === 'user_message') {
@@ -253,6 +256,12 @@ export function runHostLoop(deps: HostLoopDeps): LoopHandle {
       const next = prior
         .catch(() => {})
         .then(async () => {
+          if (goalContinuation) {
+            const goal = deps.store.get(sessionId)?.goal
+            if (!goal || goal.status !== 'active' || drainMode !== 'none'
+              || event.kind !== 'user_message'
+              || event.operationId !== `goal:${sessionId}:${goal.turns + 1}`) return
+          }
           const lifecycleContext = {
             deps,
             sessionId,
@@ -278,6 +287,16 @@ export function runHostLoop(deps: HostLoopDeps): LoopHandle {
             toolSettled: markToolSettled,
           }, notifyCheckpoint)
           await (deps.extensions ?? createBuiltinExtensionRegistry()).afterTurn(lifecycleContext)
+          if (deps.store.get(sessionId)?.goal?.status === 'active'
+            && deps.store.get(sessionId)?.state.status === 'error') {
+            const paused = await deps.store.updateGoal(sessionId, (goal) =>
+              goal.status === 'active' ? { ...goal, status: 'paused' } : undefined)
+            if (paused) await deps.onGoalStateChanged?.(sessionId)
+          }
+          if (deps.store.get(sessionId)?.goal && deps.store.get(sessionId)?.state.status === 'done'
+            && !explicitStopSessions.has(sessionId) && drainMode === 'none') {
+            await deps.onGoalTurnSettled?.(sessionId)
+          }
         })
         .finally(() => {
           if (sessionTails.get(sessionId) === next) sessionTails.delete(sessionId)
@@ -330,6 +349,11 @@ export function runHostLoop(deps: HostLoopDeps): LoopHandle {
         if (explicitStopSessions.has(sessionId) || drainMode !== 'none' || sessionTails.has(sessionId) || inFlightAborts.has(sessionId)) return false
         const record = deps.store.get(sessionId) ?? await deps.store.load(sessionId, { recoverDangling: false }).catch(() => undefined)
         if (!record) return false
+        if (record.goal && !['done', 'idle', 'error'].includes(record.state.status)) {
+          const paused = await deps.store.updateGoal(sessionId, (goal) => goal.status === 'active' ? { ...goal, status: 'paused' } : undefined)
+          if (paused) await deps.onGoalStateChanged?.(sessionId)
+          return false
+        }
         if (record.state.status === 'thinking' && record.state.pendingCalls.length === 0) {
           await dispatchOne(deps, sessionId, interruptedLlmRecoveryEvent(), inFlightAborts, undefined, undefined, {
             handle,
@@ -412,6 +436,11 @@ export function runHostLoop(deps: HostLoopDeps): LoopHandle {
         if (explicitStopSessions.has(sessionId) || drainMode !== 'none' || sessionTails.has(sessionId) || inFlightAborts.has(sessionId)) return false
         const record = deps.store.get(sessionId) ?? await deps.store.load(sessionId, { recoverDangling: false }).catch(() => undefined)
         if (!record) return false
+        if (record.goal && !['done', 'idle', 'error'].includes(record.state.status)) {
+          const paused = await deps.store.updateGoal(sessionId, (goal) => goal.status === 'active' ? { ...goal, status: 'paused' } : undefined)
+          if (paused) await deps.onGoalStateChanged?.(sessionId)
+          return false
+        }
         const runtime: LoopRuntime = {
           handle,
           loopGuard,

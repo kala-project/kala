@@ -83,6 +83,57 @@ describe('NewSessionDialog', () => {
     expect(container.firstChild).toBeNull()
   })
 
+  it('creates a Goal only after its objective and completion criteria are entered', () => {
+    const onCreate = vi.fn()
+    render(<NewSessionDialog open workspaces={[wsA]} socket={makeSocket().socket as never}
+      onCreate={onCreate} onCreateSimpleChat={() => {}} onCancel={() => {}} />)
+    expect(screen.queryByTestId('new-session-goal-fields')).toBeNull()
+    fireEvent.click(screen.getByTestId('new-session-mode-goal'))
+    const create = screen.getByTestId('new-session-create')
+    expect(create.hasAttribute('disabled')).toBe(true)
+    fireEvent.change(screen.getByTestId('new-session-goal-objective'), { target: { value: 'Ship the feature' } })
+    expect(create.hasAttribute('disabled')).toBe(true)
+    fireEvent.change(screen.getByTestId('new-session-goal-criteria'), { target: { value: 'Focused tests pass' } })
+    fireEvent.click(create)
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({
+      executionMode: 'chat',
+      goal: { objective: 'Ship the feature', successCriteria: 'Focused tests pass' },
+    }))
+  })
+
+  it('rejects invalid Goal turn budgets and does not send Goal settings in standard chat', () => {
+    const onCreate = vi.fn()
+    render(<NewSessionDialog open workspaces={[wsA]} socket={makeSocket().socket as never}
+      onCreate={onCreate} onCreateSimpleChat={() => {}} onCancel={() => {}} />)
+    fireEvent.click(screen.getByTestId('new-session-mode-goal'))
+    fireEvent.change(screen.getByTestId('new-session-goal-objective'), { target: { value: 'Ship' } })
+    fireEvent.change(screen.getByTestId('new-session-goal-criteria'), { target: { value: 'Tests pass' } })
+    fireEvent.change(screen.getByLabelText('Maximum turns'), { target: { value: '0' } })
+    expect(screen.getByTestId('new-session-create').hasAttribute('disabled')).toBe(true)
+    fireEvent.change(screen.getByLabelText('Maximum turns'), { target: { value: '5' } })
+    fireEvent.click(screen.getByTestId('new-session-create'))
+    expect(onCreate).toHaveBeenLastCalledWith(expect.objectContaining({ goal: {
+      objective: 'Ship', successCriteria: 'Tests pass', maxTurns: 5,
+    } }))
+    fireEvent.click(screen.getByTestId('new-session-mode-chat'))
+    fireEvent.click(screen.getByTestId('new-session-create'))
+    expect(onCreate).toHaveBeenLastCalledWith(expect.not.objectContaining({ goal: expect.anything() }))
+  })
+
+  it('does not offer Goal with an unsupported agent runtime', () => {
+    render(<NewSessionDialog open workspaces={[wsA]} socket={makeSocket().socket as never}
+      agentRuntimes={['kernel', 'copilot'].map((id) => ({
+        id: id as 'kernel' | 'copilot', label: id, description: id, available: true, status: 'ready' as const,
+        capabilities: KERNEL_AGENT_RUNTIME_CAPABILITIES,
+      }))}
+      onCreate={() => {}} onCreateSimpleChat={() => {}} onCancel={() => {}} />)
+    fireEvent.click(screen.getByTestId('new-session-mode-goal'))
+    fireEvent.click(screen.getByTestId('new-session-runtime-copilot'))
+    expect(screen.queryByTestId('new-session-goal-fields')).toBeNull()
+    expect(screen.getByTestId('new-session-mode-goal').hasAttribute('disabled')).toBe(true)
+    expect(screen.getByTestId('new-session-mode-chat').getAttribute('aria-checked')).toBe('true')
+  })
+
   it('uses one visible Finder column on mobile while preserving desktop column history', async () => {
     const harness = makeSocket()
     render(<NewSessionDialog open workspaces={[wsA]} socket={harness.socket as never} onCreate={() => {}} onCreateSimpleChat={() => {}} onCancel={() => {}} />)

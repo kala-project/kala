@@ -31,6 +31,7 @@ import type {
   SnapshotEntry,
 } from '@agent-kernel/shared'
 import type { SessionExecutionMode } from '@agent-kernel/shared'
+import type { SessionGoal } from '@agent-kernel/shared'
 import { LOG_FORMAT_VERSION, redactLlmTrace } from '@agent-kernel/shared'
 
 const KERNEL_VERSION = '@agent-kernel/kernel@0.0.0'
@@ -38,6 +39,7 @@ const KERNEL_VERSION = '@agent-kernel/kernel@0.0.0'
 export type WriteHeaderParams = {
   path: string
   sessionId: string
+  goal?: SessionGoal
   agentRuntime?: AgentRuntimeId
   executionMode?: SessionExecutionMode
   agentRuntimeVersion?: string
@@ -65,6 +67,7 @@ export async function writeHeader(params: WriteHeaderParams): Promise<HeaderEntr
     seq: 0,
     ts: new Date().toISOString(),
     sessionId: params.sessionId,
+    ...(params.goal ? { goal: params.goal } : {}),
     ...(params.agentRuntime ? { agentRuntime: params.agentRuntime } : {}),
     ...(params.executionMode ? { executionMode: params.executionMode } : {}),
     ...(params.agentRuntimeVersion ? { agentRuntimeVersion: params.agentRuntimeVersion } : {}),

@@ -40,6 +40,7 @@ type Props = {
     workspaceId: string
     workspaceName: string | undefined
     cwd: string
+    goal?: { objective: string; successCriteria: string; maxTurns?: number }
   }): void
   onCreateSimpleChat(agentRuntime: AgentRuntimeId): void
   onCancel(): void
@@ -71,6 +72,10 @@ export function NewSessionDialog({
   const [workspaceId, setWorkspaceId] = useState('')
   const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeId>('kernel')
   const [executionMode, setExecutionMode] = useState<SessionExecutionMode>('chat')
+  const [goalEnabled, setGoalEnabled] = useState(false)
+  const [goalObjective, setGoalObjective] = useState('')
+  const [goalSuccessCriteria, setGoalSuccessCriteria] = useState('')
+  const [goalMaxTurns, setGoalMaxTurns] = useState('')
   const [cwd, setCwd] = useState('')
   const [missingWorkspaceId, setMissingWorkspaceId] = useState<string | null>(null)
   const [copilotInstallCopied, setCopilotInstallCopied] = useState(false)
@@ -89,6 +94,10 @@ export function NewSessionDialog({
     if (initializedOpenRef.current) return
     initializedOpenRef.current = true
     setExecutionMode('chat')
+    setGoalEnabled(false)
+    setGoalObjective('')
+    setGoalSuccessCriteria('')
+    setGoalMaxTurns('')
     const rememberedRuntime = readStringPref(PREF_AGENT_RUNTIME, 'kernel')
     const preferredRuntime = agentRuntimes.find((runtime) => runtime.id === rememberedRuntime && runtime.available)
       ?? agentRuntimes.find((runtime) => runtime.id === 'kernel' && runtime.available)
@@ -126,17 +135,29 @@ export function NewSessionDialog({
 
   const selectAgentRuntime = (runtime: AgentRuntimeId): void => {
     setAgentRuntime(runtime)
+    if (runtime !== 'kernel') {
+      setGoalEnabled(false)
+      setExecutionMode('chat')
+    }
     writeStringPref(PREF_AGENT_RUNTIME, runtime)
   }
 
+  const goalValid = !goalEnabled || (goalObjective.trim().length > 0 && goalSuccessCriteria.trim().length > 0
+    && (goalMaxTurns === '' || (Number.isSafeInteger(Number(goalMaxTurns)) && Number(goalMaxTurns) >= 1 && Number(goalMaxTurns) <= 100)))
+
   const create = (): void => {
-    if (submitting || !selectedWorkspace || cwd.trim().length === 0) return
+    if (submitting || !selectedWorkspace || cwd.trim().length === 0 || !goalValid || (goalEnabled && agentRuntime !== 'kernel')) return
     onCreate({
       agentRuntime,
       executionMode,
       workspaceId: selectedWorkspace.workspaceId,
       workspaceName: selectedWorkspace.workspaceName,
       cwd: cwd.trim(),
+      ...(goalEnabled ? { goal: {
+        objective: goalObjective.trim(),
+        successCriteria: goalSuccessCriteria.trim(),
+        ...(goalMaxTurns !== '' ? { maxTurns: Number(goalMaxTurns) } : {}),
+      } } : {}),
     })
   }
 
@@ -226,21 +247,24 @@ export function NewSessionDialog({
               <span id="new-session-mode-label" className="text-caption font-semibold text-muted-foreground">
                 {t('dialogs.chooseExecutionMode')}
               </span>
-              <HelpHint label={t('dialogs.chooseExecutionMode')}>{(['chat', 'dag'] as const).map((mode) => <span className="mb-2 block last:mb-0" key={mode}><strong>{t(`dialogs.executionMode.${mode}.label`)}</strong><br />{t(`dialogs.executionMode.${mode}.description`)}</span>)}</HelpHint>
+              <HelpHint label={t('dialogs.chooseExecutionMode')}>{(['chat', 'goal', 'dag'] as const).map((mode) => <span className="mb-2 block last:mb-0" key={mode}><strong>{t(`dialogs.executionMode.${mode}.label`)}</strong><br />{t(`dialogs.executionMode.${mode}.description`)}</span>)}</HelpHint>
             </div>
-            <div className="grid min-w-0 grid-cols-2 gap-1 rounded-md border border-border/50 bg-card p-0.5" role="radiogroup" aria-labelledby="new-session-mode-label">
-              {(['chat', 'dag'] as const).map((mode) => {
-                const selected = executionMode === mode
+            <div className="grid min-w-0 grid-cols-3 gap-1 rounded-md border border-border/50 bg-card p-0.5" role="radiogroup" aria-labelledby="new-session-mode-label">
+              {(['chat', 'goal', 'dag'] as const).map((mode) => {
+                const selected = mode === 'goal' ? goalEnabled : !goalEnabled && executionMode === mode
                 return (
                   <button
                     key={mode}
                     type="button"
                     role="radio"
                     aria-checked={selected}
-                    disabled={submitting}
-                    onClick={() => setExecutionMode(mode)}
+                    disabled={submitting || (mode === 'goal' && agentRuntime !== 'kernel')}
+                    onClick={() => {
+                      setGoalEnabled(mode === 'goal')
+                      setExecutionMode(mode === 'goal' ? 'chat' : mode)
+                    }}
                     data-testid={`new-session-mode-${mode}`}
-                    title={t(`dialogs.executionMode.${mode}.description`)}
+                    title={mode === 'goal' && agentRuntime !== 'kernel' ? t('dialogs.goalKernelOnly') : t(`dialogs.executionMode.${mode}.description`)}
                     className={cn(
                       'flex min-h-[3.25rem] min-w-0 flex-col items-center justify-center break-words rounded px-1.5 py-1 text-center text-sm font-medium leading-tight transition-colors',
                       selected ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-muted hover:text-foreground',
@@ -253,6 +277,26 @@ export function NewSessionDialog({
               })}
             </div>
           </div>
+          {goalEnabled ? <div className="flex min-w-0 flex-col gap-2 sm:col-span-2" data-testid="new-session-goal-fields">
+            <label className="text-caption font-semibold text-muted-foreground" htmlFor="new-session-goal-objective">{t('dialogs.goalObjective')}</label>
+            <textarea id="new-session-goal-objective" data-testid="new-session-goal-objective" value={goalObjective}
+              onChange={(event) => setGoalObjective(event.target.value)} maxLength={20000} rows={2}
+              className="min-h-16 w-full resize-y rounded-md border border-border/60 bg-background px-3 py-2 text-sm" />
+            <label className="text-caption font-semibold text-muted-foreground" htmlFor="new-session-goal-criteria">{t('dialogs.goalSuccessCriteria')}</label>
+            <textarea id="new-session-goal-criteria" data-testid="new-session-goal-criteria" value={goalSuccessCriteria}
+              onChange={(event) => setGoalSuccessCriteria(event.target.value)} maxLength={20000} rows={2}
+              className="min-h-16 w-full resize-y rounded-md border border-border/60 bg-background px-3 py-2 text-sm" />
+            <details className="text-sm text-muted-foreground">
+              <summary className="cursor-pointer">{t('dialogs.goalAdvanced')}</summary>
+              <label className="mt-2 flex items-center gap-2" htmlFor="new-session-goal-max-turns">
+                {t('dialogs.goalMaxTurns')}
+                <input id="new-session-goal-max-turns" type="number" min={1} max={100} step={1}
+                  value={goalMaxTurns} onChange={(event) => setGoalMaxTurns(event.target.value)}
+                  placeholder={t('dialogs.goalDefaultBudget')}
+                  className="w-28 rounded-md border border-border/60 bg-background px-2 py-1 text-sm" />
+              </label>
+            </details>
+          </div> : null}
         </ScrollArea>
         <div className={cn(
           'grid min-h-0 min-w-0 grid-cols-[minmax(0,1fr)] overflow-hidden',
@@ -353,10 +397,10 @@ export function NewSessionDialog({
           <Button
             className="min-h-11"
             onClick={create}
-            disabled={submitting || !selectedWorkspace || cwd.trim().length === 0}
+            disabled={submitting || !selectedWorkspace || cwd.trim().length === 0 || !goalValid || (goalEnabled && agentRuntime !== 'kernel')}
             data-testid="new-session-create"
           >
-            {submitting ? t('dialogs.newSessionCreating') : t('dialogs.newWorkspaceSessionCreate')}
+            {submitting ? t('dialogs.newSessionCreating') : goalEnabled ? t('dialogs.startGoal') : t('dialogs.newWorkspaceSessionCreate')}
           </Button>
         </DialogFooter></ScrollArea>
       </DialogContent>

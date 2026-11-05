@@ -68,6 +68,7 @@ import { AskUserChoiceCard } from './features/chat/AskUserChoiceCard.js'
 import { BackgroundShellsButton } from './features/chat/BackgroundTerminalPanel.js'
 import { TerminalDialogContent } from './features/session-terminal/TerminalDialogContent.js'
 import { ChatPanel, type WorkspaceFileTarget } from './features/chat/ChatPanel.js'
+import { GoalStatusBar, type GoalAction } from './features/chat/GoalStatusBar.js'
 import { recentEmptyStateSessions } from './features/chat/recent-empty-sessions.js'
 import { APPROVAL_MODES, Composer } from './features/chat/Composer.js'
 import { SimpleChatDraft, type SimpleChatSubmission } from './features/chat/SimpleChatDraft.js'
@@ -291,11 +292,12 @@ export function App(): JSX.Element {
   const [inspectorOpen, setInspectorOpen] = useBooleanPref(PREF_INSPECTOR_OPEN, true)
   const [topbarOpen, setTopbarOpen] = useBooleanPref(PREF_TOPBAR_OPEN, true)
   const [pendingWorkspacePick, setPendingWorkspacePick] = useState<
-    { sessionId: string; workspaceId?: string } | null
+    { sessionId: string; firstOperationId: string; workspaceId?: string } | null
   >(null)
   const [workspacePickError, setWorkspacePickError] = useState<string | null>(null)
   const [workspacePickSubmitting, setWorkspacePickSubmitting] = useState(false)
   const [connectWorkspaceOpen, setConnectWorkspaceOpen] = useState(false)
+  const [goalControlPending, setGoalControlPending] = useState<string | null>(null)
   const [explorerDrawerOpen, setExplorerDrawerOpen] = useState(false)
   const [inspectorDrawerOpen, setInspectorDrawerOpen] = useState(false)
   const [rightPanelTabOverrides, setRightPanelTabOverrides] = useState<Record<string, RightPanelTab>>({})
@@ -1139,7 +1141,7 @@ export function App(): JSX.Element {
     cwd: string,
   ): Promise<void> => {
     if (!pendingWorkspacePick) return
-    const { sessionId } = pendingWorkspacePick
+    const { sessionId, firstOperationId } = pendingWorkspacePick
     if (!controlSocket) {
       setWorkspacePickError(t('app.socketNotConnected'))
       return
@@ -1242,6 +1244,7 @@ export function App(): JSX.Element {
     setSlashDeletePhrase('')
     setSlashDeleteConfirmationStep('phrase')
   }, [activeSessionId])
+      firstOperationId: randomId(),
   const resetSlashDelete = useCallback((): void => {
     setSlashDelete(null)
     setSlashDeletePhrase('')
@@ -1268,6 +1271,7 @@ export function App(): JSX.Element {
     newSession(workspaceId)
     setExplorerDrawerOpen(false)
   }, [newSession])
+    goal?: { objective: string; successCriteria: string; maxTurns?: number },
   const connectWorkspaceFromExplorerDrawer = useCallback((): void => {
     setExplorerDrawerOpen(false)
     setConnectWorkspaceOpen(true)
@@ -1285,11 +1289,23 @@ export function App(): JSX.Element {
   // empty-session entry point on an executor snapshot that is irrelevant there.
   // A Session directory is useful as soon as its own snapshot arrives. The
   // Executor snapshot enriches workspace presence independently and must not
+        ...(goal ? { goal } : {}),
   // prolong the directory's blocking state.
   const sessionListLoading = sessionDirectoryIsLoading(control.sessionsLoaded)
   const sessionDirectoryLoadingOwner = resolveSessionDirectoryLoadingOwner({
     loading: sessionListLoading && !hasSelectedSession,
     wideLayout,
+      if (goal) {
+        await admitUserMessage({
+          host: hostEndpoint.url,
+          ...(config.token ? { token: config.token } : {}),
+          sessionId,
+          operationId: firstOperationId,
+          text: `${goal.objective}\n\n${t('dialogs.goalSuccessCriteria')}: ${goal.successCriteria}`,
+          intent: 'text',
+          mode: 'steer',
+        })
+      }
     explorerOpen,
     explorerDrawerOpen,
   })
@@ -1299,6 +1315,20 @@ export function App(): JSX.Element {
     status: session.status,
     eventCount: currentSession?.eventCount ?? 0,
     firstUserMessage: currentSession?.firstUserMessage ?? null,
+  const controlGoal = async (sessionId: string, action: GoalAction): Promise<void> => {
+    if (!controlSocket) {
+      notify.error(t('dialogs.goalControlFailed'), { description: t('app.socketNotConnected') })
+      return
+    }
+    setGoalControlPending(sessionId)
+    try {
+      await emitRpc(controlSocket, 'client:goal_control', { sessionId, action })
+    } catch (error) {
+      notify.error(t('dialogs.goalControlFailed'), { description: error instanceof Error ? error.message : String(error) })
+    } finally {
+      setGoalControlPending(null)
+    }
+  }
   })
   const currentWorkspaceExecutor = useMemo(() => {
     if (!currentSession?.workspaceId) return undefined
@@ -2441,6 +2471,12 @@ export function App(): JSX.Element {
                               </Button>
                             </div>
                           </BannerSlot>
+                        <>
+                          {currentSession?.goal ? <GoalStatusBar
+                            goal={currentSession.goal}
+                            busy={goalControlPending === activeSessionId}
+                            onAction={(action) => { void controlGoal(activeSessionId, action) }}
+                          /> : null}
                         ) : null}
                         {sessionWorkspaceKnownOffline ? (
                           <BannerSlot>
@@ -2533,6 +2569,7 @@ export function App(): JSX.Element {
                           onNewSession={createNewSessionFromCurrent}
                           onCancel={() => {
                             if (!session.socket || activeSessionId === null) return
+                        </>
                             if (cancelPendingSessionId === activeSessionId) return
                             if (awaitingAck) setCancelPendingSessionId(activeSessionId)
                             // Stop supersedes all not-yet-executed control work.
@@ -2983,8 +3020,8 @@ export function App(): JSX.Element {
         socket={controlSocket}
         error={workspacePickError}
         submitting={workspacePickSubmitting}
-        onCreate={({ agentRuntime, executionMode, workspaceId, workspaceName, cwd }) =>
-          void pickWorkspaceForNew(agentRuntime, executionMode, workspaceId, workspaceName, cwd)
+        onCreate={({ agentRuntime, executionMode, workspaceId, workspaceName, cwd, goal }) =>
+          void pickWorkspaceForNew(agentRuntime, executionMode, workspaceId, workspaceName, cwd, goal)
         }
         onCreateSimpleChat={(agentRuntime) => void startSimpleChat(agentRuntime)}
         onCancel={() => {
