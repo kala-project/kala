@@ -34,6 +34,7 @@ type Props = {
   socket: DashboardSocket | null
   error?: string | null
   submitting?: boolean
+  goalAvailable?: boolean
   onCreate(input: {
     agentRuntime: AgentRuntimeId
     executionMode: SessionExecutionMode
@@ -64,6 +65,7 @@ export function NewSessionDialog({
   socket,
   error,
   submitting = false,
+  goalAvailable = true,
   onCreate,
   onCreateSimpleChat,
   onCancel,
@@ -144,9 +146,10 @@ export function NewSessionDialog({
 
   const goalValid = !goalEnabled || (goalObjective.trim().length > 0 && goalSuccessCriteria.trim().length > 0
     && (goalMaxTurns === '' || (Number.isSafeInteger(Number(goalMaxTurns)) && Number(goalMaxTurns) >= 1 && Number(goalMaxTurns) <= 100)))
+  const availableModes = goalAvailable ? ['chat', 'goal', 'dag'] as const : ['chat', 'dag'] as const
 
   const create = (): void => {
-    if (submitting || !selectedWorkspace || cwd.trim().length === 0 || !goalValid || (goalEnabled && agentRuntime !== 'kernel')) return
+    if (submitting || !selectedWorkspace || cwd.trim().length === 0 || !goalValid || (goalEnabled && (!goalAvailable || agentRuntime !== 'kernel'))) return
     onCreate({
       agentRuntime,
       executionMode,
@@ -247,10 +250,10 @@ export function NewSessionDialog({
               <span id="new-session-mode-label" className="text-caption font-semibold text-muted-foreground">
                 {t('dialogs.chooseExecutionMode')}
               </span>
-              <HelpHint label={t('dialogs.chooseExecutionMode')}>{(['chat', 'goal', 'dag'] as const).map((mode) => <span className="mb-2 block last:mb-0" key={mode}><strong>{t(`dialogs.executionMode.${mode}.label`)}</strong><br />{t(`dialogs.executionMode.${mode}.description`)}</span>)}</HelpHint>
+              <HelpHint label={t('dialogs.chooseExecutionMode')}>{availableModes.map((mode) => <span className="mb-2 block last:mb-0" key={mode}><strong>{t(`dialogs.executionMode.${mode}.label`)}</strong><br />{t(`dialogs.executionMode.${mode}.description`)}</span>)}</HelpHint>
             </div>
-            <div className="grid min-w-0 grid-cols-3 gap-1 rounded-md border border-border/50 bg-card p-0.5" role="radiogroup" aria-labelledby="new-session-mode-label">
-              {(['chat', 'goal', 'dag'] as const).map((mode) => {
+            <div className={cn('grid min-w-0 gap-1 rounded-md border border-border/50 bg-card p-0.5', goalAvailable ? 'grid-cols-3' : 'grid-cols-2')} role="radiogroup" aria-labelledby="new-session-mode-label">
+              {availableModes.map((mode) => {
                 const selected = mode === 'goal' ? goalEnabled : !goalEnabled && executionMode === mode
                 return (
                   <button

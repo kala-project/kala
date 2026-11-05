@@ -83,6 +83,16 @@ describe('NewSessionDialog', () => {
     expect(container.firstChild).toBeNull()
   })
 
+  it('does not expose Goal creation to a Dashboard without Goal-enabled Runtime', () => {
+    const onCreate = vi.fn()
+    render(<NewSessionDialog open goalAvailable={false} workspaces={[wsA]} socket={makeSocket().socket as never}
+      onCreate={onCreate} onCreateSimpleChat={() => {}} onCancel={() => {}} />)
+    expect(screen.queryByTestId('new-session-mode-goal')).toBeNull()
+    expect(screen.queryByTestId('new-session-goal-fields')).toBeNull()
+    fireEvent.click(screen.getByTestId('new-session-create'))
+    expect(onCreate).toHaveBeenCalledWith(expect.not.objectContaining({ goal: expect.anything() }))
+  })
+
   it('creates a Goal only after its objective and completion criteria are entered', () => {
     const onCreate = vi.fn()
     render(<NewSessionDialog open workspaces={[wsA]} socket={makeSocket().socket as never}

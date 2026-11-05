@@ -3131,6 +3131,7 @@ export function App(): JSX.Element {
         socket={controlSocket}
         error={workspacePickError}
         submitting={workspacePickSubmitting}
+        goalAvailable={import.meta.env.VITE_KALA_GOAL_ENABLED === 'true'}
         onCreate={({ agentRuntime, executionMode, workspaceId, workspaceName, cwd, goal }) =>
           void pickWorkspaceForNew(agentRuntime, executionMode, workspaceId, workspaceName, cwd, goal)
         }

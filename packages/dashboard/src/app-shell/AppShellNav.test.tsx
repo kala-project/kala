@@ -60,6 +60,17 @@ describe('sidebar shell controls', () => {
     expect(onOpenSettings).toHaveBeenCalledOnce()
   })
 
+  it('hides the Desktop download entry when this publication has no approved release', () => {
+    vi.stubEnv('VITE_KALA_DESKTOP_DOWNLOAD_ENABLED', 'false')
+    try {
+      render(<SidebarGlobalActions orientation="vertical" onOpenSettings={() => {}} />)
+      expect(screen.queryByTestId('app-shell-download-desktop')).toBeNull()
+      expect(screen.getByTestId('app-shell-nav-settings-icon')).toBeTruthy()
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   it('aligns the account and accessible icon actions in one compact footer row', () => {
     render(<SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => {}} account={{ displayName: 'Owner', initials: 'O' }} />)
     const actions = screen.getByTestId('app-shell-global-actions')
