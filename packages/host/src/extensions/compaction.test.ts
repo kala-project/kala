@@ -133,6 +133,54 @@ describe('compaction extension', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  it.each(['auto', 'preflight'] as const)('durably prunes stale tool results for %s compaction without invoking a summarizer', async (trigger) => {
+    const configWithLimit = createConfig({
+      tools: [READ],
+      systemPrompt: 'sys',
+      contextLimit: 12_000,
+      softThreshold: 0.6,
+      hardThreshold: 0.9,
+    })
+    const record = await store.create({ config: configWithLimit, sessionId: 'sess-prune' })
+    const turns: Message[] = Array.from({ length: 8 }, (_, index) => {
+      const callId = `call-${index}`
+      return [
+        { role: 'assistant' as const, content: [{ type: 'tool_call' as const, callId, name: 'read', input: { path: 'log' } }] },
+        { role: 'tool' as const, content: [{ type: 'tool_result' as const, callId, ok: true, content: index < 2 ? `HEAD${'x'.repeat(18_000)}TAIL` : `recent-${index}` }] },
+      ]
+    }).flat()
+    let summarizerCalls = 0
+    const loop = runHostLoop({
+      store,
+      llm: {
+        name: 'prune-mock',
+        async call() {
+          summarizerCalls++
+          throw new Error('summarizer must not run')
+        },
+      },
+      tools: nullTools(),
+      broadcast: silentBroadcast(),
+    })
+    await loop.dispatch(record.sessionId, {
+      kind: 'messages_replaced',
+      reason: 'manual_rewrite',
+      replaceRange: { start: 0, end: record.state.messages.length },
+      replacementMessages: [...record.state.messages, { role: 'user', content: [{ type: 'text', text: 'inspect log' }] }, ...turns],
+    })
+    expect(await loop.compact(record.sessionId, { trigger, continuation: 'stay_resting' })).toBe(true)
+    expect(summarizerCalls).toBe(0)
+    const replaced = await readReplacedEvents(record.logPath)
+    expect(replaced).toHaveLength(1)
+    const persisted = await readSessionLog(record.logPath)
+    expect(persisted.runtimeMetadata.some((entry) => entry.action === 'preemptive_pruning_applied')).toBe(true)
+    const replay = await new SessionStore(dir).load(record.sessionId)
+    const result = replay!.state.messages[3]!.content[0]!
+    expect(result.type).toBe('tool_result')
+    if (result.type === 'tool_result') expect(result.content).toContain('[pruned tool_result:')
+    expect(replay!.state.messages.at(-1)!.content[0]).toEqual(turns.at(-1)!.content[0])
+  })
+
   it('summarizer failures increment the counter; three non-manual failures open the breaker', async () => {
     let call = 0
     const llm: LLMAdapter = {

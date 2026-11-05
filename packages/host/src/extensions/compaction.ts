@@ -46,9 +46,10 @@ import {
 } from '@agent-kernel/shared/enhancement'
 
 import type { CompactRequest, CompactStatusPayload, CompactTrigger, HostLoopDeps, LoopHandle } from '../loop-types.js'
-import { dispatchOne } from '../loop.js'
+import { dispatchOne, preflightTokenLimit } from '../loop.js'
 import type { SessionRecord } from '../store/session.js'
 import { contextSnapshot, shouldAutoCompact } from '../context/manager.js'
+import { preemptivelyPruneToolResults } from '../context/preemptive-pruning.js'
 
 /**
  * Compaction summarizer prompt.
@@ -277,6 +278,28 @@ export async function runCompact(
   try {
     const baselineCursor = record.state.cursor
     const contextLimit = deps.models?.contextWindow?.(sessionId) ?? record.config.contextLimit
+    if (trigger !== 'manual' && contextLimit && record.state.pendingCalls.length === 0) {
+      const pruned = preemptivelyPruneToolResults(record.state.messages, record.config, contextLimit)
+      const belowPolicyThreshold = trigger === 'preflight'
+        ? estimateMessageTokens(pruned.messages) < preflightTokenLimit(record.config, contextLimit)
+        : pruned.tokensAfter < Math.floor(contextLimit * (record.config.hardThreshold ?? 0.92) * 0.8)
+      if (pruned.pruned && belowPolicyThreshold) {
+        if (deps.store.get(sessionId) !== record || record.state.cursor !== baselineCursor) return false
+        await dispatchOne(deps, sessionId, {
+          kind: 'messages_replaced',
+          reason: 'compaction',
+          replaceRange: { start: 0, end: record.state.messages.length },
+          replacementMessages: [...pruned.messages],
+        }, aborts)
+        await appendCompactionMetadata(deps, sessionId, 'preemptive_pruning_applied', {
+          trigger,
+          prunedCount: pruned.prunedCount,
+          tokensBefore: pruned.tokensBefore,
+          tokensAfter: pruned.tokensAfter,
+        })
+        return true
+      }
+    }
     const beforeSnapshot = contextSnapshot(record, record.state.messages, contextWindowOverrideForSession(deps, sessionId))
     const tokensBefore = beforeSnapshot.usage.inputTokens
     const startedAt = new Date().toISOString()
@@ -636,7 +659,7 @@ function broadcastCompactStatus(deps: HostLoopDeps, payload: CompactStatusPayloa
 async function appendCompactionMetadata(
   deps: HostLoopDeps,
   sessionId: string,
-  action: 'compaction_applied' | 'compaction_skipped' | 'compaction_rejected',
+  action: 'compaction_applied' | 'compaction_skipped' | 'compaction_rejected' | 'preemptive_pruning_applied',
   payload: Record<string, unknown>,
 ): Promise<void> {
   if (!deps.store.get(sessionId)) return

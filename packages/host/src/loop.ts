@@ -307,10 +307,16 @@ export function runHostLoop(deps: HostLoopDeps): LoopHandle {
     },
     async compact(sessionId, request) {
       if (drainMode !== 'none') return false
+      const priorMessages = deps.store.get(sessionId)?.state.messages
       const replaced = await (deps.extensions ?? createBuiltinExtensionRegistry())
         .compact(deps, sessionId, request, compactionInFlight, inFlightAborts)
       notifyCheckpoint(sessionId)
-      if (replaced && request.trigger !== 'tool_result') {
+      const summarized = replaced && deps.store.get(sessionId)?.state.messages.some(
+        (message) => message.metadata?.kind === 'context_compaction'
+          && message.metadata.phase === 'done'
+          && !priorMessages?.includes(message),
+      )
+      if (summarized && request.trigger !== 'tool_result') {
         loopGuard.set(sessionId, {
           remainingCalls: POST_COMPACTION_GUARD_CALLS,
           seen: new Map(),
@@ -1426,7 +1432,7 @@ function shouldPreflightCompact(
   return estimateMessageTokens(messages) >= preflightTokenLimit(config, contextLimit)
 }
 
-function preflightTokenLimit(config: AgentConfig, contextLimitOverride?: number): number {
+export function preflightTokenLimit(config: AgentConfig, contextLimitOverride?: number): number {
   const contextLimit = contextLimitOverride ?? config.contextLimit
   if (!contextLimit || contextLimit <= 0) return Number.MAX_SAFE_INTEGER
   const baseReserve = Math.min(

@@ -63,34 +63,141 @@ function byteLength(s: string): number {
   return Buffer.byteLength(s, 'utf8')
 }
 
-/**
- * Truncate to at most `lines` preview lines, preserving both the beginning and
- * the end. Command output usually explains setup at the top and the decisive
- * error or summary at the bottom.
- */
-function preview(full: string, lines: number, inlineBytes: number): string {
-  const parts = full.split('\n')
-  if (parts.length <= lines) return full
+function isContinuationByte(byte: number): boolean {
+  return (byte & 0b1100_0000) === 0b1000_0000
+}
 
-  const headLines = Math.max(1, Math.ceil(lines / 2))
-  const tailLines = Math.max(1, lines - headLines)
-  const omitted = Math.max(0, parts.length - headLines - tailLines)
-  const preview = [
-    ...parts.slice(0, headLines),
-    `[... ${omitted} lines omitted ...]`,
-    ...parts.slice(-tailLines),
-  ].join('\n')
-  // Edge: a single "line" (e.g. one huge JSON blob) is longer than inlineBytes.
-  // Cut it by bytes so the preview stays smaller than the original.
-  if (byteLength(preview) > inlineBytes && lines > 0) {
-    return Buffer.from(full, 'utf8').subarray(0, inlineBytes).toString('utf8')
-  }
-  return preview
+function utf8SequenceLength(leadByte: number): number {
+  if ((leadByte & 0b1000_0000) === 0) return 1
+  if ((leadByte & 0b1110_0000) === 0b1100_0000) return 2
+  if ((leadByte & 0b1111_0000) === 0b1110_0000) return 3
+  if ((leadByte & 0b1111_1000) === 0b1111_0000) return 4
+  return 1
 }
 
 /**
- * Sentinel string dashboards scan for. Two-line block; the second line
- * carries the resolvable file path the LLM can pass back to `read`.
+ * Find the largest byte index <= `maxEnd` that ends on a complete UTF-8
+ * codepoint boundary.
+ */
+export function safeUtf8HeadEnd(buf: Buffer, maxEnd: number): number {
+  const end = Math.max(0, Math.min(buf.length, maxEnd))
+  if (end === 0 || end === buf.length) return end
+  if (!isContinuationByte(buf[end]!)) return end
+  let lead = end - 1
+  while (lead > 0 && isContinuationByte(buf[lead]!)) {
+    lead -= 1
+  }
+  const seqLen = utf8SequenceLength(buf[lead]!)
+  return lead + seqLen <= end ? end : lead
+}
+
+/**
+ * Find the smallest byte index >= `minStart` that begins on a valid UTF-8
+ * leading byte.
+ */
+export function safeUtf8TailStart(buf: Buffer, minStart: number): number {
+  let start = Math.max(0, Math.min(buf.length, minStart))
+  while (start < buf.length && isContinuationByte(buf[start]!)) {
+    start += 1
+  }
+  return start
+}
+
+/**
+ * Slice a UTF-8 string to fit within `maxBytes` while preserving BOTH the
+ * head and the tail on valid UTF-8 codepoint boundaries.
+ */
+export function sliceHeadTailUtf8(full: string, maxBytes: number): string {
+  const buf = Buffer.from(full, 'utf8')
+  if (buf.length <= maxBytes) return full
+  if (maxBytes <= 0) return ''
+
+  // Reserve room for the inline byte-omission marker when budget allows.
+  const markerReserve = Math.min(96, Math.floor(maxBytes * 0.35))
+  const contentBudget = Math.max(2, maxBytes - markerReserve)
+  const rawHeadBudget = Math.max(1, Math.ceil(contentBudget / 2))
+  const rawTailBudget = Math.max(1, contentBudget - rawHeadBudget)
+
+  const headEnd = safeUtf8HeadEnd(buf, rawHeadBudget)
+  const tailStart = Math.max(headEnd, safeUtf8TailStart(buf, buf.length - rawTailBudget))
+  const omittedBytes = Math.max(0, tailStart - headEnd)
+  if (omittedBytes === 0) return full
+
+  const headStr = buf.subarray(0, headEnd).toString('utf8')
+  const tailStr = buf.subarray(tailStart).toString('utf8')
+  const marker = `\n[... ${omittedBytes} bytes omitted ...]\n`
+  const combined = `${headStr}${marker}${tailStr}`
+  if (byteLength(combined) <= maxBytes) return combined
+
+  // Extremely small inlineBytes fallback: keep head+tail without multi-line marker if needed.
+  const compactMarker = `[...${omittedBytes}B...]`
+  const compactBudget = Math.max(0, maxBytes - byteLength(compactMarker))
+  const compactHead = safeUtf8HeadEnd(buf, Math.ceil(compactBudget / 2))
+  const compactTail = Math.max(compactHead, safeUtf8TailStart(buf, buf.length - Math.floor(compactBudget / 2)))
+  if (compactHead === 0 && compactTail === buf.length) {
+    return buf.subarray(0, safeUtf8HeadEnd(buf, maxBytes)).toString('utf8')
+  }
+  return `${buf.subarray(0, compactHead).toString('utf8')}${compactMarker}${buf.subarray(compactTail).toString('utf8')}`
+}
+
+type PreviewSelection = {
+  text: string
+  previewLines: number
+  omittedStartLine?: number
+  omittedLineCount?: number
+}
+
+/**
+ * Truncate to at most `lines` preview lines AND `inlineBytes` UTF-8 bytes,
+ * preserving both the beginning and the end. Command output usually explains
+ * setup at the top and the decisive error or summary at the bottom.
+ */
+function buildPreview(full: string, lines: number, inlineBytes: number): PreviewSelection {
+  const parts = full.split('\n')
+  const totalLines = parts.length
+  let candidate = full
+  let omittedStartLine: number | undefined
+  let omittedLineCount: number | undefined
+  let keptLines = totalLines
+
+  if (lines > 0 && totalLines > lines) {
+    const headLines = Math.max(1, Math.ceil(lines / 2))
+    const tailLines = Math.max(1, lines - headLines)
+    const omitted = Math.max(0, totalLines - headLines - tailLines)
+    omittedStartLine = headLines
+    omittedLineCount = omitted
+    keptLines = headLines + tailLines
+    candidate = [
+      ...parts.slice(0, headLines),
+      `[... ${omitted} lines omitted (lines ${headLines + 1}-${totalLines - tailLines}) ...]`,
+      ...parts.slice(-tailLines),
+    ].join('\n')
+  }
+
+  // Edge: a single "line" (e.g. one huge JSON blob) or long lines cause the
+  // line-truncated preview to still exceed `inlineBytes`. Slice Head+Tail by
+  // UTF-8 byte budget so the tail (decisive error/summary) is never lost.
+  if (byteLength(candidate) > inlineBytes && inlineBytes > 0) {
+    const byteSliced = sliceHeadTailUtf8(full, inlineBytes)
+    return {
+      text: byteSliced,
+      previewLines: 0,
+      omittedStartLine: 0,
+      omittedLineCount: totalLines,
+    }
+  }
+
+  return {
+    text: candidate,
+    previewLines: keptLines,
+    ...(omittedStartLine !== undefined ? { omittedStartLine } : {}),
+    ...(omittedLineCount !== undefined ? { omittedLineCount } : {}),
+  }
+}
+
+/**
+ * The dashboard scans the final 512 characters for the sentinel, so the
+ * unbounded path-bearing hint must precede it.
  */
 export function overflowMarker(
   filePath: string,
@@ -99,10 +206,14 @@ export function overflowMarker(
   totalLines: number,
   previewBytes: number,
   totalBytes: number,
+  omittedStartLine?: number,
+  omittedLineCount?: number,
 ): string {
+  const nextOffset = omittedStartLine ?? Math.max(0, Math.floor(previewLines / 2))
+  const nextLimit = omittedLineCount !== undefined ? Math.min(200, Math.max(1, omittedLineCount)) : 200
   return [
+    `--- use \`read_file { path: '${filePath}', offset: ${nextOffset}, limit: ${nextLimit} }\` or \`multi_grep { searches: [{ pattern: '<pattern>', path: '${filePath}' }] }\` to read more`,
     `--- output truncated: ${previewLines} / ${totalLines} lines, ${previewBytes} / ${totalBytes} bytes stored at overflow://${callId}`,
-    `--- use \`read { path: '${filePath}' }\` to read more`,
   ].join('\n')
 }
 
@@ -120,20 +231,21 @@ export async function maybeOverflow(
   await mkdir(dirname(filePath), { recursive: true })
   await writeFile(filePath, full, 'utf8')
 
-  const previewText = preview(full, previewLines, inlineBytes)
+  const selection = buildPreview(full, previewLines, inlineBytes)
   const totalLines = full.split('\n').length
-  const previewLineCount = previewText === full ? totalLines : previewText.split('\n').length
-  const previewByteCount = byteLength(previewText)
+  const previewByteCount = byteLength(selection.text)
   const marker = overflowMarker(
     filePath,
     ctx.callId,
-    previewLineCount,
+    selection.previewLines,
     totalLines,
     previewByteCount,
     fullBytes,
+    selection.omittedStartLine,
+    selection.omittedLineCount,
   )
   return {
-    content: `${previewText}\n\n${marker}`,
+    content: `${selection.text}\n\n${marker}`,
     overflowed: true,
     fullBytes,
     filePath,

@@ -1,6 +1,7 @@
 import { runWebSearch } from '../web-search/index.js'
 import { interruptSubAgentsForParent, runAgentTool } from './agent-tool.js'
 import { runCompact } from './compaction.js'
+import { preemptivelyPruneToolResults } from '../context/preemptive-pruning.js'
 import { selectHooks, type HookPayload } from './hooks.js'
 import { runPostToolHooks, runPreToolHooks } from './hooks-runner.js'
 import { isSkillManager, runSkillTool } from './skills.js'
@@ -128,9 +129,11 @@ export function createBuiltinExtensionRegistry(additional: readonly HostExtensio
       },
       lifecycle: {
         async beforeModelCall(context) {
-          if (!context.requiresCompaction) return context.messages
+          const contextLimit = context.deps.models?.contextWindow?.(context.sessionId) ?? context.config.contextLimit
+          const pruned = preemptivelyPruneToolResults(context.messages, context.config, contextLimit)
+          if (!context.requiresCompaction) return pruned.messages
           const applied = await context.compact().catch(() => false)
-          return applied ? context.messagesAfterCompaction() : context.messages
+          return applied ? context.messagesAfterCompaction() : pruned.messages
         },
         async afterTurn(context) {
           await context.autoCompact()
