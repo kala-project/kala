@@ -28,6 +28,33 @@ describe('OnlineTelemetry', () => {
     expect(requests.some(request => request.url.endsWith('/metrics'))).toBe(true)
   })
 
+  it('counts expected exclusive replica discovery 404s without crowding out failure traces', async () => {
+    const requests: Array<{ url: string; body: string }> = []
+    const telemetry = new OnlineTelemetry({
+      serviceName: 'kala-gateway', endpoint: 'http://localhost:4318', authToken: TOKEN, flushIntervalMs: 60_000,
+      fetch: async (url, init) => {
+        requests.push({ url: String(url), body: String(init?.body) })
+        return new Response('', { status: 200 })
+      },
+    })
+    const absent = telemetry.startHttpSpan('GET', 'gateway.executor-replicas', undefined, false, true)
+    expect(absent.traceparent).toMatch(/-00$/u)
+    absent.end(404)
+    telemetry.startHttpSpan('GET', 'gateway.executor-replicas', undefined, false, true).end(503)
+    telemetry.startHttpSpan('GET', 'gateway.executor-replicas').end(404)
+    await telemetry.close()
+    const spans = requests.filter((request) => request.url.endsWith('/traces'))
+      .flatMap((request) => JSON.parse(request.body).resourceSpans[0].scopeSpans[0].spans)
+    expect(spans.map((span: { name: string }) => span.name)).toEqual([
+      'Executor replica discovery', 'Executor replica discovery',
+    ])
+    expect(spans.map((span: { attributes: Array<{ key: string; value: { intValue?: string } }> }) =>
+      span.attributes.find((attribute) => attribute.key === 'http.response.status_code')?.value.intValue)).toEqual(['503', '404'])
+    const metrics = requests.filter((request) => request.url.endsWith('/metrics')).map((request) => request.body).join('')
+    expect(metrics).toContain('gateway.executor-replicas')
+    expect(metrics).toContain('4xx')
+  })
+
   it('aggregates successful browser activity on both HTTP hops while retaining failed activity traces', async () => {
     const requests: Array<{ url: string; body: string }> = []
     const telemetry = new OnlineTelemetry({

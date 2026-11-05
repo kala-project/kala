@@ -127,6 +127,7 @@ const HTTP_TITLES: Readonly<Record<string, string>> = {
   'gateway.auth': 'Authentication flow',
   'gateway.activity': 'Browser activity report',
   'gateway.api': 'App API',
+  'gateway.executor-replicas': 'Executor replica discovery',
   'gateway.frontend': 'Open app',
   'gateway.install': 'Install workspace',
   'gateway.internal': 'Internal service request',
@@ -225,7 +226,7 @@ export class OnlineTelemetry {
     this.timer.unref()
   }
 
-  startHttpSpan(method: string | undefined, route: string, incomingTraceparent?: string | string[], errorsOnly = false): HttpSpan {
+  startHttpSpan(method: string | undefined, route: string, incomingTraceparent?: string | string[], errorsOnly = false, expectedNotFound = false): HttpSpan {
     const normalizedMethod = METHOD.test(method ?? '') ? method! : 'OTHER'
     const normalizedRoute = ROUTE.test(route) ? route : 'other'
     const parsed = typeof incomingTraceparent === 'string' ? TRACEPARENT.exec(incomingTraceparent.trim().toLowerCase()) : null
@@ -237,7 +238,7 @@ export class OnlineTelemetry {
     const startedMono = process.hrtime.bigint()
     let ended = false
     const assets = normalizedRoute === 'gateway.assets'
-    const metricsOnly = normalizedRoute === 'gateway.health' || normalizedRoute === 'runtime.health' || assets || errorsOnly
+    const metricsOnly = normalizedRoute === 'gateway.health' || normalizedRoute === 'runtime.health' || assets || errorsOnly || expectedNotFound
     const context: ActiveRequestTrace = { traceId, spanId, active: !metricsOnly }
     return {
       traceparent: `00-${traceId}-${spanId}-${metricsOnly ? '00' : '01'}`,
@@ -258,7 +259,8 @@ export class OnlineTelemetry {
           outcome: safeStatus >= 500 ? 'error' : safeStatus >= 400 ? 'rejected' : 'ok',
           'duration.ms': Math.round(durationMs),
         })
-        const recordSpan = !metricsOnly || ((assets || errorsOnly) && safeStatus >= 400)
+        const recordSpan = (!metricsOnly || ((assets || errorsOnly || expectedNotFound) && safeStatus >= 400))
+          && !(expectedNotFound && safeStatus === 404)
         if (recordSpan) this.enqueue({ kind: 'span', value: {
           traceId, spanId, ...(parentSpanId ? { parentSpanId } : {}),
           name: HTTP_TITLES[normalizedRoute] ?? 'HTTP request', kind: 2,

@@ -87,6 +87,7 @@ const DASHBOARD_API_PREFIXES = [
 
 function telemetryRoute(pathname: string): string {
   if (pathname === '/healthz') return 'gateway.health'
+  if (pathname === '/.well-known/kala/executor-replicas') return 'gateway.executor-replicas'
   if (pathname === '/auth/me') return 'gateway.account-status'
   if (pathname.startsWith('/auth/')) return 'gateway.auth'
   if (pathname.startsWith('/api/')) return 'gateway.api'
@@ -1225,7 +1226,9 @@ export async function startRuntimeIngressGateway(options: {
   const http = createServer((request, response) => {
     const pathname = (request.url ?? '/').split('?', 1)[0] ?? '/'
     // Socket.IO polling and upgrades are long-lived transports, not short commands.
-    const span = pathname.startsWith('/socket.io/') ? undefined : telemetry?.startHttpSpan(request.method, telemetryRoute(pathname), request.headers.traceparent, pathname === '/push/activity' || pathname === '/auth/me')
+    const expectedReplicaNotFound = pathname === '/.well-known/kala/executor-replicas'
+      && !options.runtimeOriginResolver?.listReplicas && !request.headers.cookie && !request.headers.authorization
+    const span = pathname.startsWith('/socket.io/') ? undefined : telemetry?.startHttpSpan(request.method, telemetryRoute(pathname), request.headers.traceparent, pathname === '/push/activity' || pathname === '/auth/me', expectedReplicaNotFound)
     if (span) {
       // The context is request-owned and invalidated on finish/close. Upgrade and
       // Socket.IO paths never activate it, preventing websocket context retention.

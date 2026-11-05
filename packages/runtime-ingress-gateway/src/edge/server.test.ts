@@ -172,10 +172,14 @@ describe('Private Cloud edge request path', () => {
     const telemetry = new OnlineTelemetry({ serviceName: 'kala-gateway', endpoint: 'http://localhost:4318', authToken: 't'.repeat(32), fetch: async () => new Response('', { status: 200 }) })
     const spy = vi.spyOn(telemetry, 'startHttpSpan')
     const gateway = await createGateway('http://127.0.0.1:9', undefined, { telemetry })
-    for (const [path, route] of [['/settings/speech', 'gateway.settings'], ['/user/session-tabs', 'gateway.session-tabs'], ['/assets/private-name.js', 'gateway.assets'], ['/push/activity', 'gateway.activity'], ['/push/subscribe', 'gateway.push'], ['/auth/me', 'gateway.account-status'], ['/auth/login', 'gateway.auth'], ['/models', 'gateway.models']]) {
-      await fetch(`http://127.0.0.1:${gateway.port}${path}`, { redirect: 'manual' })
-      expect(spy).toHaveBeenLastCalledWith('GET', route, undefined, path === '/push/activity' || path === '/auth/me')
+    for (const [path, route] of [['/settings/speech', 'gateway.settings'], ['/user/session-tabs', 'gateway.session-tabs'], ['/assets/private-name.js', 'gateway.assets'], ['/push/activity', 'gateway.activity'], ['/push/subscribe', 'gateway.push'], ['/auth/me', 'gateway.account-status'], ['/auth/login', 'gateway.auth'], ['/models', 'gateway.models'], ['/.well-known/kala/executor-replicas', 'gateway.executor-replicas']]) {
+      const response = await fetch(`http://127.0.0.1:${gateway.port}${path}`, { redirect: 'manual' })
+      if (path === '/.well-known/kala/executor-replicas') expect(response.status).toBe(404)
+      expect(spy).toHaveBeenLastCalledWith('GET', route, undefined, path === '/push/activity' || path === '/auth/me', path === '/.well-known/kala/executor-replicas')
     }
+    const cookieRequest = await fetch(`http://127.0.0.1:${gateway.port}/.well-known/kala/executor-replicas`, { headers: { cookie: 'ak_session=invalid' } })
+    expect(cookieRequest.status).toBe(404)
+    expect(spy).toHaveBeenLastCalledWith('GET', 'gateway.executor-replicas', undefined, false, false)
     await telemetry.close()
   })
   it('binds OIDC callback URLs, redirects and cookie security to the validated browser origin', async () => {
