@@ -38,6 +38,12 @@ export async function loadDesktopRelease() {
   return manifest
 }
 
+export async function desktopBootstrapAvailable() {
+  const responses = await Promise.all(['desktop-install.sh', 'desktop-package.deb', 'desktop-dependencies.json', 'desktop-SHA256SUMS.txt']
+    .map((file) => fetch(`/install/assets/${file}`, { method: 'HEAD', cache: 'no-store', signal: AbortSignal.timeout(8000) })))
+  return responses.every((response) => response.ok && !response.headers.get('content-type')?.toLowerCase().includes('text/html'))
+}
+
 export function validateDesktopOrigin(origin) {
   if (typeof origin !== 'string' || !/^https?:\/\/[A-Za-z0-9.:[\]-]+$/.test(origin)) {
     throw new Error('Installation commands require a trusted HTTPS origin or explicit loopback HTTP origin.')

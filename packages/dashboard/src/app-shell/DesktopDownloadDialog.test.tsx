@@ -83,6 +83,16 @@ describe('DesktopDownloadDialog', () => {
     expect(screen.queryByRole('button', { name: 'Download Linux amd64 .deb' })).toBeNull()
   })
 
+  it('hides the broken one-command installer but keeps browser download and verified local install', async () => {
+    vi.mocked(loadDesktopDownload).mockResolvedValue({ ...download, commands: null })
+    render(<DesktopDownloadDialog />)
+    open()
+    await screen.findByRole('link', { name: 'Download Linux amd64 .deb' })
+    expect(screen.getByRole('status').textContent).toContain('One-command installation is unavailable')
+    expect(screen.queryByTestId('copy-desktop-command')).toBeNull()
+    expect(screen.getByTestId('copy-desktop-local-command')).toBeTruthy()
+  })
+
   it('copies the full approved APT block and exposes clipboard failures without losing commands', async () => {
     const commands = "bash <<'KALA_DESKTOP_INSTALL'\nset -euo pipefail\n# Full approved fixture\nKALA_DESKTOP_INSTALL"
     vi.mocked(loadDesktopApt).mockResolvedValue(commands)

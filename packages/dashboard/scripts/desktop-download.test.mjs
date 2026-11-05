@@ -8,8 +8,9 @@ import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { after, test } from 'node:test'
-import { desktopBootstrapScript, desktopInstallCommands, desktopLocalInstallCommands, loadDesktopRelease, validateDesktopOrigin, validateDesktopRelease } from '../public/downloads/desktop/release-data.js'
+import { desktopBootstrapAvailable, desktopBootstrapScript, desktopInstallCommands, desktopLocalInstallCommands, loadDesktopRelease, validateDesktopOrigin, validateDesktopRelease } from '../public/downloads/desktop/release-data.js'
 import { aptInstallSnippet } from '../public/downloads/desktop/apt-snippet.js'
+import { verifyDesktopPublication } from './build.mjs'
 
 const publishedBase = new URL('../public/downloads/desktop/', import.meta.url)
 // The immutable Desktop .deb is staged during deployment, not checked into
@@ -56,6 +57,29 @@ test('immutable Desktop metadata matches actual package/checksum bytes', async (
   assert(checksums.includes(`${release.dependencies.sha256}  ${release.dependencies.file}`))
 })
 
+test('Dashboard build refuses stale or incomplete Desktop publication', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'kala-desktop-publication-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  verifyDesktopPublication(directory, '0.3.0')
+  await writeFile(join(directory, 'install.sh'), 'stale installer')
+  assert.throws(() => verifyDesktopPublication(directory, '0.3.0'), /without release metadata/)
+  await rm(join(directory, 'install.sh'))
+  await writeFile(join(directory, 'old.deb'), 'stale package')
+  assert.throws(() => verifyDesktopPublication(directory, '0.3.0'), /without release metadata/)
+  await rm(join(directory, 'old.deb'))
+  await writeFile(join(directory, 'install.sh'), 'stale installer')
+  await writeFile(join(directory, 'release.json'), JSON.stringify(release))
+  assert.throws(() => verifyDesktopPublication(directory, `${release.version}-stale`), /does not match Dashboard/)
+  for (const asset of [release.artifact, release.dependencies, release.checksums]) {
+    await writeFile(join(directory, asset.file), await readFile(new URL(asset.file, base)))
+  }
+  assert.throws(() => verifyDesktopPublication(directory, release.version), /installer does not match/)
+  await writeFile(join(directory, 'install.sh'), `${desktopBootstrapScript(release)}\n`)
+  verifyDesktopPublication(directory, release.version)
+  await writeFile(join(directory, release.artifact.file), 'tampered package')
+  assert.throws(() => verifyDesktopPublication(directory, release.version), /asset mismatch/)
+})
+
 test('rejects missing, malformed, unsafe and mutable release metadata', () => {
   for (const invalid of [null, [], {}, { ...release, platform: 'windows' },
     { ...release, schemaVersion: 1 }, { ...release, version: "1.2.3';bad" },
@@ -90,6 +114,20 @@ test('shared loader fails closed on absent metadata, missing files, HTML fallbac
     return new Response(null, { headers: { 'content-type': 'application/octet-stream' } })
   })
   assert.equal((await loadDesktopRelease()).artifact.file, release.artifact.file)
+})
+
+test('one-command installation is offered only when all Runtime assets are served', async (t) => {
+  const fetch = t.mock.method(globalThis, 'fetch')
+  fetch.mock.mockImplementation(async (url, options) => {
+    assert(url.startsWith('/install/assets/'))
+    assert.equal(options.method, 'HEAD')
+    return new Response(null, { status: 404 })
+  })
+  assert.equal(await desktopBootstrapAvailable(), false)
+  fetch.mock.mockImplementation(async () => new Response(null, { headers: { 'content-type': 'text/html' } }))
+  assert.equal(await desktopBootstrapAvailable(), false)
+  fetch.mock.mockImplementation(async () => new Response(null, { headers: { 'content-type': 'application/octet-stream' } }))
+  assert.equal(await desktopBootstrapAvailable(), true)
 })
 
 test('shared install command is one curl line backed by a checksum-verifying bootstrap script', () => {

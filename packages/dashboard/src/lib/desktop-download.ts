@@ -15,7 +15,10 @@ export async function loadDesktopDownload() {
   const data: typeof import('../../public/downloads/desktop/release-data.js') =
     await import(/* @vite-ignore */ `${desktopDownloadBase}release-data.js?metadata=${Date.now()}`)
   const release = await data.loadDesktopRelease()
-  return { release, commands: data.desktopInstallCommands(release, window.location.origin), localCommands: data.desktopLocalInstallCommands(release) }
+  const commands = await data.desktopBootstrapAvailable()
+    ? data.desktopInstallCommands(release, window.location.origin)
+    : null
+  return { release, commands, localCommands: data.desktopLocalInstallCommands(release) }
 }
 
 export async function loadDesktopApt(): Promise<string | null> {

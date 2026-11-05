@@ -1,4 +1,4 @@
-import { desktopDownloadBase, desktopInstallCommands, desktopLocalInstallCommands, loadDesktopRelease } from './release-data.js'
+import { desktopBootstrapAvailable, desktopDownloadBase, desktopInstallCommands, desktopLocalInstallCommands, loadDesktopRelease } from './release-data.js'
 
 document.getElementById('origin').textContent = location.origin
 const release = document.getElementById('release')
@@ -8,8 +8,13 @@ try {
   document.getElementById('manifest').href = `${desktopDownloadBase}${manifest.dependencies.file}`
   document.getElementById('checksums').href = `${desktopDownloadBase}${manifest.checksums.file}`
   document.getElementById('version').textContent = `Version ${manifest.version} · Linux amd64 · ${(manifest.artifact.size / 1048576).toFixed(1)} MiB`
+  if (await desktopBootstrapAvailable()) {
+    document.getElementById('remote-install').hidden = false
+  } else {
+    document.getElementById('remote-unavailable').hidden = false
+  }
   for (const [commandId, copyId, commands] of [
-    ['commands', 'deb-copy', desktopInstallCommands(manifest, location.origin)],
+    ...(document.getElementById('remote-install').hidden ? [] : [['commands', 'deb-copy', desktopInstallCommands(manifest, location.origin)]]),
     ['local-commands', 'local-copy', desktopLocalInstallCommands(manifest)],
   ]) {
     document.getElementById(commandId).textContent = commands

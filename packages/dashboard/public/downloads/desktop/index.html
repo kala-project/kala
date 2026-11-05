@@ -12,16 +12,19 @@
     <h1>Kala for Linux</h1>
     <p>A small Tauri client for your existing React Dashboard. No bundled Host or Runtime. Your server and ports stay unchanged.</p>
     <p lang="zh">Linux 桌面客户端：复用当前 Dashboard，不启动后端，不改变端口。</p>
-    <p><strong>Unsigned release candidate — security review required.</strong> The native GTK3 dependency graph includes upstream advisory <code>RUSTSEC-2024-0429</code>. Existing Dashboard dependencies also have unresolved audit findings. This is not a production security-approved release. See the dependency manifest and <code>docs/operations/linux-desktop-supply-chain.md</code> in the source distribution.</p>
+    <p><strong>Unsigned release candidate — security review required.</strong> The native dependency graph includes unsoundness advisories <code>RUSTSEC-2024-0429</code> (glib) and <code>RUSTSEC-2026-0386</code> (tokio). Existing Dashboard dependencies also have unresolved audit findings. This is not a production security-approved release. See the dependency manifest and <code>docs/operations/linux-desktop-supply-chain.md</code> in the source distribution.</p>
     <div id="release" role="status">Checking this deployment's release files…</div>
     <section id="available" hidden>
       <h2>Download and install</h2>
       <p id="version"></p>
       <p><a id="deb" download>Download Linux amd64 .deb</a> · <a id="manifest" download>Dependency manifest</a> · <a id="checksums" download>SHA256SUMS.txt</a></p>
-      <h3>Download &amp; install with one copied command</h3>
-      <p>Copy the entire Bash block and run it in your Linux terminal. The browser does not execute installation.</p>
-      <button type="button" id="deb-copy">Copy download &amp; install command</button>
-      <pre id="commands"></pre>
+      <div id="remote-install" hidden>
+        <h3>Download &amp; install with one copied command</h3>
+        <p>Copy the entire Bash block and run it in your Linux terminal. The browser does not execute installation.</p>
+        <button type="button" id="deb-copy">Copy download &amp; install command</button>
+        <pre id="commands"></pre>
+      </div>
+      <p id="remote-unavailable" hidden>One-command installation is unavailable on this server. Download the .deb above and use the verified local installation command below.</p>
       <p>Already downloaded? Use the local command below instead of running APT directly on a file in your private home directory. It copies the package from Downloads or the current directory into /tmp, verifies it, installs it without the _apt permission warning, then cleans up. Your original file and home permissions stay unchanged.</p>
       <details>
         <summary>Install an already downloaded .deb</summary>

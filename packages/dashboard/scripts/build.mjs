@@ -1,9 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
-import { chmodSync, lstatSync, readdirSync, realpathSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { chmodSync, existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { desktopBootstrapScript, validateDesktopRelease } from '../public/downloads/desktop/release-data.js'
 
 const require = createRequire(import.meta.url)
 const dashboard = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -38,6 +39,31 @@ export function normalizePublishedPermissions(directory) {
   }
 }
 
+export function verifyDesktopPublication(directory, productVersion) {
+  const manifestPath = join(directory, 'release.json')
+  const installerPath = join(directory, 'install.sh')
+  if (!existsSync(manifestPath)) {
+    if (readdirSync(directory).some((name) => ['install.sh', 'dependencies.json', 'SHA256SUMS.txt', 'SHA256SUMS'].includes(name)
+        || name.endsWith('.deb')
+        || name.endsWith('.dependencies.json') || name.endsWith('.release.json')
+        || name.endsWith('.SHA256SUMS.txt'))) {
+      throw new Error('Desktop files exist without release metadata')
+    }
+    return
+  }
+  const manifest = validateDesktopRelease(JSON.parse(readFileSync(manifestPath, 'utf8')))
+  if (manifest.version !== productVersion) throw new Error(`Desktop ${manifest.version} does not match Dashboard ${productVersion}`)
+  for (const asset of [manifest.artifact, manifest.dependencies, manifest.checksums]) {
+    const bytes = readFileSync(join(directory, asset.file))
+    if (createHash('sha256').update(bytes).digest('hex') !== asset.sha256 || (asset.size && bytes.length !== asset.size)) {
+      throw new Error(`Desktop release asset mismatch: ${asset.file}`)
+    }
+  }
+  if (readFileSync(installerPath, 'utf8') !== `${desktopBootstrapScript(manifest)}\n`) {
+    throw new Error('Desktop installer does not match release metadata')
+  }
+}
+
 async function run(command, args, { unit } = {}) {
   const child = spawn(command, args, {
     cwd: dashboard, stdio: 'inherit',
@@ -65,6 +91,10 @@ async function main() {
   const args = process.argv.slice(2)
   const inside = args[0] === '--inside-build-budget'
   if (inside) args.shift()
+  if (!args.includes('--prototype')) {
+    const version = JSON.parse(readFileSync(join(dashboard, 'package.json'), 'utf8')).version
+    verifyDesktopPublication(join(dashboard, 'public/downloads/desktop'), version)
+  }
   const mode = process.env.KALA_BUILD_SYSTEMD ?? 'auto'
   if (!['auto', 'required', 'off'].includes(mode)) throw new Error('KALA_BUILD_SYSTEMD must be auto, required, or off')
   if (!inside && mode !== 'off') {

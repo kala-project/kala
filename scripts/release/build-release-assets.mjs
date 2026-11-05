@@ -8,6 +8,7 @@ import { basename, dirname, join, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { build } from 'esbuild'
+import { verifyDesktopPublication } from '../../packages/dashboard/scripts/build.mjs'
 import {
   generateExecutorInstallerPowerShell,
   windowsExecutorInstallerAssetName,
@@ -597,6 +598,7 @@ function prepareEmbeddedReleaseAssetsForHost() {
   const desktopDownloadDir = join(dashboardDist, 'downloads', 'desktop')
   const desktopManifestPath = join(desktopDownloadDir, 'release.json')
   const desktopNames = []
+  verifyDesktopPublication(desktopDownloadDir, packageJson.version)
   if (existsSync(desktopManifestPath)) {
     const desktopManifest = JSON.parse(readFileSync(desktopManifestPath, 'utf8'))
     const assets = [

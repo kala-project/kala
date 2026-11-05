@@ -74,6 +74,15 @@ APT updates as live until all are satisfied.
 
 ## Revalidation
 
+The `0.3.0` preview was built in the existing isolated Ubuntu 24.04 builder
+from signed source revision `78bfd20413628445c3bf074ea758fc1209c8148f`
+with frozen pnpm and Cargo locks. A fresh strict RustSec audit on 2026-11-04
+found both `RUSTSEC-2024-0429` (`glib` 0.18.5) and
+`RUSTSEC-2026-0386` (`tokio` 1.53.1) as unsoundness warnings. The pnpm audit
+reported 17 additional low/moderate advisories. This unsigned preview has
+not passed the production publishing gate; making it downloadable for
+testing does not confer security approval or publisher authentication.
+
 ```sh
 pnpm install --frozen-lockfile
 pnpm audit --json

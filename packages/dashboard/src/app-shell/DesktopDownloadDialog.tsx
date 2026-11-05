@@ -71,7 +71,8 @@ function DownloadContent({ update }: { update: boolean }): JSX.Element {
       ) : !release ? <p role="status" className="text-sm">{t('desktopDownload.loading')}</p> : null}
       {release ? <section className="space-y-3" aria-label={t('desktopDownload.downloadSection')}>
         {release ? <p className="text-sm">{t('desktopDownload.version', { version: release.version, size: (release.artifact.size / 1048576).toFixed(1) })}</p> : null}
-        {download ? <Commands commands={download.commands} label={t('desktopDownload.command')} testId="copy-desktop-command" /> : null}
+        {download?.commands ? <Commands commands={download.commands} label={t('desktopDownload.command')} testId="copy-desktop-command" />
+          : download ? <p role="status" className="text-sm text-muted-foreground">{t('desktopDownload.bootstrapUnavailable')}</p> : null}
         {release ? (
           <>
             <Button asChild className="w-full sm:w-auto"><a data-testid="desktop-download-deb" href={`${desktopDownloadBase}${release.artifact.file}`} download><Download className="mr-2 h-4 w-4" />{t('desktopDownload.deb')}</a></Button>

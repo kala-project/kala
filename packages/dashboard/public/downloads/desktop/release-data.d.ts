@@ -9,6 +9,7 @@ export interface DesktopRelease {
 export const desktopDownloadBase: '/downloads/desktop/'
 export function validateDesktopRelease(manifest: unknown): DesktopRelease
 export function loadDesktopRelease(): Promise<DesktopRelease>
+export function desktopBootstrapAvailable(): Promise<boolean>
 export function validateDesktopOrigin(origin: unknown): string
 export function desktopInstallCommands(manifest: unknown, origin: string): string
 export function desktopBootstrapScript(manifest: unknown): string
