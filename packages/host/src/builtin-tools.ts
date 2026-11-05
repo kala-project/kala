@@ -12,6 +12,7 @@ import { ComputerInputActionSchema, ComputerSemanticActionSchema } from '@agent-
 import { z } from 'zod'
 
 import { skillToolSchema, type SkillInfo } from './extensions/skills.js'
+import { scheduledTaskToolSchema } from './extensions/scheduled-task-tool.js'
 import { resolveAgentModule } from './agent-modules/renderers.js'
 import type { AgentModule, SystemPromptPlugin, ToolDefinition, ToolsetPlugin } from './agent-modules/types.js'
 
@@ -262,12 +263,32 @@ const planningToolset: ToolsetPlugin = {
   version: '2026-10-30.2',
   label: 'Planning',
   provideTools() {
+    const cronSchema = scheduledTaskToolSchema()
     return [
       tool('todo_graph', 'host', 'read', false, 'todo_graph', {
         purpose: 'Create and maintain a session task dependency graph with parallel branches and blocked work. Operations are atomic.',
         whenToUse: ['Use when tasks have prerequisites, fan-out/fan-in, blocked work, or parallel execution.', 'Use for complex implementation plans that cannot be represented accurately as a linear list.'],
         constraints: ['Maintain only the current goal, not a session history; keep node text concise and evidence in artifacts.', 'On an explicit independent-task switch use replace, first accounting for unfinished work rather than silently discarding it.', 'After recording outcomes, remove completed branches with remove_node (cascade removes incident edges, not descendant tasks); clear when no current work remains.', 'Use stable semantic node IDs.', 'Add only real dependencies; do not turn ordering preferences into edges.', 'Blocked nodes cannot be in_progress, but multiple unblocked nodes may be in_progress.', 'Prefer incremental operations within the same goal; use replace for a new independent goal, not endless add_node.', 'Mark completed only after verification.'],
       }, todoGraphSchema),
+      {
+        name: cronSchema.name,
+        inputSchema: cronSchema.inputSchema,
+        requiresApproval: cronSchema.requiresApproval,
+        prompt: {
+          purpose: cronSchema.description,
+          whenToUse: [
+            'Use when the user asks to schedule a recurring check, reminder, or automated future prompt (once, daily, weekly, monthly, interval, or cron expression).',
+            'Use list, get, update, pause, resume, delete, or history to inspect or manage existing scheduled tasks.',
+          ],
+          constraints: [
+            'Write a self-contained prompt because future scheduled runs may execute in a fresh workspace session or hours later.',
+            'Do not embed secrets, credentials, or instruction overrides in scheduled prompts.',
+            'Sub-agents cannot create or mutate scheduled tasks.',
+          ],
+        },
+        policy: { risk: 'write', approvalDefault: 'auto' },
+        execution: { kind: 'host', handler: cronSchema.name },
+      },
     ]
   },
 }

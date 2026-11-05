@@ -134,6 +134,7 @@ import { createDashboardScheduledOrigins, dashboardOriginsOwner } from './schedu
 import { canReceiveInboxChange } from './scheduled-tasks/dashboard-inbox.js'
 import { BackgroundAuthorizationError, type ScheduledPrincipal, type ScheduledPrincipalAuthorizer } from './scheduled-tasks/authorization.js'
 import { occurrenceSessionId, UnitScheduler } from './scheduled-tasks/scheduler.js'
+import { assertNoResumableGoal } from './scheduled-tasks/goal-guard.js'
 import type { ScheduledTask, ScheduledTaskSnapshot } from './scheduled-tasks/types.js'
 
 export type HostServerOptions = {
@@ -905,6 +906,7 @@ export async function startHostServer(
       await messageAttachments?.commitReferences(sessionId, content)
       return { accepted: true, committed: true, cursor: record.state.cursor }
     }
+    if (scheduledOwnerKey) assertNoResumableGoal(store.get(sessionId) ?? record)
     // PG/S3 stores the attachment protection and Queue item in one owner-fenced
     // transaction. Legacy storage still protects references before enqueue.
     const atomicAttachments = Boolean(options.sessionAuthority && messageAttachments instanceof S3MessageAttachmentStore
@@ -2401,7 +2403,9 @@ export async function startHostServer(
   const scheduleOwnerKey = (actor: PublicApiActor): string => actor.organizationId ? `organization:${actor.organizationId}` : `principal:${actor.principal}`
   const validateScheduledTarget = async (actor: PublicApiActor, task: Pick<ScheduledTask, 'target'>): Promise<void> => {
     if (task.target.kind === 'session') {
-      if (!await apiRecord(actor, task.target.sessionId)) throw new Error('session not found')
+      const record = await apiRecord(actor, task.target.sessionId)
+      if (!record) throw new Error('session not found')
+      assertNoResumableGoal(record)
       return
     }
     const target = task.target
@@ -2443,6 +2447,11 @@ export async function startHostServer(
     }
   }
   const scheduledTaskStore = options.scheduledTaskStore ?? new ScheduledTaskStore(join(options.sessionsDir, '.scheduled-tasks'))
+  loopDeps.scheduledTaskStore = scheduledTaskStore
+  loopDeps.authorizeScheduledTaskPrincipal = async (organizationId, principal) =>
+    await currentScheduledRole({ organizationId, principal })
+  loopDeps.validateScheduledTaskTarget = async (actor, target) =>
+    await validateScheduledTarget({ ...actor, canWrite: true }, { target })
   const dashboardScheduledOrigins = createDashboardScheduledOrigins(scheduledTaskStore)
   scheduledTaskScheduler = new UnitScheduler(scheduledTaskStore, {
     async validate(task) {
@@ -2468,6 +2477,9 @@ export async function startHostServer(
           sessionId: input.sessionId, pendingMessages: messageQueues.pending(input.sessionId), mode: 'queue',
         })
       }
+      const record = await loadApiRecord(input.sessionId)
+      if (!record) throw new Error('session not found')
+      assertNoResumableGoal(record)
       await enqueueUserMessage({ sessionId: input.sessionId, text: input.prompt, intent: 'text', operationId: input.operationId, mode: 'queue', scheduledBy: scheduledAttribution(input.task), scheduledOwnerKey: input.task.ownerKey })
     },
     async createWorkspaceSession({ sessionId, task, operationId }) {
@@ -2710,7 +2722,7 @@ export async function startHostServer(
       async update(actor, taskId, input) {
         const existing = await scheduledTaskStore.getTask(scheduleOwnerKey(actor), taskId)
         if (!existing) throw new Error('scheduled task not found')
-        if (input.target) await validateScheduledTarget(actor, { target: input.target })
+        await validateScheduledTarget(actor, { target: input.target ?? existing.target })
         return await scheduledTaskStore.update(scheduleOwnerKey(actor), taskId, input)
       },
       pause: async (actor, taskId, paused) => await scheduledTaskStore.setPaused(scheduleOwnerKey(actor), taskId, paused),

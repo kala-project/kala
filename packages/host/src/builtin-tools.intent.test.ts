@@ -29,10 +29,11 @@ describe('built-in tool intent schema',()=>{
     expect((tool.inputSchema.properties as Record<string,any>).max_bytes).toBeUndefined()
   })
 
-  it('registers todo_graph as the only planning tool',()=>{
+  it('registers the task graph and scheduled task tools under planning',()=>{
     const planningTools=createBuiltinTools().filter((tool)=>tool.toolsetId==='planning')
-    expect(planningTools.map((tool)=>tool.name)).toEqual(['todo_graph'])
+    expect(planningTools.map((tool)=>tool.name)).toEqual(['todo_graph','scheduled_task'])
     expect(planningTools[0]).toMatchObject({executionKind:'host',executionHandler:'todo_graph'})
+    expect(planningTools[1]).toMatchObject({executionKind:'host',executionHandler:'scheduled_task'})
   })
 
   it('keeps the Skill Tool schema independent from the discovered Skill registry',()=>{

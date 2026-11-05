@@ -5,6 +5,7 @@ import { preemptivelyPruneToolResults } from '../context/preemptive-pruning.js'
 import { selectHooks, type HookPayload } from './hooks.js'
 import { runPostToolHooks, runPreToolHooks } from './hooks-runner.js'
 import { isSkillManager, runSkillTool } from './skills.js'
+import { runScheduledTaskTool } from './scheduled-task-tool.js'
 import { runTodoGraphTool } from './todo-graph.js'
 import { consolidateMemory } from './memory-consolidation.js'
 import { runToolCatalogTool } from './tool-catalog.js'
@@ -17,6 +18,7 @@ export const BUILTIN_HOST_TOOL_HANDLERS = [
   'websearch',
   'agent',
   'todo_graph',
+  'scheduled_task',
   'tool_search',
   'tool_describe',
   'skill',
@@ -68,6 +70,9 @@ export function createBuiltinExtensionRegistry(additional: readonly HostExtensio
         },
         async todo_graph({ deps, sessionId, effect }) {
           return await runTodoGraphTool(deps, sessionId, effect)
+        },
+        async scheduled_task({ deps, sessionId, effect }) {
+          return await runScheduledTaskTool(deps, sessionId, effect)
         },
         async tool_search({ deps, sessionId, effect }) {
           const record = deps.store.get(sessionId)

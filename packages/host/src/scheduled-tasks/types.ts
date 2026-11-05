@@ -74,6 +74,8 @@ export type CreateScheduledTask = {
   prompt: string
   target: ScheduledTaskTarget
   schedule: ScheduleSpec
+  paused?: boolean
+  createRequest?: { key: string; fingerprint: string }
 }
 
 export type UpdateScheduledTask = Partial<Pick<ScheduledTask, 'prompt' | 'target' | 'schedule'>>

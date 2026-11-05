@@ -142,6 +142,10 @@ function parseSnapshotRows(rows: SnapshotRow[]): ScheduledTaskState {
     || !Array.isArray(state.runs)
     || !state.tasks.every(isTask)
     || !state.runs.every(isRun)
+    || (state.createReceipts !== undefined
+      && (!Array.isArray(state.createReceipts) || !state.createReceipts.every((receipt) =>
+        isRecord(receipt) && isString(receipt.ownerKey) && isString(receipt.principal)
+        && isString(receipt.key) && isString(receipt.fingerprint) && isString(receipt.taskId))))
     || (state.inboxReceipts !== undefined
       && (!Array.isArray(state.inboxReceipts) || !state.inboxReceipts.every(isInboxReceipt)))) {
     throw new Error('invalid portable scheduled task snapshot state')

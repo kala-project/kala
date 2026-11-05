@@ -1,4 +1,5 @@
 import { BackgroundAuthorizationError } from './authorization.js'
+import { ScheduledGoalConflictError } from './goal-guard.js'
 import { createHash } from 'node:crypto'
 
 import type { ScheduledTaskStorage } from './store.js'
@@ -117,6 +118,10 @@ export class UnitScheduler {
       }
       await this.store.finish(run.occurrenceId, 'enqueued', { sessionId })
     } catch (error) {
+      if (error instanceof ScheduledGoalConflictError) {
+        await this.store.finish(run.occurrenceId, 'failed', { error: redact(error) })
+        return
+      }
       if (error instanceof BackgroundAuthorizationError) {
         if (error.reason === 'unavailable') throw error
         await this.store.finish(run.occurrenceId, 'failed', { error: redact(error) })

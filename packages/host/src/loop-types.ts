@@ -34,6 +34,7 @@ import type { MessageAttachmentStorage } from './message-attachment-store.js'
 import type { AskUserChoiceBroker } from './ask-user-choice.js'
 import type { ExtensionRegistry } from './extensions/registry.js'
 import type { DagStorage } from './dag/storage.js'
+import type { ScheduledTaskStorage } from './scheduled-tasks/store.js'
 
 export type LoopBroadcast = {
   onEvent(
@@ -214,6 +215,11 @@ export type HostLoopDeps = {
   publishLocalImages?: (sessionId: string, record: import('./store/session.js').SessionRecord, message: import('@agent-kernel/kernel').Message) => Promise<import('@agent-kernel/kernel').Message>
   askUserChoice?: AskUserChoiceBroker
   extensions?: ExtensionRegistry
+  scheduledTaskStore?: ScheduledTaskStorage
+  /** Current authority, never the role cached in the Session record. */
+  authorizeScheduledTaskPrincipal?: (organizationId: string, principal: string) => Promise<'owner' | 'admin' | 'member' | 'viewer'>
+  /** Same target availability and remote cwd validation used by REST scheduling. */
+  validateScheduledTaskTarget?: (actor: { principal: string; organizationId?: string }, target: import('./scheduled-tasks/types.js').ScheduledTaskTarget) => Promise<void>
   dagStore?: DagStorage
   dagWorkerConfig?: () => AgentConfig
   dagScheduler?: {

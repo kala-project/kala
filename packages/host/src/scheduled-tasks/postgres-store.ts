@@ -8,6 +8,7 @@ import {
   type RuntimeResourceOwnership,
 } from '../tenant-runtime/postgres-runtime-resource-ownership.js'
 import { nextOccurrence, validateSchedule } from './recurrence.js'
+import { assertCreateReceiptCapacity } from './create-receipts.js'
 import type { ScheduledTaskStorage } from './store.js'
 import { changedInboxes, inboxSignatures, type ScheduledInboxScope } from './inbox-changes.js'
 import type {
@@ -22,7 +23,7 @@ import type {
 } from './types.js'
 
 type InboxReceipt = { ownerKey: string; principal: string; occurrenceIds: string[]; updatedAt: string }
-type State = { schemaVersion: 1; revision: number; tasks: ScheduledTask[]; runs: ScheduledRun[]; inboxReceipts?: InboxReceipt[] }
+type State = { schemaVersion: 1; revision: number; tasks: ScheduledTask[]; runs: ScheduledRun[]; inboxReceipts?: InboxReceipt[]; createReceipts?: { ownerKey: string; principal: string; key: string; fingerprint: string; taskId: string }[] }
 type LeaseToken = { unitId: string; ownerId: string; generation: bigint }
 type LeaseRow = Record<string, unknown> & { owner_id: string; generation: string; is_live: boolean }
 type StateRow = Record<string, unknown> & { document: unknown }
@@ -204,6 +205,10 @@ export class PostgresScheduledTaskStore implements ScheduledTaskStorage {
     return task ? clone(task) : undefined
   }
 
+  async getTaskByCreateRequest(ownerKey: string, principal: string, key: string, fingerprint: string): Promise<ScheduledTask | undefined> {
+    return findCreateReceipt(await this.readState(), ownerKey, principal, key, fingerprint)
+  }
+
   async history(ownerKey: string, taskId: string): Promise<ScheduledRun[] | undefined> {
     const state = await this.readState()
     const owned = state.tasks.some((task) => task.id === taskId && task.ownerKey === ownerKey)
@@ -254,17 +259,26 @@ export class PostgresScheduledTaskStore implements ScheduledTaskStorage {
     const sessionIds = sessionIdsForTarget(input.target)
     await this.prepareSessionOwners(sessionIds)
     return await this.mutate(async (state, transaction) => {
+      if (input.createRequest) {
+        const prior = findCreateReceipt(state, input.ownerKey, input.createdBy, input.createRequest.key, input.createRequest.fingerprint)
+        if (prior) return prior
+        assertCreateReceiptCapacity(state)
+      }
       await this.assertSessionOwners(transaction, sessionIds)
       validateTaskInput(input.prompt, input.target, input.schedule)
       const now = this.#now()
       const next = nextOccurrence(input.schedule, new Date(now.getTime() - 1))
       if (!next) throw new Error('once schedule must be in the future')
       const task: ScheduledTask = {
-        id: randomUUID(), generation: 1, ownerKey: input.ownerKey, createdBy: input.createdBy, status: 'active',
+        id: randomUUID(), generation: 1, ownerKey: input.ownerKey, createdBy: input.createdBy, status: input.paused ? 'paused' : 'active',
         prompt: input.prompt, target: clone(input.target), schedule: clone(input.schedule),
         nextRunAt: next.toISOString(), createdAt: now.toISOString(), updatedAt: now.toISOString(),
       }
       state.tasks.push(task)
+      if (input.createRequest) {
+        state.createReceipts ??= []
+        state.createReceipts.push({ ownerKey: input.ownerKey, principal: input.createdBy, ...input.createRequest, taskId: task.id })
+      }
       return clone(task)
     })
   }
@@ -327,15 +341,15 @@ export class PostgresScheduledTaskStore implements ScheduledTaskStorage {
     })
   }
 
-  async delete(ownerKey: string, taskId: string): Promise<boolean> {
+  async delete(ownerKey: string, taskId: string, autoPause = false): Promise<boolean> {
     const existing = await this.getTask(ownerKey, taskId)
     await this.prepareSessionOwners(existing ? sessionIdsForTarget(existing.target) : [])
     return await this.mutate(async (state, transaction) => {
       const index = state.tasks.findIndex((task) => task.id === taskId && task.ownerKey === ownerKey)
       if (index < 0) return false
       await this.assertSessionOwners(transaction, sessionIdsForTarget(state.tasks[index]!.target))
-      if (state.tasks[index]!.status !== 'paused') throw new Error('scheduled task must be paused before deletion')
       if (state.runs.some((run) => run.taskId === taskId && run.status === 'claimed')) throw new Error('scheduled task has a claimed occurrence and cannot be deleted')
+      if (!autoPause && state.tasks[index]!.status !== 'paused') throw new Error('scheduled task must be paused before deletion')
       state.tasks.splice(index, 1)
       return true
     })
@@ -709,6 +723,16 @@ export class PostgresScheduledTaskStore implements ScheduledTaskStorage {
 }
 
 function emptyState(): State { return { schemaVersion: 1, revision: 0, tasks: [], runs: [] } }
+
+function findCreateReceipt(state: State, ownerKey: string, principal: string, key: string, fingerprint: string): ScheduledTask | undefined {
+  const receipt = state.createReceipts?.find((item) =>
+    item.ownerKey === ownerKey && item.principal === principal && item.key === key)
+  if (!receipt) return undefined
+  if (receipt.fingerprint !== fingerprint) throw new Error('idempotency_key has already been used with different create inputs')
+  const task = state.tasks.find((item) => item.id === receipt.taskId)
+  if (!task) throw new Error('idempotency_key belongs to a deleted task; use a new key')
+  return clone(task)
+}
 
 function parseState(document: unknown): State {
   const state = (typeof document === 'string' ? JSON.parse(document) : document) as State

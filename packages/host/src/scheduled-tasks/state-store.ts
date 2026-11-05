@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { nextOccurrence, validateSchedule } from './recurrence.js'
+import { assertCreateReceiptCapacity } from './create-receipts.js'
 import type { ScheduledInboxScope } from './inbox-changes.js'
 import type {
   CreateScheduledTask,
@@ -12,7 +13,7 @@ import type {
 } from './types.js'
 
 export type InboxReceipt = { ownerKey: string; principal: string; occurrenceIds: string[]; updatedAt: string }
-export type ScheduledTaskState = { schemaVersion: 1; revision: number; tasks: ScheduledTask[]; runs: ScheduledRun[]; inboxReceipts?: InboxReceipt[] }
+export type ScheduledTaskState = { schemaVersion: 1; revision: number; tasks: ScheduledTask[]; runs: ScheduledRun[]; inboxReceipts?: InboxReceipt[]; createReceipts?: { ownerKey: string; principal: string; key: string; fingerprint: string; taskId: string }[] }
 const MAX_RUNS = 10_000
 
 /** Complete persistence contract consumed by the API and Unit scheduler. */
@@ -24,6 +25,7 @@ export interface ScheduledTaskStorage {
   listTasks(ownerKey: string): Promise<ScheduledTask[]>
   getTask(ownerKey: string, taskId: string): Promise<ScheduledTask | undefined>
   getTaskById(taskId: string): Promise<ScheduledTask | undefined>
+  getTaskByCreateRequest(ownerKey: string, principal: string, key: string, fingerprint: string): Promise<ScheduledTask | undefined>
   history(ownerKey: string, taskId: string): Promise<ScheduledRun[] | undefined>
   origins(ownerKey: string, sessionId: string): Promise<Record<string, string>>
   inbox(ownerKey: string, principal: string): Promise<ScheduledInbox>
@@ -32,7 +34,7 @@ export interface ScheduledTaskStorage {
   update(ownerKey: string, taskId: string, patch: UpdateScheduledTask): Promise<ScheduledTask>
   setPaused(ownerKey: string, taskId: string, paused: boolean): Promise<ScheduledTask>
   pauseSessionTargets(ownerKey: string, sessionIds: ReadonlySet<string>): Promise<number>
-  delete(ownerKey: string, taskId: string): Promise<boolean>
+  delete(ownerKey: string, taskId: string, autoPause?: boolean): Promise<boolean>
   due(limit: number): Promise<ScheduledTask[]>
   claim(taskId: string, scheduledFor: string): Promise<ScheduledRun | undefined>
   claimedRuns(): Promise<ScheduledRun[]>
@@ -73,6 +75,11 @@ export abstract class ScheduledTaskStateStore implements ScheduledTaskStorage {
   async getTaskById(taskId: string): Promise<ScheduledTask | undefined> {
     const task = (await this.readState()).tasks.find((item) => item.id === taskId)
     return task ? clone(task) : undefined
+  }
+
+  async getTaskByCreateRequest(ownerKey: string, principal: string, key: string, fingerprint: string): Promise<ScheduledTask | undefined> {
+    const state = await this.readState()
+    return findCreateReceipt(state, ownerKey, principal, key, fingerprint)
   }
 
   async history(ownerKey: string, taskId: string): Promise<ScheduledRun[] | undefined> {
@@ -120,16 +127,25 @@ export abstract class ScheduledTaskStateStore implements ScheduledTaskStorage {
 
   async create(input: CreateScheduledTask): Promise<ScheduledTask> {
     return await this.mutateState((state) => {
+      if (input.createRequest) {
+        const prior = findCreateReceipt(state, input.ownerKey, input.createdBy, input.createRequest.key, input.createRequest.fingerprint)
+        if (prior) return prior
+        assertCreateReceiptCapacity(state)
+      }
       validateTaskInput(input.prompt, input.target, input.schedule)
       const now = this.now()
       const next = nextOccurrence(input.schedule, new Date(now.getTime() - 1))
       if (!next) throw new Error('once schedule must be in the future')
       const task: ScheduledTask = {
-        id: randomUUID(), generation: 1, ownerKey: input.ownerKey, createdBy: input.createdBy, status: 'active',
+        id: randomUUID(), generation: 1, ownerKey: input.ownerKey, createdBy: input.createdBy, status: input.paused ? 'paused' : 'active',
         prompt: input.prompt, target: clone(input.target), schedule: clone(input.schedule),
         nextRunAt: next.toISOString(), createdAt: now.toISOString(), updatedAt: now.toISOString(),
       }
       state.tasks.push(task)
+      if (input.createRequest) {
+        state.createReceipts ??= []
+        state.createReceipts.push({ ownerKey: input.ownerKey, principal: input.createdBy, ...input.createRequest, taskId: task.id })
+      }
       return clone(task)
     })
   }
@@ -172,12 +188,12 @@ export abstract class ScheduledTaskStateStore implements ScheduledTaskStorage {
     })
   }
 
-  async delete(ownerKey: string, taskId: string): Promise<boolean> {
+  async delete(ownerKey: string, taskId: string, autoPause = false): Promise<boolean> {
     return await this.mutateState((state) => {
       const index = state.tasks.findIndex((task) => task.id === taskId && task.ownerKey === ownerKey)
       if (index < 0) return false
-      if (state.tasks[index]!.status !== 'paused') throw new Error('scheduled task must be paused before deletion')
       if (state.runs.some((run) => run.taskId === taskId && run.status === 'claimed')) throw new Error('scheduled task has a claimed occurrence and cannot be deleted')
+      if (!autoPause && state.tasks[index]!.status !== 'paused') throw new Error('scheduled task must be paused before deletion')
       state.tasks.splice(index, 1)
       return true
     })
@@ -244,6 +260,16 @@ export abstract class ScheduledTaskStateStore implements ScheduledTaskStorage {
     })
   }
 
+}
+
+function findCreateReceipt(state: ScheduledTaskState, ownerKey: string, principal: string, key: string, fingerprint: string): ScheduledTask | undefined {
+  const receipt = state.createReceipts?.find((item) =>
+    item.ownerKey === ownerKey && item.principal === principal && item.key === key)
+  if (!receipt) return undefined
+  if (receipt.fingerprint !== fingerprint) throw new Error('idempotency_key has already been used with different create inputs')
+  const task = state.tasks.find((item) => item.id === receipt.taskId)
+  if (!task) throw new Error('idempotency_key belongs to a deleted task; use a new key')
+  return clone(task)
 }
 
 function validateTaskInput(prompt: string, target: CreateScheduledTask['target'], schedule: CreateScheduledTask['schedule']): void {
