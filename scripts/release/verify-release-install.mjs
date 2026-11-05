@@ -17,7 +17,7 @@ const releaseDir = join(repoRoot, 'release')
 const manifestPath = join(releaseDir, 'manifest.json')
 const hostAsset = 'kala-dashboard-with-runtime.cjs'
 const windowsAssets = [
-  'kala-executor-win32-x64.exe',
+  'kala-executor.cjs',
   'kala-executor-service-host-win32-x64.exe',
   'node-pty-win32-x64.tar.gz',
   'install-executor.ps1',
@@ -30,7 +30,7 @@ for (const asset of [hostAsset, DEDICATED_SUPPORT_ARCHIVE]) {
   if (!manifest.assets.includes(asset) || !existsSync(join(releaseDir, asset))) fail(`missing required manifest asset: ${asset}`)
 }
 const hasWindowsPayload = windowsAssets.every((asset) => manifest.assets.includes(asset) && existsSync(join(releaseDir, asset)))
-if (windowsAssets.some((asset) => manifest.assets.includes(asset) || existsSync(join(releaseDir, asset))) && !hasWindowsPayload) {
+if (windowsAssets.slice(1).some((asset) => manifest.assets.includes(asset) || existsSync(join(releaseDir, asset))) && !hasWindowsPayload) {
   fail('release contains an incomplete Windows installation payload')
 }
 
@@ -87,7 +87,17 @@ async function smokeHost({ label, releaseAssetsDir, expectWindows }) {
     if (capabilitiesRes.status !== 200 || capabilities.product !== 'dedicated' || capabilities.deployment?.tenancy !== 'single-tenant') {
       throw new Error(`${label}: release install did not load canonical Dedicated deployment config`)
     }
-    const installCapabilitiesRes = await fetch(`${url}/api/executor-install-capabilities`)
+    const unauthenticatedInstallCapabilities = await fetch(`${url}/api/executor-install-capabilities`)
+    if (unauthenticatedInstallCapabilities.status !== 401) {
+      throw new Error(`${label}: unauthenticated install capabilities returned ${unauthenticatedInstallCapabilities.status}`)
+    }
+    const installCapabilitiesRes = await fetch(`${url}/api/executor-install-capabilities`, {
+      headers: {
+        'x-agent-runlab-principal': 'release-install-smoke',
+        'x-agent-runlab-organization-id': 'release-install-smoke',
+        'x-agent-runlab-organization-role': 'owner',
+      },
+    })
     const installCapabilities = await installCapabilitiesRes.json()
     if (installCapabilitiesRes.status !== 200 || installCapabilities?.platforms?.windows?.available !== expectWindows) {
       throw new Error(`${label}: Windows install capability was ${JSON.stringify(installCapabilities)}`)

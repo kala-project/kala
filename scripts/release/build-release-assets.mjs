@@ -9,7 +9,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { build } from 'esbuild'
 import {
-  executorNativeAssetName,
   generateExecutorInstallerPowerShell,
   windowsExecutorInstallerAssetName,
 } from './executor-installer.mjs'
@@ -54,8 +53,8 @@ if (!repo && component !== 'dashboard') {
   throw new Error('release repo is required; pass --repo owner/name or set GITHUB_REPOSITORY')
 }
 if (nativeOnly && noNative) throw new Error('--native-only and --no-native are mutually exclusive')
-// Self-contained SEA executables are opt-in. The release workflow invokes
-// --component executor --native-only explicitly for its required OS targets.
+// Matching runners stage platform-specific Copilot and Windows companion
+// dependencies separately from the platform-neutral CJS Executor.
 const wantsNativeBuild = !finalizeOnly && nativeOnly
 const currentNativeTarget = wantsNativeBuild ? detectNativeTarget() : undefined
 const nativeTarget = wantsNativeBuild ? options.nativeTarget ?? currentNativeTarget : undefined
@@ -145,7 +144,7 @@ if (component === 'all' || component === 'host') {
 // build silently produces a valid bundle with broken /install/assets URLs.
 prepareBootstrapAssets()
 
-const buildEntries = [...entries].sort((a, b) => {
+const buildEntries = (nativeOnly && component === 'executor' ? [] : [...entries]).sort((a, b) => {
   if (a.component === 'host' && b.component !== 'host') return 1
   if (b.component === 'host' && a.component !== 'host') return -1
   return 0
@@ -216,8 +215,7 @@ if (nativeOnly && nativeTarget === WINDOWS_EXECUTOR_TARGET && entries.some((entr
 
 if (nativeOnly) {
   removeNativeBuildWorkspace()
-  console.log(`native release assets written to ${outDir} for ${nativeTarget}`)
-  for (const item of entries) console.log(` - ${basename(nativeAssetName(item.name, nativeTarget))}`)
+  console.log(`platform companion assets written to ${outDir} for ${nativeTarget}`)
   if (nativeTarget === WINDOWS_EXECUTOR_TARGET && entries.some((entry) => entry.role === 'executor')) {
     console.log(` - ${windowsNodePtyCompanionAssetName(nativeTarget)}`)
     console.log(` - ${WINDOWS_SERVICE_HOST.asset}`)
@@ -305,7 +303,9 @@ function finalizeRelease() {
     .concat((component === 'all' || component === 'host') && exists(DEDICATED_SUPPORT_ARCHIVE) ? [DEDICATED_SUPPORT_ARCHIVE] : [])
     .concat(includeDashboard && exists('kala-model-catalog-seed.json') ? ['kala-model-catalog-seed.json'] : [])
     .concat(bootstrapAssets)
-  const hasNativeAssets = builtEntries.some((entry) => entry.natives.length > 0)
+  if (builtEntries.some((entry) => entry.role === 'executor' && entry.natives.length > 0)) {
+    throw new Error('standalone native Executor binaries are not release assets')
+  }
   const manifest = {
     name: 'kala',
     version: packageJson.version,
@@ -323,10 +323,8 @@ function finalizeRelease() {
     },
     fallbackAssets: Object.fromEntries(builtEntries.map((entry) => [entry.name, entry.cjs]).filter(([, cjs]) => cjs)),
     notes: [
-      hasNativeAssets
-        ? 'Executor is published as an OS-native binary; Portable Host and Dedicated components require Node.js 22+ .cjs assets by default'
-        : 'Node.js .cjs assets are the default; required OS-native Executor assets are added by the Executor release job',
-      'run.sh is a wget-only bash bootstrap that prefers .cjs assets with Node.js 22+ and can use a published native Executor otherwise',
+      'Executor runs from kala-executor.cjs with Node.js 22+ on every supported platform',
+      'run.sh is a wget-only bash bootstrap that uses the .cjs Executor asset with Node.js 22+',
       'Portable uses kala-dashboard-with-runtime.cjs with embedded dashboard assets; Self-hosted Platform uses kala-runtime.cjs plus an independently activated dashboard release',
     ],
   }
@@ -423,12 +421,11 @@ function prepareBootstrapAssets() {
     bootstrapAssets.push(POSIX_PORTABLE_MANAGER, WINDOWS_PORTABLE_MANAGER)
   }
   if (component === 'all' || component === 'executor') {
-    const windowsExecutable = executorNativeAssetName(WINDOWS_EXECUTOR_TARGET)
     const windowsCompanion = windowsNodePtyCompanionAssetName(WINDOWS_EXECUTOR_TARGET)
     const windowsServiceHost = WINDOWS_SERVICE_HOST.asset
-    if (exists(windowsExecutable) || exists(windowsCompanion) || exists(windowsServiceHost)) {
-      if (!exists(windowsExecutable) || !exists(windowsCompanion) || !exists(windowsServiceHost)) {
-        throw new Error('Windows Executor, ConPTY companion, and service host must be staged together')
+    if (exists(windowsCompanion) || exists(windowsServiceHost)) {
+      if (!exists('kala-executor.cjs') || !exists(windowsCompanion) || !exists(windowsServiceHost)) {
+        throw new Error('Windows CJS Executor, ConPTY companion, and service host must be staged together')
       }
       const installer = windowsExecutorInstallerAssetName()
       writeFileSync(join(outDir, installer), generateExecutorInstallerPowerShell({ repo, tag }))
@@ -549,7 +546,7 @@ function embeddedDocsBanner(dir) {
   for (const file of walkFiles(dir)) {
     if (!file.toLowerCase().endsWith('.md')) continue
     const rel = relative(dir, file).replace(/\\/g, '/')
-    assets.push({ path: rel, contentBase64: readFileSync(file).toString('base64') })
+    assets.push({ path: rel, contentBase64: Buffer.from(readFileSync(file, 'utf8').replace(/\r\n/g, '\n')).toString('base64') })
   }
   return `globalThis.__KALA_EMBEDDED_DOCS__=${JSON.stringify(assets)};\n`
 }
@@ -597,7 +594,6 @@ function prepareEmbeddedReleaseAssetsForHost() {
     writeFileSync(path, unifiedBootstrap({ repo, tag, component }))
     chmodSync(path, 0o755)
   }
-  const nativeExecutor = currentNativeTarget ? executorNativeAssetName(currentNativeTarget) : undefined
   const desktopDownloadDir = join(dashboardDist, 'downloads', 'desktop')
   const desktopManifestPath = join(desktopDownloadDir, 'release.json')
   const desktopNames = []
@@ -615,7 +611,7 @@ function prepareEmbeddedReleaseAssetsForHost() {
       desktopNames.push(target)
     }
   }
-  const embeddedNames = [executorCjs, nativeExecutor, 'run.sh', ...desktopNames]
+  const embeddedNames = [executorCjs, 'run.sh', ...desktopNames]
     .filter((name) => name && exists(name))
   writeSha256Sums(embeddedNames)
   return embeddedReleaseAssetsBanner(outDir, [...embeddedNames, 'SHA256SUMS'])

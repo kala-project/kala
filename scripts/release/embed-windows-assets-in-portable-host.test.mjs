@@ -10,6 +10,7 @@ import {
   PORTABLE_HOST_ASSET,
   WINDOWS_INSTALL_PAYLOADS,
 } from './embed-windows-assets-in-portable-host.mjs'
+import { createDashboardArchive, dashboardArchiveName } from './release-archives.mjs'
 
 const revision = '1234567890abcdef1234567890abcdef12345678'
 const repo = 'example/kala'
@@ -40,6 +41,40 @@ test('embeds verified Windows payloads with a payload-only checksum index', () =
   }
 })
 
+test('preserves the Windows-built Host while embedding the exact release Dashboard bytes', () => {
+  const dir = fixture()
+  try {
+    const dist = join(dir, 'dashboard')
+    mkdirSync(join(dist, 'brand'), { recursive: true })
+    const path = 'brand/kala-wordmark-light.svg'
+    const canonical = Buffer.from('<svg>release</svg>\n')
+    const index = Buffer.from('<html>Dashboard</html>\n')
+    writeFileSync(join(dist, path), canonical)
+    writeFileSync(join(dist, 'index.html'), index)
+    const files = [
+      { path, bytes: canonical.length, sha256: createHash('sha256').update(canonical).digest('hex') },
+      { path: 'index.html', bytes: index.length, sha256: createHash('sha256').update(index).digest('hex') },
+    ]
+    const manifestPath = join(dir, 'dashboard-release.json')
+    writeFileSync(manifestPath, JSON.stringify({ schemaVersion: 1, product: 'kala-dashboard', version: '1.2.3', source: { revision }, assetDigest: createHash('sha256').update(JSON.stringify(files)).digest('hex'), files }))
+    createDashboardArchive({ dashboardDist: dist, manifestPath, outputPath: join(dir, dashboardArchiveName) })
+    const hostPath = join(dir, PORTABLE_HOST_ASSET)
+    const captured = [
+      { path, contentBase64: Buffer.from('<svg>release</svg>\r\n').toString('base64') },
+      { path: 'index.html', contentBase64: index.toString('base64') },
+    ]
+    writeFileSync(hostPath, readFileSync(hostPath, 'utf8').replace("console.log('fixture')", `globalThis.__KALA_EMBEDDED_DASHBOARD__=${JSON.stringify(captured)};\nconsole.log('fixture')`))
+
+    embedWindowsAssetsInPortableHost({ directory: dir, repo, tag, expectedRevision: revision, canonicalDashboard: true })
+    const host = readFileSync(hostPath, 'utf8')
+    const embedded = banner(host, 'globalThis.__KALA_EMBEDDED_DASHBOARD__=')
+    assert.deepEqual(Buffer.from(embedded[0].contentBase64, 'base64'), canonical)
+    assert.match(host, /console\.log\('fixture'\)/u)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('fails closed when manifest and Portable Host identities do not match the expected revision', () => {
   const dir = fixture()
   try {
@@ -65,6 +100,7 @@ function fixture() {
   writeFileSync(join(dir, 'manifest.json'), JSON.stringify({
     repo,
     tag,
+    version: '1.2.3',
     source: { revision },
     assets: [PORTABLE_HOST_ASSET],
   }))

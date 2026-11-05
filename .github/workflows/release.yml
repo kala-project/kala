@@ -15,7 +15,7 @@ on:
         type: boolean
         default: false
       native_targets:
-        description: 'Exact default Executor targets: Linux x64, macOS x64/arm64, and Windows x64.'
+        description: 'Matching-runner Copilot SDK runtime targets: Linux x64, macOS x64/arm64, and Windows x64; no standalone native Executor.'
         required: false
         # Linux arm64 is paused for the current release.
         default: 'linux-x64,darwin-x64,darwin-arm64,win32-x64'
@@ -51,7 +51,7 @@ jobs:
           fi
           REQUIRED_NATIVE_TARGETS="linux-x64,darwin-x64,darwin-arm64,win32-x64"
           if [ "$NATIVE_TARGETS" != "$REQUIRED_NATIVE_TARGETS" ]; then
-            echo "native_targets must be exactly $REQUIRED_NATIVE_TARGETS; partial four-platform releases are not supported" >&2
+            echo "native_targets must include exactly the four matching-runner Copilot SDK runtimes: $REQUIRED_NATIVE_TARGETS; partial four-platform releases are not supported" >&2
             exit 1
           fi
           MATRIX_ENTRIES=""
@@ -62,7 +62,7 @@ jobs:
               darwin-x64) OS="macos-15-intel" ;;
               darwin-arm64) OS="macos-15" ;;
               win32-x64) continue ;; # Built with the Windows-captured Portable Host in windows-assets.
-              *) echo "Unsupported native target: $t" >&2; exit 1 ;;
+              *) echo "Unsupported Copilot SDK runtime target: $t" >&2; exit 1 ;;
             esac
             ENTRY="{\"os\":\"$OS\",\"target\":\"$t\"}"
             if [ -z "$MATRIX_ENTRIES" ]; then
@@ -161,6 +161,7 @@ jobs:
       - run: pnpm run build
       - run: pnpm run typecheck
       - run: pnpm run test:extended
+      - run: KALA_RUN_POSTGRES_INTEGRATION=1 pnpm --dir packages/host exec vitest run src/store/postgres-session.integration.test.ts
       - run: pnpm run privacy:history
       - run: pnpm run verify:licenses
       - run: pnpm run verify:public-packages
@@ -221,6 +222,8 @@ jobs:
       - run: pnpm run build
       - name: Build the platform-neutral Portable Host on Windows Node.js 22
         run: pnpm run build:release-assets -- --component all --tag ${{ needs.resolve.outputs.tag }} --repo ${{ github.repository }} --no-native
+      - name: Install and uninstall the generated Windows Portable manager
+        run: node --test scripts/release/portable-manager-windows.test.mjs
       - name: Capture the Windows-built Host and Copilot runtime
         shell: pwsh
         run: |
@@ -234,7 +237,7 @@ jobs:
           Copy-Item release $hostRelease -Recurse
           "PRODUCT_E2E_WINDOWS_HOST_RELEASE_DIR=$hostRelease" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Remove-Item release -Recurse -Force
-      - name: Build the native Windows x64 Executor and ConPTY companion
+      - name: Stage the existing Windows ConPTY and service-host dependencies
         run: pnpm run build:release-assets -- --component executor --tag ${{ needs.resolve.outputs.tag }} --repo ${{ github.repository }} --native-only --native-target win32-x64
       - name: Bind the Windows capture to the exact tag revision and hashes
         shell: pwsh
@@ -244,7 +247,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $capture = Join-Path $env:RUNNER_TEMP 'windows-captured'
           if ((git rev-parse HEAD).Trim() -ne $env:CAPTURE_REVISION) { throw 'Windows release checkout differs from the tag revision' }
-          Copy-Item release/kala-executor-win32-x64.exe $capture/
+          Copy-Item $env:PRODUCT_E2E_WINDOWS_HOST_RELEASE_DIR/kala-executor.cjs $capture/
           Copy-Item release/node-pty-win32-x64.tar.gz $capture/
           Copy-Item release/kala-executor-service-host-win32-x64.exe $capture/
           Set-Location $capture
@@ -253,6 +256,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          Copy-Item $env:RUNNER_TEMP/windows-captured/kala-executor.cjs release/
           tar -xzf release/node-pty-win32-x64.tar.gz -C release
           New-Item -ItemType Directory -Path release/prebuilds -Force | Out-Null
           Move-Item release/win32-x64 release/prebuilds/win32-x64 -Force
@@ -324,14 +328,18 @@ jobs:
           import { join } from 'node:path'
           const root = process.env.WINDOWS_CAPTURE_DIR
           const manifest = JSON.parse(readFileSync(join(root, 'windows-capture-manifest.json'), 'utf8'))
-          const expected = ['kala-copilot-runtime-node-win32-x64.node', 'kala-copilot-runtime-win32-x64', 'kala-dashboard-with-runtime.cjs', 'kala-executor-service-host-win32-x64.exe', 'kala-executor-win32-x64.exe', 'node-pty-win32-x64.tar.gz']
+          const expected = ['kala-copilot-runtime-node-win32-x64.node', 'kala-copilot-runtime-win32-x64', 'kala-dashboard-with-runtime.cjs', 'kala-executor.cjs', 'kala-executor-service-host-win32-x64.exe', 'node-pty-win32-x64.tar.gz']
           if (manifest.schemaVersion !== 1 || manifest.revision !== process.env.EXPECTED_REVISION) throw new Error('Windows capture revision mismatch')
-          if (JSON.stringify(Object.keys(manifest.assets).sort()) !== JSON.stringify(expected)) throw new Error('Windows capture manifest inventory is not exact')
+          if (JSON.stringify(Object.keys(manifest.assets).sort()) !== JSON.stringify([...expected].sort())) throw new Error('Windows capture manifest inventory is not exact')
           if (JSON.stringify(readdirSync(root).sort()) !== JSON.stringify([...expected, 'windows-capture-manifest.json'].sort())) throw new Error('Windows capture artifact inventory is not closed')
           for (const name of expected) {
             const bytes = readFileSync(join(root, name))
             if (createHash('sha256').update(bytes).digest('hex') !== manifest.assets[name]) throw new Error(`Windows capture checksum mismatch: ${name}`)
-            copyFileSync(join(root, name), join('release', name))
+            if (name === 'kala-executor.cjs'
+              && createHash('sha256').update(readFileSync(join('release', name))).digest('hex') !== manifest.assets[name]) {
+              throw new Error('Windows Executor CJS differs from the canonical signed release asset')
+            }
+            if (name !== 'kala-executor.cjs') copyFileSync(join(root, name), join('release', name))
           }
           NODE
       - name: Restore executable bit on downloaded assets
@@ -345,21 +353,17 @@ jobs:
           --repo ${{ github.repository }}
           --tag ${{ needs.resolve.outputs.tag }}
           --expected-revision ${{ github.sha }}
+          --canonical-dashboard
       - run: pnpm run build:release-assets -- --component ${{ needs.resolve.outputs.component }} --tag ${{ needs.resolve.outputs.tag }} --repo ${{ github.repository }} --finalize-only
-      - name: Require installable desktop Executor assets
+      - name: Require CJS Executor and existing Windows dependencies
         run: |
-          test -f release/kala-executor-linux-x64
-          # test -f release/kala-executor-linux-arm64 # Paused for the current release.
-          test -f release/kala-executor-darwin-x64
-          test -f release/kala-executor-darwin-arm64
-          test -f release/kala-executor-win32-x64.exe
+          test -f release/kala-executor.cjs
           test -f release/node-pty-win32-x64.tar.gz
           test -f release/kala-executor-service-host-win32-x64.exe
           test -f release/install-executor.ps1
           test -f release/kala-copilot-runtime-win32-x64
           test -f release/kala-copilot-runtime-node-win32-x64.node
-          # The Windows service host is an additional required asset, not a fifth Executor binary.
-          test "$(find release -maxdepth 1 -type f -name 'kala-executor-*' ! -name 'kala-executor-service-host-*' | wc -l)" -eq 4
+          ! find release -maxdepth 1 -type f \( -name 'kala-executor-linux-*' -o -name 'kala-executor-darwin-*' -o -name 'kala-executor-win32-*.exe' \) -print -quit | grep -q .
           ! find release -maxdepth 1 -type f \( -iname '*.msi' -o -iname '*.dll' -o -iname '*win32-arm64*' -o -iname '*windows-arm64*' -o -iname '*linux-arm64*' \) -print -quit | grep -q .
       - run: pnpm run verify:release-assets
       - run: pnpm run verify:version -- --tag ${{ needs.resolve.outputs.tag }} --manifest release/manifest.json
@@ -367,8 +371,14 @@ jobs:
         run: pnpm run verify:release-install
       - uses: sigstore/cosign-installer@v3
       - name: Sign the checksum index with Sigstore keyless identity
-        run: cosign sign-blob --yes --bundle release/SHA256SUMS.sigstore.json release/SHA256SUMS
-      - name: Verify exact signed Executor-native inventory
+        run: |
+          for attempt in 1 2 3; do
+            if cosign sign-blob --yes --bundle release/SHA256SUMS.sigstore.json release/SHA256SUMS; then break; fi
+            rm -f release/SHA256SUMS.sigstore.json
+            test "$attempt" -lt 3 || exit 1
+            sleep 10
+          done
+      - name: Verify exact signed CJS Executor inventory
         run: |
           pnpm run verify:release-assets -- --require-signed
           cosign verify-blob \

@@ -23,7 +23,7 @@ export const requiredReleaseEvidence = Object.freeze({
     targets: Object.freeze(['linux-x64-compose', 'linux-x64-compose-fresh']),
     checks: Object.freeze(['assetIntegrity', 'cleanInstall', 'organizationProvisioning', 'tenantIsolation', 'browser', 'executor', 'fullUpgrade', 'mtlsClientRejection', 'unitResourceIsolation', 'runtimeRestartRecovery', 'dashboardUpgradeIsolation', 'rollback', 'backupRestore']),
     targetChecks: Object.freeze({
-      'linux-x64-compose-fresh': Object.freeze(['assetIntegrity', 'imageDigestPinning', 'freshCandidateInstall', 'ephemeralBundledAcceptance', 'realBundledIdentities', 'authenticatedModelFixture', 'organizationProvisioning', 'tenantIsolation', 'browser', 'executor', 'mtlsClientRejection', 'unitResourceIsolation', 'runtimeRestartRecovery', 'backupRestore']),
+      'linux-x64-compose-fresh': Object.freeze(['assetIntegrity', 'imageDigestPinning', 'freshCandidateInstall', 'isolatedExternalOidc', 'externalPostgresS3', 'verifiedExternalRestore', 'authenticatedModelFixture', 'organizationProvisioning', 'tenantIsolation', 'browser', 'executor', 'mtlsClientRejection', 'unitResourceIsolation', 'runtimeRestartRecovery']),
     }),
   }),
   'private-cloud-predecessor': Object.freeze({
@@ -37,7 +37,7 @@ export const requiredReleaseEvidence = Object.freeze({
 const topLevelFields = new Set(['schemaVersion', 'category', 'tag', 'version', 'revision', 'target', 'artifact', 'artifacts', 'ok', 'checks', 'generatedAt', 'certifying', 'predecessorPolicy'])
 const windowsPortableArtifacts = Object.freeze([
   'kala-dashboard-with-runtime.cjs',
-  'kala-executor-win32-x64.exe',
+  'kala-executor.cjs',
   'node-pty-win32-x64.tar.gz',
   'kala-executor-service-host-win32-x64.exe',
   'install-executor.ps1',

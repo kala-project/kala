@@ -328,13 +328,13 @@ export function sha256File(path) {
 export async function loginWithPassword(page, { productOrigin, loginName, password, loginUrl = `${productOrigin}/auth/login` }) {
   const start = new URL(loginUrl)
   if (start.origin !== new URL(productOrigin).origin || start.pathname !== '/auth/login') throw new Error('login URL must be on the product authentication endpoint')
-  await page.goto(start.href, { waitUntil: 'domcontentloaded' })
+  await navigateLoginPage(page, start.href)
   await page.waitForSelector('input[name=loginName]')
   // ZITADEL's login app hydrates after the input first appears and can replace
   // that node once. Wait for hydration before entering credentials.
   await new Promise((resolve) => setTimeout(resolve, 1_200))
   await typeStableValue(page, 'input[name=loginName]', loginName)
-  await submitVisibleForm(page, 'input[name=loginName]')
+  await submitVisibleForm(page, 'input[name=loginName]', loginName)
   await page.waitForSelector('input[name=password]')
   await typeStableValue(page, 'input[name=password]', password)
   await submitVisibleForm(page, 'input[name=password]')
@@ -380,10 +380,28 @@ export async function loginWithPassword(page, { productOrigin, loginName, passwo
   return effectivePassword
 }
 
-async function typeStableValue(page, selector, value) {
+export async function navigateLoginPage(page, url) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded' })
+      return
+    } catch (error) {
+      if (attempt === 3 || !(error instanceof Error) || error.message !== `net::ERR_NETWORK_CHANGED at ${url}`) throw error
+      await new Promise((resolve) => setTimeout(resolve, attempt * 250))
+    }
+  }
+}
+
+async function typeStableValue(page, selector, value, replaceExisting = false) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     await page.waitForSelector(selector)
     await page.click(selector)
+    if (replaceExisting) {
+      await page.keyboard.down('Control')
+      await page.keyboard.press('KeyA')
+      await page.keyboard.up('Control')
+      await page.keyboard.press('Backspace')
+    }
     await page.keyboard.type(value)
     if (await page.$eval(selector, (input) => input.value).catch(() => '') === value) return
     await new Promise((resolve) => setTimeout(resolve, 250))
@@ -399,8 +417,39 @@ async function findVisibleElement(elements, predicate) {
   return null
 }
 
-async function submitVisibleForm(page, selector) {
-  await page.waitForFunction(() => [...document.querySelectorAll('button')].some((button) => !button.disabled && /continue|next|sign in/iu.test(button.textContent ?? '')))
+export async function waitForIdentitySubmit(page, selector, retryValue) {
+  const attempts = retryValue === undefined ? 1 : 3
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      await page.waitForFunction(() => [...document.querySelectorAll('button')].some((button) => !button.disabled && /continue|next|sign in/iu.test(button.textContent ?? '')), { timeout: 30_000 / attempts })
+      return
+    } catch (error) {
+      if (!(error instanceof Error) || error.name !== 'TimeoutError') throw error
+      const input = await page.$(selector)
+      if (attempt === attempts - 1 || !input) {
+        const path = new URL(page.url()).pathname
+        const form = await page.evaluate((fieldSelector) => {
+          const field = document.querySelector(fieldSelector)
+          return {
+            readyState: document.readyState,
+            inputLength: field instanceof HTMLInputElement ? field.value.length : null,
+            inputDisabled: field instanceof HTMLInputElement ? field.disabled : null,
+            buttons: [...document.querySelectorAll('button')].map((button) => ({
+              disabled: button.disabled,
+              expectedAction: /continue|next|sign in/iu.test(button.textContent ?? ''),
+            })),
+            alerts: document.querySelectorAll('[role=alert]').length,
+          }
+        }, selector)
+        throw new Error(`identity form did not enable (path=${path}, form=${JSON.stringify(form)})`, { cause: error })
+      }
+      await typeStableValue(page, selector, retryValue, true)
+    }
+  }
+}
+
+async function submitVisibleForm(page, selector, retryValue) {
+  await waitForIdentitySubmit(page, selector, retryValue)
   const buttons = await page.$$('button')
   const button = await findVisibleElement(buttons, async (candidate) =>
     await candidate.evaluate((item) =>

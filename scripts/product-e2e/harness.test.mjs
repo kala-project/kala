@@ -4,7 +4,68 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { ProductE2EHarness, clickByTestId } from './harness.mjs'
+import { ProductE2EHarness, clickByTestId, navigateLoginPage, waitForIdentitySubmit } from './harness.mjs'
+
+test('retries only a transient network change on the initial login navigation', async () => {
+  const url = 'http://localhost:13001/auth/login'
+  const transient = new Error(`net::ERR_NETWORK_CHANGED at ${url}`)
+  let attempts = 0
+  await navigateLoginPage({
+    async goto(actual, options) {
+      assert.equal(actual, url)
+      assert.deepEqual(options, { waitUntil: 'domcontentloaded' })
+      if (++attempts < 3) throw transient
+    },
+  }, url)
+  assert.equal(attempts, 3)
+
+  attempts = 0
+  await assert.rejects(navigateLoginPage({ async goto() { attempts++; throw transient } }, url), transient)
+  assert.equal(attempts, 3)
+
+  attempts = 0
+  const other = new Error('net::ERR_CONNECTION_REFUSED')
+  await assert.rejects(navigateLoginPage({ async goto() { attempts++; throw other } }, url), other)
+  assert.equal(attempts, 1)
+})
+
+test('retypes the hydrated identity input only when the submit button stays disabled', async () => {
+  const events = []
+  const timeout = Object.assign(new Error('waiting timed out'), { name: 'TimeoutError' })
+  let waits = 0
+  const page = {
+    async waitForFunction(_predicate, options) {
+      assert.equal(options.timeout, 10_000)
+      if (++waits === 1) throw timeout
+    },
+    async $(selector) { assert.equal(selector, 'input[name=loginName]'); return {} },
+    async waitForSelector() { events.push('selector') },
+    async click() { events.push('click') },
+    keyboard: {
+      async down(key) { events.push(`down:${key}`) },
+      async press(key) { events.push(`press:${key}`) },
+      async up(key) { events.push(`up:${key}`) },
+      async type() { events.push('type') },
+    },
+    async $eval() { return 'alice@example.test' },
+  }
+  await waitForIdentitySubmit(page, 'input[name=loginName]', 'alice@example.test')
+  assert.equal(waits, 2)
+  assert.deepEqual(events, ['selector', 'click', 'down:Control', 'press:KeyA', 'up:Control', 'press:Backspace', 'type'])
+
+  const other = new Error('navigation failed')
+  await assert.rejects(waitForIdentitySubmit({ async waitForFunction() { throw other } }, 'input[name=loginName]', 'alice@example.test'), other)
+  await assert.rejects(waitForIdentitySubmit({
+    async waitForFunction() { throw timeout },
+    async $() { return null },
+    url() { return 'https://identity.example/ui/v2/login?state=secret' },
+    async evaluate() { return { inputLength: 0, buttons: [{ disabled: true, expectedAction: true }] } },
+  }, 'input[name=loginName]', 'alice@example.test'), (error) => {
+    assert.match(error.message, /path=\/ui\/v2\/login, form=\{"inputLength":0,"buttons":\[\{"disabled":true,"expectedAction":true\}\]\}/u)
+    assert.doesNotMatch(error.message, /secret/u)
+    return true
+  })
+})
 
 test('records task evidence and cleans resources in reverse order', async () => {
   const root = await mkdtemp(join(tmpdir(), 'product-e2e-harness-'))

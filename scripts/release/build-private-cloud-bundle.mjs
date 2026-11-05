@@ -22,6 +22,7 @@ const files = [
   'deploy/private-cloud/compose.yaml',
   'deploy/private-cloud/compose.postgres-s3-base.yaml',
   'deploy/private-cloud/compose.oidc-private-ca.yaml',
+  'deploy/private-cloud/compose.s3-private-ca.yaml',
   'deploy/private-cloud/compose.storage-nfs.yaml',
   'deploy/private-cloud/compose.storage-external-nfs.yaml',
   'deploy/private-cloud/compose.storage-local.yaml',

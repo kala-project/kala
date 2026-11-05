@@ -7,7 +7,6 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import {
-  executorNativeAssetName,
   generateExecutorInstallerPowerShell,
   generateExecutorInstallerSh,
   mapExecutorPlatform,
@@ -26,22 +25,13 @@ test('maps supported executor OS and architecture aliases', () => {
   assert.equal(mapExecutorPlatform('linux', 'riscv64'), undefined)
 })
 
-test('uses one Kala namespace for native asset names', () => {
-  assert.equal(executorNativeAssetName('linux-x64'), 'kala-executor-linux-x64')
-  assert.equal(executorNativeAssetName('linux-arm64'), 'kala-executor-linux-arm64')
-  assert.equal(executorNativeAssetName('darwin-x64'), 'kala-executor-darwin-x64')
-  assert.equal(executorNativeAssetName('darwin-arm64'), 'kala-executor-darwin-arm64')
-  assert.equal(executorNativeAssetName('win32-x64'), 'kala-executor-win32-x64.exe')
-  assert.throws(() => executorNativeAssetName('win32-arm64'))
-  assert.throws(() => executorNativeAssetName('freebsd-x64'))
-})
-
-test('generates HTTPS-only, checksummed Bash installer with native or Node.js fallback', () => {
+test('generates HTTPS-only, checksummed Node.js-only Bash installer', () => {
   const sh = generateExecutorInstallerSh({ repo: 'owner/repo', tag: 'v1.2.3' })
-  for (const marker of [/release asset URL must use HTTPS/, /--https-only/, /SHA256SUMS/, /kala-executor-/, /--internal-installer/]) assert.match(sh, marker)
+  for (const marker of [/release asset URL must use HTTPS/, /--https-only/, /SHA256SUMS/, /kala-executor\.cjs/, /--internal-installer/]) assert.match(sh, marker)
   assert.doesNotMatch(sh, /ALLOW_UNSIGNED|unsigned install/)
   assert.match(sh, /kala-executor\.cjs/)
   assert.match(sh, /Node\.js 22\+/)
+  assert.doesNotMatch(sh, /native Executor|kala-executor-\$target/)
   assert.doesNotMatch(sh, /manifest\.json/)
   assert.match(sh, /this release supports Linux and macOS only/)
   assert.doesNotMatch(sh, /win32|mingw|msys|cygwin|\.exe|\.ps1|conpty/iu)
@@ -65,11 +55,15 @@ test('generates a signed-checksum Windows x64 installer with an exact ConPTY inv
   assert.equal(windowsExecutorInstallerAssetName(), 'install-executor.ps1')
   for (const marker of [
     /Windows x64/,
-    /kala-executor-win32-x64\.exe/,
+    /kala-executor\.cjs/,
+    /Get-Command node\.exe -CommandType Application/,
+    /Node\.js 22\+ is required for the Windows Executor/,
     /node-pty-win32-x64\.tar\.gz/,
     /kala-executor-service-host-win32-x64\.exe/,
     /SHA256SUMS\.sigstore\.json/,
-    /cosign\.Source verify-blob/,
+    /\$env:KALA_VERIFIED_EXECUTOR_SHA256 = \$executorDigest/,
+    /\$env:KALA_VERIFIED_CONPTY_MANIFEST_SHA256 = \$companionManifestDigest/,
+    /& \$cosignPath verify-blob/,
     /SHA256\]::Create\(\)/,
     /ComputeHash\(\$stream\)/,
     /Verifying Windows Executor checksum/,
@@ -94,15 +88,15 @@ test('generates a signed-checksum Windows x64 installer with an exact ConPTY inv
     /Starting verified Windows Executor/,
     /--internal-installer/,
   ]) assert.match(ps1, marker)
-  assert.match(ps1, /Push-Location -LiteralPath \$work[\s\S]*?\$tar\.Source -tzf \$companion[\s\S]*?\$tar\.Source -xzf \$companion[\s\S]*?Pop-Location/u)
-  assert.doesNotMatch(ps1, /\$tar\.Source -(?:tzf|xzf) \$archive/u)
+  assert.match(ps1, /Push-Location -LiteralPath \$work[\s\S]*?\$tarPath -tzf \$companion[\s\S]*?\$tarPath -xzf \$companion[\s\S]*?Pop-Location/u)
+  assert.doesNotMatch(ps1, /\$tarPath -(?:tzf|xzf) \$archive/u)
   assert.match(ps1, /Host-mediated release trust requires a valid internal installation session/)
   assert.match(ps1, /--invite-installer/)
   assert.match(ps1, /KALA_INVITE_INSTALL_MODE/)
   assert.match(ps1, /\$internalSession/)
   assert.match(ps1, /\$inviteSession/)
-  assert.match(ps1, /if \(\$hostRelease\) \{ & \$binary @args \} else \{ & \$binary --internal-installer @args \}/)
-  assert.doesNotMatch(ps1, /& \$binary --internal-installer @args\s*\n/u, 'organization invite must not execute the Host installation-session entry point')
+  assert.match(ps1, /if \(\$hostRelease\) \{ node\.exe \$binary @args \} else \{ node\.exe \$binary --internal-installer @args \}/)
+  assert.doesNotMatch(ps1, /node\.exe \$binary --internal-installer @args\s*\n/u, 'organization invite must not execute the Host installation-session entry point')
   assert.match(ps1, /Release downloads require HTTPS except for loopback URLs/)
   assert.match(ps1, /SHA256SUMS must contain exactly one valid entry/)
   assert.match(ps1, /if \(\$hostRelease\) \{[\s\S]*?AllowAutoRedirect = \$false[\s\S]*?GetResponseStream\(\)[\s\S]*?CopyTo\(\$outputStream\)[\s\S]*?\} else \{[\s\S]*?-PassThru/u)
@@ -110,26 +104,7 @@ test('generates a signed-checksum Windows x64 installer with an exact ConPTY inv
   assert.match(ps1, /Fetching verified asset \$name/)
   assert.match(ps1, /Asset download completed \$name/)
   assert.match(ps1, /redirected away from HTTPS/)
-  assert.doesNotMatch(ps1, /ALLOW_UNSIGNED|winget|kala-executor\.cjs/iu)
-})
-
-test('release builder emits the four-target RC manifest with the Windows native installer', () => {
-  const builder = readFileSync(new URL('./build-release-assets.mjs', import.meta.url), 'utf8')
-  assert.match(builder, /sourceSnapshotSha256/u)
-  assert.match(builder, /release source changed while assets were being built/u)
-  assert.match(builder, /bootstrapAssets\.push\('run\.sh'\)/)
-  assert.doesNotMatch(builder, /install-executor\.sh|generateExecutorInstallerSh/)
-  assert.match(builder, /const nativeTargets = \['linux-x64', 'darwin-x64', 'darwin-arm64', WINDOWS_EXECUTOR_TARGET\]/)
-  assert.match(builder, /name: 'kala-executor'/)
-  assert.doesNotMatch(builder, /legacyExecutorNativeAssetName|runlab-executor/)
-  assert.match(builder, /const supportedNativeBuildTargets = nativeTargets/)
-  assert.match(builder, /packageWindowsNodePtyCompanion/)
-  assert.match(builder, /stageWindowsServiceHost/)
-  assert.match(builder, /windowsServiceHostManifestMetadata/)
-  assert.match(builder, /generateExecutorInstallerPowerShell/)
-  assert.match(builder, /Windows native release builds are Executor-only; Portable Host remains a Node\.js 22\+ CJS asset/)
-  assert.match(builder, /Node SEA builds are not cross-compiled/)
-  assert.doesNotMatch(builder, /writeExecutorUpdateManifest/)
+  assert.doesNotMatch(ps1, /ALLOW_UNSIGNED|winget|kala-executor-win32-x64\.exe/iu)
 })
 
 test('Windows installer architecture detection supports PowerShell 5.1 without RuntimeInformation', () => {
@@ -143,10 +118,39 @@ test('Windows installer architecture detection supports PowerShell 5.1 without R
 const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh'
 const hasPowerShell = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'], { encoding: 'utf8' }).status === 0
 
+test('Windows Node version guard accepts Node 22 and rejects older releases', { skip: !hasPowerShell }, () => {
+  const ps1 = generateExecutorInstallerPowerShell({ repo: 'owner/repo', tag: 'v1.2.3' })
+  const start = ps1.indexOf('$nodeVersionMatch =')
+  const end = ps1.indexOf("$asset = 'kala-executor.cjs'", start)
+  assert.ok(start > 0 && end > start)
+  const guard = ps1.slice(start, end)
+  for (const [version, accepted] of [['v22.1.0', true], ['v21.9.0', false]]) {
+    const result = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+      `$ErrorActionPreference = 'Stop'; $nodeVersion = '${version}'; $global:LASTEXITCODE = 0; ${guard} Write-Output 'accepted'`,
+    ], { encoding: 'utf8' })
+    assert.equal(result.status === 0, accepted, result.stderr)
+  }
+})
+
+test('Windows installer invokes executable commands, not PowerShell member expressions', () => {
+  const ps1 = generateExecutorInstallerPowerShell({ repo: 'owner/repo', tag: 'v1.2.3' })
+  assert.match(ps1, /\$nodeVersion = node\.exe --version/u)
+  assert.match(ps1, /node\.exe \$binary @args/u)
+  assert.match(ps1, /& \$tarPath -tzf \$companion/u)
+  assert.doesNotMatch(ps1, /& \$\w+\.Source/u)
+})
+
+test('Windows ConPTY manifest digest uses the same streaming SHA-256 as downloaded assets', () => {
+  const ps1 = generateExecutorInstallerPowerShell({ repo: 'owner/repo', tag: 'v1.2.3' })
+  assert.match(ps1, /\$companionManifestDigest = Get-Digest \$manifestPath/u)
+  assert.match(ps1, /function Assert-Digest[\s\S]*?\(Get-Digest \$path\)/u)
+  assert.doesNotMatch(ps1, /Get-FileHash/u)
+})
+
 test('Windows architecture guard accepts AMD64 and rejects unsupported native architectures', { skip: !hasPowerShell }, () => {
   const ps1 = generateExecutorInstallerPowerShell({ repo: 'owner/repo', tag: 'v1.2.3' })
   const start = ps1.indexOf('if ([Environment]::OSVersion.Platform')
-  const end = ps1.indexOf("$asset = 'kala-executor-win32-x64.exe'")
+  const end = ps1.indexOf('$node = Get-Command node.exe')
   assert.ok(start > 0 && end > start)
   const guard = ps1.slice(start, end)
     .replace('[Environment]::OSVersion.Platform', '$testOSPlatform')

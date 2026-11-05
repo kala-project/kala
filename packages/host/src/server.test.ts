@@ -324,7 +324,7 @@ describe('wire protocol', () => {
     // Closing sockets does not wait for already dispatched Agent turns to finish
     // their durable writes; keep the temporary Session directory until they do.
     await server.loop.waitForQuiescence()
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   })
 
   it('terminates unknown Runtime routes without stealing API requests or Socket.IO acknowledgements', async () => {
@@ -2551,7 +2551,7 @@ describe('wire protocol', () => {
     const releaseDir = mkdtempSync(join(tmpdir(), 'agent-kernel-windows-release-assets-'))
     const localSessionsDir = mkdtempSync(join(tmpdir(), 'agent-kernel-windows-release-sessions-'))
     const assets = new Map([
-      ['kala-executor-win32-x64.exe', Buffer.from('native-executor-fixture')],
+      ['kala-executor.cjs', Buffer.from('cjs-executor-fixture')],
       ['kala-executor-service-host-win32-x64.exe', Buffer.from('service-host-fixture')],
       ['node-pty-win32-x64.tar.gz', Buffer.from('conpty-companion-fixture')],
       ['install-executor.ps1', Buffer.from("Write-Host 'installer fixture'\n")],
@@ -2579,13 +2579,13 @@ describe('wire protocol', () => {
       await writeFile(join(releaseDir, 'kala-executor-service-host-win32-x64.exe'), serviceHost)
       const complete = await fetch(capabilityUrl)
       await expect(complete.json()).resolves.toMatchObject({ platforms: { windows: { available: true } } })
-      const native = assets.get('kala-executor-win32-x64.exe')!
-      const nativeUrl = `http://localhost:${localServer.port}/install/assets/kala-executor-win32-x64.exe`
-      const nativeResponse = await fetch(nativeUrl)
-      expect(nativeResponse.headers.get('content-length')).toBe(String(native.byteLength))
-      expect(Buffer.from(await nativeResponse.arrayBuffer())).toEqual(native)
-      const nativeHead = await fetch(nativeUrl, { method: 'HEAD' })
-      expect(nativeHead.headers.get('content-length')).toBe(String(native.byteLength))
+      const executor = assets.get('kala-executor.cjs')!
+      const executorUrl = `http://localhost:${localServer.port}/install/assets/kala-executor.cjs`
+      const executorResponse = await fetch(executorUrl)
+      expect(executorResponse.headers.get('content-length')).toBe(String(executor.byteLength))
+      expect(Buffer.from(await executorResponse.arrayBuffer())).toEqual(executor)
+      const executorHead = await fetch(executorUrl, { method: 'HEAD' })
+      expect(executorHead.headers.get('content-length')).toBe(String(executor.byteLength))
       const powershell = await fetch(`http://localhost:${localServer.port}/install.ps1`)
       expect(powershell.status).toBe(200)
       expect(await powershell.text()).toContain('/install/assets/install-executor.ps1')
@@ -5008,14 +5008,19 @@ describe('wire protocol', () => {
     const workspaceId = 'workspace-terminal-order'
     const sessionId = 'session-terminal-order'
     const executor: ClientSocket<ExecutorServerToClientEvents, ExecutorClientToServerEvents> = clientIO(`http://localhost:${isolated.port}/executor`, {
-      transports: ['websocket'], auth: { role: 'executor', clientVersion: PROTOCOL_VERSION }, reconnection: false,
+      transports: ['websocket'], auth: { role: 'executor', clientVersion: PROTOCOL_VERSION }, autoConnect: false, reconnection: false,
     })
     const dashboard: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(`http://localhost:${isolated.port}/dashboard`, {
       transports: ['websocket'], auth: { sessionId, role: 'dashboard', clientVersion: PROTOCOL_VERSION }, autoConnect: false, reconnection: false,
     })
     try {
       await isolated.store.create({ sessionId, workspaceId, config })
-      await new Promise<void>((resolve) => executor.on('connect', resolve))
+      const connected = new Promise<void>((resolve, reject) => {
+        executor.once('connect', resolve)
+        executor.once('connect_error', reject)
+      })
+      executor.connect()
+      await connected
       executor.emit('executor:announce', { executorId: 'executor-terminal-order', workspaceId, workspaceName: 'terminal order', tools: [], runtime: 'node', runtimeVersion: 'test' })
       const ready = new Promise<SessionReadyEvent>((resolve) => dashboard.on('session:ready', resolve))
       dashboard.connect()
@@ -5043,7 +5048,7 @@ describe('wire protocol', () => {
       await isolated.close()
       rmSync(root, { recursive: true, force: true })
     }
-  })
+  }, 30_000)
 
   it('does not create or report a fork after the source Session owner moves', async () => {
     const isolatedDir = mkdtempSync(join(tmpdir(), 'kala-fork-owner-'))
@@ -5547,6 +5552,7 @@ describe('wire protocol', () => {
     })
     expect(server.store.get(start.childSessionId)?.state).toMatchObject({ status: 'done', pendingCalls: [] })
     expect(abortCounts.get(start.childSessionId)).toBe(1)
+    await vi.waitFor(() => expect(server.store.get(sessionId)?.state.status).toBe('done'), { timeout: 10_000 })
 
     dashboard.close()
     executor.close()

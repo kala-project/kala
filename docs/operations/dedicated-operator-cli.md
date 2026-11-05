@@ -63,10 +63,10 @@ route fencing, health verification, and rollback recovery.
 
 ### Windows Workspace installers
 
-A Linux-only local Runtime build does not include native Windows Executor assets.
+A Linux-only local Runtime build does not include the Windows ConPTY and service-host dependencies.
 Updating Runtime or Dashboard alone therefore does not enable Windows in Add
 Workspace. `/api/executor-install-capabilities` reports Windows available only
-when the Host can verify `kala-executor-win32-x64.exe`,
+when the Host can verify `kala-executor.cjs`,
 `kala-executor-service-host-win32-x64.exe`, `node-pty-win32-x64.tar.gz`, and
 `install-executor.ps1` against its served `SHA256SUMS`.
 

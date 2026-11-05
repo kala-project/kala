@@ -263,7 +263,7 @@ esac
 
 export function generateWindowsPortableManager({ repo, tag }) {
   assertReleaseIdentity(repo, tag)
-  return `#requires -Version 5.1
+  return String.raw`#requires -Version 5.1
 [CmdletBinding()]
 param(
   [Parameter(Position=0)][ValidateSet('install','start','status','logs','stop','upgrade','uninstall','help')][string]$Command = 'help',
@@ -272,6 +272,7 @@ param(
   [switch]$PurgeData
 )
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $Repo = ${psQuote(repo)}
 $BuiltTag = ${psQuote(tag)}
 $Asset = ${psQuote(HOST_ASSET)}
@@ -303,10 +304,10 @@ using Stop-Process, which cannot provide a safe cooperative shutdown here.
 function Fail([string]$Message) { throw "Kala Portable: $Message" }
 function Assert-SafePaths {
   $script:Root = [IO.Path]::GetFullPath($script:Root); $script:Data = [IO.Path]::GetFullPath($script:Data)
-  $home = [IO.Path]::GetFullPath($env:USERPROFILE); $comparison = [StringComparison]::OrdinalIgnoreCase
+  $userHome = [IO.Path]::GetFullPath($env:USERPROFILE); $comparison = [StringComparison]::OrdinalIgnoreCase
   function Is-Root([string]$Path) { return $Path.Equals([IO.Path]::GetPathRoot($Path), $comparison) }
   function Contains-Path([string]$Parent, [string]$Child) { $prefix = $Parent.TrimEnd('\') + '\'; return $Child.Equals($Parent, $comparison) -or $Child.StartsWith($prefix, $comparison) }
-  if ((Is-Root $Root) -or (Is-Root $Data) -or $Root.Equals($home,$comparison) -or $Data.Equals($home,$comparison)) { Fail 'runtime and data directories must not be a drive root or the user home' }
+  if ((Is-Root $Root) -or (Is-Root $Data) -or $Root.Equals($userHome,$comparison) -or $Data.Equals($userHome,$comparison)) { Fail 'runtime and data directories must not be a drive root or the user home' }
   if ((Contains-Path $Root $Data) -or (Contains-Path $Data $Root)) { Fail 'runtime and data directories must not overlap' }
   $script:Runtime = Join-Path $Root 'runtime'; $script:PidFile = Join-Path $Root 'kala.pid'; $script:LogFile = Join-Path $Root 'kala.log'; $script:ErrorLog = Join-Path $Root 'kala-error.log'; $script:TagFile = Join-Path $Root 'release-tag'; $script:BaseFile = Join-Path $Root 'release-base-url'; $script:Manager = Join-Path $Root 'bin\kala-portable.ps1'
 }
@@ -323,6 +324,13 @@ function Get-Base([string]$ReleaseTag) {
   return "https://github.com/$Repo/releases/download/$ReleaseTag"
 }
 function Download([string]$Url, [string]$Path) { Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Path }
+function Assert-Digest([string]$Path, [string]$Expected, [string]$Name) {
+  $stream = [IO.File]::OpenRead($Path)
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try { $actual = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+  finally { $stream.Dispose(); $sha.Dispose() }
+  if ($actual -ne $Expected) { Fail "$Name checksum mismatch" }
+}
 function Assert-Node22 {
   $node = Get-Command node -ErrorAction SilentlyContinue; if (-not $node) { Fail 'Node.js 22 or newer is required' }
   $major = & $node.Source -e "process.stdout.write(process.versions.node.split('.')[0])"; if ([int]$major -lt 22) { Fail 'Node.js 22 or newer is required' }
@@ -345,7 +353,7 @@ function Prepare-Release([string]$ReleaseTag) {
       $lines = @(Get-Content $index | Where-Object { $_ -match ('^[0-9a-f]{64}  ' + [regex]::Escape($name) + '$') })
       if ($lines.Count -ne 1) { Fail "$name must appear exactly once in SHA256SUMS" }
       $downloaded = Join-Path $temp $name; Download "$base/$name" $downloaded
-      $actual = (Get-FileHash -Algorithm SHA256 "$downloaded").Hash.ToLowerInvariant(); if ($actual -ne $lines[0].Substring(0,64)) { Fail "$name checksum mismatch" }
+      Assert-Digest $downloaded $lines[0].Substring(0,64) $name
     }
     return @{ Tag=$ReleaseTag; Base=$base; Temp=$temp; NodePath=$nodePath }
   } catch { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue; throw }

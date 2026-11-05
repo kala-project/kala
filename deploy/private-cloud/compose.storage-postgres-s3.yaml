@@ -23,13 +23,19 @@ services:
         cp /run/secrets/runtime_host_cert /host/runtime_host.pem
         cp /run/secrets/runtime_health_key /host/runtime_health_key.pem
         cp /run/secrets/runtime_health_cert /host/runtime_health.pem
+        cp /run/kala-installation/installation-id /host/installation-id
         cp /run/secrets/internal_ca /gateway/internal_ca.pem
         cp /run/secrets/ingress_client_key /gateway/ingress_client_key.pem
         cp /run/secrets/ingress_client_cert /gateway/ingress_client.pem
+        cp /run/kala-installation/installation-id /gateway/installation-id
         chown -R 65532:65532 /host /gateway
         chmod 700 /host /gateway
         chmod 400 /host/* /gateway/*
     secrets: !override [ingress_secret, llm_api_key, session_secret, oidc_client_id, oidc_client_secret, control_postgres_writer_url, internal_ca, runtime_host_key, runtime_host_cert, ingress_client_key, ingress_client_cert, runtime_health_key, runtime_health_cert]
+    configs:
+      - source: installation_id
+        target: /run/kala-installation/installation-id
+        mode: 0444
 
   control-plane-init:
     command: !override [packages/runtime-ingress-gateway/dist/src/bin/init-control-plane.js]
@@ -67,6 +73,9 @@ services:
     restart: "no"
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
+    # File-backed Compose secrets retain the host's 0600 owner and need this
+    # capability when the container runs as root with all other caps dropped.
+    cap_add: [DAC_OVERRIDE]
     read_only: true
     tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
     pids_limit: 128
@@ -116,6 +125,7 @@ services:
     restart: "no"
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE]
     read_only: true
     tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
     pids_limit: 128
@@ -129,7 +139,7 @@ services:
       KALA_RUNTIME_EXPERIMENTAL_DOCKER_STORAGE: "1"
       KALA_RUNTIME_POSTGRES_SCHEMA_MODE: versioned
       KALA_RUNTIME_REQUIRE_INSTALLATION_CLAIM: "1"
-      KALA_INSTALLATION_ID_FILE: /run/kala-installation/installation-id
+      KALA_INSTALLATION_ID_FILE: /run/kala-secrets/installation-id
       KALA_RUNTIME_EXPERIMENTAL_SESSION_OWNERSHIP: "1"
       KALA_RUNTIME_NODE_ID: runtime-host
       KALA_RUNTIME_NODE_ORIGIN: https://runtime-host:13002
@@ -145,10 +155,6 @@ services:
     # Scratch is disposable: committed Session/Queue/Artifact authority belongs to PG/S3.
     volumes:
       - runtime-storage-secrets:/run/kala-storage:ro
-    configs:
-      - source: installation_id
-        target: /run/kala-installation/installation-id
-        mode: 0444
     tmpfs:
       - /var/lib/kala:rw,noexec,nosuid,size=256m,uid=65532,gid=65532,mode=0700
     depends_on: !override
@@ -160,20 +166,17 @@ services:
     environment:
       KALA_INGRESS_LOGIN_STATE_STORE_KIND: postgres
       KALA_INGRESS_REQUIRE_INSTALLATION_CLAIM: "1"
-      KALA_INSTALLATION_ID_FILE: /run/kala-installation/installation-id
+      KALA_INSTALLATION_ID_FILE: /run/kala-secrets/installation-id
       KALA_INGRESS_EXPERIMENTAL_DOCKER_STORAGE: "1"
       KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING_FILE: /run/kala-storage/runtime_postgres_reader_url
       KALA_INGRESS_EXPERIMENTAL_RUNTIME_ORIGIN_ALLOWLIST: https://runtime-host:13002
       KALA_INGRESS_EXPERIMENTAL_BOOTSTRAP_RUNTIME_ORIGIN: https://runtime-host:13002
     volumes:
       - gateway-storage-secrets:/run/kala-storage:ro
-    configs:
-      - source: installation_id
-        target: /run/kala-installation/installation-id
-        mode: 0444
     networks: !override
       edge: { gw_priority: 1 }
       runtime: {}
+      egress: {}
     depends_on: !override
       init-app-secrets: { condition: service_completed_successfully }
       control-plane-init: { condition: service_completed_successfully }

@@ -134,9 +134,11 @@ test('Private Cloud promotion requires exact fresh-candidate evidence and cannot
 
   assert.deepEqual(jobs.fresh_beta_candidate_assets.needs, ['resolve', 'bundle'])
   assert.equal(jobs.fresh_beta_candidate_assets.if, "startsWith(github.ref, 'refs/tags/')")
-  const stageRun = namedStep(jobs.fresh_beta_candidate_assets, 'Stage signed draft bundle and exact beta Executor').run
+  const stageRun = namedStep(jobs.fresh_beta_candidate_assets, 'Stage signed draft bundle and exact CJS Executor').run
   assert.match(stageRun, /kala-private-cloud-\$\{VERSION\}-linux-x64\.tar\.gz/u)
   assert.match(stageRun, /private-cloud-linux-x64\.sigstore\.json/u)
+  assert.match(stageRun, /manifest\.source\?\.revision !== process\.env\.GITHUB_SHA/u)
+  assert.match(stageRun, /sha256sum --check --ignore-missing SHA256SUMS/u)
   const stagedArtifact = jobs.fresh_beta_candidate_assets.steps.find((step) => step.uses === 'actions/upload-artifact@v5')
   assert.equal(stagedArtifact.with.name, 'private-cloud-beta-draft-assets-${{ github.run_id }}-${{ github.run_attempt }}')
 
@@ -144,8 +146,15 @@ test('Private Cloud promotion requires exact fresh-candidate evidence and cannot
   assert.equal(jobs.fresh_beta_candidate_acceptance.if, "startsWith(github.ref, 'refs/tags/')")
   const stagedDownload = jobs.fresh_beta_candidate_acceptance.steps.find((step) => step.uses === 'actions/download-artifact@v5')
   assert.equal(stagedDownload.with.name, stagedArtifact.with.name)
-  const freshRun = namedStep(jobs.fresh_beta_candidate_acceptance, 'Install the fresh beta candidate before browser, tenant, Executor and restore checks').run
-  assert.match(freshRun, /--fresh-candidate --ephemeral-bundled-acceptance --candidate-archive "\$archive"/u)
+  const anonymousPull = namedStep(jobs.fresh_beta_candidate_acceptance, 'Require anonymous full-layer pulls of the exact signed candidate images').run
+  assert.match(anonymousPull, /docker --config "\$scratch\/anonymous-docker" pull "\$image"/u)
+  assert.match(anonymousPull, /name of \["runtime","ingress","dashboard"\]/u)
+  assert.ok(jobs.fresh_beta_candidate_acceptance.steps.findIndex((step) => step.name === 'Require anonymous full-layer pulls of the exact signed candidate images')
+    < jobs.fresh_beta_candidate_acceptance.steps.findIndex((step) => step.uses === 'docker/login-action@v3'))
+  const freshRun = namedStep(jobs.fresh_beta_candidate_acceptance, 'Provision isolated TLS OIDC and PostgreSQL/S3, then install and restore signed candidate').run
+  assert.match(freshRun, /node scripts\/release\/provision-private-cloud-hosted-authorities\.mjs/u)
+  assert.match(freshRun, /--fresh-candidate --candidate-archive "\$archive"/u)
+  assert.doesNotMatch(freshRun, /--ephemeral-bundled-acceptance/u)
   assert.match(freshRun, /verify-private-cloud-fresh-evidence\.mjs[\s\S]*--archive "\$archive" --tag "\$TAG" --revision "\$GITHUB_SHA"/u)
   assert.doesNotMatch(freshRun, /predecessor/iu)
   const freshUpload = jobs.fresh_beta_candidate_acceptance.steps.find((step) => step.uses === 'actions/upload-artifact@v5')
@@ -200,7 +209,7 @@ test('release requires three POSIX and one Windows hosted Portable acceptances p
   assert.match(promotion, /--jq '\.workflow_runs\[\]\.head_sha' \| awk/u)
   assert.doesNotMatch(promotion, /select\(\.head_sha/u)
   assert.doesNotMatch(promotion, /Windows release asset is not allowed/u)
-  assert.match(promotion, /kala-executor-win32-x64\.exe[\s\S]*node-pty-win32-x64\.tar\.gz kala-executor-service-host-win32-x64\.exe install-executor\.ps1/u)
+  assert.match(promotion, /kala-executor\.cjs[\s\S]*node-pty-win32-x64\.tar\.gz kala-executor-service-host-win32-x64\.exe install-executor\.ps1/u)
   assert.match(promotion, /gh release download "\$TAG" --dir "\$CANDIDATE"/u)
   assert.match(promotion, /verify-promotion-candidate\.mjs/u)
   assert.match(promotion, /kala-dashboard-with-runtime\.cjs/u)

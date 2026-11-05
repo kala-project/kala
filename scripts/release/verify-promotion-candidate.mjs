@@ -14,10 +14,8 @@ const tag = required('--tag')
 const revision = required('--revision')
 const manifest = json(join(directory, 'manifest.json'))
 const targets = [...requiredReleaseEvidence.portable.targets]
-const nativeExecutorAssets = targets.map((target) => target === 'win32-x64' ? 'kala-executor-win32-x64.exe' : `kala-executor-${target}`)
 const windowsAssets = ['node-pty-win32-x64.tar.gz', 'kala-executor-service-host-win32-x64.exe', 'install-executor.ps1']
 const expectedAssets = [
-  ...nativeExecutorAssets,
   ...windowsAssets,
   ...targets.flatMap((target) => [`kala-copilot-runtime-${target}`, `kala-copilot-runtime-node-${target}.node`]),
   'kala-dashboard-with-runtime.cjs', 'kala-runtime.cjs', 'kala-executor.cjs', 'kala-dedicated-ingress.cjs', 'kala-dedicated-deploy-supervisor.cjs',
@@ -33,12 +31,12 @@ if (JSON.stringify(manifest.windowsServiceHost) !== JSON.stringify(windowsServic
 }
 assertUnique(manifest.assets, 'current release manifest assets')
 if (JSON.stringify([...manifest.assets].sort()) !== JSON.stringify(expectedAssets)) fail('current release manifest does not contain the exact checksummed assets')
-if (!Array.isArray(manifest.nativeTargets) || JSON.stringify([...manifest.nativeTargets].sort()) !== JSON.stringify([...targets].sort())) {
-  fail('current release manifest does not contain exactly the four supported native Executor targets')
+if (JSON.stringify(manifest.nativeTargets) !== '[]') {
+  fail('current release manifest must not contain standalone native Executor targets')
 }
 const expectedNativeAssets = {
   'kala-host': [], 'kala-runtime': [],
-  'kala-executor': nativeExecutorAssets,
+  'kala-executor': [],
   'kala-dedicated-ingress': [], 'kala-dedicated-deploy-supervisor': [],
 }
 if (JSON.stringify(manifest.nativeAssets) !== JSON.stringify(expectedNativeAssets)) fail('candidate contains unexpected native binaries')

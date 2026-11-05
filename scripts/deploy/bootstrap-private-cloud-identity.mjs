@@ -19,7 +19,7 @@ const IMAGE_PATTERN = /^(?:[a-z0-9.-]+(?::[0-9]+)?\/)?(?:[a-z0-9._-]+\/)*alpine(
 // the metadata's client ID and secret hash prove that all three files agree.
 export function parseCliArgs(argv) {
   const requiredOptions = new Set(['--config-dir', '--bootstrap-volume', '--identity-image'])
-  const allowed = new Set([...requiredOptions, '--acceptance-users-file'])
+  const allowed = new Set([...requiredOptions, '--acceptance-users-file', '--external-request-port'])
   const values = new Map()
   for (let index = 0; index < argv.length; index += 2) {
     const option = argv[index]
@@ -37,12 +37,13 @@ export function parseCliArgs(argv) {
     bootstrapVolume: values.get('--bootstrap-volume'),
     identityImage: values.get('--identity-image'),
     ...(values.has('--acceptance-users-file') ? { acceptanceUsersFile: values.get('--acceptance-users-file') } : {}),
+    ...(values.has('--external-request-port') ? { externalRequestPort: values.get('--external-request-port') } : {}),
   }
 }
 
 export async function bootstrapPrivateCloudIdentity(options, dependencies = {}) {
   validateOptions(options)
-  const local = await readLocalDeployment(options.configDir)
+  const local = await readLocalDeployment(options.configDir, options.externalRequestPort)
   const fetchImpl = dependencies.fetch ?? globalThis.fetch
   const runDocker = dependencies.runDocker ?? defaultRunDocker
   const createAttemptId = dependencies.randomUUID ?? randomUUID
@@ -215,6 +216,7 @@ function validateOptions(options) {
     throw new Error('--identity-image must be an immutable Alpine image digest')
   }
   if (options.acceptanceUsersFile !== undefined && (typeof options.acceptanceUsersFile !== 'string' || !isAbsolute(options.acceptanceUsersFile))) throw new Error('--acceptance-users-file must be an absolute path')
+  if (options.externalRequestPort !== undefined && (!/^[1-9][0-9]{3,4}$/u.test(options.externalRequestPort) || Number(options.externalRequestPort) > 65535 || options.externalRequestPort === '13002')) throw new Error('--external-request-port must be a distinct localhost TCP port')
 }
 
 async function readAcceptanceUsers(path) {
@@ -234,7 +236,7 @@ async function readAcceptanceUsers(path) {
   return users
 }
 
-async function readLocalDeployment(configDir) {
+async function readLocalDeployment(configDir, externalRequestPort) {
   await requirePrivateDirectory(configDir)
   const path = join(configDir, 'deployment.env')
   const file = await readStateFile(path)
@@ -257,17 +259,18 @@ async function readLocalDeployment(configDir) {
   if (!/^[1-9][0-9]{0,4}$/u.test(identityPort) || numericIdentityPort > 65535) {
     throw new Error('KALA_IDENTITY_PORT must be a decimal TCP port from 1 through 65535')
   }
-  const identityOrigin = requireLocalhostOrigin(environment.OIDC_ISSUER, 'OIDC_ISSUER')
-  if (identityOrigin !== `http://localhost:${identityPort}`) {
-    throw new Error('OIDC_ISSUER must use KALA_IDENTITY_PORT on localhost')
-  }
-  if (environment.OIDC_DISCOVERY_ORIGIN !== 'http://identity-proxy:8080') {
-    throw new Error('OIDC_DISCOVERY_ORIGIN must remain http://identity-proxy:8080 for bundled identity')
+  const external = externalRequestPort !== undefined
+  const identityOrigin = external ? environment.OIDC_ISSUER : requireLocalhostOrigin(environment.OIDC_ISSUER, 'OIDC_ISSUER')
+  if (external) {
+    if (environment.KALA_IDENTITY_MODE !== 'external' || identityOrigin !== 'https://localhost:13002' || identityPort !== '13002') throw new Error('independent OIDC enrollment requires an external HTTPS localhost:13002 issuer')
+  } else {
+    if (identityOrigin !== `http://localhost:${identityPort}`) throw new Error('OIDC_ISSUER must use KALA_IDENTITY_PORT on localhost')
+    if (environment.OIDC_DISCOVERY_ORIGIN !== 'http://identity-proxy:8080') throw new Error('OIDC_DISCOVERY_ORIGIN must remain http://identity-proxy:8080 for bundled identity')
   }
   return {
     identityOrigin,
     identityHost: `localhost:${identityPort}`,
-    requestOrigin: `http://127.0.0.1:${identityPort}`,
+    requestOrigin: `http://127.0.0.1:${external ? externalRequestPort : identityPort}`,
     redirectUri: `${appOrigin}/auth/callback`,
     postLogoutRedirectUri: `${appOrigin}/`,
   }

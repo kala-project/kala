@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { verifyPortableAcceptanceEvidence } from './verify-portable-evidence.mjs'
 
 export async function verifyPortablePublic({ metadata, acceptance, tag, revision, repository, fetchImpl = fetch }) {
-  assert.equal(repository, 'xingsy97/kala', 'unexpected Portable package ownership')
+  assert.equal(repository, 'kala-project/kala', 'unexpected Portable package ownership')
   assert.deepEqual(Object.keys(metadata).sort(), ['schemaVersion', 'status', 'image', 'platform', 'tag', 'revision', 'checks', 'publicPromotion'].sort())
   assert.equal(metadata.schemaVersion, 1)
   assert.equal(metadata.status, 'isolated-vm-accepted')
@@ -16,18 +16,18 @@ export async function verifyPortablePublic({ metadata, acceptance, tag, revision
   assert.equal(metadata.publicPromotion, false, 'candidate metadata must not claim public promotion in advance')
   assert.deepEqual(Object.keys(metadata.checks).sort(), ['imageSignature', 'provenance', 'sbom', 'isolatedVmAcceptance'].sort())
   for (const result of Object.values(metadata.checks)) assert.equal(result, true)
-  const imageMatch = metadata.image.match(/^ghcr\.io\/xingsy97\/kala-portable@(sha256:[0-9a-f]{64})$/u)
+  const imageMatch = metadata.image.match(/^ghcr\.io\/kala-project\/kala-portable@(sha256:[0-9a-f]{64})$/u)
   assert.ok(imageMatch, 'image must be the exact immutable Portable package digest')
   verifyPortableAcceptanceEvidence(acceptance, { image: metadata.image, tag, revision })
 
   // Query GHCR without a repository token or docker login. GitHub's Packages
   // REST endpoint can require authentication even when the registry permits
   // anonymous pulls; promotion separately pulls every layer with empty Docker credentials.
-  const tokenResponse = await fetchImpl('https://ghcr.io/token?service=ghcr.io&scope=repository:xingsy97/kala-portable:pull', { cache: 'no-store' })
+  const tokenResponse = await fetchImpl('https://ghcr.io/token?service=ghcr.io&scope=repository:kala-project/kala-portable:pull', { cache: 'no-store' })
   if (tokenResponse.status !== 200) throw new Error('GHCR refused an anonymous pull token')
   const anonymousToken = (await tokenResponse.json()).token
   if (typeof anonymousToken !== 'string' || !anonymousToken) throw new Error('GHCR anonymous pull token is unavailable')
-  const manifestResponse = await fetchImpl(`https://ghcr.io/v2/xingsy97/kala-portable/manifests/${imageMatch[1]}`, {
+  const manifestResponse = await fetchImpl(`https://ghcr.io/v2/kala-project/kala-portable/manifests/${imageMatch[1]}`, {
     method: 'HEAD', cache: 'no-store', headers: {
       authorization: `Bearer ${anonymousToken}`,
       accept: 'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json',

@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import { createHash, randomBytes } from 'node:crypto'
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import puppeteer from 'puppeteer-core'
 import { io } from 'socket.io-client'
 import { loginWithPassword } from '../product-e2e/harness.mjs'
 import { createRcEvidence } from './rc-evidence.mjs'
+import { verifyExternalRestore } from './private-cloud-external-restore.mjs'
 
 const root = resolve(import.meta.dirname, '../..')
 if (process.argv.includes('--internal-assert-runtime-gates')) {
@@ -19,11 +19,17 @@ if (process.argv.includes('--internal-inspect-organization-provisioning')) {
   process.stdout.write(JSON.stringify(inspectOrganizationProvisioning(acceptanceOrganizationRequests('runlab-rc-test'))) + '\n')
   process.exit(0)
 }
+if (process.argv.includes('--internal-assert-model-fixture-network')) {
+  assertModelFixtureNetwork(json(readFileSync(0, 'utf8')))
+  process.stdout.write(JSON.stringify({ ok: true }) + '\n')
+  process.exit(0)
+}
 const freshCandidate = process.argv.includes('--fresh-candidate')
 const nonCertifyingPredecessor = process.argv.includes('--non-certifying-predecessor')
 const ephemeralBundledAcceptance = process.argv.includes('--ephemeral-bundled-acceptance')
-if (ephemeralBundledAcceptance && !freshCandidate) throw new Error('--ephemeral-bundled-acceptance requires --fresh-candidate')
+if (ephemeralBundledAcceptance) throw new Error('Fresh Private Cloud acceptance cannot use bundled identity or local-volume storage; isolated external OIDC and PostgreSQL/S3 with a verified external restore are required')
 if (nonCertifyingPredecessor === freshCandidate) throw new Error('exactly one of --fresh-candidate or --non-certifying-predecessor is required')
+if (freshCandidate && !process.env.KALA_RC_PRIVATE_CLOUD_CONFIG_TEMPLATE) throw new Error('Fresh Private Cloud acceptance needs independently provisioned external OIDC and PostgreSQL/S3 configuration and verified external restore')
 const candidateArchive = resolve(required('--candidate-archive'))
 const predecessorArchive = freshCandidate ? undefined : resolve(required('--predecessor-archive'))
 const executorAsset = resolve(required('--executor'))
@@ -34,21 +40,23 @@ const predecessorTag = freshCandidate ? undefined : required('--predecessor-tag'
 if (predecessorTag && (!/^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/u.test(predecessorTag) || predecessorTag === tag)) throw new Error('Private Cloud predecessor tag must be valid and distinct')
 const output = resolve(required('--output'))
 const configTemplate = ephemeralBundledAcceptance ? undefined : resolve(requiredEnv('KALA_RC_PRIVATE_CLOUD_CONFIG_TEMPLATE'))
-const scratch = mkdtempSync(join(tmpdir(), 'runlab-rc-private-cloud-'))
+const scratch = mkdtempSync(join(root, '.runlab-rc-private-cloud-'))
 const operatorRoot = join(scratch, 'operator')
 const config = join(scratch, 'config')
 const backup = join(scratch, 'backup')
 const workspaceRoot = join(scratch, 'workspace')
-const candidate = extract(candidateArchive, join(scratch, 'candidate'))
-const predecessor = predecessorArchive ? extract(predecessorArchive, join(scratch, 'predecessor')) : undefined
+let candidate
+let predecessor
 const project = 'runlab-rc-' + randomBytes(6).toString('hex')
 const worktreeOperator = join(root, 'scripts/deploy/kala-private-cloud.mjs')
 let installed = false
 let executor
 let alicePassword
-const modelFixture = ephemeralBundledAcceptance ? `${project}-model-fixture` : undefined
+const modelFixture = freshCandidate || ephemeralBundledAcceptance ? `${project}-model-fixture` : undefined
 
 try {
+  candidate = extract(candidateArchive, join(scratch, 'candidate'))
+  predecessor = predecessorArchive ? extract(predecessorArchive, join(scratch, 'predecessor')) : undefined
   verify(candidate)
   if (predecessor) verify(predecessor)
   const candidateManifest = json(readFileSync(join(candidate, 'manifest.json'), 'utf8'))
@@ -79,8 +87,12 @@ try {
     Object.assign(process.env, acceptance.environment)
   } else {
     cpSync(configTemplate, config, { recursive: true })
+    chmodSync(config, 0o700)
+    chmodSync(join(config, 'secrets'), 0o700)
     requirePrivateConfig(config)
     rewriteDeploymentEnv(join(config, 'deployment.env'), project)
+    if (freshCandidate) assertExternalConfig(config)
+    if (freshCandidate) configureAuthenticatedFixture(config)
   }
   const organizationRequests = acceptanceOrganizationRequests(project)
   alicePassword = requiredEnv('PRIVATE_CLOUD_TEST_ALICE_PASSWORD')
@@ -93,7 +105,7 @@ try {
   if (!installedResult.ok || installedResult.receipt?.phase !== 'completed') throw new Error(`Private Cloud ${freshCandidate ? 'fresh candidate' : 'predecessor'} install did not complete`)
   assertServicesReady(installedResult.services)
   await waitForHttp('http://localhost:13001/healthz', 90_000)
-  if (ephemeralBundledAcceptance) await startAuthenticatedModelFixture({ candidate, candidateLock, config, project, modelFixture })
+  if (modelFixture) await startAuthenticatedModelFixture({ candidate, candidateLock, config, modelFixture })
   if ((await fetch('http://localhost:13001/runtime/capabilities')).status !== 401) throw new Error('Private Cloud exposed tenant capabilities without authentication')
   provisionAcceptanceOrganizations(worktreeOperator, env, organizationRequests)
 
@@ -114,11 +126,11 @@ try {
     })
     if (!invite.inviteToken) throw new Error('Private Cloud did not issue an Executor invite')
     if (!existsSync(executorAsset)) throw new Error('Private Cloud acceptance Executor is missing')
-    chmodSync(executorAsset, 0o755)
+    if (!executorAsset.endsWith('.cjs')) chmodSync(executorAsset, 0o755)
     const executorHome = join(scratch, 'executor-home')
     mkdirSync(executorHome, { recursive: true }); mkdirSync(workspaceRoot, { recursive: true })
     const logs = []
-    executor = spawn(executorAsset, ['--host', 'http://localhost:13001', '--invite', invite.inviteToken, '--sandbox-root', workspaceRoot, '--name', 'rc-private-cloud-workspace'], { cwd: workspaceRoot, env: { ...process.env, HOME: executorHome }, stdio: ['ignore', 'pipe', 'pipe'] })
+    executor = spawn(executorAsset.endsWith('.cjs') ? process.execPath : executorAsset, [...(executorAsset.endsWith('.cjs') ? [executorAsset] : []), '--host', 'http://localhost:13001', '--invite', invite.inviteToken, '--sandbox-root', workspaceRoot, '--name', 'rc-private-cloud-workspace'], { cwd: workspaceRoot, env: { ...process.env, HOME: executorHome }, stdio: ['ignore', 'pipe', 'pipe'] })
     executor.stdout.on('data', (chunk) => logs.push(String(chunk))); executor.stderr.on('data', (chunk) => logs.push(String(chunk)))
     await waitFor(() => logs.some((line) => line.includes('executor announced')), 30_000, 'Private Cloud Executor connection')
   } finally { await browser.close() }
@@ -144,7 +156,32 @@ try {
     verifyMtlsClientRejection(candidate, config)
     const runtimeGates = await verifyCandidateRuntimeGates({ candidate, config, alicePassword, bobPassword: credentials.bob })
     assertRuntimeGateReport(runtimeGates)
-    await verifyBackupRestore({ operatorBinary: candidateOperator, release: candidate, config, backup, env })
+    await verifyExternalRestore({
+      config, backup, postgresImage: infrastructureImage(candidate, 'postgres'),
+      stop: () => { const invocation = composeInvocation(candidate, config, ['stop', 'runtime-host', 'runtime-ingress']); run(invocation.command, invocation.args, false, invocation.env, invocation.cwd) },
+      start: () => { const invocation = composeInvocation(candidate, config, ['start', 'runtime-host', 'runtime-ingress']); run(invocation.command, invocation.args, false, invocation.env, invocation.cwd) },
+      verifyRead: async () => {
+        await waitForHttp('http://localhost:13001/healthz', 90_000)
+        const browser = await puppeteer.launch({ executablePath: process.env.CHROME_PATH ?? '/snap/bin/chromium', headless: true, args: ['--no-sandbox'] })
+        try {
+          const page = await browser.newPage()
+          const failedResponses = []
+          page.on('response', (response) => {
+            if (response.status() >= 400 && failedResponses.length < 10) failedResponses.push({ status: response.status(), origin: new URL(response.url()).origin })
+          })
+          try {
+            await loginWithPassword(page, { productOrigin: 'http://localhost:13001', loginName: requiredEnv('PRIVATE_CLOUD_TEST_ALICE_EMAIL'), password: alicePassword })
+          } catch (error) {
+            throw new Error(`External restore login failed (HTTP errors=${JSON.stringify(failedResponses)})`, { cause: error })
+          }
+          const cookie = (await page.cookies()).map((entry) => entry.name + '=' + entry.value).join('; ')
+          const recovered = await connectReadyDashboard('http://localhost:13001', cookie, runtimeGates.restartRecovery.sessionId, 90_000)
+          try {
+            if (!hasProjectedUserText(recovered.ready.state, runtimeGates.restartRecovery.baseline) || !hasAssistantText(recovered.ready.state, runtimeGates.restartRecovery.marker)) throw new Error('External restore lost authenticated business Session projection')
+          } finally { recovered.socket.close() }
+        } finally { await browser.close() }
+      },
+    })
   } else {
     const beforeDashboard = operator(candidateOperator, ['status'], env).services
     const dashboardUpgrade = operator(candidateOperator, ['upgrade-dashboard', '--bundle', hybrid], env)
@@ -175,7 +212,7 @@ try {
     ...(freshCandidate ? {} : { certifying: false, predecessorPolicy: 'unsupported-explicit-override' }),
     artifact: { name: basename(candidateArchive), sha256: digest(readFileSync(candidateArchive)) },
     checks: freshCandidate
-      ? { assetIntegrity: true, imageDigestPinning: true, freshCandidateInstall: true, ...(ephemeralBundledAcceptance ? { ephemeralBundledAcceptance: true, realBundledIdentities: true, authenticatedModelFixture: true } : {}), organizationProvisioning: true, tenantIsolation: true, browser: true, executor: true, mtlsClientRejection: true, unitResourceIsolation: true, runtimeRestartRecovery: true, backupRestore: true }
+      ? { assetIntegrity: true, imageDigestPinning: true, freshCandidateInstall: true, isolatedExternalOidc: true, externalPostgresS3: true, verifiedExternalRestore: true, authenticatedModelFixture: true, organizationProvisioning: true, tenantIsolation: true, browser: true, executor: true, mtlsClientRejection: true, unitResourceIsolation: true, runtimeRestartRecovery: true }
       : { assetIntegrity: true, cleanInstall: true, organizationProvisioning: true, tenantIsolation: true, browser: true, executor: true, fullUpgrade: true, mtlsClientRejection: true, unitResourceIsolation: true, runtimeRestartRecovery: true, dashboardUpgradeIsolation: true, rollback: true, backupRestore: true },
   })
   mkdirSync(resolve(output, '..'), { recursive: true, mode: 0o700 })
@@ -250,12 +287,15 @@ async function prepareEphemeralBundledAcceptance({ candidate, candidateLock, con
   } }
 }
 
-async function startAuthenticatedModelFixture({ candidate, candidateLock, config, project, modelFixture }) {
+async function startAuthenticatedModelFixture({ candidate, candidateLock, config, modelFixture }) {
   const configInvocation = composeInvocation(candidate, config, ['config', '--format', 'json'])
   const rendered = json(run(configInvocation.command, configInvocation.args, false, configInvocation.env, configInvocation.cwd).stdout)
-  const network = rendered.networks?.egress?.name ?? `${project}_egress`
-  const labels = run('docker', ['network', 'inspect', '--format', '{{index .Labels "com.docker.compose.project"}}/{{index .Labels "com.docker.compose.network"}}', network]).stdout.trim()
-  if (labels !== `${project}/egress`) throw new Error('Installed Compose egress network is not owned by this project')
+  const deployment = envFile(join(config, 'deployment.env'))
+  const network = deployment.KALA_RC_EGRESS_NETWORK
+  const networkDetails = json(run('docker', ['network', 'inspect', network]).stdout)[0]
+  const authorityNames = requiredEnv('PRIVATE_CLOUD_EXTERNAL_AUTHORITY_CONTAINERS').split(',')
+  const authorities = [5, 2, 6].map((index) => json(run('docker', ['inspect', authorityNames[index]]).stdout)[0])
+  assertModelFixtureNetwork({ rendered, deployment, networkDetails, authorities })
   run('docker', [
     'run', '-d', '--name', modelFixture, '--network', network, '--network-alias', 'fixture.example.com',
     '--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=16m', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
@@ -270,6 +310,20 @@ async function startAuthenticatedModelFixture({ candidate, candidateLock, config
     const ready = run('docker', ['logs', modelFixture], true).stdout.includes('"ready":true')
     return running && ready
   }, 20_000, 'authenticated OpenAI-compatible acceptance fixture')
+}
+
+function assertModelFixtureNetwork({ rendered, deployment, networkDetails, authorities }) {
+  const network = deployment.KALA_RC_EGRESS_NETWORK
+  const suffix = /^runlab-rc-egress-([0-9a-f]{12})$/u.exec(network ?? '')?.[1]
+  if (!suffix || deployment.KALA_RC_EGRESS_EXTERNAL !== 'true' || rendered.networks?.egress?.external !== true || rendered.networks.egress.name !== network) throw new Error('Installed candidate is not attached to the hosted external egress network')
+  if (networkDetails?.Name !== network || !/^[0-9a-f]{64}$/u.test(networkDetails.Id ?? '') || networkDetails.Driver !== 'bridge' || networkDetails.Scope !== 'local' || networkDetails.Internal !== false) throw new Error('Hosted external egress network is not an isolated local bridge')
+  for (const [index, kind] of ['identity', 'postgres', 's3'].entries()) {
+    if (authorities[index]?.Config?.Labels?.['com.docker.compose.project'] !== `runlab-rc-${kind}-${suffix}`
+      || authorities[index]?.State?.Running !== true
+      || authorities[index]?.NetworkSettings?.Networks?.[network]?.NetworkID !== networkDetails.Id) {
+      throw new Error('Hosted external authority is not attached to the candidate egress network')
+    }
+  }
 }
 
 function acceptanceOrganizationRequests(project) {
@@ -314,6 +368,51 @@ function configureRuntimeGateLimits(path) {
   // durability invariant can be exercised; keep the acceptance ceiling at two.
   lines.push('KALA_RUNTIME_UNIT_MAX_QUEUED_MESSAGES=2', 'KALA_RUNTIME_UNIT_MAX_ARTIFACT_BYTES=1048576')
   writeFileSync(path, lines.join('\n') + '\n', { mode: 0o600 })
+}
+
+function configureAuthenticatedFixture(config) {
+  writeFileSync(join(config, 'secrets', 'llm_api_key'), randomBytes(36).toString('base64url'), { mode: 0o600 })
+  writeFileSync(join(config, 'runtime-provider-catalog.json'), JSON.stringify({
+    version: 1, defaultModel: 'acceptance-openai:kala-deterministic',
+    providers: [{ id: 'acceptance-openai', label: 'Authenticated deterministic acceptance fixture', wire: 'openai',
+      baseUrl: 'http://fixture.example.com:3000/v1', credentialRef: 'file:llm_api_key',
+      models: [{ id: 'kala-deterministic', label: 'Kala deterministic tool fixture', contextWindow: 32768 }] }],
+  }) + '\n', { mode: 0o600 })
+}
+
+function assertExternalConfig(path) {
+  const deployment = envFile(join(path, 'deployment.env'))
+  if (deployment.KALA_STORAGE !== 'postgres-s3' || deployment.KALA_IDENTITY_MODE !== 'external' || deployment.KALA_PROFILE !== 'local' || deployment.KALA_PG_S3_EVALUATION_ACK !== '1' || deployment.KALA_PG_S3_EXTERNAL_BACKUP_ACK !== '1') throw new Error('Fresh acceptance requires independent external OIDC and PostgreSQL/S3; a backup acknowledgment is not restore proof')
+  const containers = requiredEnv('PRIVATE_CLOUD_EXTERNAL_AUTHORITY_CONTAINERS').split(',')
+  if (containers.length !== 7 || new Set(containers).size !== 7 || containers.some((name) => !/^runlab-rc-[a-z0-9-]+$/u.test(name))) throw new Error('Fresh acceptance needs seven distinct runner-local OIDC, identity PostgreSQL, application PostgreSQL, S3, login, identity proxy and S3 TLS proxy containers')
+  const expected = [
+    'ghcr.io/zitadel/zitadel@sha256:15543f7a80c3e37905fe8c7db56af7ed2a9ece256704322c1449d7e8453afdab',
+    'postgres@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193',
+    'postgres@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193',
+    'chrislusf/seaweedfs@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860',
+    'ghcr.io/zitadel/zitadel-login@sha256:adeba50a8090d1484a312ac81e67cae5f839ba376e3325c00ec75fc79939a842',
+    'caddy@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d',
+    'caddy@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d',
+  ]
+  const inspected = containers.map((name, index) => {
+    const result = run('docker', ['inspect', name])
+    const container = json(result.stdout)[0]
+    if (container?.State?.Running !== true || container?.Config?.Image !== expected[index] || !container.Config.Labels?.['com.docker.compose.project']) throw new Error('Runner-local external authority must be running from an exact pinned official image with an isolated Compose project')
+    return container
+  })
+  const identityProject = inspected[0].Config.Labels['com.docker.compose.project']
+  const postgresProject = inspected[2].Config.Labels['com.docker.compose.project']
+  const s3Project = inspected[3].Config.Labels['com.docker.compose.project']
+  if ([1, 4, 5].some((index) => inspected[index].Config.Labels['com.docker.compose.project'] !== identityProject) || inspected[6].Config.Labels['com.docker.compose.project'] !== s3Project || new Set([identityProject, postgresProject, s3Project, deployment.COMPOSE_PROJECT_NAME]).size !== 4) throw new Error('Fresh OIDC, PostgreSQL and S3 authorities must be separate disposable Compose projects')
+  for (const container of inspected) {
+    const image = container.Config.Image
+    const check = run('docker', ['buildx', 'imagetools', 'inspect', image])
+    if (!check.stdout.includes('Digest:    ' + image.split('@')[1])) throw new Error('External official authority image digest could not be verified against its registry')
+  }
+  const issuer = requiredEnv('PRIVATE_CLOUD_TEST_ALICE_OIDC_ISSUER')
+  if (!issuer || issuer !== deployment.OIDC_ISSUER || issuer !== requiredEnv('PRIVATE_CLOUD_TEST_BOB_OIDC_ISSUER')) throw new Error('External OIDC issuer must match both enrolled identities exactly')
+  for (const name of ['control_postgres_migration_owner_url', 'runtime_postgres_owner_url', 'runtime_s3_access_key_id', 'installation_claim_s3_access_key_id']) if (!existsSync(join(path, 'secrets', name))) throw new Error('Fresh acceptance external authority is missing ' + name)
+  if (readFileSync(join(path, 'secrets', 'runtime_s3_access_key_id'), 'utf8').trim() === requiredEnv('PRIVATE_CLOUD_EXTERNAL_S3_BACKUP_ACCESS_KEY_ID')) throw new Error('External S3 backup identity must not be the Runtime identity')
 }
 
 function assertDigestPinnedImages(lock) {
@@ -362,6 +461,7 @@ async function verifyCandidateRuntimeGates({ candidate, config, alicePassword, b
   const actors = []
   let chatSocket
   let dagSocket
+  let aliceArtifactSocket
   try {
     for (const [name, email, password, sessionId] of [
       ['alice', requiredEnv('PRIVATE_CLOUD_TEST_ALICE_EMAIL'), alicePassword, chatSession],
@@ -377,7 +477,9 @@ async function verifyCandidateRuntimeGates({ candidate, config, alicePassword, b
     }
     const alice = actors[0]
     const bob = actors[1]
-    assertSocketAck(await socketAck(alice.socket, 'client:create_session', { operationId: operationId(), sessionId: aliceArtifactSession }))
+    aliceArtifactSocket = connectDashboard(origin, alice.cookie, aliceArtifactSession)
+    await once(aliceArtifactSocket, 'session:ready', 20_000)
+    assertSocketAck(await socketAck(aliceArtifactSocket, 'client:create_session', { operationId: operationId(), sessionId: aliceArtifactSession }))
     assertSocketAck(await socketAck(bob.socket, 'client:create_session', { operationId: operationId(), sessionId: bobArtifactSession }))
     const aliceArtifactStatuses = await uploadFixtureBytes(alice.page, aliceArtifactSession, [1048577])
     const bobArtifactStatuses = await uploadFixtureBytes(bob.page, bobArtifactSession, [1])
@@ -438,7 +540,7 @@ async function verifyCandidateRuntimeGates({ candidate, config, alicePassword, b
     }))
     await queueObserved
     if (markerProjectedBeforeRestart) throw new Error('Queued message ran before the Runtime restart; recovery was not tested')
-    alice.socket.close(); bob.socket.close(); dagSocket.close(); dagSocket = undefined
+    alice.socket.close(); bob.socket.close(); aliceArtifactSocket.close(); aliceArtifactSocket = undefined; dagSocket.close(); dagSocket = undefined
     const invocation = composeInvocation(candidate, config, ['stop', 'runtime-host'])
     run(invocation.command, invocation.args, false, invocation.env, invocation.cwd)
     const start = composeInvocation(candidate, config, ['start', 'runtime-host'])
@@ -470,6 +572,9 @@ async function verifyCandidateRuntimeGates({ candidate, config, alicePassword, b
     return {
       unitResourceIsolation: { aliceArtifactStatuses, bobArtifactStatuses },
       restartRecovery: {
+        sessionId: chatSession,
+        baseline,
+        marker,
         queuePersistedBeforeRestart: true,
         queueHydratedAfterRestart,
         queuedMarkerRecovered: true,
@@ -483,7 +588,7 @@ async function verifyCandidateRuntimeGates({ candidate, config, alicePassword, b
       },
     }
   } finally {
-    chatSocket?.close(); dagSocket?.close()
+    chatSocket?.close(); dagSocket?.close(); aliceArtifactSocket?.close()
     for (const actor of actors) { actor.socket.close(); await actor.context.close().catch(() => undefined) }
     await browser.close()
   }
@@ -553,7 +658,7 @@ function bundleOperator(directory) {
 function operator(binary, args, env) { const result = run(binary.endsWith('.mjs') ? process.execPath : binary, binary.endsWith('.mjs') ? [binary, ...args] : args, false, env); return json(result.stdout) }
 function assertServicesReady(services) { for (const name of ['runtime-host', 'runtime-ingress', 'dashboard']) if (services?.[name]?.state !== 'running' || !['', 'healthy'].includes(services[name].health)) throw new Error('Private Cloud service is not ready: ' + name) }
 function inspectVolume(release, config, name) { const invocation = composeInvocation(release, config, ['config', '--format', 'json']); const value = json(run(invocation.command, invocation.args, false, invocation.env, invocation.cwd).stdout); return value.volumes?.[name]?.name ?? envFile(join(config, 'deployment.env')).COMPOSE_PROJECT_NAME + '_' + name }
-function composeInvocation(release, config, args) { const deployment = envFile(join(config, 'deployment.env')); const storage = deployment.KALA_STORAGE === 'local-volume' ? 'compose.storage-local.yaml' : deployment.KALA_STORAGE === 'external-nfs' ? 'compose.storage-external-nfs.yaml' : 'compose.storage-nfs.yaml'; const profile = deployment.KALA_PROFILE === 'local' ? 'compose.local.yaml' : 'compose.cloudflare.yaml'; const overlays = ['compose.yaml', storage, profile, ...(deployment.KALA_IDENTITY_MODE === 'bundled' ? ['compose.identity-local.yaml'] : [])]; const lock = json(readFileSync(join(release, 'image-lock.json'), 'utf8')); return { command: 'docker', cwd: release, env: { ...process.env, ...deployment, KALA_RUNTIME_IMAGE: lock.images.runtime, KALA_INGRESS_IMAGE: lock.images.ingress, KALA_DASHBOARD_IMAGE: lock.images.dashboard, KALA_SECRETS_DIR: join(config, 'secrets'), KALA_IDENTITY_SECRETS_DIR: join(config, 'identity-secrets'), KALA_PROVIDER_CATALOG_FILE: join(config, 'runtime-provider-catalog.json'), KALA_DEPLOYMENT_CONFIG_FILE: join(release, 'deployment.json') }, args: ['compose', '--project-name', deployment.COMPOSE_PROJECT_NAME, '--env-file', join(config, 'deployment.env'), ...overlays.flatMap((file) => ['-f', join(release, file)]), ...args] } }
+function composeInvocation(release, config, args) { const deployment = envFile(join(config, 'deployment.env')); const storage = deployment.KALA_STORAGE === 'local-volume' ? 'compose.storage-local.yaml' : deployment.KALA_STORAGE === 'external-nfs' ? 'compose.storage-external-nfs.yaml' : 'compose.storage-nfs.yaml'; const profile = deployment.KALA_PROFILE === 'local' ? 'compose.local.yaml' : 'compose.cloudflare.yaml'; const overlays = deployment.KALA_STORAGE === 'postgres-s3' ? ['compose.postgres-s3-base.yaml', 'compose.storage-postgres-s3.yaml', profile, ...(existsSync(join(config, 'oidc-ca.pem')) ? ['compose.oidc-private-ca.yaml'] : []), ...(existsSync(join(config, 's3-ca.pem')) ? ['compose.s3-private-ca.yaml'] : [])] : ['compose.yaml', storage, profile, ...(deployment.KALA_IDENTITY_MODE === 'bundled' ? ['compose.identity-local.yaml'] : [])]; const lock = json(readFileSync(join(release, 'image-lock.json'), 'utf8')); return { command: 'docker', cwd: release, env: { ...process.env, ...deployment, KALA_RUNTIME_IMAGE: lock.images.runtime, KALA_INGRESS_IMAGE: lock.images.ingress, KALA_DASHBOARD_IMAGE: lock.images.dashboard, KALA_SECRETS_DIR: join(config, 'secrets'), KALA_IDENTITY_SECRETS_DIR: join(config, 'identity-secrets'), KALA_PROVIDER_CATALOG_FILE: join(config, 'runtime-provider-catalog.json'), KALA_DEPLOYMENT_CONFIG_FILE: join(release, 'deployment.json'), ...(deployment.KALA_STORAGE === 'postgres-s3' ? { KALA_INSTALLATION_ID_FILE: join(config, 'installation-id') } : {}), ...(existsSync(join(config, 'oidc-ca.pem')) ? { KALA_OIDC_CA_FILE: join(config, 'oidc-ca.pem') } : {}), ...(existsSync(join(config, 's3-ca.pem')) ? { KALA_S3_CA_FILE: join(config, 's3-ca.pem') } : {}) }, args: ['compose', '--project-name', deployment.COMPOSE_PROJECT_NAME, '--env-file', join(config, 'deployment.env'), ...overlays.flatMap((file) => ['-f', join(release, file)]), ...args] } }
 function envFile(path) { return Object.fromEntries(readFileSync(path, 'utf8').split(/\r?\n/u).map((line) => line.match(/^([A-Z][A-Z0-9_]*)=(.*)$/u)).filter(Boolean).map((match) => [match[1], match[2]])) }
 function infrastructureImage(release, name) { const match = readFileSync(join(release, 'compose.yaml'), 'utf8').match(new RegExp('image: (' + name + '(?::[^\\s@]+)?@sha256:[0-9a-f]{64})', 'u')); if (!match) throw new Error('missing immutable ' + name + ' image'); return match[1] }
 function cleanupProject(name) {

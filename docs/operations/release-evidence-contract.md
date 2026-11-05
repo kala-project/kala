@@ -29,7 +29,7 @@ The required promotion matrix is:
 
 | Category | Target | Required proof |
 |---|---|---|
-| Portable | Linux x64, macOS x64/arm64, and Windows x64 with ConPTY (exactly four records; Linux arm64 paused) | exact attested asset, clean install, boot, capabilities, embedded Dashboard, persisted Session state, graceful stop, same-version reinstall; Windows also verifies the native Executor and ConPTY installer lifecycles |
+| Portable | Linux x64, macOS x64/arm64, and Windows x64 with ConPTY (exactly four records; Linux arm64 paused) | exact attested CJS asset, clean install, boot, capabilities, embedded Dashboard, persisted Session state, graceful stop, same-version reinstall; Windows also verifies the CJS Executor and ConPTY installer lifecycles |
 
 Optional Dedicated and Private Cloud lifecycle evidence still has a strict schema
 if independently produced, but is not claimed as proven for this release.

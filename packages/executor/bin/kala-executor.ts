@@ -28,8 +28,8 @@
  * `workspaceId` matches this executor's stored workspace id.
  */
 
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { basename, dirname, resolve, join, sep } from 'node:path'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { basename, resolve, join, sep } from 'node:path'
 import process from 'node:process'
 
 import lockfile from 'proper-lockfile'
@@ -52,7 +52,7 @@ import { acquireExecutorLock } from '../src/local-lock.js'
 import { assertSupportedInstallerPrivileges, bootstrapEnvironment, defaultManagedRoot, downloadExecutorUpdateAssets, redeemInstallation, reportInstallation, waitForApproval, writeInstallerSession } from '../src/installer-flow.js'
 import { createLinuxServicePlan, executeLinuxServicePlan, linuxServicePaths, type Command } from '../src/linux-service.js'
 import { installPosixService, macosServiceDefinition, manageMacosService } from '../src/posix-service.js'
-import { assertElevatedWindowsAdministrator, assertManagedWindowsInstallation, copyWindowsNodePtyRuntime, copyWindowsServiceHost, createWindowsSelfRemovalPlan, createWindowsServicePlan, deleteWindowsSelfRemovalTask, encodeWindowsTaskXml, executeWindowsServicePlan, registerWindowsSelfRemovalTask, renderWindowsServiceConfig, secureWindowsServiceDataDir, waitForWindowsServiceStopped, type WindowsServiceAction } from '../src/windows-service.js'
+import { assertElevatedWindowsAdministrator, assertManagedWindowsInstallation, copyWindowsExecutorCjs, copyWindowsNodePtyRuntime, copyWindowsServiceHost, createWindowsSelfRemovalPlan, createWindowsServicePlan, deleteWindowsSelfRemovalTask, encodeWindowsTaskXml, executeWindowsServicePlan, registerWindowsSelfRemovalTask, renderWindowsServiceConfig, secureWindowsServiceDataDir, secureWindowsServiceInstallDir, waitForWindowsServiceStopped, windowsExecutorSourceRoot, type WindowsServiceAction } from '../src/windows-service.js'
 import type { ServiceAction, ServiceMode } from '../src/cli-args.js'
 import type { InstallerSession } from '../src/installer-session.js'
 import { spawn } from 'node:child_process'
@@ -261,6 +261,8 @@ async function runInternalInstaller(): Promise<void> {
   const env = bootstrapEnvironment(process.env)
   assertSupportedInstallerPrivileges(env, process.getuid?.() === 0)
   if (env.EXECUTOR_INSTALL_MODE === 'service' && process.platform === 'win32') {
+    windowsExecutorSourceRoot(process.execPath, process.argv[1], process.versions.node)
+    assertWindowsInstallerDigests()
     await assertElevatedWindowsAdministrator()
   }
   await reportInstallation(env, 'asset_verified')
@@ -338,7 +340,8 @@ async function runInviteInstaller(): Promise<void> {
     return
   }
   if (process.platform === 'win32') {
-    if (basename(process.execPath).toLowerCase() === 'node.exe') throw new Error('Windows service mode requires the native kala-executor asset')
+    windowsExecutorSourceRoot(process.execPath, process.argv[1], process.versions.node)
+    assertWindowsInstallerDigests()
     await assertElevatedWindowsAdministrator()
   } else {
     const servicePaths = process.platform === 'linux'
@@ -394,13 +397,20 @@ function posixServiceOptions() {
   return { platform: process.platform, architecture: process.arch, home: homedir(), uid: process.getuid?.(), runner: { run: runServiceCommand } }
 }
 
+function assertWindowsInstallerDigests(): void {
+  if (!/^[0-9a-f]{64}$/u.test(process.env.KALA_VERIFIED_EXECUTOR_SHA256 ?? '')
+    || !/^[0-9a-f]{64}$/u.test(process.env.KALA_VERIFIED_CONPTY_MANIFEST_SHA256 ?? '')) {
+    throw new Error('Windows service installation requires verified Executor and ConPTY installer digests')
+  }
+}
+
 async function installWindowsService(env: Pick<ReturnType<typeof bootstrapEnvironment>, 'HOST_URL' | 'EXECUTOR_PRIVILEGE_MODE'> & Partial<Pick<ReturnType<typeof bootstrapEnvironment>, 'EXECUTOR_INSTALL_LABEL' | 'EXECUTOR_INSTALL_ID'>>, workspaceRoot: string, token: string, workspaceId: string, options: { routeHint?: string; installationSource?: 'dashboard-native' | 'private-cloud-invite'; reportProgress?: boolean } = {}): Promise<void> {
+  const sourceRoot = windowsExecutorSourceRoot(process.execPath, process.argv[1], process.versions.node)
   const serviceName = 'KalaExecutor'
   const plan = createWindowsServicePlan({
     serviceName, displayName: 'Kala Executor',
-    programFiles: process.env.ProgramFiles, programData: process.env.ProgramData,
+    programFiles: process.env.ProgramFiles, programData: process.env.ProgramData, nodeExecutablePath: process.execPath,
   })
-  if (basename(process.execPath).toLowerCase() === 'node.exe') throw new Error('Windows service mode requires the native kala-executor asset')
   if (existsSync(plan.layout.installDir) || existsSync(plan.layout.dataDir)) {
     throw new Error('Refusing to replace an existing Windows Executor installation or data directory')
   }
@@ -415,9 +425,10 @@ async function installWindowsService(env: Pick<ReturnType<typeof bootstrapEnviro
   }
   try {
     await secureWindowsServiceDataDir(plan.layout.dataDir)
-    copyFileSync(process.execPath, plan.layout.executablePath)
-    copyWindowsNodePtyRuntime(dirname(process.execPath), plan.layout.installDir)
-    copyWindowsServiceHost(dirname(process.execPath), plan.layout.installDir)
+    await secureWindowsServiceInstallDir(plan.layout.installDir)
+    copyWindowsExecutorCjs(sourceRoot, plan.layout.executablePath, process.env.KALA_VERIFIED_EXECUTOR_SHA256 ?? '')
+    copyWindowsNodePtyRuntime(sourceRoot, plan.layout.installDir, process.env.KALA_VERIFIED_CONPTY_MANIFEST_SHA256 ?? '')
+    copyWindowsServiceHost(sourceRoot, plan.layout.installDir)
     writePrivateAtomic(plan.layout.serviceConfigPath, renderWindowsServiceConfig(plan.layout, serviceName, 'Kala Executor'))
     writePrivateAtomic(credentialPath, `${token}\n`)
     writePrivateAtomic(plan.layout.configPath, `${JSON.stringify(config, null, 2)}\n`)
@@ -425,8 +436,8 @@ async function installWindowsService(env: Pick<ReturnType<typeof bootstrapEnviro
     if (options.reportProgress !== false) await reportInstallation(env as ReturnType<typeof bootstrapEnvironment>, 'starting')
     await executeWindowsServicePlan(plan, ['create', 'recovery', 'start'])
     process.stdout.write('[4/4] Windows service started and connected.\n')
-    process.stdout.write(`  Status ${JSON.stringify(plan.layout.executablePath)} service status\n`)
-    process.stdout.write(`  Uninstall ${JSON.stringify(plan.layout.executablePath)} service uninstall\n`)
+    process.stdout.write(`  Status ${JSON.stringify(plan.layout.nodeExecutablePath)} ${JSON.stringify(plan.layout.executablePath)} service status\n`)
+    process.stdout.write(`  Uninstall ${JSON.stringify(plan.layout.nodeExecutablePath)} ${JSON.stringify(plan.layout.executablePath)} service uninstall\n`)
   } catch (error) {
     await executeWindowsServicePlan(plan, ['stop']).catch(() => undefined)
     // Never remove a running service's executable or credentials. Preserve
@@ -794,7 +805,7 @@ async function manageWindowsService(action: Exclude<ServiceAction, 'install'>): 
   }
   for (const result of results) { if (result.stdout) process.stdout.write(result.stdout); if (result.stderr) process.stderr.write(result.stderr) }
   if (action === 'uninstall') {
-    if (resolve(process.execPath).startsWith(`${resolve(plan.layout.installDir)}${sep}`)) {
+    if (resolve(process.argv[1] ?? '').startsWith(`${resolve(plan.layout.installDir)}${sep}`)) {
       const statusFile = await scheduleWindowsSelfRemoval(plan.layout.installDir, plan.layout.dataDir)
       process.stdout.write('\nKala Executor Windows service removal was scheduled. Program files and credentials will be removed after this process exits.\n')
       process.stdout.write(`Removal status file: ${statusFile}\n`)

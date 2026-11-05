@@ -13,6 +13,7 @@ import {
   readExactTarGz,
   releaseMetadataArchiveName,
   verifyDashboardArchive,
+  verifyEmbeddedDashboard,
   verifyReleaseMetadataArchive,
 } from './release-archives.mjs'
 
@@ -52,6 +53,14 @@ test('merges exact Dashboard bytes and its manifest into one independently verif
   const verified = verifyDashboardArchive(value.archive)
   assert.equal(verified.manifest.version, '1.2.3')
   assert.deepEqual([...readExactTarGz(value.archive).keys()].sort(), ['assets/app.js', 'dashboard-release.json', 'index.html'])
+})
+
+test('rejects a Portable Host that corrupts binary Dashboard assets during embedding', () => {
+  const icon = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0xff])
+  const manifest = { files: [{ path: 'assets/icon.png', bytes: icon.length, sha256: sha256(icon) }] }
+  const host = (bytes) => `globalThis.__KALA_EMBEDDED_DASHBOARD__=${JSON.stringify([{ path: 'assets/icon.png', contentBase64: bytes.toString('base64') }])};\n`
+  assert.doesNotThrow(() => verifyEmbeddedDashboard(host(icon), manifest))
+  assert.throws(() => verifyEmbeddedDashboard(host(Buffer.from(icon.toString('utf8'))), manifest), /differs from the release archive/u)
 })
 
 test('produces byte-identical Dashboard archives across output paths and source mtimes', () => {

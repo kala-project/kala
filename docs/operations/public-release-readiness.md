@@ -28,7 +28,7 @@ Dedicated/Private Cloud lifecycle checks are **not certified** by this release.
 
 | Variant | Distribution | Required user workflow | Dashboard lifecycle |
 |---|---|---|---|
-| Portable | one CJS or one OS/architecture native executable | download, verify, run | embedded and upgraded with Runtime |
+| Portable | Node.js 22+ CJS Host and Executor with platform runtime dependencies | download, verify, run | embedded and upgraded with Runtime |
 | Dedicated | signed Platform release bundle and systemd operator CLI | install, status, upgrade, rollback, backup, restore, uninstall | independent immutable release |
 | Private Cloud | signed multi-architecture images plus a versioned Compose bundle | configure secrets, preflight, install/upgrade/rollback with no source checkout | independent image |
 
@@ -51,7 +51,7 @@ Cloud is the same Platform architecture with `multi-tenant`.
 
 - [x] One product version is enforced across packages and artifacts.
 - [x] Linux and macOS x64/arm64 Portable build jobs exist on matching runners.
-- [ ] Windows x64 Portable Host, native Executor, ConPTY, and installer lifecycle
+- [ ] Windows x64 Portable Host, CJS Executor, ConPTY, and installer lifecycle
   must pass the exact-tag hosted acceptance before promotion. Windows assets
   are required by the current release and promotion workflows, not excluded.
 - [x] GitHub release assets have a keyless checksum signature and GitHub build

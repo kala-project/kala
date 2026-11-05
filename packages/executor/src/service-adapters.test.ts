@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -7,7 +8,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { createLinuxServicePlan, executeLinuxServicePlan, renderLinuxServiceFiles } from './linux-service.js'
 import { createMacosLaunchdService, executeLaunchdPlan } from './macos-launchd.js'
-import { assertElevatedWindowsAdministrator, assertManagedWindowsInstallation, copyWindowsNodePtyRuntime, copyWindowsServiceHost, createWindowsSelfRemovalPlan, createWindowsServicePlan, encodeWindowsTaskXml, executeWindowsServicePlan, registerWindowsSelfRemovalTask, renderWindowsServiceConfig, secureWindowsServiceDataDir, waitForWindowsServiceStopped, WINDOWS_NODE_PTY_RUNTIME_FILES } from './windows-service.js'
+import { assertElevatedWindowsAdministrator, assertManagedWindowsInstallation, copyWindowsExecutorCjs, copyWindowsNodePtyRuntime, copyWindowsServiceHost, createWindowsSelfRemovalPlan, createWindowsServicePlan, encodeWindowsTaskXml, executeWindowsServicePlan, registerWindowsSelfRemovalTask, renderWindowsServiceConfig, secureWindowsServiceDataDir, secureWindowsServiceInstallDir, waitForWindowsServiceStopped, windowsExecutorSourceRoot, WINDOWS_NODE_PTY_RUNTIME_FILES } from './windows-service.js'
 import type { InstallerSession } from './installer-session.js'
 
 const session: InstallerSession = {
@@ -165,14 +166,16 @@ describe('macOS service adapter', () => {
 
 describe('Windows service adapter', () => {
   it('quotes paths, excludes credentials, and executes only through the injected boundary', async () => {
-    const plan = createWindowsServicePlan({ serviceName: 'KalaExecutor', programFiles: 'C:\\Program Files', programData: 'C:\\Program Data', executableName: 'kala-executor.exe' })
+    const plan = createWindowsServicePlan({ serviceName: 'KalaExecutor', programFiles: 'C:\\Program Files', programData: 'C:\\Program Data', nodeExecutablePath: 'C:\\Program Files\\nodejs\\node.exe' })
     const create = plan.commands.find((command) => command.action === 'create')!
     expect(create.args.join(' ')).toContain('C:\\Program Files')
     expect(create.args[3]).toBe('"C:\\Program Files\\Kala\\Executor\\kala-executor-service.exe"')
     expect(create.args.join(' ')).not.toMatch(/token|credential|--config/i)
     expect(plan.layout.serviceConfigPath).toBe('C:\\Program Files\\Kala\\Executor\\kala-executor-service.xml')
-    expect(renderWindowsServiceConfig(plan.layout, 'KalaExecutor', 'Kala Executor')).toContain('<executable>%BASE%\\kala-executor.exe</executable>')
-    expect(renderWindowsServiceConfig(plan.layout, 'KalaExecutor', 'Kala Executor')).toContain('--config &quot;C:\\Program Data\\Kala\\Executor\\config.json&quot;')
+    const config = renderWindowsServiceConfig(plan.layout, 'KalaExecutor', 'Kala Executor')
+    expect(config).toContain('<executable>C:\\Program Files\\nodejs\\node.exe</executable>')
+    expect(config).toContain('<arguments>&quot;C:\\Program Files\\Kala\\Executor\\kala-executor.cjs&quot; --config &quot;C:\\Program Data\\Kala\\Executor\\config.json&quot;</arguments>')
+    expect(config).not.toContain('token')
     const runner = vi.fn(async () => ({ exitCode: 0, stdout: 'ok', stderr: '' }))
     await executeWindowsServicePlan(plan, ['create', 'recovery', 'start'], { platform: 'win32', runner })
     expect(runner).toHaveBeenCalledTimes(3)
@@ -188,17 +191,52 @@ describe('Windows service adapter', () => {
         mkdirSync(dirname(path), { recursive: true })
         writeFileSync(path, relative)
       }
-      copyWindowsNodePtyRuntime(source, destination)
+      writeFileSync(join(source, 'node-pty-companion.json'), JSON.stringify({
+        schemaVersion: 1, product: 'kala-executor-node-pty-companion', target: 'win32-x64', nodePtyVersion: '1.1.0',
+        files: WINDOWS_NODE_PTY_RUNTIME_FILES.map((relative) => ({
+          path: relative, bytes: Buffer.byteLength(relative), sha256: createHash('sha256').update(relative).digest('hex'),
+        })),
+      }))
+      const manifestDigest = createHash('sha256').update(readFileSync(join(source, 'node-pty-companion.json'))).digest('hex')
+      copyWindowsNodePtyRuntime(source, destination, manifestDigest)
       for (const relative of WINDOWS_NODE_PTY_RUNTIME_FILES) {
         expect(readFileSync(join(destination, ...relative.split('/')), 'utf8')).toBe(relative)
       }
       rmSync(join(source, 'worker', 'conoutSocketWorker.js'))
       const incomplete = join(root, 'incomplete')
-      expect(() => copyWindowsNodePtyRuntime(source, incomplete)).toThrow('missing worker/conoutSocketWorker.js')
+      expect(() => copyWindowsNodePtyRuntime(source, incomplete, manifestDigest)).toThrow('missing worker/conoutSocketWorker.js')
       expect(existsSync(incomplete)).toBe(false)
+      writeFileSync(join(source, 'worker', 'conoutSocketWorker.js'), 'tampered')
+      expect(() => copyWindowsNodePtyRuntime(source, incomplete, manifestDigest)).toThrow('integrity mismatch')
+      writeFileSync(join(source, 'node-pty-companion.json'), '{}')
+      expect(() => copyWindowsNodePtyRuntime(source, incomplete, manifestDigest)).toThrow('changed since installer verification')
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+
+  it('copies only a checksummed CJS, never Node.exe, and refuses modified release bytes', () => {
+    const root = mkdtempSync(join(tmpdir(), 'kala-windows-cjs-'))
+    try {
+      const source = join(root, 'kala-executor.cjs')
+      const destination = join(root, 'installed.cjs')
+      writeFileSync(source, 'console.log("verified")\n')
+      const digest = createHash('sha256').update(readFileSync(source)).digest('hex')
+      writeFileSync(join(root, 'SHA256SUMS'), `${digest}  kala-executor.cjs\n`)
+      copyWindowsExecutorCjs(root, destination, digest)
+      expect(readFileSync(destination, 'utf8')).toBe(readFileSync(source, 'utf8'))
+      writeFileSync(source, 'console.log("tampered")\n')
+      expect(() => copyWindowsExecutorCjs(root, destination, digest)).toThrow('integrity mismatch')
+      expect(readFileSync(destination, 'utf8')).toBe('console.log("verified")\n')
+      writeFileSync(join(root, 'SHA256SUMS'), `${digest}  kala-executor.cjs\n${digest}  kala-executor.cjs\n`)
+      expect(() => copyWindowsExecutorCjs(root, destination, digest)).toThrow('exactly one')
+      writeFileSync(join(root, 'SHA256SUMS'), `${createHash('sha256').update(readFileSync(source)).digest('hex')}  kala-executor.cjs\n`)
+      expect(() => copyWindowsExecutorCjs(root, destination, digest)).toThrow('changed since installer verification')
+    } finally { rmSync(root, { recursive: true, force: true }) }
+    expect(windowsExecutorSourceRoot('C:\\Program Files\\nodejs\\node.exe', 'C:\\Download\\kala-executor.cjs', '22.11.0')).toBe('C:\\Download')
+    expect(() => windowsExecutorSourceRoot('C:\\Download\\kala-executor.exe', 'C:\\Download\\kala-executor.cjs', '22.11.0')).toThrow('Node.js 22+')
+    expect(() => windowsExecutorSourceRoot('C:\\Program Files\\nodejs\\node.exe', 'C:\\Download\\kala-executor.cjs', '20.0.0')).toThrow('Node.js 22+')
+    expect(() => windowsExecutorSourceRoot('C:\\Program Files\\nodejs\\node.exe', 'C:\\Download\\other.cjs', '22.11.0')).toThrow('verified kala-executor.cjs')
   })
 
   it('escapes service XML and rejects an untrusted binary before copying it', () => {
@@ -291,6 +329,10 @@ describe('Windows service adapter', () => {
     await secureWindowsServiceDataDir('C:\\ProgramData\\Kala\\Executor', { platform: 'win32', runner })
     expect(runner).toHaveBeenCalledWith('icacls.exe', [
       'C:\\ProgramData\\Kala\\Executor', '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F',
+    ])
+    await secureWindowsServiceInstallDir('C:\\Program Files\\Kala\\Executor', { platform: 'win32', runner })
+    expect(runner).toHaveBeenCalledWith('icacls.exe', [
+      'C:\\Program Files\\Kala\\Executor', '/inheritance:r', '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F',
     ])
     await expect(secureWindowsServiceDataDir('C:\\ProgramData\\Kala\\Executor', {
       platform: 'win32', runner: async () => ({ exitCode: 5, stdout: '', stderr: 'Access denied' }),

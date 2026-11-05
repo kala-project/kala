@@ -30,10 +30,10 @@ validation tools remain available for a separately approved future npm release.
 ## GitHub Release assets
 
 The `GitHub Release Assets` workflow also accepts only the unified `v*` tag. Its
-current release matrix builds matching-runner Node SEA assets for Linux x64
-and macOS x64/arm64, plus a Windows x64 Node.js Host and native Executor
-with ConPTY and service installer assets. Linux arm64 remains paused; SEA binaries
-are never cross-compiled or relabeled. The CJS job builds portable fallbacks, the Dashboard
+current release matrix collects matching-runner Copilot SDK runtime files for Linux x64
+and macOS x64/arm64, plus a Windows x64 Node.js Host and CJS Executor
+with ConPTY and service installer assets. Linux arm64 remains paused; no standalone
+native Executor binaries are built. The CJS job builds the shared Executor, the Dashboard
 archive, Dedicated support archive, release metadata archive, manifest, and
 checksums. The final job merges exact
 artifacts and regenerates all metadata before publication.
@@ -43,17 +43,16 @@ Important assets include:
 | Asset | Purpose |
 |---|---|
 | `kala-dashboard-with-runtime.cjs` | Portable Runtime with embedded Dashboard |
-| `kala-host-<os>-<arch>` | Native Portable Runtime |
-| `kala-executor.cjs` | Node.js Executor fallback |
-| `kala-executor-<os>-<arch>` | Native Executor |
+| `kala-executor.cjs` | Portable Executor on Node.js 22+ |
+| `node-pty-win32-x64.tar.gz`, `kala-executor-service-host-win32-x64.exe` | Existing Windows ConPTY and SCM service-host dependencies |
 | `kala-runtime.cjs` | Platform Runtime without embedded Dashboard |
 | `kala-dashboard.tar.gz` | Independent Platform Dashboard static files with embedded `dashboard-release.json` |
 | `kala-release-metadata.tar.gz` | CycloneDX SBOM, third-party notices, and release notes |
 | `run.sh` | Checksum-verifying Portable bootstrap |
 | `manifest.json` and `SHA256SUMS` | External release identity and integrity |
 
-The `.cjs` assets require Node.js 22+. `run.sh` prefers them when Node 22 is
-available and otherwise selects a matching native binary. Manual downloads must
+The `.cjs` assets require Node.js 22+. `run.sh` requires a matching Node 22+
+installation; it does not download a standalone native Executor. Manual downloads must
 verify `SHA256SUMS` before execution. `manifest.json`, `SHA256SUMS`, and
 `SHA256SUMS.sigstore.json` remain external so consumers can authenticate the
 closed release inventory before opening either archive. Archive consumers must

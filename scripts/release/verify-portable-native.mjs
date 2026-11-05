@@ -23,7 +23,7 @@ if (target === 'win32-x64') {
   process.exit(0)
 }
 const executorAsset = resolve(required('--executor-asset'))
-if (basename(executorAsset) !== `kala-executor-${target}` || !existsSync(executorAsset)) throw new Error(`Portable native Executor asset is missing for ${target}`)
+if (basename(executorAsset) !== 'kala-executor.cjs' || !existsSync(executorAsset)) throw new Error(`Portable CJS Executor asset is missing for ${target}`)
 const scratch = mkdtempSync(join(tmpdir(), 'runlab-portable-acceptance-'))
 const install = join(scratch, 'kala-dashboard-with-runtime.cjs')
 const state = join(scratch, 'state')
@@ -146,7 +146,7 @@ function startNativeExecutor(origin) {
   if (process.platform !== target.split('-')[0] && !(process.platform === 'darwin' && target.startsWith('darwin-'))) throw new Error(`Portable ${target} acceptance requires its matching native runner`)
   chmodSync(executorAsset, 0o755)
   const logs = []
-  const child = spawn(executorAsset, ['--host', origin, '--sandbox-root', workspace, '--name', 'portable-acceptance'], {
+  const child = spawn(process.execPath, [executorAsset, '--host', origin, '--sandbox-root', workspace, '--name', 'portable-acceptance'], {
     cwd: workspace,
     env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), EXECUTOR_TOKEN: executorToken, WORKSPACE_NAME: 'portable-acceptance', KALA_WORKSPACE_ID_FILE: workspaceIdFile },
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
@@ -224,7 +224,7 @@ function verifyWindowsPortableAndConpty() {
   const releaseDir = resolve(required('--release-dir'))
   const names = [
     'kala-dashboard-with-runtime.cjs',
-    'kala-executor-win32-x64.exe',
+    'kala-executor.cjs',
     'node-pty-win32-x64.tar.gz',
     'kala-executor-service-host-win32-x64.exe',
     'install-executor.ps1',

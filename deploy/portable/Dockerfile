@@ -17,7 +17,7 @@ RUN test -n "${KALA_VERSION}" \
     && install -d -o 65532 -g 65532 -m 0700 \
        /var/lib/kala /var/lib/kala/sessions /var/lib/kala/artifacts /var/lib/kala/audit
 
-FROM gcr.io/distroless/nodejs22-debian13@sha256:5ef534d3db0ac0c43bee379af4ae49cfbfc0ef38a46c94c52d87c68f32f34d8a AS node-runtime-source
+FROM gcr.io/distroless/nodejs22-debian13@sha256:5e72a679e328276f6ffc3c4bb45c94f847f6abf0b424a1f8cc984f7f1c1daf47 AS node-runtime-source
 FROM scratch AS node-runtime
 COPY --from=node-runtime-source /nodejs/bin/node /nodejs/bin/node
 COPY --from=node-runtime-source /etc/os-release /etc/os-release
@@ -59,7 +59,7 @@ LABEL org.opencontainers.image.title="Kala Portable" \
       org.opencontainers.image.created="${KALA_CREATED}" \
       io.kala.distribution="portable" \
       io.kala.portable.asset.sha256="${KALA_ASSET_SHA256}" \
-      io.kala.portable.runtime.source="gcr.io/distroless/nodejs22-debian13@sha256:5ef534d3db0ac0c43bee379af4ae49cfbfc0ef38a46c94c52d87c68f32f34d8a"
+      io.kala.portable.runtime.source="gcr.io/distroless/nodejs22-debian13@sha256:5e72a679e328276f6ffc3c4bb45c94f847f6abf0b424a1f8cc984f7f1c1daf47"
 ENV NODE_ENV=production \
     PATH=/nodejs/bin:/usr/local/bin:/usr/bin:/bin \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \

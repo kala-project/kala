@@ -86,7 +86,7 @@ jobs:
           Copy-Item release $hostRelease -Recurse
           "PRODUCT_E2E_WINDOWS_HOST_RELEASE_DIR=$hostRelease" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Remove-Item release -Recurse -Force
-      - name: Build the native Windows x64 Executor and ConPTY companion
+      - name: Stage the existing Windows ConPTY and service-host dependencies
         run: pnpm run build:release-assets -- --component executor --tag ${{ needs.resolve.outputs.tag }} --repo ${{ github.repository }} --native-only --native-target win32-x64
       - name: Bind the Windows capture to the exact tag revision and hashes
         shell: pwsh
@@ -96,7 +96,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $capture = Join-Path $env:RUNNER_TEMP 'private-cloud-windows-captured'
           if ((git rev-parse HEAD).Trim() -ne $env:CAPTURE_REVISION) { throw 'Windows release checkout differs from the tag revision' }
-          Copy-Item release/kala-executor-win32-x64.exe $capture/
+          Copy-Item $env:PRODUCT_E2E_WINDOWS_HOST_RELEASE_DIR/kala-executor.cjs $capture/
           Copy-Item release/node-pty-win32-x64.tar.gz $capture/
           Copy-Item release/kala-executor-service-host-win32-x64.exe $capture/
           Set-Location $capture
@@ -105,6 +105,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          Copy-Item $env:RUNNER_TEMP/private-cloud-windows-captured/kala-executor.cjs release/
           tar -xzf release/node-pty-win32-x64.tar.gz -C release
           New-Item -ItemType Directory -Path release/prebuilds -Force | Out-Null
           Move-Item release/win32-x64 release/prebuilds/win32-x64 -Force
@@ -161,10 +162,10 @@ jobs:
           const root = process.env.WINDOWS_CAPTURE_DIR
           const output = '.private-cloud-runtime-windows-assets'
           const manifest = JSON.parse(readFileSync(join(root, 'windows-capture-manifest.json'), 'utf8'))
-          const expected = ['kala-copilot-runtime-node-win32-x64.node', 'kala-copilot-runtime-win32-x64', 'kala-dashboard-with-runtime.cjs', 'kala-executor-service-host-win32-x64.exe', 'kala-executor-win32-x64.exe', 'node-pty-win32-x64.tar.gz']
-          const required = ['kala-executor-service-host-win32-x64.exe', 'kala-executor-win32-x64.exe', 'node-pty-win32-x64.tar.gz']
+          const expected = ['kala-copilot-runtime-node-win32-x64.node', 'kala-copilot-runtime-win32-x64', 'kala-dashboard-with-runtime.cjs', 'kala-executor.cjs', 'kala-executor-service-host-win32-x64.exe', 'node-pty-win32-x64.tar.gz']
+          const required = ['kala-executor-service-host-win32-x64.exe', 'node-pty-win32-x64.tar.gz']
           if (manifest.schemaVersion !== 1 || manifest.revision !== process.env.EXPECTED_REVISION) throw new Error('Windows capture revision mismatch')
-          if (JSON.stringify(Object.keys(manifest.assets).sort()) !== JSON.stringify(expected)) throw new Error('Windows capture manifest inventory is not exact')
+          if (JSON.stringify(Object.keys(manifest.assets).sort()) !== JSON.stringify([...expected].sort())) throw new Error('Windows capture manifest inventory is not exact')
           if (JSON.stringify(readdirSync(root).sort()) !== JSON.stringify([...expected, 'windows-capture-manifest.json'].sort())) throw new Error('Windows capture artifact inventory is not closed')
           for (const name of expected) {
             const bytes = readFileSync(join(root, name))
@@ -415,7 +416,7 @@ jobs:
     needs: [resolve, bundle]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: write # Draft assets need write-level read; keep this token off the acceptance VM.
     env:
@@ -425,7 +426,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: sigstore/cosign-installer@v3
-      - name: Stage signed draft bundle and exact beta Executor
+      - name: Stage signed draft bundle and exact CJS Executor
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = "refs/tags/$TAG"
@@ -440,20 +441,30 @@ jobs:
           cosign verify-blob --bundle candidate/private-cloud-linux-x64.sigstore.json \
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/private-cloud-release.yml@$GITHUB_REF" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com "$archive"
-          for attempt in $(seq 1 40); do
-            gh release download "$TAG" -p kala-executor-linux-x64 -D executor && test -s executor/kala-executor-linux-x64 && break
+          verify_exact_executor() {
+            test -s executor/manifest.json && test -s executor/kala-executor.cjs || return 1
+            test -s executor/SHA256SUMS && test -s executor/SHA256SUMS.sigstore.json || return 1
+            node -e '
+              const fs = require("node:fs");
+              const manifest = JSON.parse(fs.readFileSync("executor/manifest.json", "utf8"));
+              const sums = fs.readFileSync("executor/SHA256SUMS", "utf8").split("\n");
+              if (manifest.source?.revision !== process.env.GITHUB_SHA || manifest.source?.dirty !== false ||
+                  manifest.tag !== process.env.TAG || !manifest.assets?.includes("kala-executor.cjs") ||
+                  !["manifest.json", "kala-executor.cjs"].every(name =>
+                    sums.some(line => /^[0-9a-f]{64}  /u.test(line) && line.endsWith("  " + name)))) process.exit(1);
+            ' || return 1
+            cosign verify-blob --bundle executor/SHA256SUMS.sigstore.json \
+              --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com executor/SHA256SUMS || return 1
+            (cd executor && sha256sum --check --ignore-missing SHA256SUMS)
+          }
+          for attempt in $(seq 1 120); do
+            rm -f executor/manifest.json executor/kala-executor.cjs executor/SHA256SUMS executor/SHA256SUMS.sigstore.json
+            if gh release download "$TAG" -D executor -p manifest.json -p kala-executor.cjs \
+                -p SHA256SUMS -p SHA256SUMS.sigstore.json && verify_exact_executor; then break; fi
             sleep 15
           done
-          test -s executor/kala-executor-linux-x64
-          for attempt in $(seq 1 40); do
-            gh release download "$TAG" -p SHA256SUMS -p SHA256SUMS.sigstore.json -D executor && test -s executor/SHA256SUMS && test -s executor/SHA256SUMS.sigstore.json && break
-            sleep 15
-          done
-          test -s executor/SHA256SUMS && test -s executor/SHA256SUMS.sigstore.json
-          cosign verify-blob --bundle executor/SHA256SUMS.sigstore.json \
-            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com executor/SHA256SUMS
-          (cd executor && sha256sum --check --ignore-missing SHA256SUMS)
+          verify_exact_executor
       - uses: actions/upload-artifact@v5
         with:
           name: private-cloud-beta-draft-assets-${{ github.run_id }}-${{ github.run_attempt }}
@@ -500,7 +511,7 @@ jobs:
           command -v docker
           docker info >/dev/null
           node -e 'const s=require("node:net").createServer(); s.once("error",()=>process.exit(1)); s.listen(13001,"127.0.0.1",()=>s.close())'
-      - name: Reserve disk for the signed candidate and bundled identity images
+      - name: Reserve disk for the signed candidate and isolated external services
         run: |
           set -euo pipefail
           available_kib="$(df --output=avail -k / | tail -1 | tr -d ' ')"
@@ -514,9 +525,26 @@ jobs:
       - uses: actions/download-artifact@v5
         with:
           name: private-cloud-beta-draft-assets-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: sigstore/cosign-installer@v3
+      - name: Require anonymous full-layer pulls of the exact signed candidate images
+        run: |
+          set -euo pipefail
+          archive="candidate/kala-private-cloud-${VERSION}-linux-x64.tar.gz"
+          cosign verify-blob --bundle candidate/private-cloud-linux-x64.sigstore.json \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/private-cloud-release.yml@$GITHUB_REF" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com "$archive"
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "$scratch"' EXIT
+          tar -xzf "$archive" -C "$scratch"
+          lock="$(find "$scratch" -name image-lock.json -type f -print -quit)"
+          test -n "$lock"
+          mkdir "$scratch/anonymous-docker"
+          images="$(node -e 'const lock=require(process.argv[1]); for (const name of ["runtime","ingress","dashboard"]) { const image=lock.images?.[name]; if (!/^ghcr\.io\/[^@]+@sha256:[0-9a-f]{64}$/.test(image)) process.exit(1); console.log(image) }' "$lock")"
+          while IFS= read -r image; do
+            docker --config "$scratch/anonymous-docker" pull "$image"
+          done <<< "$images"
       - uses: docker/login-action@v3
         with: { registry: ghcr.io, username: '${{ github.actor }}', password: '${{ github.token }}' }
-      - uses: sigstore/cosign-installer@v3
       - name: Reverify the staged signed draft bundle and images
         run: |
           set -euo pipefail
@@ -525,7 +553,8 @@ jobs:
           cosign verify-blob --bundle candidate/private-cloud-linux-x64.sigstore.json \
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/private-cloud-release.yml@$GITHUB_REF" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com "$archive"
-          bundle="$(mktemp -d)"
+          bundle="$GITHUB_WORKSPACE/.runlab-private-cloud-signed-bundle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -m 700 "$bundle"
           trap 'rm -rf "$bundle"' EXIT
           tar -xzf "$archive" -C "$bundle"
           lock="$(find "$bundle" -name image-lock.json -type f -print -quit)"
@@ -539,19 +568,27 @@ jobs:
       - name: Reverify the staged signed beta Executor binary
         run: |
           set -euo pipefail
-          test -s executor/kala-executor-linux-x64 && test -s executor/SHA256SUMS && test -s executor/SHA256SUMS.sigstore.json
+          test -s executor/kala-executor.cjs && test -s executor/SHA256SUMS && test -s executor/SHA256SUMS.sigstore.json
           cosign verify-blob --bundle executor/SHA256SUMS.sigstore.json \
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com executor/SHA256SUMS
           (cd executor && sha256sum --check --ignore-missing SHA256SUMS)
-      - name: Install the fresh beta candidate before browser, tenant, Executor and restore checks
+      - name: Provision isolated TLS OIDC and PostgreSQL/S3, then install and restore signed candidate
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
+          bundle="$GITHUB_WORKSPACE/.runlab-private-cloud-authorities-bundle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -m 700 "$bundle"
+          trap 'rm -rf "$bundle"' EXIT
+          tar --same-permissions -xzf "candidate/kala-private-cloud-${VERSION}-linux-x64.tar.gz" -C "$bundle"
+          manifest="$(find "$bundle" -name manifest.json -type f -print -quit)"
+          test -n "$manifest"
           evidence="$RUNNER_TEMP/private-cloud-fresh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.rc-evidence.json"
           archive="candidate/kala-private-cloud-${VERSION}-linux-x64.tar.gz"
-          node scripts/release/verify-private-cloud-clean-compose.mjs \
-            --fresh-candidate --ephemeral-bundled-acceptance --candidate-archive "$archive" \
-            --executor executor/kala-executor-linux-x64 \
+          node scripts/release/provision-private-cloud-hosted-authorities.mjs \
+            --bundle "$(dirname "$manifest")" --fresh-candidate --candidate-archive "$archive" \
+            --executor executor/kala-executor.cjs \
             --tag "$TAG" --revision "$GITHUB_SHA" --output "$evidence"
           node scripts/release/verify-private-cloud-fresh-evidence.mjs \
             --evidence "$evidence" --archive "$archive" --tag "$TAG" --revision "$GITHUB_SHA"
@@ -657,7 +694,7 @@ jobs:
       - name: Verify the exact signed release Executor binary
         run: |
           set -euo pipefail
-          test -s executor/kala-executor-linux-x64 && test -s executor/SHA256SUMS && test -s executor/SHA256SUMS.sigstore.json || { echo 'Signed release Executor is unavailable' >&2; exit 1; }
+          test -s executor/kala-executor.cjs && test -s executor/SHA256SUMS && test -s executor/SHA256SUMS.sigstore.json || { echo 'Signed release Executor is unavailable' >&2; exit 1; }
           cosign verify-blob --bundle executor/SHA256SUMS.sigstore.json \
             --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com executor/SHA256SUMS
@@ -670,7 +707,7 @@ jobs:
             --non-certifying-predecessor \
             --candidate-archive "candidate/kala-private-cloud-${VERSION}-linux-x64.tar.gz" \
             --predecessor-archive "predecessor/kala-private-cloud-${PREDECESSOR_TAG#v}-linux-x64.tar.gz" \
-            --executor executor/kala-executor-linux-x64 \
+            --executor executor/kala-executor.cjs \
             --tag "$TAG" --revision "$GITHUB_SHA" \
             --predecessor-tag "$PREDECESSOR_TAG" --predecessor-revision "$PREDECESSOR_REVISION" --output "$evidence"
           node -e 'const fs=require("node:fs");const e=JSON.parse(fs.readFileSync(process.argv[1]));if(e.category!=="private-cloud-predecessor"||e.certifying!==false||e.predecessorPolicy!=="unsupported-explicit-override"||!e.ok||Object.values(e.checks).some(v=>v!==true))process.exit(1)' "$evidence"

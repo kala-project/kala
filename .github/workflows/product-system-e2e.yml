@@ -51,7 +51,7 @@ jobs:
         run: node scripts/product-e2e/verify-windows-terminal.mjs
 
   windows-executor-conpty-e2e:
-    name: Windows x64 native Executor / ConPTY lifecycle
+    name: Windows x64 CJS Executor / ConPTY lifecycle
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
@@ -79,17 +79,18 @@ jobs:
       - name: Build isolated Windows Host fixture
         shell: pwsh
         run: |
-          pnpm run build:release-assets -- --component host --tag latest --repo xingsy97/kala
+          pnpm run build:release-assets -- --component all --tag latest --repo xingsy97/kala
           if ($LASTEXITCODE -ne 0) { throw 'Windows release asset verification failed' }
           $hostRelease = Join-Path $env:RUNNER_TEMP 'windows-host-release'
           Copy-Item release $hostRelease -Recurse
           "PRODUCT_E2E_WINDOWS_HOST_RELEASE_DIR=$hostRelease" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Build Windows x64 native Executor and ConPTY companion
+      - name: Stage Windows x64 ConPTY and service-host dependencies
         run: pnpm run build:release-assets -- --component executor --native-only --native-target win32-x64 --tag latest --repo xingsy97/kala
       - name: Verify and stage isolated Windows Executor payload
         shell: pwsh
         run: |
-          if (-not (Test-Path release/kala-executor-win32-x64.exe)) { throw 'missing Windows Executor' }
+          Copy-Item $env:PRODUCT_E2E_WINDOWS_HOST_RELEASE_DIR/kala-executor.cjs release/
+          if (-not (Test-Path release/kala-executor.cjs)) { throw 'missing Windows Executor CJS' }
           if (-not (Test-Path release/node-pty-win32-x64.tar.gz)) { throw 'missing ConPTY companion' }
           if (-not (Test-Path release/kala-executor-service-host-win32-x64.exe)) { throw 'missing Windows service host' }
           node --input-type=module -e "import { verifyWindowsServiceHost } from './scripts/release/windows-service-host.mjs'; verifyWindowsServiceHost('release/kala-executor-service-host-win32-x64.exe')"

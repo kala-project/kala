@@ -29,6 +29,7 @@ const secretNames = ['control_postgres_password', 'session_secret', 'ingress_sec
 const postgresS3SecretNames = ['control_postgres_migration_owner_url', 'control_postgres_writer_url', 'runtime_postgres_owner_url', 'runtime_postgres_writer_url', 'runtime_postgres_reader_url', 'runtime_state_master_key', 'runtime_s3_access_key_id', 'runtime_s3_secret_access_key', 'installation_claim_s3_access_key_id', 'installation_claim_s3_secret_access_key']
 const tlsNames = ['internal_ca_key.pem', 'internal_ca.pem', 'runtime_host_key.pem', 'runtime_host.pem', 'ingress_client_key.pem', 'ingress_client.pem', 'runtime_health_key.pem', 'runtime_health.pem']
 const oidcCaName = 'oidc-ca.pem'
+const s3CaName = 's3-ca.pem'
 const configOriginName = 'storage-origin.json'
 const installationIdName = 'installation-id'
 
@@ -277,24 +278,33 @@ function validatePostgresS3RenderedConfig(config, configDir) {
   for (const [name, service] of Object.entries(services)) for (const mount of service.volumes ?? []) if (mount.type === 'volume' && !secretProjections.has(mount.source)) throw new Error(`postgres-s3 ${name} mounts a non-projection volume`)
   const volumeTarget = (volume) => typeof volume === 'string' ? volume.split(':')[1] : volume?.target
   const secretSource = (secret) => typeof secret === 'string' ? secret : secret?.source
-  const runtime = services['runtime-host']; const ingress = services['runtime-ingress']; const controlInit = services['control-plane-init']; const runtimeInit = services['runtime-schema-init']; const storageInit = services['init-storage-secrets']; const claim = services['fresh-storage-claim']
-  if (!runtime || !ingress || !controlInit || !runtimeInit || !storageInit || !claim) throw new Error('postgres-s3 rendered topology is missing required external storage/claim services')
+  const runtime = services['runtime-host']; const ingress = services['runtime-ingress']; const appInit = services['init-app-secrets']; const controlInit = services['control-plane-init']; const runtimeInit = services['runtime-schema-init']; const storageInit = services['init-storage-secrets']; const claim = services['fresh-storage-claim']
+  if (!runtime || !ingress || !appInit || !controlInit || !runtimeInit || !storageInit || !claim) throw new Error('postgres-s3 rendered topology is missing required external storage/claim services')
   if ((runtime.volumes ?? []).some((volume) => volumeTarget(volume) === '/var/lib/kala' || secretSource(volume) === 'tenant-data')) throw new Error('postgres-s3 runtime-host must not mount tenant-data or any persistent /var/lib/kala volume')
   const scratch = (runtime.tmpfs ?? []).some((mount) => (typeof mount === 'string' ? mount.split(':')[0] : mount?.target) === '/var/lib/kala')
   if (!scratch) throw new Error('postgres-s3 runtime-host must use bounded disposable /var/lib/kala tmpfs')
   if ((ingress.volumes ?? []).some((volume) => volumeTarget(volume) === '/var/lib/kala-control' || secretSource(volume) === 'control-data')) throw new Error('postgres-s3 runtime-ingress must not mount control-data')
+  if (!['edge', 'runtime', 'egress'].every((name) => Object.hasOwn(ingress.networks ?? {}, name))) throw new Error('postgres-s3 Gateway must reach Runtime, public edge and external PostgreSQL/OIDC authorities')
   if (ingress.environment?.KALA_INGRESS_LOGIN_STATE_STORE_KIND !== 'postgres') throw new Error('postgres-s3 OIDC login state must use external control PostgreSQL')
   if (controlInit.environment?.KALA_INGRESS_REQUIRE_EXISTING_DATABASE !== '1' || Object.keys(controlInit.depends_on ?? {}).join(',') !== 'fresh-storage-claim' || Object.keys(runtimeInit.depends_on ?? {}).join(',') !== 'fresh-storage-claim') throw new Error('postgres-s3 migrations must depend solely on the completed fresh external-storage claim')
   for (const job of [controlInit, runtimeInit]) if (job.depends_on['fresh-storage-claim']?.condition !== 'service_completed_successfully') throw new Error('postgres-s3 schema jobs must wait for a successful fresh storage claim')
-  if ((claim.volumes ?? []).length || (claim.configs ?? []).map(secretSource).join(',') !== 'installation_id' || config.configs?.installation_id?.file !== join(configDir, installationIdName)) throw new Error('postgres-s3 claim must use the Operator installation UUID without a persistent local receipt')
+  const s3Ca = existsSync(join(configDir, s3CaName))
+  const validS3CaMount = (mount) => mount?.type === 'bind' && mount.source === join(configDir, s3CaName) && mount.target === '/run/kala-s3-ca/ca.pem' && mount.read_only === true
+  const caMounts = (claim.volumes ?? []).filter((mount) => mount?.target === '/run/kala-s3-ca/ca.pem')
+  if (s3Ca ? caMounts.length !== 1 || !validS3CaMount(caMounts[0]) || claim.environment?.NODE_EXTRA_CA_CERTS !== '/run/kala-s3-ca/ca.pem' || runtime.environment?.NODE_EXTRA_CA_CERTS !== '/run/kala-storage/s3_ca.pem' || !(storageInit.secrets ?? []).some((secret) => secretSource(secret) === 's3_private_ca') || config.secrets?.s3_private_ca?.file !== join(configDir, s3CaName) : caMounts.length !== 0 || claim.environment?.NODE_EXTRA_CA_CERTS || runtime.environment?.NODE_EXTRA_CA_CERTS) throw new Error('postgres-s3 S3 private CA must be a validated read-only trust extension for claim and Runtime')
+  if ((claim.volumes ?? []).some((mount) => !validS3CaMount(mount)) || (claim.configs ?? []).map(secretSource).join(',') !== 'installation_id' || config.configs?.installation_id?.file !== join(configDir, installationIdName)) throw new Error('postgres-s3 claim must use the Operator installation UUID without a persistent local receipt')
+  const appInitCommand = (appInit.command ?? []).join('\n')
+  if (!(appInit.configs ?? []).some((entry) => secretSource(entry) === 'installation_id' && entry.target === '/run/kala-installation/installation-id')
+    || !appInitCommand.includes('cp /run/kala-installation/installation-id /host/installation-id')
+    || !appInitCommand.includes('cp /run/kala-installation/installation-id /gateway/installation-id')) throw new Error('postgres-s3 installation UUID must be projected into restricted workload secret volumes')
   const claimSecrets = (claim.secrets ?? []).map(secretSource).sort()
   if (JSON.stringify(claimSecrets) !== JSON.stringify(['control_postgres_migration_owner_url', 'runtime_postgres_owner_url', 'runtime_state_master_key', 'installation_claim_s3_access_key_id', 'installation_claim_s3_secret_access_key'].sort()) || claim.environment?.KALA_FRESH_CLAIM_STATE_MASTER_KEY_FILE !== '/run/secrets/runtime_state_master_key' || claim.environment?.KALA_FRESH_CLAIM_S3_ACCESS_KEY_ID_FILE !== '/run/secrets/installation_claim_s3_access_key_id' || claim.environment?.KALA_FRESH_CLAIM_S3_SECRET_ACCESS_KEY_FILE !== '/run/secrets/installation_claim_s3_secret_access_key') throw new Error('postgres-s3 claim must receive only the two owner URLs and its separate scoped S3 credentials')
   const controlSecrets = (controlInit.secrets ?? []).map(secretSource); const runtimeInitSecrets = (runtimeInit.secrets ?? []).map(secretSource); const storageSecrets = (storageInit.secrets ?? []).map(secretSource)
   if (JSON.stringify(controlSecrets) !== JSON.stringify(['control_postgres_migration_owner_url']) || JSON.stringify(runtimeInitSecrets) !== JSON.stringify(['runtime_postgres_owner_url'])) throw new Error('postgres-s3 migration owners must be isolated to their one-shot schema jobs')
-  if (storageSecrets.includes('runtime_postgres_owner_url') || storageSecrets.some((name) => name.startsWith('installation_claim_s3_')) || !['runtime_postgres_writer_url', 'runtime_postgres_reader_url', 'runtime_s3_access_key_id', 'runtime_s3_secret_access_key', 'runtime_state_master_key'].every((name) => storageSecrets.includes(name))) throw new Error('postgres-s3 workload secret projection must exclude owner credentials and include restricted Runtime/S3 credentials')
+  if (storageSecrets.includes('runtime_postgres_owner_url') || storageSecrets.some((name) => name.startsWith('installation_claim_s3_')) || !['runtime_postgres_writer_url', 'runtime_postgres_reader_url', 'runtime_s3_access_key_id', 'runtime_s3_secret_access_key', 'runtime_state_master_key', ...(s3Ca ? ['s3_private_ca'] : [])].every((name) => storageSecrets.includes(name))) throw new Error('postgres-s3 workload secret projection must exclude owner credentials and include restricted Runtime/S3 credentials')
   if (runtime.environment?.KALA_RUNTIME_EXPERIMENTAL_POSTGRES_CONNECTION_STRING_FILE !== '/run/kala-storage/runtime_postgres_writer_url' || ingress.environment?.KALA_INGRESS_EXPERIMENTAL_POSTGRES_READER_CONNECTION_STRING_FILE !== '/run/kala-storage/runtime_postgres_reader_url') throw new Error('postgres-s3 Runtime writer and Gateway reader credentials are not isolated in the rendered topology')
   for (const [name, service, flag] of [['runtime-host', runtime, 'KALA_RUNTIME_REQUIRE_INSTALLATION_CLAIM'], ['runtime-ingress', ingress, 'KALA_INGRESS_REQUIRE_INSTALLATION_CLAIM']]) {
-    if (service.environment?.[flag] !== '1' || service.environment?.KALA_INSTALLATION_ID_FILE !== '/run/kala-installation/installation-id' || !(service.configs ?? []).some((entry) => secretSource(entry) === 'installation_id' && entry.target === '/run/kala-installation/installation-id')) throw new Error(`postgres-s3 ${name} must verify the Operator installation UUID against its external authorities at startup`)
+    if (service.environment?.[flag] !== '1' || service.environment?.KALA_INSTALLATION_ID_FILE !== '/run/kala-secrets/installation-id' || (service.configs ?? []).some((entry) => secretSource(entry) === 'installation_id')) throw new Error(`postgres-s3 ${name} must verify the projected Operator installation UUID against its external authorities at startup`)
   }
 }
 
@@ -603,10 +613,50 @@ async function install() {
     // A fresh PG/S3 project has no application data volumes. Remove its disposable
     // secret projections so the same installation UUID can pass fresh-project
     // preflight on retry; Compose never removes external PostgreSQL/S3 state.
+    const installDiagnostic = process.env.KALA_RC_CLAIM_DIAGNOSTICS === '1'
+      ? hostedInstallFailureDiagnostic(release, configDir) : undefined
     try { compose(release, configDir, ['down', '--remove-orphans', '--volumes']) } catch {}
     failed(receipt, error)
+    if (installDiagnostic) throw new Error(`hosted install diagnostic: ${installDiagnostic}; ${error instanceof Error ? error.message : String(error)}`)
     throw error
   }
+}
+
+function hostedInstallFailureDiagnostic(release, configDir) {
+  const allowedServices = ['fresh-storage-claim', 'runtime-schema-init', 'control-plane-init', 'init-app-secrets', 'init-storage-secrets', 'runtime-host', 'runtime-ingress', 'dashboard']
+  const statusInvocation = composeInvocation(release, configDir, ['ps', '--all', '--format', 'json'])
+  const status = spawnSync(statusInvocation.command, statusInvocation.args, {
+    cwd: statusInvocation.cwd, env: statusInvocation.env, encoding: 'utf8', maxBuffer: 64 * 1024,
+  })
+  if (status.status !== 0) return 'service-status-unavailable'
+  let rows
+  try { rows = status.stdout.trim().split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line)) }
+  catch { return 'service-status-invalid' }
+  const failed = rows.find((row) => allowedServices.includes(row.Service) && row.Health === 'unhealthy')
+    ?? rows.find((row) => allowedServices.includes(row.Service) && row.State === 'exited' && Number(row.ExitCode) > 0)
+    ?? rows.find((row) => allowedServices.includes(row.Service) && row.State === 'restarting')
+  const service = failed?.Service ?? (rows.some((row) => row.Service === 'runtime-host') ? 'runtime-host' : undefined)
+  if (!service) return 'failed-service-undetermined'
+  const label = failed ? service : `status-inconclusive:${service}`
+  const invocation = composeInvocation(release, configDir, ['logs', '--no-color', '--tail', '30', service])
+  const result = spawnSync(invocation.command, invocation.args, {
+    cwd: invocation.cwd, env: invocation.env, encoding: 'utf8', maxBuffer: 64 * 1024,
+  })
+  if (result.status !== 0) return `${label}:logs-unavailable`
+  const logs = result.stdout + result.stderr
+  const categories = [
+    ['private-file-permission', /EACCES|EPERM|permission denied, open/iu],
+    ['missing-config', /ENOENT|no such file|points to an empty file|is required/iu],
+    ['postgres-auth', /password authentication failed|permission denied for (?:database|schema|table)/iu],
+    ['postgres-not-empty', /PostgreSQL is not empty|PostgreSQL.*fresh installation claim refused/iu],
+    ['s3-not-empty', /S3 bucket is not empty|S3 bucket has object versions or delete markers/iu],
+    ['s3-denied', /AccessDenied|UnauthorizedAccess|HTTP 403/iu],
+    ['s3-marker', /S3 installation marker could not be checked|S3 claim failed/iu],
+    ['recovery-checkpoint', /recovery checkpoint|checkpoint.*failed/iu],
+    ['tls', /certificate|CERT_|unable to verify|self.signed/iu],
+    ['network', /ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ETIMEDOUT|ENETUNREACH|ENOTFOUND|EAI_AGAIN|Connection terminated|timeout exceeded when trying to connect/iu],
+  ].filter(([, pattern]) => pattern.test(logs)).map(([category]) => category)
+  return `${label}:${categories.join(',') || (logs.trim() ? 'unclassified' : 'no-service-output')}`
 }
 
 async function verifyBundledIdentity(configDir) {
@@ -780,9 +830,13 @@ function composeFiles(release, configDir) {
   files.push(profile === 'local' ? 'compose.local.yaml' : 'compose.cloudflare.yaml')
   if (deploymentEnv(configDir).KALA_IDENTITY_MODE === 'bundled') files.push('compose.identity-local.yaml')
   if (existsSync(join(configDir, oidcCaName)) && existsSync(join(release.dir, 'compose.oidc-private-ca.yaml'))) files.push('compose.oidc-private-ca.yaml')
+  if (storage === 'postgres-s3' && existsSync(join(configDir, s3CaName))) {
+    if (!existsSync(join(release.dir, 'compose.s3-private-ca.yaml'))) throw new Error('signed PostgreSQL/S3 bundle does not provide verified S3 CA trust')
+    files.push('compose.s3-private-ca.yaml')
+  }
   return ['--project-name', projectName(configDir), '--env-file', join(configDir, 'deployment.env'), ...files.flatMap((file) => ['-f', join(release.dir, file)])]
 }
-function composeEnv(release, configDir) { const environment = deploymentEnv(configDir); return { ...process.env, ...environment, ...(environment.KALA_STORAGE === 'nfs' ? { KALA_NFS_LISTEN_ADDRESS: environment.KALA_NFS_LISTEN_ADDRESS ?? '127.0.0.1', KALA_NFS_PORT: String(localPorts(environment).nfs) } : {}), KALA_RUNTIME_IMAGE: release.lock.images.runtime, KALA_INGRESS_IMAGE: release.lock.images.ingress, KALA_DASHBOARD_IMAGE: release.lock.images.dashboard, KALA_SECRETS_DIR: join(configDir, 'secrets'), KALA_IDENTITY_SECRETS_DIR: join(configDir, 'identity-secrets'), KALA_PROVIDER_CATALOG_FILE: join(configDir, 'runtime-provider-catalog.json'), KALA_DEPLOYMENT_CONFIG_FILE: join(release.dir, 'deployment.json'), ...(environment.KALA_STORAGE === 'postgres-s3' ? { KALA_INSTALLATION_ID_FILE: join(configDir, installationIdName) } : {}), ...(existsSync(join(configDir, oidcCaName)) ? { KALA_OIDC_CA_FILE: join(configDir, oidcCaName) } : {}) } }
+function composeEnv(release, configDir) { const environment = deploymentEnv(configDir); return { ...process.env, ...environment, ...(environment.KALA_STORAGE === 'nfs' ? { KALA_NFS_LISTEN_ADDRESS: environment.KALA_NFS_LISTEN_ADDRESS ?? '127.0.0.1', KALA_NFS_PORT: String(localPorts(environment).nfs) } : {}), KALA_RUNTIME_IMAGE: release.lock.images.runtime, KALA_INGRESS_IMAGE: release.lock.images.ingress, KALA_DASHBOARD_IMAGE: release.lock.images.dashboard, KALA_SECRETS_DIR: join(configDir, 'secrets'), KALA_IDENTITY_SECRETS_DIR: join(configDir, 'identity-secrets'), KALA_PROVIDER_CATALOG_FILE: join(configDir, 'runtime-provider-catalog.json'), KALA_DEPLOYMENT_CONFIG_FILE: join(release.dir, 'deployment.json'), ...(environment.KALA_STORAGE === 'postgres-s3' ? { KALA_INSTALLATION_ID_FILE: join(configDir, installationIdName) } : {}), ...(existsSync(join(configDir, oidcCaName)) ? { KALA_OIDC_CA_FILE: join(configDir, oidcCaName) } : {}), ...(environment.KALA_STORAGE === 'postgres-s3' && existsSync(join(configDir, s3CaName)) ? { KALA_S3_CA_FILE: join(configDir, s3CaName) } : {}) } }
 function inspectServices(release, configDir) { const invocation = composeInvocation(release, configDir, ['ps', '--format', 'json']); const result = captureSync(invocation.command, invocation.args, invocation.cwd, invocation.env); const rows = result.trim() ? result.trim().split(/\r?\n/u).map((line) => JSON.parse(line)) : []; return Object.fromEntries(rows.map((row) => [row.Service, { containerId: row.ID, image: row.Image, state: row.State, health: row.Health ?? '' }])) }
 function resolveVolumes(release, configDir) { const text = captureSync('docker', ['compose', ...composeFiles(release, configDir), 'config', '--format', 'json'], release.dir, composeEnv(release, configDir)); const config = JSON.parse(text); const identity = deploymentEnv(configDir).KALA_IDENTITY_MODE === 'bundled'; return Object.fromEntries(['tenant-data', 'control-data', ...(identity ? ['identity-zitadel-config', 'identity-zitadel-bootstrap'] : [])].map((name) => [name, config.volumes?.[name]?.name ?? `${projectName(configDir)}_${name}`])) }
 function infrastructure(release, name) { const composeText = readFileSync(join(release.dir, 'compose.yaml'), 'utf8'); const match = composeText.match(new RegExp(`image: (${name}(?::[^\s@]+)?@sha256:[0-9a-f]{64})`, 'u')); if (!match) throw new Error(`missing pinned ${name} infrastructure image`); return match[1] }
@@ -795,7 +849,7 @@ function publicReceipt(receipt) { return receipt && { operationId: receipt.opera
 function installed() { const value = requiredJson(installationPath); if (value.schemaVersion !== 1 || !value.installationId || !value.configDir) throw new Error('invalid installation record'); requireConfig(value.configDir); assertInstallationConfiguration(value, value.configDir); return value }
 function assertInstallationConfiguration(installation, configDir) { const environment = deploymentEnv(configDir); if (installation.projectName && installation.projectName !== projectName(configDir)) throw new Error('configuration COMPOSE_PROJECT_NAME differs from the installed project; in-place project switching is forbidden'); if (installation.storageMode && installation.storageMode !== environment.KALA_STORAGE || !installation.storageMode && environment.KALA_STORAGE === 'postgres-s3') throw new Error('configuration storage mode differs from the installation record; use a fresh Operator root/project and leave legacy volumes untouched'); if (environment.KALA_STORAGE === 'postgres-s3' && installation.composeTopology !== 'postgres-s3-v1' || environment.KALA_STORAGE !== 'postgres-s3' && installation.composeTopology && installation.composeTopology !== 'legacy-v1') throw new Error('installation Compose topology differs from its recorded mode; never switch an existing project between legacy and PG/S3 roots') }
 function refusePostgresS3Lifecycle(operation, configDir) { if (deploymentEnv(configDir).KALA_STORAGE === 'postgres-s3') throw new Error(`postgres-s3 evaluation refuses ${operation}: the volume lifecycle cannot protect or recover external PostgreSQL, S3, and runtime_state_master_key authority; coordinate and rehearse the external plan without using this command`) }
-function requireConfig(dir) { for (const name of ['deployment.env', 'runtime-provider-catalog.json']) if (!existsSync(join(dir, name))) throw new Error(`configuration is missing ${name}`); if (!existsSync(join(dir, 'secrets'))) throw new Error('configuration is missing secrets directory'); validateOidcCa(dir) }
+function requireConfig(dir) { for (const name of ['deployment.env', 'runtime-provider-catalog.json']) if (!existsSync(join(dir, name))) throw new Error(`configuration is missing ${name}`); if (!existsSync(join(dir, 'secrets'))) throw new Error('configuration is missing secrets directory'); validateOidcCa(dir); validateS3Ca(dir) }
 function validateConfig(dir, { requireClient = false } = {}) {
   requireConfig(dir)
   const environment = deploymentEnv(dir)
@@ -973,20 +1027,29 @@ function openssl(args) { const result = spawnSync('openssl', args, { encoding: '
 function validateSecretFile(path, name) { if (!existsSync(path)) throw new Error(`configuration is missing secrets/${name}`); const info = lstatSync(path); if (!info.isFile() || info.isSymbolicLink()) throw new Error(`secrets/${name} must be a regular file, not a symlink`); if ((info.mode & 0o077) !== 0) throw new Error(`secrets/${name} permissions must not allow group or other access (expected 0600)`); if (!readFileSync(path, 'utf8').trim()) throw new Error(`secrets/${name} must not be empty`) }
 function validateOidcCa(dir) {
   const path = join(dir, oidcCaName)
+  validateCaFile(path, oidcCaName)
+}
+function validateCaFile(path, name) {
   const info = lstatSync(path, { throwIfNoEntry: false })
   if (!info) return
-  if (!info.isFile() || info.isSymbolicLink()) throw new Error(`${oidcCaName} must be a regular file, not a symlink`)
-  if ((info.mode & 0o077) !== 0 || (info.mode & 0o400) === 0) throw new Error(`${oidcCaName} must be owner-readable and must not allow group or other access (expected 0600 or 0400)`)
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error(`${name} must be a regular file, not a symlink`)
+  if ((info.mode & 0o077) !== 0 || (info.mode & 0o400) === 0) throw new Error(`${name} must be owner-readable and must not allow group or other access (expected 0600 or 0400)`)
   const body = readFileSync(path, 'utf8')
-  if (/-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/u.test(body)) throw new Error(`${oidcCaName} must contain CA certificates only, never a private key`)
+  if (/-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/u.test(body)) throw new Error(`${name} must contain CA certificates only, never a private key`)
   const pattern = /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/gu
   const certificates = body.match(pattern)
-  if (!certificates?.length || body.replace(pattern, '').trim()) throw new Error(`${oidcCaName} must contain only PEM-encoded CA certificates`)
+  if (!certificates?.length || body.replace(pattern, '').trim()) throw new Error(`${name} must contain only PEM-encoded CA certificates`)
   for (const certificate of certificates) {
     let parsed
-    try { parsed = new X509Certificate(certificate) } catch { throw new Error(`${oidcCaName} contains an invalid X.509 certificate`) }
-    if (!parsed.ca) throw new Error(`${oidcCaName} must contain CA certificates, not leaf certificates`)
+    try { parsed = new X509Certificate(certificate) } catch { throw new Error(`${name} contains an invalid X.509 certificate`) }
+    if (!parsed.ca) throw new Error(`${name} must contain CA certificates, not leaf certificates`)
   }
+}
+function validateS3Ca(dir) {
+  const path = join(dir, s3CaName)
+  if (!existsSync(path)) return
+  if (deploymentEnv(dir).KALA_STORAGE !== 'postgres-s3') throw new Error('s3-ca.pem is only valid for external PostgreSQL/S3')
+  validateCaFile(path, s3CaName)
 }
 function placeholder(value) { return !value || /^(?:REPLACE_|.*<[^>]+>)/u.test(value) }
 function validIdentityIssuer(value, environment) { return environment.KALA_IDENTITY_MODE === 'bundled' && value === `http://localhost:${localPorts(environment).identity}` ? value : validHttpsOrigin(value, 'OIDC issuer') }

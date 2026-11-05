@@ -1,0 +1,32 @@
+# Optional CA for a separately managed HTTPS S3 endpoint. Node's default
+# trusted roots remain active; this file only adds the validated private CA.
+services:
+  fresh-storage-claim:
+    environment:
+      NODE_EXTRA_CA_CERTS: /run/kala-s3-ca/ca.pem
+    volumes:
+      - ${KALA_S3_CA_FILE:?set KALA_S3_CA_FILE to the validated private S3 CA}:/run/kala-s3-ca/ca.pem:ro
+
+  init-storage-secrets:
+    command: !override
+      - /bin/sh
+      - -ec
+      - |
+        umask 077
+        cp /run/secrets/runtime_postgres_writer_url /runtime/runtime_postgres_writer_url
+        cp /run/secrets/runtime_state_master_key /runtime/runtime_state_master_key
+        cp /run/secrets/runtime_s3_access_key_id /runtime/runtime_s3_access_key_id
+        cp /run/secrets/runtime_s3_secret_access_key /runtime/runtime_s3_secret_access_key
+        cp /run/secrets/runtime_postgres_reader_url /gateway/runtime_postgres_reader_url
+        cp /run/secrets/s3_private_ca /runtime/s3_ca.pem
+        chown -R 65532:65532 /runtime /gateway
+        chmod 700 /runtime /gateway
+        chmod 400 /runtime/* /gateway/*
+    secrets: !override [runtime_postgres_writer_url, runtime_state_master_key, runtime_s3_access_key_id, runtime_s3_secret_access_key, runtime_postgres_reader_url, s3_private_ca]
+
+  runtime-host:
+    environment:
+      NODE_EXTRA_CA_CERTS: /run/kala-storage/s3_ca.pem
+
+secrets:
+  s3_private_ca: { file: "${KALA_S3_CA_FILE:?set KALA_S3_CA_FILE to the validated private S3 CA}" }

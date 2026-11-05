@@ -110,6 +110,31 @@ test('registers the fixed localhost OIDC client and atomically saves protected e
   }
 })
 
+test('enrolls a separate HTTPS issuer through loopback-only bootstrap without changing bundled behavior', async (t) => {
+  const { configDir, secretsDir, options } = await fixture(t)
+  await writeProtected(join(configDir, 'deployment.env'), [
+    'KALA_PUBLIC_URLS=http://localhost:13001',
+    'KALA_PUBLIC_LISTEN=127.0.0.1:13001',
+    'KALA_IDENTITY_MODE=external',
+    'KALA_IDENTITY_PORT=13002',
+    'OIDC_ISSUER=https://localhost:13002',
+    'OIDC_DISCOVERY_ORIGIN=https://192.0.2.1:13002',
+  ].join('\n') + '\n')
+  await writeProtected(join(secretsDir, 'oidc_client_id'), 'REPLACE_WITH_EXTERNAL_OIDC_CLIENT_ID\n')
+  await writeProtected(join(secretsDir, 'oidc_client_secret'), 'REPLACE_WITH_EXTERNAL_OIDC_CLIENT_SECRET\n')
+  const apiCalls = []
+  await bootstrapPrivateCloudIdentity({ ...options, externalRequestPort: '13003' }, {
+    runDocker: async () => 'bootstrap-pat\n',
+    fetch: async (url, request) => {
+      apiCalls.push({ url, body: JSON.parse(request.body) })
+      return okJson(apiCalls.length === 1 ? { id: 'project-1' } : { appId: 'app-1', clientId: 'client-1', clientSecret: CLIENT_SECRET })
+    },
+  })
+  assert.ok(apiCalls.every((call) => call.url.startsWith('http://127.0.0.1:13003/')))
+  assert.equal(JSON.parse(await readFile(join(secretsDir, 'identity-zitadel-enrollment.json'), 'utf8')).issuer, 'https://localhost:13002')
+  await assert.rejects(bootstrapPrivateCloudIdentity({ ...options, externalRequestPort: '13002' }), /distinct localhost TCP port/u)
+})
+
 test('creates two verified acceptance users before OIDC enrollment and returns their exact distinct subjects without passwords', async (t) => {
   const { options, secretsDir, configDir } = await fixture(t)
   await writeProtected(join(secretsDir, 'oidc_client_id'), 'REPLACE_WITH_LOCAL_OIDC_CLIENT_ID\n')

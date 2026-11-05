@@ -94,7 +94,7 @@ test('release verification rejects embedded Dashboard assignment without rejecti
   assert.ok(!verifier.includes("platformRuntime.includes('__KALA_EMBEDDED_DASHBOARD__')"))
 })
 
-test('release verifier enforces the exact four-platform default while builder exposes Windows build capability', () => {
+test('release verifier requires four Copilot runtimes and no native Executor while retaining Windows dependencies', () => {
   const builder = read('scripts/release/build-release-assets.mjs')
   const verifier = read('scripts/release/verify-release-assets.mjs')
   assert.match(builder, /const nativeTargets = \['linux-x64', 'darwin-x64', 'darwin-arm64', WINDOWS_EXECUTOR_TARGET\]/)
@@ -114,7 +114,8 @@ test('release verifier enforces the exact four-platform default while builder ex
   assert.match(builder, /\[ "\$BASE_URL" != "\$host_asset_base" \]/)
   assert.match(builder, /if \[ "\$VERIFY_SIGSTORE" = "1" \]; then require_cmd cosign; fi/)
   for (const section of ['Improvements', 'Fixes', 'Known issues', 'Installation', 'Supported platforms', 'Verification', 'Full changelog']) assert.match(builder, new RegExp(section))
-  assert.match(verifier, /supportedNativeTargets = \['linux-x64', 'darwin-x64', 'darwin-arm64', 'win32-x64'\]/)
+  assert.match(verifier, /supportedCopilotRuntimeTargets = \['linux-x64', 'darwin-x64', 'darwin-arm64', 'win32-x64'\]/)
+  assert.match(verifier, /standalone native Executor binaries are not release assets/)
   assert.match(verifier, /acceptedWindows/)
   assert.match(verifier, /const acceptedWindows = new Set\(\[[\s\S]*?\n    WINDOWS_PORTABLE_MANAGER,/u)
   assert.match(verifier, /linux-arm64/)

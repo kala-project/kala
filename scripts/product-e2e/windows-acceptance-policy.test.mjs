@@ -23,7 +23,7 @@ test('Windows Host CJS stages only a matching Windows x64 Copilot runtime', asyn
   assert.doesNotMatch(builder, /stageCopilotRuntime\(['"]linux-x64['"]\)/u)
 })
 
-test('hosted Windows acceptance keeps Host CJS and native Executor targets separate and never uses Box', async () => {
+test('hosted Windows acceptance keeps Host CJS and Windows companion stages separate and never uses Box', async () => {
   const workflow = await read('.github/workflows/product-system-e2e.yml')
   const host = job(workflow, 'windows-host-cjs-e2e', 'windows-executor-conpty-e2e')
   const executor = job(workflow, 'windows-executor-conpty-e2e', 'linux-system-e2e')
@@ -40,7 +40,7 @@ test('hosted Windows acceptance keeps Host CJS and native Executor targets separ
   assert.doesNotMatch(host, /--native-only|PRODUCT_E2E_WINDOWS_TARGET: executor/u)
 
   assert.match(executor, /--component executor --native-only --native-target win32-x64/u)
-  assert.match(executor, /kala-executor-win32-x64\.exe/u)
+  assert.match(executor, /kala-executor\.cjs/u)
   assert.match(executor, /node-pty-win32-x64\.tar\.gz/u)
   assert.match(executor, /kala-executor-service-host-win32-x64\.exe/u)
   assert.match(executor, /verifyWindowsServiceHost/u)
@@ -59,7 +59,7 @@ test('Windows verifier fails closed on missing payloads, missing ConPTY, and uns
     'kala-dashboard-with-runtime.cjs',
     'kala-copilot-runtime-win32-x64',
     'kala-copilot-runtime-node-win32-x64.node',
-    'kala-executor-win32-x64.exe',
+    'kala-executor.cjs',
     'kala-executor-service-host-win32-x64.exe',
     'conpty.node',
     'conpty_console_list.node',
@@ -94,7 +94,7 @@ test('Private Cloud Windows invite verifier uses real ingress with env-only cred
   assert.match(verifier, /config\.routeHint !== invite\.routeHint/u)
   assert.match(verifier, /credential\.startsWith\('ak_invite_'\)/u)
   assert.match(verifier, /identity\.tokenHash !== expectedHash/u)
-  assert.match(verifier, /\['service', 'uninstall'\]/u)
+  assert.match(verifier, /run\(process\.execPath, \[installedExecutor, 'service', 'uninstall'\]\)/u)
   assert.match(verifier, /service uninstall left managed Windows Executor directories/u)
   assert.match(verifier, /process\.platform !== 'win32' \|\| process\.arch !== 'x64'/u)
 })

@@ -286,7 +286,7 @@ jobs:
             revision: process.env.REVISION,
             portableAssetSha256: process.env.ASSET_SHA256,
             nodeBaseDigest: process.env.BASE_DIGEST,
-            runtimeBaseDigest: 'sha256:5ef534d3db0ac0c43bee379af4ae49cfbfc0ef38a46c94c52d87c68f32f34d8a',
+            runtimeBaseDigest: 'sha256:5e72a679e328276f6ffc3c4bb45c94f847f6abf0b424a1f8cc984f7f1c1daf47',
             checks: { signedReleaseAsset: true, imageSignature: true, provenance: true, sbom: true, vulnerabilityPolicy: true, isolatedVmAcceptance: false },
             publicPromotion: false,
           }

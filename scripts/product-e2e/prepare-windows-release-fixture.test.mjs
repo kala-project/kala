@@ -66,11 +66,17 @@ test('source-built Windows fixture stages matching Host-served assets without cl
   try {
     mkdirSync(host); mkdirSync(executor)
     writeFileSync(join(host, 'kala-dashboard-with-runtime.cjs'), 'host')
-    writeFileSync(join(host, 'SHA256SUMS'), `${sha('host')}  kala-dashboard-with-runtime.cjs\n`)
-    writeFileSync(join(executor, 'kala-executor-win32-x64.exe'), 'executor')
+    writeFileSync(join(host, 'kala-executor.cjs'), 'executor')
+    writeFileSync(join(host, 'SHA256SUMS'), `${sha('host')}  kala-dashboard-with-runtime.cjs\n${sha('executor')}  kala-executor.cjs\n`)
+    writeFileSync(join(executor, 'kala-executor.cjs'), 'executor')
     if (!stageServiceHostFixture(executor, t)) return
     stageCompanionFixture(dir, executor)
     const args = [script, '--host-release', host, '--executor-release', executor]
+    writeFileSync(join(executor, 'kala-executor.cjs'), 'different')
+    const mismatch = spawnSync(process.execPath, args, { encoding: 'utf8' })
+    assert.notEqual(mismatch.status, 0)
+    assert.match(mismatch.stderr, /Executor CJS differs from the Host build/u)
+    writeFileSync(join(executor, 'kala-executor.cjs'), 'executor')
     const first = spawnSync(process.execPath, args, { encoding: 'utf8' })
     assert.equal(first.status, 0, first.stderr)
     assert.match(first.stdout, /local source-build checksums only; not signed release evidence/u)
@@ -97,8 +103,9 @@ test('source-built Windows fixture rejects an extracted payload missing the work
   try {
     mkdirSync(host); mkdirSync(executor)
     writeFileSync(join(host, 'kala-dashboard-with-runtime.cjs'), 'host')
-    writeFileSync(join(host, 'SHA256SUMS'), `${sha('host')}  kala-dashboard-with-runtime.cjs\n`)
-    writeFileSync(join(executor, 'kala-executor-win32-x64.exe'), 'executor')
+    writeFileSync(join(host, 'kala-executor.cjs'), 'executor')
+    writeFileSync(join(host, 'SHA256SUMS'), `${sha('host')}  kala-dashboard-with-runtime.cjs\n${sha('executor')}  kala-executor.cjs\n`)
+    writeFileSync(join(executor, 'kala-executor.cjs'), 'executor')
     if (!stageServiceHostFixture(executor, t)) return
     stageCompanionFixture(dir, executor)
     rmSync(join(executor, 'worker', 'conoutSocketWorker.js'))
