@@ -1,19 +1,19 @@
 import { downloadBlob } from '../../lib/save-file.js'
 
 type DownloadableFileResult =
-  | { kind: 'text'; content: string; truncated?: boolean }
-  | { kind: 'image' | 'pdf' | 'video'; content: string; mediaType: string; truncated?: boolean }
-  | { kind: 'binary'; content?: string; mediaType?: string; truncated?: boolean }
+  | { kind: 'text'; content: string; size?: number; truncated?: boolean }
+  | { kind: 'image' | 'pdf' | 'video'; content: string; mediaType: string; size?: number; truncated?: boolean }
+  | { kind: 'binary'; content?: string; mediaType?: string; size?: number; truncated?: boolean }
 
 export function fileResultDownloadBlob(result: DownloadableFileResult): { blob: Blob } | undefined {
-  if (result.kind === 'text') {
-    if (result.truncated) return undefined
-    return { blob: new Blob([result.content], { type: 'text/plain;charset=utf-8' }) }
-  }
   if (result.truncated) return undefined
-  if (result.kind === 'image' || result.kind === 'pdf' || result.kind === 'video') return { blob: base64Blob(result.content, result.mediaType) }
-  if (result.kind === 'binary' && result.content) return { blob: base64Blob(result.content, result.mediaType ?? 'application/octet-stream') }
-  return undefined
+  const blob = result.kind === 'text'
+    ? new Blob([result.content], { type: 'text/plain;charset=utf-8' })
+    : result.kind === 'binary'
+      ? result.content ? base64Blob(result.content, result.mediaType ?? 'application/octet-stream') : undefined
+      : base64Blob(result.content, result.mediaType)
+  if (!blob || (result.size !== undefined && blob.size !== result.size)) return undefined
+  return { blob }
 }
 
 export function saveBlob(blob: Blob, filename: string): void {

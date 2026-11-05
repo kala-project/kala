@@ -51,7 +51,7 @@ import {
 } from '../../components/ui/dialog.js'
 import { cn } from '../../lib/utils.js'
 import { downloadFilename, fileResultDownloadBlob } from './file-download.js'
-import { saveFile } from '../../lib/save-file.js'
+import { chooseSaveDestination, saveFile } from '../../lib/save-file.js'
 import { useTranslation } from 'react-i18next'
 
 type DashboardSocket = Socket<DashboardServerToClientEvents, DashboardClientToServerEvents>
@@ -724,19 +724,25 @@ function copyableViewerContent(viewer: FileViewState): string | undefined {
 }
 
 async function downloadWorkspaceFile(socket: DashboardSocket, workspaceId: string, sessionId: string | undefined, path: string, cachedViewer?: FileViewState, cwd?: string): Promise<void> {
-  const cached = cachedViewer && viewerPath(cachedViewer) === path ? downloadableBlob(cachedViewer) : undefined
-  if (cached) {
-    const result = await saveFile({ blob: cached.blob, suggestedName: downloadFilename(path) })
-    if (result !== 'cancelled') notify.success(result === 'saved' ? 'File saved' : 'Download started', { description: path, id: `file-download:${path}` })
-    return
+  try {
+    const cached = cachedViewer && viewerPath(cachedViewer) === path ? downloadableBlob(cachedViewer) : undefined
+    if (cached) {
+      const result = await saveFile({ blob: cached.blob, suggestedName: downloadFilename(path) })
+      if (result !== 'cancelled') notify.success(result === 'saved' ? 'File saved' : 'Download started', { description: path, id: `file-download:${path}` })
+      return
+    }
+    const destination = await chooseSaveDestination(downloadFilename(path))
+    if (destination.kind === 'cancelled') return
+    const result = await downloadWorkspaceFileBlob(socket, workspaceId, path, cwd)
+    if ('error' in result) {
+      notify.error('File download unavailable', { description: result.error, id: `file-download:${path}` })
+      return
+    }
+    const saved = await saveFile({ blob: result.blob, suggestedName: downloadFilename(path), mimeType: result.blob.type, destination })
+    if (saved !== 'cancelled') notify.success(saved === 'saved' ? 'File saved' : 'Download started', { description: path, id: `file-download:${path}` })
+  } catch (error) {
+    notify.error('File download failed', { description: error instanceof Error ? error.message : String(error), id: `file-download:${path}` })
   }
-  const result = await downloadWorkspaceFileBlob(socket, workspaceId, path, cwd)
-  if ('error' in result) {
-    notify.error('File download unavailable', { description: result.error, id: `file-download:${path}` })
-    return
-  }
-  const saved = await saveFile({ blob: result.blob, suggestedName: downloadFilename(path), mimeType: result.blob.type })
-  if (saved !== 'cancelled') notify.success(saved === 'saved' ? 'File saved' : 'Download started', { description: path, id: `file-download:${path}` })
 }
 
 async function downloadWorkspaceFileBlob(socket: DashboardSocket, workspaceId: string, path: string, cwd?: string): Promise<{ blob: Blob } | { error: string }> {
@@ -800,7 +806,9 @@ async function assembleWorkspaceFileBlob(socket: DashboardSocket, workspaceId: s
   if (options.token?.cancelled) return fail('File loading was cancelled.')
   if (expectedSize === null) return fail('The executor did not return file metadata.')
   if (offset !== expectedSize) return fail(`Loaded ${formatBytes(offset)} of ${formatBytes(expectedSize)}. Try again.`)
-  return { blob: new Blob(chunks, { type: mediaType || 'application/octet-stream' }) }
+  const blob = new Blob(chunks, { type: mediaType || 'application/octet-stream' })
+  if (blob.size !== expectedSize) return fail(`Assembled ${formatBytes(blob.size)} of ${formatBytes(expectedSize)}. Try again.`)
+  return { blob }
 }
 
 function downloadableBlob(viewer: FileViewState): { blob: Blob } | undefined {

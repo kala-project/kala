@@ -49,4 +49,29 @@ describe('saveFile', () => {
     expect(showSaveFilePicker).toHaveBeenCalledWith({ suggestedName: 'a.txt', types: [{ description: 'text/plain', accept: { 'text/plain': ['.txt'] } }] })
     expect(click).toHaveBeenCalledOnce()
   })
+
+  it('does not report success or start a second download if writing the selected file fails', async () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const close = vi.fn(async () => {})
+    const write = vi.fn(async () => { throw new Error('disk full') })
+    const showSaveFilePicker = vi.fn(async () => ({ createWritable: async () => ({ write, close }) }))
+    const pickerWindow = Object.assign(Object.create(window) as Window, { showSaveFilePicker })
+
+    await expect(saveFile({ suggestedName: 'archive.zip', blob: new Blob(['content']) }, pickerWindow as never))
+      .rejects.toThrow('disk full')
+    expect(close).not.toHaveBeenCalled()
+    expect(click).not.toHaveBeenCalled()
+    expect(URL.createObjectURL).not.toHaveBeenCalled()
+  })
+
+  it('reports a failed flush rather than claiming the selected file was saved', async () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const close = vi.fn(async () => { throw new Error('flush failed') })
+    const showSaveFilePicker = vi.fn(async () => ({ createWritable: async () => ({ write: async () => {}, close }) }))
+    const pickerWindow = Object.assign(Object.create(window) as Window, { showSaveFilePicker })
+
+    await expect(saveFile({ suggestedName: 'archive.zip', blob: new Blob(['content']) }, pickerWindow as never))
+      .rejects.toThrow('flush failed')
+    expect(click).not.toHaveBeenCalled()
+  })
 })

@@ -19,6 +19,14 @@ describe('session file download helpers', () => {
     expect(fileResultDownloadBlob({ requestId: 'r1', workspaceId: 'w1', path: '/repo/a.bin', kind: 'binary', content: 'AAE=', mediaType: 'application/octet-stream', size: 100, truncated: true })).toBeUndefined()
   })
 
+  it('does not save a short cached preview when the file size claims a full ZIP', () => {
+    expect(fileResultDownloadBlob({
+      kind: 'binary', content: 'UEsDBA==', mediaType: 'application/zip',
+      size: 50 * 1024 * 1024,
+    })).toBeUndefined()
+    expect(fileResultDownloadBlob({ kind: 'text', content: 'abc', size: 10 })).toBeUndefined()
+  })
+
   it('derives a filename without leaking parent path components', () => {
     expect(downloadFilename('/repo/archive.tar.gz')).toBe('archive.tar.gz')
     expect(downloadFilename('C:\\repo\\notes.txt')).toBe('notes.txt')

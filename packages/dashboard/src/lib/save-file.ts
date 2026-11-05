@@ -2,29 +2,49 @@ export type SaveFileInput = {
   suggestedName: string
   blob: Blob
   mimeType?: string
+  destination?: SaveFileDestination
 }
 
 export type SaveFileResult = 'saved' | 'downloaded' | 'cancelled'
+
+export type SaveFileDestination =
+  | { kind: 'file'; handle: FileSystemFileHandle }
+  | { kind: 'browser' }
+  | { kind: 'cancelled' }
 
 type SavePickerWindow = Window & typeof globalThis & {
   showSaveFilePicker?: (options: { suggestedName: string; types?: Array<{ description: string; accept: Record<string, string[]> }> }) => Promise<FileSystemFileHandle>
 }
 
-export async function saveFile(input: SaveFileInput, windowValue: SavePickerWindow = window as SavePickerWindow): Promise<SaveFileResult> {
+export async function chooseSaveDestination(
+  suggestedName: string,
+  mimeType?: string,
+  windowValue: SavePickerWindow = window as SavePickerWindow,
+): Promise<SaveFileDestination> {
   const picker = windowValue.showSaveFilePicker
   if (typeof picker === 'function') {
     try {
-      const handle = await picker({
-        suggestedName: input.suggestedName,
-        types: filePickerTypes(input.suggestedName, input.mimeType ?? input.blob.type),
-      })
-      const writable = await handle.createWritable()
-      await writable.write(input.blob)
-      await writable.close()
-      return 'saved'
+      const handle = await picker({ suggestedName, types: filePickerTypes(suggestedName, mimeType ?? '') })
+      return { kind: 'file', handle }
     } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return 'cancelled'
+      if (error instanceof DOMException && error.name === 'AbortError') return { kind: 'cancelled' }
+      return { kind: 'browser' }
     }
+  }
+  return { kind: 'browser' }
+}
+
+export async function saveFile(input: SaveFileInput, windowValue: SavePickerWindow = window as SavePickerWindow): Promise<SaveFileResult> {
+  const destination = input.destination
+    ?? (typeof windowValue.showSaveFilePicker === 'function'
+      ? await chooseSaveDestination(input.suggestedName, input.mimeType ?? input.blob.type, windowValue)
+      : { kind: 'browser' as const })
+  if (destination.kind === 'cancelled') return 'cancelled'
+  if (destination.kind === 'file') {
+    const writable = await destination.handle.createWritable()
+    await writable.write(input.blob)
+    await writable.close()
+    return 'saved'
   }
   downloadBlob(input.blob, input.suggestedName, windowValue)
   return 'downloaded'

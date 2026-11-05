@@ -5,6 +5,7 @@ import type { DirListEntry, DirListResult, FileContentsResult, TerminalCreateRes
 
 import { SessionFilesPanel, WorkspaceFileViewDialog } from './SessionFilesPanel.js'
 import { FILE_VIEW_FONT_SIZE_PX } from '../../lib/display-sizes.js'
+import { notify } from '../../notify.js'
 
 const setPositionMock = vi.fn()
 const revealLineInCenterMock = vi.fn()
@@ -105,6 +106,7 @@ describe('SessionFilesPanel', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('waits for the bound Session acknowledgement before sending the first directory request', async () => {
@@ -345,6 +347,79 @@ describe('SessionFilesPanel', () => {
     expect(requests.map((request) => request.offset)).toEqual([0, 2, 4])
     expect(requests.every((request) => request.maxBytes === 4 * 1024 * 1024)).toBe(true)
     expect(createObjectURLMock.mock.calls[0]?.[0]).toMatchObject({ size: 5, type: 'application/octet-stream' })
+  })
+
+  it('saves a complete 50 MiB ZIP assembled from ranged reads', async () => {
+    const size = 50 * 1024 * 1024
+    const chunkSize = 4 * 1024 * 1024
+    const write = vi.fn(async (_blob: Blob) => {})
+    const showSaveFilePicker = vi.fn(async () => ({ createWritable: async () => ({ write, close: async () => {} }) }))
+    vi.stubGlobal('showSaveFilePicker', showSaveFilePicker)
+    const fullChunk = Buffer.alloc(chunkSize, 0x5a).toString('base64')
+    const finalChunk = Buffer.alloc(2 * 1024 * 1024, 0x5a).toString('base64')
+    const offsets: number[] = []
+    const socket = makeSessionFilesSocket({
+      file: { kind: 'binary', content: '', size, encoding: 'base64', mediaType: 'application/zip' },
+      entries: [{ name: 'archive.zip', path: '/repo/archive.zip', type: 'file', size }],
+    })
+    socket.emitMock.mockImplementation((event: string, payload: Record<string, unknown>, ack?: (payload: unknown) => void) => {
+      if (event === 'client:list_dirs') queueMicrotask(() => socket.serverEmit('server:dir_list', dirList(String(payload.requestId), [{ name: 'archive.zip', path: '/repo/archive.zip', type: 'file', size }])))
+      if (event === 'workspace:read_binary') {
+        expect(showSaveFilePicker).toHaveBeenCalledOnce()
+        const offset = Number(payload.offset)
+        offsets.push(offset)
+        queueMicrotask(() => ack?.({
+          requestId: payload.requestId,
+          base64: offset + chunkSize <= size ? fullChunk : finalChunk,
+          mime: 'application/zip',
+          size,
+          offset,
+          fileVersion: 'same-file',
+          ...(offset + chunkSize < size ? { truncated: { maxBytes: chunkSize } } : {}),
+        }))
+      }
+      return undefined
+    })
+
+    render(<SessionFilesPanel mode="sidebar" socket={socket.asDashboardSocket()} workspaceId="ws-1" sessionId="sess-1" cwd="/repo" />)
+    fireEvent.click(await screen.findByRole('button', { name: /download archive\.zip/i }))
+
+    await waitFor(() => expect(write).toHaveBeenCalledOnce(), { timeout: 20_000 })
+    expect(offsets).toEqual(Array.from({ length: 13 }, (_, index) => index * chunkSize))
+    expect(write.mock.calls[0]?.[0]).toMatchObject({ size, type: 'application/zip' })
+    expect(createObjectURLMock).not.toHaveBeenCalled()
+  }, 30_000)
+
+  it('does not fetch an uncached file after the save dialog is cancelled', async () => {
+    vi.stubGlobal('showSaveFilePicker', vi.fn(async () => { throw new DOMException('cancelled', 'AbortError') }))
+    const socket = makeSessionFilesSocket({
+      file: { kind: 'binary', content: '', size: 50, encoding: 'base64', mediaType: 'application/zip' },
+      entries: [{ name: 'archive.zip', path: '/repo/archive.zip', type: 'file', size: 50 }],
+    })
+    render(<SessionFilesPanel mode="sidebar" socket={socket.asDashboardSocket()} workspaceId="ws-1" sessionId="sess-1" cwd="/repo" />)
+    fireEvent.click(await screen.findByRole('button', { name: /download archive\.zip/i }))
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /download archive\.zip/i }).hasAttribute('disabled')).toBe(false))
+    expect(socket.emitMock.mock.calls.filter(([event]) => event === 'workspace:read_binary')).toHaveLength(0)
+    expect(createObjectURLMock).not.toHaveBeenCalled()
+  })
+
+  it('reports a failed save without claiming the file downloaded', async () => {
+    const error = vi.spyOn(notify, 'error').mockImplementation(() => {})
+    const success = vi.spyOn(notify, 'success').mockImplementation(() => {})
+    vi.stubGlobal('showSaveFilePicker', vi.fn(async () => ({
+      createWritable: async () => ({ write: async () => { throw new Error('disk full') }, close: async () => {} }),
+    })))
+    const socket = makeSessionFilesSocket({
+      file: { kind: 'binary', content: 'UEs=', size: 2, encoding: 'base64', mediaType: 'application/zip' },
+      entries: [{ name: 'archive.zip', path: '/repo/archive.zip', type: 'file', size: 2 }],
+    })
+    render(<SessionFilesPanel mode="sidebar" socket={socket.asDashboardSocket()} workspaceId="ws-1" sessionId="sess-1" cwd="/repo" />)
+    fireEvent.click(await screen.findByRole('button', { name: /download archive\.zip/i }))
+
+    await waitFor(() => expect(error).toHaveBeenCalledWith('File download failed', expect.objectContaining({ description: 'disk full' })))
+    expect(success).not.toHaveBeenCalled()
+    expect(createObjectURLMock).not.toHaveBeenCalled()
   })
 
   it('does not save corrupted chunks when a legacy executor ignores offsets', async () => {
