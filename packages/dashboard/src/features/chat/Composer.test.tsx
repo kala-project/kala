@@ -753,6 +753,35 @@ describe('Composer', () => {
     expect(screen.getByTestId('composer-input')).toHaveProperty('value', 'new draft')
   })
 
+  it('restores a failed send to its original session after switching away', async () => {
+    const a = createInitialState({ sessionId: 'sending-a' })
+    const b = createInitialState({ sessionId: 'sending-b' })
+    const keyA = 'agent-kernel:composer:draft:sending-a'
+    const keyB = 'agent-kernel:composer:draft:sending-b'
+    window.localStorage.removeItem(keyA)
+    window.localStorage.removeItem(keyB)
+    let rejectSubmit: ((error: Error) => void) | undefined
+    const onSubmit = vi.fn(() => new Promise<void>((_, reject) => { rejectSubmit = reject }))
+    const view = renderComposer({ state: a, onSubmit })
+    fireEvent.change(screen.getByTestId('composer-input'), { target: { value: 'send from A' } })
+    fireEvent.keyDown(screen.getByTestId('composer-input'), { key: 'Enter' })
+    const renderSession = (state: typeof a) => <Composer
+      model="" models={[]} onModelChange={() => {}} approvalMode="auto" onApprovalModeChange={() => {}}
+      state={state} config={null} humanAttention={EMPTY_HUMAN_ATTENTION} queuedMessages={[]}
+      onSubmit={onSubmit} onCompact={() => {}}
+    />
+    view.rerender(renderSession(b))
+    fireEvent.change(screen.getByTestId('composer-input'), { target: { value: 'draft for B' } })
+    rejectSubmit?.(new Error('send failed'))
+    await waitFor(() => expect(window.localStorage.getItem(keyA)).toBe('send from A'))
+    expect(screen.getByTestId('composer-input')).toHaveProperty('value', 'draft for B')
+    expect(screen.queryByText('send failed')).toBeNull()
+    view.rerender(renderSession(a))
+    expect(screen.getByTestId('composer-input')).toHaveProperty('value', 'send from A')
+    window.localStorage.removeItem(keyA)
+    window.localStorage.removeItem(keyB)
+  })
+
   it('shows and safely exits shell mode in the simple Composer', () => {
     const onSubmit = vi.fn()
     const previousMode = window.localStorage.getItem('ak-composer-mode')
@@ -1190,8 +1219,9 @@ describe('Composer', () => {
     const dock = screen.getByTestId('queued-messages-dock')
     expect(dock.textContent ?? '').toContain('2 Messages in Queue')
     expect(dock.textContent ?? '').toContain('run this after the current answer')
-    expect(dock.textContent ?? '').toContain('Queued follow-up')
-    expect(dock.textContent ?? '').toContain('Steering update')
+    expect(dock.textContent ?? '').not.toContain('Queued follow-up')
+    expect(dock.textContent ?? '').not.toContain('Steering update')
+    expect(dock.textContent ?? '').not.toContain('Sends after')
   })
 
   it('allows queued messages to be reordered, edited, and deleted', async () => {

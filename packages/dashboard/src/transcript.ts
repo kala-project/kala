@@ -39,7 +39,7 @@ export type TranscriptItem =
       id: string
       text: string
       mode: 'steer' | 'queue'
-      status: 'sending' | 'queued'
+      status: 'sending' | 'accepted' | 'unconfirmed' | 'failed' | 'queued'
       content?: readonly MessageContent[]
       shell?: QueuedMessagePreview['shell']
       createdAt: string
@@ -71,6 +71,8 @@ export type PendingUserTranscriptMessage = {
   content?: readonly MessageContent[]
   createdAt: string
   afterSeq?: number
+  afterMessageCount?: number
+  deliveryStatus?: 'sending' | 'accepted' | 'unconfirmed' | 'failed'
 }
 
 const EMPTY_TIMELINE: readonly TimelineEntry[] = []
@@ -94,75 +96,50 @@ export function reconcilePendingUserMessages(
   pendingUserMessages: readonly PendingUserTranscriptMessage[],
   timeline: readonly TimelineEntry[],
   queuedMessages: readonly QueuedMessagePreview[],
-  status: AgentStatus | undefined,
-  streamingText: string,
+  _status: AgentStatus | undefined,
+  _streamingText: string,
   authoritativeMessages: readonly Message[] = [],
 ): readonly PendingUserTranscriptMessage[] {
   if (pendingUserMessages.length === 0) return pendingUserMessages
-  const acked = new Map<string, number>()
+  const ackedIds = new Set<string>()
+  const consumedTimelineSeqs = new Set<number>()
+  const consumedStateIndexes = new Set<number>()
   for (const entry of timeline) {
     if (entry.event.kind !== 'user_message') continue
-    incrementPendingAck(acked, pendingMessageKey(entry.event.text ?? '', 'steer'))
+    if (entry.event.operationId) ackedIds.add(entry.event.operationId)
   }
   for (const queued of queuedMessages) {
-    incrementPendingAck(acked, pendingMessageKey(queued.text, queued.mode))
+    ackedIds.add(queued.id)
   }
-  for (const message of authoritativeMessages) {
-    if (message.role !== 'user') continue
-    const text = message.content
-      .filter((content) => content.type === 'text')
-      .map((content) => content.text)
-      .join('')
-    incrementPendingAck(acked, pendingMessageKey(text, 'steer'))
-  }
-
-  const canDropCompleted = isRestingStatus(status) && streamingText.length === 0
   let changed = false
   const next = pendingUserMessages.filter((pending) => {
-    const key = pendingMessageKey(pending.text, pending.mode)
-    const count = acked.get(key) ?? 0
-    if (count > 0) {
-      acked.set(key, count - 1)
+    if (ackedIds.has(pending.id)) {
       changed = true
       return false
     }
-    if (canDropCompleted && pending.mode === 'steer' && hasCompletedTurnAfterPending(timeline, pending)) {
+    const legacyEvent = timeline.find((entry) =>
+      entry.event.kind === 'user_message'
+      && !entry.event.operationId
+      && !consumedTimelineSeqs.has(entry.seq)
+      && (pending.afterSeq === undefined || entry.seq > pending.afterSeq)
+      && (entry.event.text ?? '') === pending.text
+      && pending.mode === 'steer')
+    const authoritativeIndex = timeline.length === 0 && pending.mode === 'steer'
+      ? authoritativeMessages.findIndex((message, index) =>
+        index >= (pending.afterMessageCount ?? 0)
+        && !consumedStateIndexes.has(index)
+        && message.role === 'user'
+        && message.content.filter((part) => part.type === 'text').map((part) => part.text).join('') === pending.text)
+      : -1
+    if (legacyEvent || authoritativeIndex >= 0) {
+      if (legacyEvent) consumedTimelineSeqs.add(legacyEvent.seq)
+      if (authoritativeIndex >= 0) consumedStateIndexes.add(authoritativeIndex)
       changed = true
       return false
     }
     return true
   })
   return changed ? next : pendingUserMessages
-}
-
-function incrementPendingAck(acked: Map<string, number>, key: string): void {
-  acked.set(key, (acked.get(key) ?? 0) + 1)
-}
-
-function pendingMessageKey(text: string, mode: 'steer' | 'queue'): string {
-  return `${mode}\u0000${text}`
-}
-
-function isRestingStatus(status: AgentStatus | undefined): boolean {
-  return status === 'idle' || status === 'done' || status === 'error'
-}
-
-function hasCompletedTurnAfterPending(timeline: readonly TimelineEntry[], pending: PendingUserTranscriptMessage): boolean {
-  const afterSeq = pending.afterSeq
-  if (afterSeq !== undefined) {
-    return timeline.some((entry) => entry.seq > afterSeq && isTurnCompletionEvent(entry))
-  }
-  const createdAtMs = Date.parse(pending.createdAt)
-  if (!Number.isFinite(createdAtMs)) return false
-  return timeline.some((entry) => {
-    if (!isTurnCompletionEvent(entry)) return false
-    const entryMs = Date.parse(entry.ts)
-    return Number.isFinite(entryMs) && entryMs >= createdAtMs
-  })
-}
-
-function isTurnCompletionEvent(entry: TimelineEntry): boolean {
-  return entry.event.kind === 'llm_response' || entry.event.kind === 'llm_error'
 }
 
 export function visibleTranscript(
@@ -342,7 +319,7 @@ export function appendLiveTranscriptItems(
       id: pending.id,
       text: pending.text,
       mode: pending.mode,
-      status: 'sending',
+      status: pending.deliveryStatus ?? 'sending',
       ...(pending.content ? { content: pending.content } : {}),
       createdAt: pending.createdAt,
     })

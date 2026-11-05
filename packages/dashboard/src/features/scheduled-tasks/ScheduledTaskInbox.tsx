@@ -1,7 +1,7 @@
 import { ScrollArea } from '../../components/ui/scroll-area.js'
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
-import { Bell, ChevronRight, CircleAlert, LoaderCircle, X } from 'lucide-react'
+import { Bell, ChevronRight, CircleAlert, LoaderCircle, MessageCircle, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { DashboardSocket } from '../../session.js'
 
@@ -48,10 +48,12 @@ function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === 'AbortError'
 }
 
-function formatScheduledTime(value: string) {
+function formatScheduledTime(value: string, compact = false) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
-  return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+  return new Intl.DateTimeFormat(undefined, compact
+    ? { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }
+    : { dateStyle: 'medium', timeStyle: 'short' }).format(date)
 }
 
 export function ScheduledTaskInbox({ host, token, socket, onOpenTask, onOpenSession, sessionNames }: ScheduledTaskInboxProps) {
@@ -227,12 +229,12 @@ export function ScheduledTaskInbox({ host, token, socket, onOpenTask, onOpenSess
               const details = statusDetails[item.status]
               const target = item.target
               const sessionId = item.sessionId ?? (target?.kind === 'session' ? target.sessionId : undefined)
-              const sessionName = sessionId ? sessionNames?.get(sessionId) || t('scheduledTaskInbox.unnamedSession') : undefined
+              const sessionName = sessionId ? sessionNames?.get(sessionId) : undefined
               return (
-                <div key={item.occurrenceId} className="rounded-lg border-b border-border/50 last:border-0">
-                <button
+                <div key={item.occurrenceId} className="flex items-center rounded-lg border-b border-border/50 last:border-0">
+                  <button
                   type="button"
-                  className="group flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  className="group flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   onClick={() => {
                     setOpen(false)
                     onOpenTask(item.taskId)
@@ -240,24 +242,23 @@ export function ScheduledTaskInbox({ host, token, socket, onOpenTask, onOpenSess
                 >
                   <span className={`size-2 shrink-0 rounded-full ${item.seen ? 'bg-muted-foreground/30' : 'bg-primary'}`} aria-hidden="true" />
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-xs font-semibold" title={item.taskLabel}>{item.taskLabel || t('scheduledTaskInbox.taskFallback', { id: item.taskId })}</span>
-                    <span className="mt-1 block break-all text-caption text-muted-foreground">
-                      {target?.kind === 'workspace'
-                        ? t('scheduledTaskInbox.workspace', { name: target.workspaceName || target.workspaceId })
-                        : sessionName ? t('scheduledTaskInbox.session', { name: sessionName }) : t('scheduledTaskInbox.contextUnavailable')}
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="min-w-0 flex-1 truncate text-xs font-semibold" title={item.taskLabel}>{item.taskLabel || t('scheduledTaskInbox.taskFallback', { id: item.taskId })}</span>
+                      <span className={`shrink-0 rounded px-1.5 py-0.5 text-caption font-medium ${details.className}`}>{t(`scheduledTaskInbox.status.${item.status}`)}</span>
                     </span>
-                    {target?.kind === 'workspace' && sessionName ? <span className="mt-1 block truncate text-caption text-muted-foreground" title={sessionName}>{t('scheduledTaskInbox.session', { name: sessionName })}</span> : null}
-                    {target?.kind === 'workspace' && target.cwd ? <span className="block truncate text-caption text-muted-foreground" title={target.cwd}>{target.cwd}</span> : null}
-                    <span className="flex items-center gap-2">
-                      <span className={`mt-1 rounded px-1.5 py-0.5 text-caption font-medium ${details.className}`}>{t(`scheduledTaskInbox.status.${item.status}`)}</span>
+                    <span className="mt-1 flex min-w-0 items-center gap-2 text-caption text-muted-foreground">
+                      <span className="min-w-0 flex-1 truncate" title={sessionName ?? (target?.kind === 'workspace' ? target.workspaceName || target.workspaceId : undefined)}>
+                        {sessionName ? t('scheduledTaskInbox.session', { name: sessionName })
+                          : target?.kind === 'workspace' ? t('scheduledTaskInbox.workspace', { name: target.workspaceName || target.workspaceId })
+                            : sessionId ? t('scheduledTaskInbox.unnamedSession') : t('scheduledTaskInbox.contextUnavailable')}
+                      </span>
+                      <time className="shrink-0" dateTime={item.updatedAt} title={t('scheduledTaskInbox.updatedAt', { time: formatScheduledTime(item.updatedAt) })}>{formatScheduledTime(item.updatedAt, true)}</time>
                     </span>
-                    <time className="mt-1 block text-caption text-muted-foreground" dateTime={item.updatedAt}>{t('scheduledTaskInbox.updatedAt', { time: formatScheduledTime(item.updatedAt) })}</time>
-                    <span className="mt-1 block text-caption text-muted-foreground">{t(`scheduledTaskInbox.outcome.${item.status}`)}</span>
-                    {item.error ? <span className="mt-1 block whitespace-pre-wrap break-words text-xs text-destructive">{item.error}</span> : null}
+                    {item.error ? <span className="mt-1 block truncate text-xs text-destructive" title={item.error}>{item.error}</span> : null}
                   </span>
                   <ChevronRight className="size-4 shrink-0 text-muted-foreground group-hover:text-foreground" aria-hidden="true" />
-                </button>
-                {item.sessionId && onOpenSession ? <button type="button" className="mb-2 ml-7 text-xs text-primary hover:underline" onClick={() => { setOpen(false); onOpenSession(item.sessionId!) }}>{t('scheduledTaskInbox.openSession')}</button> : null}
+                  </button>
+                  {item.sessionId && onOpenSession ? <button type="button" className="mr-1.5 rounded-md p-1.5 text-primary hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label={t('scheduledTaskInbox.openSession')} title={t('scheduledTaskInbox.openSession')} onClick={() => { setOpen(false); onOpenSession(item.sessionId!) }}><MessageCircle className="size-4" aria-hidden="true" /></button> : null}
                 </div>
               )
             })}

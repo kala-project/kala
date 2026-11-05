@@ -1,5 +1,5 @@
 import { ScrollArea } from './components/ui/scroll-area.js'
-import { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type SetStateAction } from 'react'
 import { createPortal } from 'react-dom'
 import { Archive, Boxes, ChevronDown, ChevronRight, ChevronUp, Clock3, Eraser, FolderOpen, GitBranch, Info, ListChecks, Loader2, Menu, Moon, PanelLeftClose, PanelLeftOpen, PanelRight, PanelRightClose, Plus, Settings, ShieldCheck, Sparkles, Square, SquareTerminal, Sun, Workflow, X } from 'lucide-react'
 import { HelpHint } from './components/ui/help-hint.js'
@@ -164,6 +164,7 @@ import { resolveWorkspaceExplorerBinding } from './workspace-explorer-binding.js
 import { workspaceReadBinary } from './lib/workspace-exec.js'
 import { emitRpc } from './socket-rpc.js'
 import { AdmissionDeliveryFailedError, AdmissionDeliveryPendingError, admitUserMessage, releaseMessageAttachments, uploadMessageAttachment } from './admission-client.js'
+import { PendingDeliveryStorageError, readPendingDeliveries, removePendingDelivery, savePendingDelivery, type SavedPendingDelivery } from './pending-delivery.js'
 import { appendLiveTranscriptItems, appendTranscriptBaseItems, lastUserTranscriptIndex, reconcilePendingUserMessages, transcriptBaseItems, transcriptTimelineForRuntime, transcriptViewStartForItems, type TranscriptItem } from './transcript.js'
 import { compactFailureMessage, compactReasonMessage, hasCompactableContent, isCompactionSuccess, isCompactTerminalEvent, shouldShowQueuedAutoCompact } from './app-logic/compaction.js'
 import { addQueuedMessageTombstone, mergeOptimisticQueuedMessages, nextSessionSelection, reconcileOptimisticQueuedMessages, removeQueuedMessageTombstone, removedSessionIds, sessionDisplayLabel, sessionExists, sessionIdsForCacheInvalidation } from './app-logic/session-selectors.js'
@@ -296,8 +297,8 @@ export function App(): JSX.Element {
   >(null)
   const [workspacePickError, setWorkspacePickError] = useState<string | null>(null)
   const [workspacePickSubmitting, setWorkspacePickSubmitting] = useState(false)
-  const [connectWorkspaceOpen, setConnectWorkspaceOpen] = useState(false)
   const [goalControlPending, setGoalControlPending] = useState<string | null>(null)
+  const [connectWorkspaceOpen, setConnectWorkspaceOpen] = useState(false)
   const [explorerDrawerOpen, setExplorerDrawerOpen] = useState(false)
   const [inspectorDrawerOpen, setInspectorDrawerOpen] = useState(false)
   const [rightPanelTabOverrides, setRightPanelTabOverrides] = useState<Record<string, RightPanelTab>>({})
@@ -327,15 +328,30 @@ export function App(): JSX.Element {
   const [workspaceTerminalStatus, setWorkspaceTerminalStatus] = useState<'idle' | 'starting' | 'running' | 'exited' | 'error'>('idle')
   const [workspaceFileViewTarget, setWorkspaceFileViewTarget] = useState<WorkspaceFileTarget | null>(null)
   const [compactStatus, setCompactStatus] = useState<CompactStatus>({ kind: 'idle' })
-  const [awaitingAck, setAwaitingAck] = useState(false)
-  const [messageDeliveryError, setMessageDeliveryError] = useState<{ message: string; operationId?: string } | null>(null)
+  const [deliveries, setDeliveries] = useState<Record<string, {
+    pending: readonly PendingUserTranscriptMessage[]
+    queued: readonly QueuedMessagePreview[]
+    inflight: number
+    error: { message: string; operationId?: string } | null
+  }>>({})
+  const updateDelivery = useCallback((namespace: string, sessionId: string, update: (current: {
+    pending: readonly PendingUserTranscriptMessage[]
+    queued: readonly QueuedMessagePreview[]
+    inflight: number
+    error: { message: string; operationId?: string } | null
+  }) => typeof deliveries[string]) => {
+    setDeliveries((previous) => {
+      const key = `${namespace}:${sessionId}`
+      const current = previous[key] ?? { pending: [], queued: [], inflight: 0, error: null }
+      const next = update(current)
+      return next === current ? previous : { ...previous, [key]: next }
+    })
+  }, [])
   // A cancel can arrive while the Host has accepted the socket request but has
   // not yet moved the durable session from idle to thinking. Keep that intent
   // until the authoritative state becomes active, then replay it exactly once.
   const [cancelPendingSessionId, setCancelPendingSessionId] = useState<string | null>(null)
   const [forkingFromSeq, setForkingFromSeq] = useState<number | null>(null)
-  const [pendingUserMessages, setPendingUserMessages] = useState<readonly PendingUserTranscriptMessage[]>([])
-  const [optimisticQueuedMessages, setOptimisticQueuedMessages] = useState<readonly QueuedMessagePreview[]>([])
   // Keep local deletes tombstoned for the lifetime of the selected Session.
   // Queue snapshots are not ordered acknowledgements, so removing a tombstone
   // after one empty snapshot could let a later stale snapshot revive the row.
@@ -391,6 +407,26 @@ export function App(): JSX.Element {
     ? authSession.session?.authenticated ? authSession.session.cacheNamespace : 'signed-out'
     : 'local-operator'
   const cacheNamespace = `${sessionCacheNamespace(hostEndpoint.url, PROTOCOL_VERSION)}:${identityCacheNamespace}`
+  const delivery = config.sessionId ? deliveries[`${cacheNamespace}:${config.sessionId}`] : undefined
+  const awaitingAck = (delivery?.inflight ?? 0) > 0
+  const messageDeliveryError = delivery?.error ?? null
+  const pendingUserMessages = delivery?.pending ?? []
+  const optimisticQueuedMessages = delivery?.queued ?? []
+  const setMessageDeliveryError = (value: SetStateAction<{ message: string; operationId?: string } | null>) => {
+    if (config.sessionId) updateDelivery(cacheNamespace, config.sessionId, (current) => ({ ...current, error: typeof value === 'function' ? value(current.error) : value }))
+  }
+  const setPendingUserMessages = (value: SetStateAction<readonly PendingUserTranscriptMessage[]>) => {
+    if (config.sessionId) updateDelivery(cacheNamespace, config.sessionId, (current) => {
+      const next = typeof value === 'function' ? value(current.pending) : value
+      return next === current.pending ? current : { ...current, pending: next }
+    })
+  }
+  const setOptimisticQueuedMessages = (value: SetStateAction<readonly QueuedMessagePreview[]>) => {
+    if (config.sessionId) updateDelivery(cacheNamespace, config.sessionId, (current) => {
+      const next = typeof value === 'function' ? value(current.queued) : value
+      return next === current.queued ? current : { ...current, queued: next }
+    })
+  }
   const sessionViewCache = useMemo(() => createDurableSessionViewCache({
     namespace: cacheNamespace,
     maxBytes: sessionViewCacheMaxBytesFromMb(sessionViewCacheMaxMb),
@@ -524,6 +560,7 @@ export function App(): JSX.Element {
     operationId = newPendingMessageId(),
     agentStatus,
     afterSeq,
+    afterMessageCount,
   }: {
     sessionId: string
     text: string
@@ -533,6 +570,7 @@ export function App(): JSX.Element {
     operationId?: string
     agentStatus?: string
     afterSeq: number
+    afterMessageCount?: number
   }): Promise<void> => {
     const createdAt = new Date().toISOString()
     const agentBusy =
@@ -540,27 +578,24 @@ export function App(): JSX.Element {
       agentStatus === 'executing_tools' ||
       agentStatus === 'awaiting_approval'
     const effectiveOptimisticMode: typeof mode = mode === 'queue' && !agentBusy ? 'steer' : mode
-    if (effectiveOptimisticMode === 'queue') {
-      setOptimisticQueuedMessages((previous) => [
-        ...previous,
-        { id: operationId, text, mode, createdAt, ...(content ? { content } : {}) },
-      ])
-    } else {
-      setPendingUserMessages((previous) => [
-        ...previous,
-        {
-          id: operationId,
-          text,
-          mode: effectiveOptimisticMode,
-          ...(content ? { content } : {}),
-          createdAt,
-          afterSeq,
-        },
-      ])
+    const saved: SavedPendingDelivery = {
+      id: operationId, text, mode, displayMode: effectiveOptimisticMode, createdAt, afterSeq,
+      ...(afterMessageCount !== undefined ? { afterMessageCount } : {}),
+      ...(content ? { content } : {}),
+      deliveryStatus: 'sending',
     }
-    setAwaitingAck(true)
-    setMessageDeliveryError(null)
+    updateDelivery(cacheNamespace, sessionId, (current) => ({ ...current, pending: [
+      ...current.pending,
+      { ...saved, mode: effectiveOptimisticMode },
+    ] }))
+    updateDelivery(cacheNamespace, sessionId, (current) => ({ ...current, inflight: current.inflight + 1, error: null }))
+    let awaitingAcceptance = true
     try {
+      try {
+        savePendingDelivery(cacheNamespace, sessionId, saved)
+      } catch (error) {
+        throw new PendingDeliveryStorageError(error)
+      }
       await admitUserMessage({
         host: hostEndpoint.url,
         ...(config.token ? { token: config.token } : {}),
@@ -570,34 +605,74 @@ export function App(): JSX.Element {
         mode,
         operationId,
         ...(content ? { content } : {}),
+        onAccepted: () => {
+          try {
+            savePendingDelivery(cacheNamespace, sessionId, { ...saved, deliveryStatus: 'accepted' })
+          } catch (error) {
+            console.error('Unable to update saved message delivery status', error)
+          }
+          if (awaitingAcceptance) {
+            awaitingAcceptance = false
+            updateDelivery(cacheNamespace, sessionId, (current) => ({
+              ...current,
+              inflight: current.inflight - 1,
+              pending: effectiveOptimisticMode === 'queue'
+                ? current.pending.filter((item) => item.id !== operationId)
+                : current.pending.map((item) => item.id === operationId ? { ...item, deliveryStatus: 'accepted' } : item),
+              queued: effectiveOptimisticMode === 'queue'
+                ? [...current.queued, { id: operationId, text, mode, createdAt, ...(content ? { content } : {}) }]
+                : current.queued,
+            }))
+          }
+        },
       })
       if (effectiveOptimisticMode === 'steer') suppressNextWaitingNotification.current = true
     } catch (error) {
-      setPendingUserMessages((previous) => previous.filter((item) => item.id !== operationId))
-      if (!(error instanceof AdmissionDeliveryPendingError && effectiveOptimisticMode === 'queue')) {
-        setOptimisticQueuedMessages((previous) => previous.filter((item) => item.id !== operationId))
+      if (error instanceof AdmissionDeliveryPendingError || error instanceof AdmissionDeliveryFailedError) {
+        try {
+          savePendingDelivery(cacheNamespace, sessionId, { ...saved, deliveryStatus: error instanceof AdmissionDeliveryFailedError ? 'failed' : 'unconfirmed' })
+        } catch (storageError) {
+          console.error('Unable to update saved message delivery status', storageError)
+        }
+      } else if (!(error instanceof PendingDeliveryStorageError)) {
+        try {
+          removePendingDelivery(cacheNamespace, sessionId, operationId)
+        } catch (storageError) {
+          console.error('Unable to clear saved message delivery record', storageError)
+        }
       }
+      updateDelivery(cacheNamespace, sessionId, (current) => ({
+        ...current,
+        pending: error instanceof AdmissionDeliveryPendingError || error instanceof AdmissionDeliveryFailedError
+          ? current.pending.some((item) => item.id === operationId)
+            ? current.pending.map((item) => item.id === operationId ? { ...item, deliveryStatus: error instanceof AdmissionDeliveryFailedError ? 'failed' : 'unconfirmed' } : item)
+            : [...current.pending, { ...saved, deliveryStatus: error instanceof AdmissionDeliveryFailedError ? 'failed' : 'unconfirmed' }]
+          : current.pending.filter((item) => item.id !== operationId),
+        queued: error instanceof AdmissionDeliveryPendingError
+          ? current.queued
+          : current.queued.filter((item) => item.id !== operationId),
+      }))
       if (error instanceof AdmissionDeliveryPendingError) {
-        setMessageDeliveryError({
-          message: error.lastError
+        updateDelivery(cacheNamespace, sessionId, (current) => ({ ...current, error: {
+          message: error.lastError && error.attempts > 0
             ? t('composer.delivery.pendingDetail', { reason: error.lastError, attempts: error.attempts })
             : t('composer.delivery.pending'),
           operationId: error.operationId,
-        })
+        } }))
       } else if (error instanceof AdmissionDeliveryFailedError) {
-        setMessageDeliveryError({
+        updateDelivery(cacheNamespace, sessionId, (current) => ({ ...current, error: {
           message: error.lastError ?? t('composer.delivery.failed'),
           operationId: error.operationId,
-        })
+        } }))
       } else {
-        setMessageDeliveryError({ message: error instanceof Error ? error.message : String(error) })
+        updateDelivery(cacheNamespace, sessionId, (current) => ({ ...current, error: { message: error instanceof Error ? error.message : String(error) } }))
       }
       throw error
     } finally {
-      setAwaitingAck(false)
+      if (awaitingAcceptance) updateDelivery(cacheNamespace, sessionId, (current) => ({ ...current, inflight: current.inflight - 1 }))
     }
     if (!config.explicit) setConfig((previous) => ({ ...previous, explicit: true }))
-  }, [config.explicit, config.token, hostEndpoint.url, t])
+  }, [cacheNamespace, config.explicit, config.token, hostEndpoint.url, t, updateDelivery])
   const currentAgentRuntimeCapabilities = currentRuntimeDescriptor?.capabilities ?? KERNEL_AGENT_RUNTIME_CAPABILITIES
   const availableModels = currentRuntimeDescriptor?.models ?? models
   const selectedModelKey = resolveModelKey(availableModels, session.selectedModel) || session.selectedModel || ''
@@ -786,14 +861,40 @@ export function App(): JSX.Element {
     setCompactStatus({ kind: 'idle' })
     compactStartSeq.current = null
     inferredCompactSeq.current = null
-    setAwaitingAck(false)
     setCancelPendingSessionId(null)
-    setPendingUserMessages([])
-    setOptimisticQueuedMessages([])
     setDeletedQueuedMessageIds(new Set())
     setForkingFromSeq(null)
     suppressNextWaitingNotification.current = false
   }, [config.sessionId])
+
+  useEffect(() => {
+    if (!config.sessionId) return
+    const sessionId = config.sessionId
+    try {
+      const saved = readPendingDeliveries(cacheNamespace, sessionId)
+      if (saved.length === 0) return
+      updateDelivery(cacheNamespace, sessionId, (current) => {
+        const pendingIds = new Set(current.pending.map((item) => item.id))
+        const queuedIds = new Set(current.queued.map((item) => item.id))
+        const pending = [...current.pending]
+        const queued = [...current.queued]
+        for (const record of saved) {
+          if ((record.displayMode ?? record.mode) === 'queue' && record.deliveryStatus === 'accepted') {
+            if (!queuedIds.has(record.id)) queued.push(record)
+          } else if (!pendingIds.has(record.id)) {
+            pending.push({ ...record, mode: record.displayMode ?? record.mode, deliveryStatus: record.deliveryStatus === 'sending' ? 'unconfirmed' : record.deliveryStatus })
+          }
+        }
+        const unresolved = saved.find((record) => record.deliveryStatus === 'sending' || record.deliveryStatus === 'unconfirmed' || record.deliveryStatus === 'failed')
+        return {
+          ...current, pending, queued,
+          error: current.error ?? (unresolved ? { message: unresolved.deliveryStatus === 'failed' ? t('composer.delivery.failed') : t('composer.delivery.pending'), operationId: unresolved.id } : null),
+        }
+      })
+    } catch (error) {
+      updateDelivery(cacheNamespace, sessionId, (current) => ({ ...current, error: { message: error instanceof Error ? error.message : String(error) } }))
+    }
+  }, [cacheNamespace, config.sessionId, t, updateDelivery])
 
   useEffect(() => {
     const handoff = pendingSimpleChatHandoff.current
@@ -819,14 +920,6 @@ export function App(): JSX.Element {
   }, [forkingFromSeq])
 
   useEffect(() => {
-    if (!awaitingAck) return
-    const status = session.state?.status
-    if ((status && status !== 'idle') || session.streamingActive) {
-      setAwaitingAck(false)
-    }
-  }, [awaitingAck, session.state, session.streamingActive])
-
-  useEffect(() => {
     if (cancelPendingSessionId === null || cancelPendingSessionId !== activeSessionId) return
     const status = session.state?.status
     if (status === 'done' || status === 'error') {
@@ -844,13 +937,51 @@ export function App(): JSX.Element {
       session.timeline,
       session.queuedMessages,
       session.state?.status,
-      session.streamingActive ? session.streamingText : '',
+      '',
+      session.timeline.length === 0 ? session.state?.messages ?? EMPTY_MESSAGES : EMPTY_MESSAGES,
     ))
-  }, [session.timeline, session.queuedMessages, session.state?.status, session.streamingText, session.streamingActive])
+  }, [pendingUserMessages, session.timeline, session.queuedMessages, session.state?.messages, session.state?.status])
 
   useEffect(() => {
     setOptimisticQueuedMessages((prev) => reconcileOptimisticQueuedMessages(prev, session.queuedMessages, session.timeline))
-  }, [session.queuedMessages, session.timeline])
+  }, [optimisticQueuedMessages, session.queuedMessages, session.timeline])
+
+  useEffect(() => {
+    if (!config.sessionId) return
+    const saved = (() => {
+      try {
+        return readPendingDeliveries(cacheNamespace, config.sessionId!)
+      } catch (error) {
+        console.error('Unable to read saved message delivery records', error)
+        return []
+      }
+    })()
+    const confirmedIds = new Set([
+      ...session.queuedMessages.map((item) => item.id),
+      ...session.timeline.flatMap((entry) => entry.event.kind === 'user_message' && entry.event.operationId ? [entry.event.operationId] : []),
+    ])
+    const remaining = new Set(reconcilePendingUserMessages(
+      saved,
+      session.timeline,
+      session.queuedMessages,
+      session.state?.status,
+      '',
+      session.timeline.length === 0 ? session.state?.messages ?? [] : [],
+    ).map((item) => item.id))
+    for (const record of saved) {
+      if (!confirmedIds.has(record.id) && (record.deliveryStatus === 'failed' || remaining.has(record.id))) continue
+      confirmedIds.add(record.id)
+      try {
+        removePendingDelivery(cacheNamespace, config.sessionId, record.id)
+      } catch (error) {
+        console.error('Unable to clear confirmed message delivery record', error)
+      }
+    }
+    updateDelivery(cacheNamespace, config.sessionId, (current) =>
+      current.error?.operationId && confirmedIds.has(current.error.operationId)
+        ? { ...current, error: null }
+        : current)
+  }, [cacheNamespace, config.sessionId, session.queuedMessages, session.timeline, session.state?.messages, session.state?.status, updateDelivery])
 
   const scheduleCompactIdle = (ms: number): void => {
     if (compactResetTimer.current !== null) {
@@ -1113,6 +1244,7 @@ export function App(): JSX.Element {
     }
     setPendingWorkspacePick({
       sessionId: randomId(),
+      firstOperationId: randomId(),
       ...(workspaceId !== undefined ? { workspaceId } : {}),
     })
   }, [clearSessionSelection])
@@ -1139,6 +1271,7 @@ export function App(): JSX.Element {
     workspaceId: string,
     workspaceName: string | undefined,
     cwd: string,
+    goal?: { objective: string; successCriteria: string; maxTurns?: number },
   ): Promise<void> => {
     if (!pendingWorkspacePick) return
     const { sessionId, firstOperationId } = pendingWorkspacePick
@@ -1156,11 +1289,23 @@ export function App(): JSX.Element {
         workspaceId,
         ...(workspaceName !== undefined ? { workspaceName } : {}),
         cwd,
+        ...(goal ? { goal } : {}),
         ...(agentRuntime === 'kernel' ? { selectedModel: preferredModel } : {}),
       }, 10_000, sessionRouteTickets ? {
         host: hostEndpoint.url,
         ...(config.token !== undefined ? { token: config.token } : {}),
       } : undefined)
+      if (goal) {
+        await admitUserMessage({
+          host: hostEndpoint.url,
+          ...(config.token ? { token: config.token } : {}),
+          sessionId,
+          operationId: firstOperationId,
+          text: `${goal.objective}\n\n${t('dialogs.goalSuccessCriteria')}: ${goal.successCriteria}`,
+          intent: 'text',
+          mode: 'steer',
+        })
+      }
       selectCreatedSession(sessionId)
       setPendingWorkspacePick(null)
     } catch (err) {
@@ -1168,6 +1313,20 @@ export function App(): JSX.Element {
       setWorkspacePickError(message === 'runtime_not_ready' ? t('dialogs.runtimeTemporarilyReadOnly') : message)
     } finally {
       setWorkspacePickSubmitting(false)
+    }
+  }
+  const controlGoal = async (sessionId: string, action: GoalAction): Promise<void> => {
+    if (!controlSocket) {
+      notify.error(t('dialogs.goalControlFailed'), { description: t('app.socketNotConnected') })
+      return
+    }
+    setGoalControlPending(sessionId)
+    try {
+      await emitRpc(controlSocket, 'client:goal_control', { sessionId, action })
+    } catch (error) {
+      notify.error(t('dialogs.goalControlFailed'), { description: error instanceof Error ? error.message : String(error) })
+    } finally {
+      setGoalControlPending(null)
     }
   }
   const startSimpleChat = (agentRuntime: import('@agent-kernel/shared').AgentRuntimeId): void => {
@@ -1244,7 +1403,6 @@ export function App(): JSX.Element {
     setSlashDeletePhrase('')
     setSlashDeleteConfirmationStep('phrase')
   }, [activeSessionId])
-      firstOperationId: randomId(),
   const resetSlashDelete = useCallback((): void => {
     setSlashDelete(null)
     setSlashDeletePhrase('')
@@ -1271,7 +1429,6 @@ export function App(): JSX.Element {
     newSession(workspaceId)
     setExplorerDrawerOpen(false)
   }, [newSession])
-    goal?: { objective: string; successCriteria: string; maxTurns?: number },
   const connectWorkspaceFromExplorerDrawer = useCallback((): void => {
     setExplorerDrawerOpen(false)
     setConnectWorkspaceOpen(true)
@@ -1289,23 +1446,11 @@ export function App(): JSX.Element {
   // empty-session entry point on an executor snapshot that is irrelevant there.
   // A Session directory is useful as soon as its own snapshot arrives. The
   // Executor snapshot enriches workspace presence independently and must not
-        ...(goal ? { goal } : {}),
   // prolong the directory's blocking state.
   const sessionListLoading = sessionDirectoryIsLoading(control.sessionsLoaded)
   const sessionDirectoryLoadingOwner = resolveSessionDirectoryLoadingOwner({
     loading: sessionListLoading && !hasSelectedSession,
     wideLayout,
-      if (goal) {
-        await admitUserMessage({
-          host: hostEndpoint.url,
-          ...(config.token ? { token: config.token } : {}),
-          sessionId,
-          operationId: firstOperationId,
-          text: `${goal.objective}\n\n${t('dialogs.goalSuccessCriteria')}: ${goal.successCriteria}`,
-          intent: 'text',
-          mode: 'steer',
-        })
-      }
     explorerOpen,
     explorerDrawerOpen,
   })
@@ -1315,20 +1460,6 @@ export function App(): JSX.Element {
     status: session.status,
     eventCount: currentSession?.eventCount ?? 0,
     firstUserMessage: currentSession?.firstUserMessage ?? null,
-  const controlGoal = async (sessionId: string, action: GoalAction): Promise<void> => {
-    if (!controlSocket) {
-      notify.error(t('dialogs.goalControlFailed'), { description: t('app.socketNotConnected') })
-      return
-    }
-    setGoalControlPending(sessionId)
-    try {
-      await emitRpc(controlSocket, 'client:goal_control', { sessionId, action })
-    } catch (error) {
-      notify.error(t('dialogs.goalControlFailed'), { description: error instanceof Error ? error.message : String(error) })
-    } finally {
-      setGoalControlPending(null)
-    }
-  }
   })
   const currentWorkspaceExecutor = useMemo(() => {
     if (!currentSession?.workspaceId) return undefined
@@ -1489,10 +1620,10 @@ export function App(): JSX.Element {
       session.timeline,
       session.queuedMessages,
       session.state?.status,
-      session.streamingActive ? session.streamingText : '',
+      '',
       currentAgentRuntime === 'kernel' ? EMPTY_MESSAGES : stateMessages,
     ),
-    [pendingUserMessages, session.timeline, session.queuedMessages, session.state?.status, session.streamingText, session.streamingActive, currentAgentRuntime, stateMessages],
+    [pendingUserMessages, session.timeline, session.queuedMessages, session.state?.status, currentAgentRuntime, stateMessages],
   )
   const chatItems = useMemo(
     () =>
@@ -2340,6 +2471,12 @@ export function App(): JSX.Element {
                           onOpenSession={selectSession}
                         />
                       ) : (
+                        <>
+                          {currentSession?.goal ? <GoalStatusBar
+                            goal={currentSession.goal}
+                            busy={goalControlPending === activeSessionId}
+                            onAction={(action) => { void controlGoal(activeSessionId, action) }}
+                          /> : null}
                         <SessionInspectionContext.Provider value={sessionInspectionTransport}>
                         <ChatPanel
                         sessionId={activeSessionId}
@@ -2397,36 +2534,15 @@ export function App(): JSX.Element {
                         }}
                         onSuggest={(text) => {
                           if (activeSessionId === null || sessionWorkspaceKnownOffline) return
-                          const pendingId = newPendingMessageId()
-                          suppressNextWaitingNotification.current = true
-                          setPendingUserMessages((prev) => [
-                            ...prev,
-                            {
-                              id: pendingId,
-                              text,
-                              mode: 'steer',
-                              createdAt: new Date().toISOString(),
-                              afterSeq: session.timeline.at(-1)?.seq ?? 0,
-                            },
-                          ])
-                          setAwaitingAck(true)
-                          void admitUserMessage({
-                            host: hostEndpoint.url,
-                            ...(config.token ? { token: config.token } : {}),
+                          void deliverUserMessage({
                             sessionId: activeSessionId,
                             text,
-                            intent: 'text',
                             mode: 'steer',
-                          }).then(() => setAwaitingAck(false)).catch((error) => {
-                            setPendingUserMessages((prev) => prev.filter((item) => item.id !== pendingId))
-                            setAwaitingAck(false)
-                            setMessageDeliveryError(error instanceof AdmissionDeliveryPendingError
-                              ? { message: error.lastError ? t('composer.delivery.pendingDetail', { reason: error.lastError, attempts: error.attempts }) : t('composer.delivery.pending'), operationId: error.operationId }
-                              : error instanceof AdmissionDeliveryFailedError
-                                ? { message: error.lastError ?? t('composer.delivery.failed'), operationId: error.operationId }
-                              : { message: error instanceof Error ? error.message : String(error) })
-                            notify.error(error instanceof Error ? error.message : String(error))
-                          })
+                            intent: 'text',
+                            agentStatus: session.state?.status,
+                            afterSeq: session.timeline.at(-1)?.seq ?? 0,
+                            afterMessageCount: session.state?.messages.length ?? 0,
+                          }).catch(() => {})
                           if (!config.explicit) setConfig((prev) => ({ ...prev, explicit: true }))
                         }}
                         footerSlot={
@@ -2453,6 +2569,7 @@ export function App(): JSX.Element {
                         }
                         />
                         </SessionInspectionContext.Provider>
+                        </>
                       )}
                     </div>
                     <div className="min-h-0">
@@ -2471,12 +2588,6 @@ export function App(): JSX.Element {
                               </Button>
                             </div>
                           </BannerSlot>
-                        <>
-                          {currentSession?.goal ? <GoalStatusBar
-                            goal={currentSession.goal}
-                            busy={goalControlPending === activeSessionId}
-                            onAction={(action) => { void controlGoal(activeSessionId, action) }}
-                          /> : null}
                         ) : null}
                         {sessionWorkspaceKnownOffline ? (
                           <BannerSlot>
@@ -2569,7 +2680,6 @@ export function App(): JSX.Element {
                           onNewSession={createNewSessionFromCurrent}
                           onCancel={() => {
                             if (!session.socket || activeSessionId === null) return
-                        </>
                             if (cancelPendingSessionId === activeSessionId) return
                             if (awaitingAck) setCancelPendingSessionId(activeSessionId)
                             // Stop supersedes all not-yet-executed control work.
@@ -2675,6 +2785,7 @@ export function App(): JSX.Element {
                               ...(content ? { content } : {}),
                               agentStatus: session.state?.status,
                               afterSeq: session.timeline.at(-1)?.seq ?? 0,
+                              afterMessageCount: session.state?.messages.length ?? 0,
                             })
                             // Sending is an explicit "I'm at the end" signal:
                             // re-pin and force a jump even if the user had

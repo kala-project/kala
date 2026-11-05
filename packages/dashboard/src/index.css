@@ -804,11 +804,6 @@
   to { transform: translateZ(0) rotate(360deg); }
 }
 
-@keyframes ak-pending-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.62; }
-}
-
 @keyframes ak-slide-in-right {
   from { opacity: 0; transform: translateX(12px); }
   to { opacity: 1; transform: translateX(0); }

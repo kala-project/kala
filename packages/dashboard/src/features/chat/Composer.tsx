@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Archive, ArrowRight, AtSign, Bot, Check, ChevronDown, ChevronUp, Cloud, CornerDownRight, Eraser, FileText, GripVertical, ListChecks, LoaderCircle, LockKeyhole, Maximize2, Mic, Navigation, PanelTopClose, PanelTopOpen, Paperclip, Pencil, Plus, RefreshCw, ShieldCheck, SlidersHorizontal, Square, Trash2, X } from 'lucide-react'
+import { Archive, ArrowRight, AtSign, Bot, Check, ChevronDown, ChevronUp, Cloud, Eraser, FileText, GripVertical, ListChecks, LoaderCircle, LockKeyhole, Maximize2, Mic, Navigation, PanelTopClose, PanelTopOpen, Paperclip, Pencil, Plus, RefreshCw, ShieldCheck, SlidersHorizontal, Square, Trash2, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
@@ -317,6 +317,8 @@ export function Composer({
   const { mode, toggle: toggleMode } = useComposerMode()
   const displayStyle = chatDisplayStyle(displayPrefs)
   const sessionId = state?.sessionId ?? null
+  const currentSessionId = useRef(sessionId)
+  currentSessionId.current = sessionId
   const [voiceLayoutPreference, setVoiceLayoutPreference] = useState(() => ({ sessionId, layout: readStoredVoiceLayout(sessionId) }))
   const voiceLayout = voiceLayoutPreference.sessionId === sessionId ? voiceLayoutPreference.layout : readStoredVoiceLayout(sessionId)
   const updateVoiceLayout = (layout: VoiceLayout): void => {
@@ -769,17 +771,22 @@ export function Composer({
         }
       }
       if (!durablyAccepted) {
-        setText((current) => {
-          if (current.length === 0) {
-            setMessageIntent(submittedIntent)
-            return submittedText
-          }
-          return current
-        })
-        setPastedImages((current) => current.length === 0 ? submittedImages : current)
-        setAttachedFiles((current) => current.length === 0 ? submittedFiles : current)
+        if (currentSessionId.current === sessionId) {
+          setText((current) => {
+            if (current.length === 0) {
+              setMessageIntent(submittedIntent)
+              return submittedText
+            }
+            return current
+          })
+          setPastedImages((current) => current.length === 0 ? submittedImages : current)
+          setAttachedFiles((current) => current.length === 0 ? submittedFiles : current)
+        } else if (!readStoredDraft(sessionId)) {
+          writeStoredDraft(sessionId, submittedText)
+          writeStoredDraftIntent(sessionId, submittedText, submittedIntent)
+        }
       }
-      setPendingToast(error instanceof Error ? error.message : String(error))
+      if (currentSessionId.current === sessionId) setPendingToast(error instanceof Error ? error.message : String(error))
     } finally {
       if (uploadingFiles || lockWhileSubmitting) {
         submitInFlight.current = false
@@ -2458,16 +2465,13 @@ function QueuedMessagesDock({
       className="mb-2 rounded-xl bg-muted/55 px-3 py-2 text-xs"
       data-testid="queued-messages-dock"
     >
-      <div className="mb-1.5 flex items-center justify-between gap-3">
+      <div className="mb-1.5 flex items-center gap-2">
         <div className="flex min-w-0 items-center gap-2 font-medium text-foreground">
           <ListChecks className="h-3.5 w-3.5 flex-none text-muted-foreground" aria-hidden="true" />
           <span>
             {t('composer.queued.pending', { count: items.length })}
           </span>
         </div>
-        <span className="flex-none text-caption text-muted-foreground">
-          {t('composer.queued.sendsAfterActiveTurn')}
-        </span>
       </div>
       <ScrollArea
         className={cn(items.length > QUEUED_MESSAGES_VISIBLE_LIMIT && 'h-40 max-h-40')}
@@ -2505,10 +2509,6 @@ function QueuedMessagesDock({
                 {index + 1}
               </span>
               <span className="min-w-0">
-                <span className="mb-0.5 flex items-center gap-1 text-caption text-muted-foreground">
-                  <CornerDownRight className="h-3 w-3" aria-hidden="true" />
-                  {item.mode === 'steer' ? t('composer.queued.steerLabel') : t('composer.queued.queueLabel')}
-                </span>
                 {editingId === item.id ? (
                   <span className="flex min-w-0 flex-col gap-1">
                   <input

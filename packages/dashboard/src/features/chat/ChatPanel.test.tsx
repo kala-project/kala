@@ -2269,7 +2269,19 @@ describe('ChatPanel', () => {
     expect(screen.getByTestId('pending-user-message-local-1').textContent ?? '').toContain('sending now')
     expect(screen.getByTestId('pending-user-message-local-1').textContent ?? '').not.toContain('Sending')
     expect(screen.getByTestId('pending-user-message-status-local-1').getAttribute('aria-label')).toBe('Sending')
+    expect(screen.getByTestId('pending-user-message-status-local-1').className).not.toContain('animate-')
     expect(screen.queryByText(/Queued #/)).toBeNull()
+  })
+
+  it('distinguishes accepted, unconfirmed, and queued messages without pulsing the bubble', () => {
+    render(<ChatPanel items={[
+      { kind: 'pending_user_message', id: 'accepted', text: 'one', mode: 'steer', status: 'accepted', createdAt: '2026-07-06T00:00:00.000Z' },
+      { kind: 'pending_user_message', id: 'unconfirmed', text: 'two', mode: 'steer', status: 'unconfirmed', createdAt: '2026-07-06T00:00:01.000Z' },
+      { kind: 'pending_user_message', id: 'queued', text: 'three', mode: 'queue', status: 'queued', createdAt: '2026-07-06T00:00:02.000Z' },
+    ]} />)
+    expect(screen.getByTestId('pending-user-message-status-accepted').getAttribute('aria-label')).toBe('Accepted, syncing to Session')
+    expect(screen.getByTestId('pending-user-message-status-unconfirmed').getAttribute('aria-label')).toBe('Delivery unconfirmed')
+    expect(screen.getByTestId('pending-user-message-status-queued').className).not.toContain('animate-')
   })
 
   it('renders cancelled assistant suffix as a status chip', () => {

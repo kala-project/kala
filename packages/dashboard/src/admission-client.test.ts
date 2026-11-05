@@ -158,17 +158,41 @@ describe('admitUserMessage', () => {
   })
 
   it('waits for the durable operation to reach the Session log', async () => {
+    const onAccepted = vi.fn()
     const fetchMock = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true, duplicate: false, operationId: 'operation-0003', sequence: 9, state: 'pending', routeGeneration: 5 }), { status: 202 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ operationId: 'operation-0003', sessionId: 'session-1', sequence: 9, state: 'pending', acceptedAt: new Date().toISOString(), routeGeneration: 5, attempts: 1 }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ operationId: 'operation-0003', sessionId: 'session-1', sequence: 9, state: 'committed', acceptedAt: new Date().toISOString(), routeGeneration: 5, attempts: 2, sessionCursor: 44 }), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
-    await expect(admitUserMessage({ host: '', sessionId: 'session-1', operationId: 'operation-0003', text: 'hello', intent: 'text', mode: 'steer', deliveryTimeoutMs: 2_000 })).resolves.toMatchObject({ accepted: true })
+    await expect(admitUserMessage({ host: '', sessionId: 'session-1', operationId: 'operation-0003', text: 'hello', intent: 'text', mode: 'steer', deliveryTimeoutMs: 2_000, onAccepted })).resolves.toMatchObject({ accepted: true })
+    expect(onAccepted).toHaveBeenCalledWith(expect.objectContaining({ operationId: 'operation-0003', state: 'pending' }))
     expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
       '/runtime/admission/messages',
       '/runtime/admission/messages/operation-0003',
       '/runtime/admission/messages/operation-0003',
     ])
+  })
+
+  it('reports server acceptance before waiting for Session commit', async () => {
+    let finishStatus: ((response: Response) => void) | undefined
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        accepted: true, duplicate: false, operationId: 'slow-commit', sequence: 10, state: 'pending', routeGeneration: 5,
+      }), { status: 202 }))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { finishStatus = resolve }))
+    vi.stubGlobal('fetch', fetchMock)
+    const onAccepted = vi.fn()
+    const operation = admitUserMessage({
+      host: '', sessionId: 'session-1', operationId: 'slow-commit',
+      text: 'continue', intent: 'text', mode: 'steer', onAccepted,
+    })
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(onAccepted).toHaveBeenCalledWith(expect.objectContaining({ state: 'pending', operationId: 'slow-commit' }))
+    finishStatus?.(new Response(JSON.stringify({
+      operationId: 'slow-commit', sessionId: 'session-1', sequence: 10, state: 'committed',
+      acceptedAt: new Date().toISOString(), routeGeneration: 5, attempts: 1,
+    }), { status: 200 }))
+    await expect(operation).resolves.toMatchObject({ accepted: true })
   })
 
   it('treats a durably accepted queue message as queued without waiting for turn completion', async () => {

@@ -114,6 +114,7 @@ export async function admitUserMessage(input: {
   timeoutMs?: number
   attempts?: number
   deliveryTimeoutMs?: number
+  onAccepted?: (accepted: AdmissionAccepted) => void
 }): Promise<AdmissionAccepted> {
   const operationId = input.operationId ?? randomId()
   const attempts = input.attempts ?? 3
@@ -149,6 +150,7 @@ export async function admitUserMessage(input: {
         throw new Error('invalid admission acknowledgement')
       }
       const accepted = body as AdmissionAccepted
+      input.onAccepted?.(accepted)
       // Portable mode commits in-process and has no durable Ingress ledger.
       // Platform mode returns a positive route generation and must prove the
       // accepted operation reached Session JSONL before the UI calls it done.

@@ -1083,7 +1083,13 @@ function PendingUserMessageRow({
   const content = item.content ?? [{ type: 'text' as const, text: item.text }]
   const statusLabel = item.status === 'queued'
     ? t('composer.queued.queueLabel')
-    : t('chat.transcript.sendingMessage')
+    : item.status === 'accepted'
+      ? t('chat.transcript.acceptedMessage')
+      : item.status === 'unconfirmed'
+        ? t('chat.transcript.unconfirmedMessage')
+        : item.status === 'failed'
+          ? t('chat.transcript.failedMessage')
+          : t('chat.transcript.sendingMessage')
   const shellState = item.shell?.state
   const effectiveStatusLabel = shellState
     ? item.shell?.error ?? `Shell command ${shellState === 'nonzero' ? 'completed with a nonzero exit' : shellState}`
@@ -1091,7 +1097,7 @@ function PendingUserMessageRow({
   return (
     <div className="group relative flex min-w-0 max-w-full justify-end" data-testid={`pending-user-message-${item.id}`} data-status={item.status}>
       <div
-        className="relative min-w-0 max-w-[92%] overflow-hidden rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-primary-foreground shadow-sm motion-safe:animate-[ak-pending-pulse_1.6s_ease-in-out_infinite] sm:max-w-[85%]"
+        className="relative min-w-0 max-w-[92%] overflow-hidden rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-primary-foreground shadow-sm sm:max-w-[85%]"
         title={effectiveStatusLabel}
         aria-label={effectiveStatusLabel}
         data-testid={`pending-user-message-status-${item.id}`}

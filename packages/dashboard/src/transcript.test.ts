@@ -566,7 +566,7 @@ describe('visibleMessages', () => {
   it('reconciles local pending messages with timeline and queue acknowledgements', () => {
     const pending = [
       { id: 'local-1', text: 'sent', mode: 'steer' as const, createdAt: '2026-07-06T00:00:00.000Z', afterSeq: 0 },
-      { id: 'local-2', text: 'queued', mode: 'queue' as const, createdAt: '2026-07-06T00:00:01.000Z', afterSeq: 0 },
+      { id: 'queue-1', text: 'queued', mode: 'queue' as const, createdAt: '2026-07-06T00:00:01.000Z', afterSeq: 0 },
     ]
     const timeline: TimelineEntry[] = [
       { seq: 1, ts: '2026-07-06T00:00:02.000Z', event: { kind: 'user_message', text: 'sent' }, effects: [] },
@@ -583,7 +583,7 @@ describe('visibleMessages', () => {
     expect(next).toEqual([])
   })
 
-  it('drops stale steer pending messages after the later LLM turn has completed', () => {
+  it('does not mistake an unrelated completed turn for delivery of a pending message', () => {
     const pending = [
       { id: 'local-1', text: 'Schema-first or types-first', mode: 'steer' as const, createdAt: '2026-07-06T00:00:00.000Z', afterSeq: 10 },
       { id: 'queue-1', text: 'keep queued local preview', mode: 'queue' as const, createdAt: '2026-07-06T00:00:00.000Z', afterSeq: 10 },
@@ -599,7 +599,35 @@ describe('visibleMessages', () => {
 
     const next = reconcilePendingUserMessages(pending, timeline, [], 'done', '')
 
-    expect(next).toEqual([pending[1]])
+    expect(next).toEqual(pending)
+  })
+
+  it('matches modern messages by operation ID instead of identical historical text', () => {
+    const pending = [
+      { id: 'new-op', text: 'repeat', mode: 'steer' as const, createdAt: '2026-07-06T00:00:02.000Z', afterSeq: 10 },
+    ]
+    const timeline: TimelineEntry[] = [
+      { seq: 9, ts: '2026-07-06T00:00:00.000Z', event: { kind: 'user_message', operationId: 'old-op', text: 'repeat' }, effects: [] },
+      { seq: 11, ts: '2026-07-06T00:00:03.000Z', event: { kind: 'user_message', operationId: 'another-op', text: 'repeat' }, effects: [] },
+    ]
+    expect(reconcilePendingUserMessages(pending, timeline, [], 'done', '')).toEqual(pending)
+    expect(reconcilePendingUserMessages(pending, [
+      ...timeline, { seq: 12, ts: '2026-07-06T00:00:04.000Z', event: { kind: 'user_message', operationId: 'new-op', text: 'repeat' }, effects: [] },
+    ], [], 'done', '')).toEqual([])
+  })
+
+  it('does not reconcile a new queue message with an earlier identical queue entry', () => {
+    const pending = [{ id: 'new-queue-op', text: 'repeat', mode: 'queue' as const, createdAt: '2026-07-06T00:00:02.000Z', afterSeq: 2 }]
+    const queued = [{ id: 'old-queue-op', text: 'repeat', mode: 'queue' as const, createdAt: '2026-07-06T00:00:01.000Z' }]
+    expect(reconcilePendingUserMessages(pending, [], queued, 'thinking', '')).toEqual(pending)
+    expect(reconcilePendingUserMessages(pending, [], [...queued, { ...queued[0]!, id: 'new-queue-op' }], 'thinking', '')).toEqual([])
+  })
+
+  it('uses the post-submit state tail for an external runtime without timeline operation IDs', () => {
+    const pending = [{ id: 'new-op', text: 'repeat', mode: 'steer' as const, createdAt: '2026-07-06T00:00:02.000Z', afterMessageCount: 1 }]
+    const user: Message = { role: 'user', content: [{ type: 'text', text: 'repeat' }] }
+    expect(reconcilePendingUserMessages(pending, [], [], 'thinking', '', [user])).toEqual(pending)
+    expect(reconcilePendingUserMessages(pending, [], [], 'thinking', '', [user, user])).toEqual([])
   })
 
   it('keeps local pending messages while the turn is still active or streaming', () => {
