@@ -9,7 +9,13 @@ import {
   optionalString,
   requireString,
 } from './schema.js'
-import { startBackgroundShell } from './background-shell.js'
+import {
+  evictBackgroundShellNow,
+  killBackgroundShell,
+  readBackgroundShell,
+  startBackgroundShell,
+  waitForBackgroundShell,
+} from './background-shell.js'
 import { selectShell, shellArgv, shellResourceLimitsFromEnv } from './shell-runtime.js'
 
 const DEFAULT_TIMEOUT_MS = 30_000
@@ -62,9 +68,14 @@ async function runShell(input: Record<string, unknown>, ctx: Parameters<Tool['ru
     }
     const cwdInput = optionalString(input, 'cwd')
     const runInBackground = optionalBoolean(input, 'run_in_background') ?? optionalBoolean(input, 'background') ?? false
+    const yieldTimeMs = optionalPositiveInt(input, 'yield_time_ms', 50) ?? optionalPositiveInt(input, 'yieldTimeMs', 50)
+    if (yieldTimeMs !== undefined && yieldTimeMs > 300_000) {
+      throw new ToolError('EINVAL', 'yield_time_ms must be <= 300000')
+    }
     const captureSeparateStreams = optionalBoolean(input, 'capture_separate_streams') ?? false
     const shell = selectShell(optionalString(input, 'shell'))
-    const timeoutMs = bashTimeoutMs(input) ?? DEFAULT_TIMEOUT_MS
+    const explicitTimeoutMs = bashTimeoutMs(input)
+    const timeoutMs = explicitTimeoutMs ?? DEFAULT_TIMEOUT_MS
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       ...(ctx.env ?? {}),
@@ -86,6 +97,7 @@ async function runShell(input: Record<string, unknown>, ctx: Parameters<Tool['ru
     // Race #1: caller aborted before spawn. Short-circuit so we don't leak
     // a subprocess whose only outcome would be an immediate SIGKILL.
     if (ctx.signal.aborted) {
+      if (runInBackground) throw new ToolError('ECANCELED', 'background command aborted before spawn')
       return captureSeparateStreams
         ? JSON.stringify({ stdout: '', stderr: 'aborted before spawn', exitCode: null, signal: 'ABORT', durationMs: 0 })
         : `--- exit code: -1, duration: 0ms\n--- aborted before spawn`
@@ -93,10 +105,73 @@ async function runShell(input: Record<string, unknown>, ctx: Parameters<Tool['ru
 
     if (runInBackground) {
       const task = await startBackgroundShell({ sessionId: ctx.sessionId, command, cwd: resolvedCwd, env, shell })
+      if (ctx.signal.aborted) {
+        let terminated = false
+        try {
+          const killed = await killBackgroundShell(task.taskId, ctx.sessionId, 'SIGKILL')
+          const stopped = await waitForBackgroundShell({
+            taskId: task.taskId,
+            sessionId: ctx.sessionId,
+            timeoutMs: 1_000,
+          })
+          terminated = killed && stopped.exited && stopped.task.status === 'killed'
+          if (terminated) await evictBackgroundShellNow(task.taskId, ctx.sessionId)
+        } catch {
+          // Keep the task in the registry when termination cannot be verified.
+        }
+        throw new ToolError('ECANCELED', terminated
+          ? 'background command aborted after spawn and terminated'
+          : `background command aborted after spawn; taskId: ${task.taskId}; termination unconfirmed — inspect before retrying`)
+      }
       return JSON.stringify({
         taskId: task.taskId,
         note: 'started',
         ...(task.pid !== undefined ? { pid: task.pid } : {}),
+      })
+    }
+
+    if (yieldTimeMs !== undefined && captureSeparateStreams) {
+      throw new ToolError('EINVAL', 'yield_time_ms does not support capture_separate_streams')
+    }
+    if (yieldTimeMs !== undefined) {
+      const start = Date.now()
+      const task = await startBackgroundShell({ sessionId: ctx.sessionId, command, cwd: resolvedCwd, env, shell })
+      const waited = await waitForBackgroundShell({
+        taskId: task.taskId,
+        sessionId: ctx.sessionId,
+        timeoutMs: Math.min(yieldTimeMs, explicitTimeoutMs ?? yieldTimeMs),
+        signal: ctx.signal,
+      })
+      if (waited.aborted || (!waited.exited && explicitTimeoutMs !== undefined && explicitTimeoutMs <= yieldTimeMs)) {
+        const killed = !waited.exited && await killBackgroundShell(task.taskId, ctx.sessionId, 'SIGKILL')
+        const stopped = await waitForBackgroundShell({ taskId: task.taskId, sessionId: ctx.sessionId, timeoutMs: 1_000 })
+        const out = await readBackgroundShell({ taskId: task.taskId, sessionId: ctx.sessionId, offset: 0, maxBytes: MAX_OUTPUT })
+        const terminationConfirmed = killed && stopped.exited && stopped.task.status === 'killed'
+        if (terminationConfirmed) await evictBackgroundShellNow(task.taskId, ctx.sessionId)
+        const duration = Date.now() - start
+        const exitLabel = stopped.exited
+          ? stopped.task.exitCode ?? (stopped.task.signal ? `signal:${stopped.task.signal}` : -1)
+          : 'unknown'
+        return `${out.content}${out.hasMore ? '\n--- output truncated\n' : ''}--- exit code: ${exitLabel}, duration: ${duration}ms\n--- ${waited.aborted ? 'aborted' : `killed after ${timeoutMs}ms (timeout)`}${terminationConfirmed ? '' : `; taskId: ${task.taskId} (termination unconfirmed)`}`
+      }
+      if (waited.exited) {
+        const out = await readBackgroundShell({ taskId: task.taskId, sessionId: ctx.sessionId, offset: 0, maxBytes: MAX_OUTPUT })
+        await evictBackgroundShellNow(task.taskId, ctx.sessionId)
+        const duration = Date.now() - start
+        const exitLabel = waited.task.exitCode ?? (waited.task.signal ? `signal:${waited.task.signal}` : -1)
+        return `${out.content}${out.hasMore ? '\n--- output truncated\n' : ''}--- exit code: ${exitLabel}, duration: ${duration}ms`
+      }
+      const out = await readBackgroundShell({ taskId: task.taskId, sessionId: ctx.sessionId, offset: 0, maxBytes: MAX_OUTPUT })
+      return JSON.stringify({
+        status: 'running',
+        yielded: true,
+        taskId: task.taskId,
+        ...(task.pid !== undefined ? { pid: task.pid } : {}),
+        output: out.content,
+        nextOffset: out.nextOffset,
+        hasMore: out.hasMore,
+        bytesTruncated: out.bytesTruncated,
+        note: 'Command exceeded yield_time_ms and continues in the background. Use process (poll/write/kill) or bash_output with taskId.',
       })
     }
 

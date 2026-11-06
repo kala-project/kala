@@ -256,9 +256,28 @@ const shellToolset: ToolsetPlugin = {
     return [
       tool('shell', 'executor', 'shell', true, 'bash', {
         purpose: 'Run a native shell command inside the executor sandbox. Uses PowerShell or cmd on Windows and a POSIX shell on macOS/Linux.',
-        whenToUse: ['Run tests, builds, linters, package scripts, or precise shell inspections.', 'Use background mode for long-running commands.'],
-        constraints: ['Use syntax for the selected Workspace operating system.', 'Avoid destructive commands unless explicitly requested.', 'Set timeout_seconds to the expected command duration for foreground commands.', 'Use run_in_background for long-running commands, servers, experiments, or commands that need polling.', 'An ack timeout is an unknown execution outcome, not proof the command did not run or stopped; inspect effects before retrying.'],
-      }, { type: 'object', required: ['command'], properties: { command: { type: 'string' }, shell: { type: 'string', enum: ['auto', 'powershell', 'cmd', 'bash', 'zsh', 'sh'] }, cwd: { type: 'string' }, timeout_seconds: { type: 'integer', minimum: 1, description: 'Maximum foreground command runtime in seconds. Pick a value appropriate to the command.' }, run_in_background: { type: 'boolean' } } }),
+        whenToUse: ['Run tests, builds, linters, package scripts, or precise shell inspections.', 'Use background mode or yield_time_ms for long-running or interactive commands.'],
+        constraints: ['Use syntax for the selected Workspace operating system.', 'Avoid destructive commands unless explicitly requested.', 'Set timeout_seconds to the expected command duration for foreground commands.', 'Use run_in_background for long-running commands, servers, or experiments, or set yield_time_ms to run inline up to yield_time_ms and automatically transition to the background if still running.', 'An ack timeout is an unknown execution outcome, not proof the command did not run or stopped; inspect effects before retrying.'],
+      }, { type: 'object', required: ['command'], properties: { command: { type: 'string' }, shell: { type: 'string', enum: ['auto', 'powershell', 'cmd', 'bash', 'zsh', 'sh'] }, cwd: { type: 'string' }, timeout_seconds: { type: 'integer', minimum: 1, description: 'Maximum foreground command runtime in seconds. Pick a value appropriate to the command.' }, yield_time_ms: { type: 'integer', minimum: 50, maximum: 300000, description: 'Wait up to this many milliseconds for completion; if still running, automatically move to the background and return taskId plus partial output.' }, run_in_background: { type: 'boolean' } } }),
+      tool('process', 'executor', 'shell', true, 'process', {
+        purpose: 'Manage session-scoped background processes started via shell (run_in_background or yield_time_ms): list tasks, poll incremental output, write interactive stdin, or send termination signals.',
+        whenToUse: ['List active or completed background processes in this session.', 'Poll incremental output with offset and block=true.', 'Send interactive stdin lines or EOF to a running background process.', 'Stop a background process with SIGTERM, SIGKILL, or SIGINT.'],
+        constraints: ['Only tasks belonging to the current session are accessible.', 'Use block=true and offset=nextOffset when polling instead of tight non-blocking loops.'],
+      }, {
+        type: 'object',
+        required: ['action'],
+        properties: {
+          action: { type: 'string', enum: ['list', 'poll', 'write', 'kill'] },
+          task_id: { type: 'string', description: 'Background taskId (required for poll, write, kill).' },
+          offset: { type: 'integer', minimum: 0, description: 'Byte offset from previous nextOffset when polling.' },
+          block: { type: 'boolean', description: 'Wait up to timeout_ms for new output or process exit when polling.' },
+          wait_for_output: { type: 'boolean', description: 'When block=true, return as soon as new output arrives (default true) instead of waiting only for process exit.' },
+          timeout_ms: { type: 'integer', minimum: 1, maximum: 300000, description: 'Maximum wait time in ms when block=true.' },
+          input: { type: 'string', description: 'UTF-8 string to write to stdin when action=write (include trailing newline to submit a line).' },
+          eof: { type: 'boolean', description: 'Close stdin after writing when action=write.' },
+          signal: { type: 'string', enum: ['SIGTERM', 'SIGKILL', 'SIGINT'], description: 'Signal for action=kill (default SIGTERM).' },
+        },
+      }),
       tool('bash_output', 'executor', 'shell', false, 'bash_output', {
         purpose: 'Read output from a background bash task by task_id.',
         whenToUse: ['Poll long-running tests, builds, dev servers, or experiments.'],

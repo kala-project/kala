@@ -29,6 +29,12 @@ describe('built-in tool intent schema',()=>{
     expect((tool.inputSchema.properties as Record<string,any>).max_bytes).toBeUndefined()
   })
 
+  it('keeps interactive process writes and kills behind the shell approval gate',()=>{
+    expect(createBuiltinTools().find((tool)=>tool.name==='process')).toMatchObject({
+      executionKind:'executor',executionHandler:'process',requiresApproval:true,
+    })
+  })
+
   it('registers the task graph and scheduled task tools under planning',()=>{
     const planningTools=createBuiltinTools().filter((tool)=>tool.toolsetId==='planning')
     expect(planningTools.map((tool)=>tool.name)).toEqual(['todo_graph','scheduled_task'])

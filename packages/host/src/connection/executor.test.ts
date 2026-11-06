@@ -355,6 +355,48 @@ describe('ExecutorRegistry', () => {
     await expect(p).resolves.toMatchObject({ ok: true })
   })
 
+  it('budgets acknowledgement timeout for process(action=poll, block=true) and shell(yield_time_ms) across remote executors', async () => {
+    const reg = createExecutorRegistry(fakeIo() as never, makeResolver({ 'sess-proc': 'ws-default' }), 60_000)
+    const sock = makeFakeSocket('s-proc')
+    reg.attach(sock as never, announceOf('e-proc'))
+
+    const pollPromise = reg.callTool(
+      'sess-proc',
+      callEffect('c-proc-poll', 'process', undefined, {
+        action: 'poll',
+        task_id: 'task-1',
+        block: true,
+        timeout_ms: 90_000,
+      }),
+    )
+    const pollPayload = sock.emitted[0]!.payload as ToolCallMessage
+    expect(pollPayload.ackTimeoutMs).toBe(99_000)
+    sock.emitted[0]!.ack!({ callId: 'c-proc-poll', ok: true, content: '{}' })
+    await expect(pollPromise).resolves.toMatchObject({ ok: true })
+
+    const yieldPromise = reg.callTool(
+      'sess-proc',
+      callEffect('c-shell-yield', 'shell', undefined, {
+        command: 'npm run dev',
+        yield_time_ms: 90_000,
+      }),
+    )
+    const yieldPayload = sock.emitted[1]!.payload as ToolCallMessage
+    expect(yieldPayload.ackTimeoutMs).toBe(99_000)
+    sock.emitted[1]!.ack!({ callId: 'c-shell-yield', ok: true, content: '{}' })
+    await expect(yieldPromise).resolves.toMatchObject({ ok: true })
+
+    const cappedPoll = reg.callTool(
+      'sess-proc',
+      callEffect('c-proc-capped', 'process', undefined, {
+        action: 'poll', task_id: 'task-1', block: true, timeout_ms: 900_000,
+      }),
+    )
+    expect((sock.emitted[2]!.payload as ToolCallMessage).ackTimeoutMs).toBe(330_000)
+    sock.emitted[2]!.ack!({ callId: 'c-proc-capped', ok: true, content: '{}' })
+    await expect(cappedPoll).resolves.toMatchObject({ ok: true })
+  })
+
   it('fails pending calls when the executor disconnects with no replacement', async () => {
     const reg = createExecutorRegistry(
       fakeIo() as never,

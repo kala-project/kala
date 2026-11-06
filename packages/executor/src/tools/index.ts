@@ -11,6 +11,7 @@ export { applyFilePatchTool } from './apply-file-patch.js'
 export { bashTool, shellTool } from './bash.js'
 export { bashOutputTool } from './bash-output.js'
 export { killShellTool } from './kill-shell.js'
+export { processTool } from './process.js'
 export { webfetchTool } from './webfetch.js'
 export { memoryTool } from './memory.js'
 export { internalDirectTools } from './internal.js'
@@ -32,6 +33,7 @@ import { applyFilePatchTool } from './apply-file-patch.js'
 import { bashTool, shellTool } from './bash.js'
 import { bashOutputTool } from './bash-output.js'
 import { killShellTool } from './kill-shell.js'
+import { processTool } from './process.js'
 import { webfetchTool } from './webfetch.js'
 import { memoryTool } from './memory.js'
 import { internalDirectTools } from './internal.js'
@@ -51,6 +53,7 @@ export const allTools: readonly Tool[] = [
   bashTool,
   bashOutputTool,
   killShellTool,
+  processTool,
   webfetchTool,
   memoryTool,
   ...internalDirectTools,

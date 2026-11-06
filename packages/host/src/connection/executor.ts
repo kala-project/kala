@@ -1342,9 +1342,16 @@ function ackTimeoutMsFor(
   let toolTimeoutMs: number | undefined
   if (toolName === 'bash_output' && input['block'] === true) {
     toolTimeoutMs = positiveInt(input['timeout_ms']) ?? 30_000
+  } else if (
+    toolName === 'process' &&
+    (input['action'] === 'poll' || input['action'] === undefined) &&
+    input['block'] === true
+  ) {
+    toolTimeoutMs = Math.min(positiveInt(input['timeout_ms']) ?? positiveInt(input['timeoutMs']) ?? 30_000, 300_000)
   } else if (toolName === 'bash' || toolName === 'shell') {
     if (input['run_in_background'] === true || input['background'] === true) return defaultAckTimeoutMs
-    toolTimeoutMs = bashToolTimeoutMs(input)
+    const yieldTimeMs = positiveInt(input['yield_time_ms']) ?? positiveInt(input['yieldTimeMs'])
+    toolTimeoutMs = yieldTimeMs ?? bashToolTimeoutMs(input)
   } else {
     return defaultAckTimeoutMs
   }
