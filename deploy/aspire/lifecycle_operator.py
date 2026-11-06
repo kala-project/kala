@@ -1228,7 +1228,7 @@ def load_control_upgrade_policy(path: Path) -> dict[str, Any]:
         fail("invalid control upgrade policy")
     required = {"schemaVersion", "reviewId", "predecessorImages", "targetImages", "postgresMajor", "migrationMode", "controlSchema"}
     if (not isinstance(policy, dict) or set(policy) != required or policy["schemaVersion"] != 2
-            or policy["migrationMode"] != "control-plane-7-to-9"
+            or policy["migrationMode"] not in ("control-plane-7-to-9", "control-plane-10-to-11")
             or not isinstance(policy["reviewId"], str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", policy["reviewId"])
             or not isinstance(policy["postgresMajor"], int) or not 10 <= policy["postgresMajor"] <= 99):
         fail("unsupported reviewed control upgrade policy")
@@ -1237,10 +1237,12 @@ def load_control_upgrade_policy(path: Path) -> dict[str, Any]:
         if not isinstance(images, dict) or set(images) not in ACCEPTED_SHAPES or any(not isinstance(v, str) or not IMAGE.fullmatch(v) for v in images.values()):
             fail("control upgrade policy requires an exact immutable image graph")
     plan = policy["controlSchema"]
+    transitions = {"control-plane-7-to-9": (7, 9), "control-plane-10-to-11": (10, 11)}
+    source, target = transitions[policy["migrationMode"]]
     if (not isinstance(plan, dict) or set(plan) != {"fromVersion", "toVersion", "writerRole", "migrations"}
-            or plan["fromVersion"] != 7 or plan["toVersion"] != 9 or plan["writerRole"] != "kala_gateway"
-            or not isinstance(plan["migrations"], list) or len(plan["migrations"]) != 9):
-        fail("only the reviewed control-plane 7-to-9 transition is supported")
+            or plan["fromVersion"] != source or plan["toVersion"] != target or plan["writerRole"] != "kala_gateway"
+            or not isinstance(plan["migrations"], list) or len(plan["migrations"]) != target):
+        fail("only the two exact reviewed control-plane transitions are supported")
     for version, item in enumerate(plan["migrations"], 1):
         if (not isinstance(item, dict) or set(item) != {"version", "name", "checksum"} or item["version"] != version
                 or not isinstance(item["name"], str) or not re.fullmatch(f"{version:04d}_[a-z0-9_]+\\.sql", item["name"])
@@ -1310,7 +1312,10 @@ def control_bundle_probe(target: dict[str, Any], policy: dict[str, Any], paths: 
             document = json.loads(result.stdout)
         except ValueError:
             fail("migration image did not return a bounded release identity")
-        if not isinstance(document, dict) or document.get("event") != event or document.get("migrations") != policy["controlSchema"]["migrations"]:
+        if (not isinstance(document, dict) or document.get("event") != event
+                or document.get("migrations") != policy["controlSchema"]["migrations"]
+                or (action == "--check-source" and (document.get("fromVersion") != policy["controlSchema"]["fromVersion"]
+                    or document.get("toVersion") != policy["controlSchema"]["toVersion"]))):
             fail("migration image bundle/source differs from the reviewed control policy")
 
 
@@ -1372,7 +1377,8 @@ def control_upgrade(args: argparse.Namespace) -> dict[str, Any]:
         result_document = json.loads(result.stdout)
         if (observed["state"] != "exited" or observed["exit"] != 0 or not isinstance(result_document, dict)
                 or result_document.get("event") != "control_schema_upgrade_committed"
-                or result_document.get("fromVersion") != 7 or result_document.get("toVersion") != 9
+                or result_document.get("fromVersion") != policy["controlSchema"]["fromVersion"]
+                or result_document.get("toVersion") != policy["controlSchema"]["toVersion"]
                 or result_document.get("migrations") != policy["controlSchema"]["migrations"]):
             fail("migration outcome was not confirmed")
         document["migrationResult"] = "committed"

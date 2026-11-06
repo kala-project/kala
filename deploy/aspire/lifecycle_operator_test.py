@@ -306,6 +306,29 @@ class ExternalIngressContractTests(unittest.TestCase):
 
 
 class LifecyclePolicyAndStopTests(unittest.TestCase):
+    def test_control_upgrade_policy_accepts_only_matching_reviewed_transitions(self):
+        images = {name: f"example/{name}@sha256:" + "b" * 64 for name in op.SERVICES}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "policy.json"
+            for mode, source, target in (("control-plane-7-to-9", 7, 9), ("control-plane-10-to-11", 10, 11)):
+                plan = {"fromVersion": source, "toVersion": target, "writerRole": "kala_gateway",
+                        "migrations": [{"version": v, "name": f"{v:04d}_migration.sql", "checksum": "a" * 64}
+                                       for v in range(1, target + 1)]}
+                policy = {"schemaVersion": 2, "reviewId": "reviewed", "predecessorImages": images,
+                          "targetImages": images, "postgresMajor": 16, "migrationMode": mode, "controlSchema": plan}
+                with mock.patch.object(op, "private_regular", return_value=path):
+                    path.write_text(json.dumps(policy))
+                    self.assertEqual(op.load_control_upgrade_policy(path), policy)
+                    for mismatch in ({**plan, "fromVersion": source - 1},
+                                     {**plan, "toVersion": target - 1},
+                                     {**plan, "migrations": plan["migrations"][:-1]}):
+                        path.write_text(json.dumps({**policy, "controlSchema": mismatch}))
+                        with self.assertRaises(op.OperatorError):
+                            op.load_control_upgrade_policy(path)
+                    path.write_text(json.dumps({**policy, "migrationMode": "control-plane-9-to-11"}))
+                    with self.assertRaises(op.OperatorError):
+                        op.load_control_upgrade_policy(path)
+
     def test_policy_refuses_unreviewed_migration(self):
         images = {name: f"example/{name}@sha256:" + "b" * 64 for name in op.SERVICES}
         policy = {"schemaVersion": 1, "reviewId": "reviewed", "predecessorImages": images,

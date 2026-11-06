@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Image-contained, deliberately narrow Dedicated 7 -> 9 maintenance entrypoint. */
+/** Image-contained, deliberately narrow Dedicated control-schema maintenance entrypoint. */
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import process from 'node:process'
@@ -9,9 +9,7 @@ import { grantControlWriter } from './init-control-plane.js'
 import { assertWebhookInstallation } from '../webhooks/worker-authority.js'
 
 export type MigrationIdentity = Pick<ControlPlaneMigration, 'version' | 'name' | 'checksum'>
-export interface ControlUpgradePlan {
-  fromVersion: 7
-  toVersion: 9
+export type ControlUpgradePlan = ({ fromVersion: 7; toVersion: 9 } | { fromVersion: 10; toVersion: 11 }) & {
   writerRole: 'kala_gateway'
   migrations: readonly MigrationIdentity[]
 }
@@ -21,9 +19,10 @@ export function migrationIdentities(migrations: readonly ControlPlaneMigration[]
 
 export function validateControlUpgradePlan(value: unknown, migrations: readonly ControlPlaneMigration[]): ControlUpgradePlan {
   const plan = value as Partial<ControlUpgradePlan> | null
-  if (!plan || plan.fromVersion !== 7 || plan.toVersion !== 9 || plan.writerRole !== 'kala_gateway'
+  if (!plan || !((plan.fromVersion === 7 && plan.toVersion === 9) || (plan.fromVersion === 10 && plan.toVersion === 11))
+    || plan.writerRole !== 'kala_gateway'
     || Object.keys(plan).sort().join(',') !== 'fromVersion,migrations,toVersion,writerRole'
-    || !Array.isArray(plan.migrations) || migrations.length !== 9 || plan.migrations.length !== migrations.length) {
+    || !Array.isArray(plan.migrations) || migrations.length !== plan.toVersion || plan.migrations.length !== migrations.length) {
     throw new Error('Unsupported reviewed control upgrade plan')
   }
   for (const [index, actual] of migrations.entries()) {
