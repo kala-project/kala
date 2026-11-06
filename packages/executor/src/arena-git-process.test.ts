@@ -1,14 +1,16 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
+import { once } from 'node:events'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { startExecutor } from './client.js'
-import { assertGroupStopped } from './tools/arena-process-groups.js'
+import { assertArenaKeeper } from './arena-keeper.js'
+import { assertGroupStopped, leaderIdentity } from './tools/arena-process-groups.js'
 import { arenaGitInitTool } from './tools/arena-git-mutation.js'
 import type { ArenaProcessGroup } from './tools/arena-process-groups.js'
 
-describe('Arena Git process-group journal', () => {
+describe.skipIf(process.platform !== 'linux')('Arena Git process-group journal', () => {
   const dirs: string[] = []
   afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 
@@ -32,11 +34,17 @@ describe('Arena Git process-group journal', () => {
       trigger(name: string, ...args: unknown[]) { events.emit(name, ...args) },
     }
     const receiptStorePath = join(root, 'receipts.json')
-    const handle = startExecutor({
-      host: 'http://localhost', workspaceId: 'arena-group', executorId: 'group',
-      sandboxRoots: [root], receiptStorePath, tools: [arenaGitInitTool], ioFactory: (() => socket) as never,
-    })
+    const keeperFile = join(root, 'keeper.json')
+    const keeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 60000)'], { stdio: 'ignore' })
+    let handle: ReturnType<typeof startExecutor> | undefined
     try {
+      writeFileSync(keeperFile, JSON.stringify(await leaderIdentity(keeper.pid!)), { mode: 0o600 })
+      await assertArenaKeeper(keeperFile)
+      handle = startExecutor({
+        host: 'http://localhost', workspaceId: 'arena-group', executorId: 'group',
+        sandboxRoots: [root], receiptStorePath, arenaKeeperIdentityFile: keeperFile,
+        tools: [arenaGitInitTool], ioFactory: (() => socket) as never,
+      })
       const ack = vi.fn()
       socket.trigger('tool:call', {
         origin: 'host', sessionId: 'session', callId: 'arena-init-GROUP',
@@ -53,6 +61,12 @@ describe('Arena Git process-group journal', () => {
       for (const group of receipt.processGroups ?? []) await expect(assertGroupStopped(group)).resolves.toBeUndefined()
       await expect(assertGroupStopped({ ...receipt.processGroups![0]!, pidNamespace: 'pid:[0]' }))
         .rejects.toThrow('PID namespace')
-    } finally { await handle.close() }
+    } finally {
+      await handle?.close()
+      if (keeper.exitCode === null) {
+        keeper.kill('SIGTERM')
+        await once(keeper, 'exit')
+      }
+    }
   }, 20_000)
 })

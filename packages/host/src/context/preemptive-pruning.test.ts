@@ -139,6 +139,7 @@ describe('preemptive tool result pruning', () => {
 
     const resultMessages = await registry.beforeModelCall({
       deps: {
+        store: { get: () => undefined },
         models: {
           get: () => 'test-model',
           set: () => {},

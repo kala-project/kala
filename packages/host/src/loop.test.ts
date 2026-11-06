@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -178,7 +179,7 @@ describe('host loop', () => {
     dir = mkdtempSync(join(tmpdir(), 'kala-host-'))
     store = new SessionStore(dir)
     config = createConfig({ tools: [READ], systemPrompt: 'sys' })
-    const record = await store.create({ config, sessionId: 'sess-1' })
+    const record = await store.create({ config, sessionId: `sess-${randomUUID()}` })
     sessionId = record.sessionId
     state = record.state
   })

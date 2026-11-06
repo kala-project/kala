@@ -60,7 +60,7 @@ describe('PostgreSQL migrations', () => {
   it('applies the initial migration once under an advisory lock and is idempotent', async () => {
     const client = new FakeClient()
     const first = await runPostgresMigrations(pool(client))
-    expect(first).toEqual({ previousVersion: 0, currentVersion: 25, appliedVersions: Array.from({ length: 25 }, (_, i) => i + 1) })
+    expect(first).toEqual({ previousVersion: 0, currentVersion: LATEST_POSTGRES_SCHEMA_VERSION, appliedVersions: Array.from({ length: LATEST_POSTGRES_SCHEMA_VERSION }, (_, i) => i + 1) })
     expect(client.statements[0]).toContain('pg_advisory_lock')
     expect(client.statements).toContain('BEGIN')
     expect(client.statements).toContain('COMMIT')
@@ -79,7 +79,7 @@ describe('PostgreSQL migrations', () => {
 
     client.statements.length = 0
     const second = await runPostgresMigrations(pool(client))
-    expect(second).toEqual({ previousVersion: 25, currentVersion: 25, appliedVersions: [] })
+    expect(second).toEqual({ previousVersion: LATEST_POSTGRES_SCHEMA_VERSION, currentVersion: LATEST_POSTGRES_SCHEMA_VERSION, appliedVersions: [] })
     expect(client.statements).not.toContain('BEGIN')
     expect(client.releaseCount).toBe(2)
   })
@@ -103,7 +103,7 @@ describe('PostgreSQL migrations', () => {
     client.applied.splice(7)
     client.statements.length = 0
     await expect(runPostgresMigrations(pool(client))).resolves.toEqual({
-      previousVersion: 7, currentVersion: 25, appliedVersions: Array.from({ length: 18 }, (_, i) => i + 8),
+      previousVersion: 7, currentVersion: LATEST_POSTGRES_SCHEMA_VERSION, appliedVersions: Array.from({ length: LATEST_POSTGRES_SCHEMA_VERSION - 7 }, (_, i) => i + 8),
     })
     const changes = client.statements.filter((statement) => /^(CREATE|ALTER|DROP|DELETE|UPDATE)/u.test(statement)
       && !statement.includes('kala_schema_migrations'))
