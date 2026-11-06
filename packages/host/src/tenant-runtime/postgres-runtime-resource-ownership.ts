@@ -1,4 +1,4 @@
-import { createRequire } from 'node:module'
+import pg from 'pg'
 import { observePostgresConnectionErrors, type PostgresConnectionErrorEvents } from '../postgres-connection-errors.js'
 
 import { tracePostgresQuery, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
@@ -18,7 +18,7 @@ export interface RuntimeResourceOwnershipDatabase extends RuntimeResourceOwnersh
   end(): Promise<void>
 }
 
-const { Pool } = createRequire(import.meta.url)('pg') as {
+const { Pool } = pg as {
   Pool: new (config: Record<string, unknown>) => RuntimeResourceOwnershipDatabase & PostgresConnectionErrorEvents
 }
 

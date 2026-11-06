@@ -951,6 +951,9 @@ importers:
       '@types/node':
         specifier: 22.9.0
         version: 22.9.0
+      '@types/pg':
+        specifier: 8.20.0
+        version: 8.20.0
       '@types/web-push':
         specifier: 3.6.4
         version: 3.6.4
