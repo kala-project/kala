@@ -151,6 +151,7 @@ export class PostgresRuntimeResourceOwnershipStore {
   readonly #memberships: string
   readonly #ownerships: string
   readonly #effects: string
+  readonly #learningJobs: string
   readonly #arenaClaims: string
   readonly #arenaNonAdmissions: string
   readonly #arenaReconcile: string
@@ -163,6 +164,7 @@ export class PostgresRuntimeResourceOwnershipStore {
     this.#memberships = `${schema}.tenant_runtime_unit_replica_memberships`
     this.#ownerships = `${schema}.tenant_runtime_resource_ownerships`
     this.#effects = `${schema}.tenant_runtime_active_workspace_effects`
+    this.#learningJobs = `${schema}.tenant_runtime_background_learning_jobs`
     this.#arenaClaims = `${schema}.tenant_runtime_arena_repository_claims`
     this.#arenaNonAdmissions = `${schema}.tenant_runtime_arena_non_admissions`
     this.#arenaReconcile = `${schema}.kala_reconcile_arena_effect`
@@ -444,8 +446,12 @@ export class PostgresRuntimeResourceOwnershipStore {
         WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4 FOR UPDATE`,
       resourceValues(lease))
       await assertResourceOwnerInTables(transaction, this.#memberships, this.#ownerships, lease)
+      // Legacy/UNKNOWN Arena rows without an identity still block every
+      // repository. Named Skill/memory effects instead fence their own Session.
       const unscoped = await transaction.query(`SELECT 1 FROM ${this.#effects}
-        WHERE repository_identity IS NULL OR repository_identity = $1 LIMIT 1`, [repositoryIdentity])
+        WHERE repository_identity = $1 OR (repository_identity IS NULL
+          AND effect_id !~ '^(skill-file-[0-9A-HJKMNP-TV-Z]{26}|memory-file-[a-f0-9]{64})$')
+        LIMIT 1`, [repositoryIdentity])
       if (unscoped.rowCount) throw new RuntimeWorkspaceEffectActiveError()
       await transaction.query(`INSERT INTO ${this.#arenaClaims}
         (repository_identity, organization_id, unit_id, resource_id, arena_id)
@@ -477,7 +483,9 @@ export class PostgresRuntimeResourceOwnershipStore {
       resourceValues(lease))
       await assertResourceOwnerInTables(transaction, this.#memberships, this.#ownerships, lease)
       const blocked = await transaction.query(`SELECT 1 FROM ${this.#effects}
-        WHERE repository_identity IS NULL OR repository_identity = $1 LIMIT 1`, [repositoryIdentity])
+        WHERE repository_identity = $1 OR (repository_identity IS NULL
+          AND effect_id !~ '^(skill-file-[0-9A-HJKMNP-TV-Z]{26}|memory-file-[a-f0-9]{64})$')
+        LIMIT 1`, [repositoryIdentity])
       if (blocked.rowCount) throw new RuntimeWorkspaceEffectActiveError()
       const claimed = await transaction.query(`INSERT INTO ${this.#arenaClaims}
         (repository_identity, organization_id, unit_id, resource_id, arena_id)
@@ -576,12 +584,80 @@ export class PostgresRuntimeResourceOwnershipStore {
         || BigInt(current.membership_generation) !== lease.membershipGeneration) {
         throw new RuntimeResourceOwnershipFencedError()
       }
+
       const removed = await transaction.query(`DELETE FROM ${this.#effects}
         WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4
           AND effect_id = $5 AND owner_token = $6 AND generation = $7`,
       [...resourceValues(lease), effectId, lease.ownerToken, lease.generation.toString()])
       if (removed.rowCount !== 1) throw new RuntimeResourceOwnershipFencedError()
     })
+  }
+
+  async enqueueBackgroundLearning(lease: RuntimeResourceOwnership, fingerprint: string): Promise<void> {
+    this.#validateLearningJob(lease, fingerprint)
+    await this.#transaction(async (transaction) => {
+      await this.#assertLearningOwner(transaction, lease)
+      await transaction.query(`INSERT INTO ${this.#learningJobs}
+        (organization_id, unit_id, resource_id, fingerprint, status)
+        VALUES ($1,$2,$3,$4,'pending') ON CONFLICT DO NOTHING`,
+      [lease.organizationId, lease.unitId, lease.resourceId, fingerprint])
+    })
+  }
+
+  /** One generation claims exactly once, before model extraction or any filesystem effect. */
+  async claimBackgroundLearning(lease: RuntimeResourceOwnership, fingerprint: string): Promise<boolean> {
+    this.#validateLearningJob(lease, fingerprint)
+    return await this.#transaction(async (transaction) => {
+      await this.#assertLearningOwner(transaction, lease)
+      const changed = await transaction.query(`UPDATE ${this.#learningJobs}
+        SET status = 'attempted', owner_generation = $5, attempted_at = clock_timestamp()
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_id = $3
+          AND fingerprint = $4 AND status = 'pending' RETURNING fingerprint`,
+      [lease.organizationId, lease.unitId, lease.resourceId, fingerprint, lease.generation.toString()])
+      return changed.rowCount === 1
+    })
+  }
+
+  async finishBackgroundLearning(lease: RuntimeResourceOwnership, fingerprint: string, error?: string): Promise<void> {
+    this.#validateLearningJob(lease, fingerprint)
+    await this.#transaction(async (transaction) => {
+      await this.#assertLearningOwner(transaction, lease)
+      const changed = await transaction.query(`UPDATE ${this.#learningJobs}
+        SET status = 'completed', completed_at = clock_timestamp(), error = $6
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_id = $3
+          AND fingerprint = $4 AND owner_generation = $5 AND status = 'attempted'`,
+      [lease.organizationId, lease.unitId, lease.resourceId, fingerprint, lease.generation.toString(),
+        error?.slice(0, 2_000) ?? null])
+      if (changed.rowCount !== 1) throw new RuntimeResourceOwnershipFencedError()
+    })
+  }
+
+  async pendingBackgroundLearning(lease: RuntimeResourceOwnership): Promise<string[]> {
+    validateOwnership(lease)
+    if (lease.resourceType !== 'session') throw new TypeError('background learning requires a Session owner')
+    return await this.#transaction(async (transaction) => {
+      await this.#assertLearningOwner(transaction, lease)
+      const selected = await transaction.query<{ fingerprint: string }>(`SELECT fingerprint FROM ${this.#learningJobs}
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_id = $3 AND status = 'pending'
+        ORDER BY created_at LIMIT 100`,
+      [lease.organizationId, lease.unitId, lease.resourceId])
+      return selected.rows.map((row) => row.fingerprint)
+    })
+  }
+
+  #validateLearningJob(lease: RuntimeResourceOwnership, fingerprint: string): void {
+    validateOwnership(lease)
+    if (lease.resourceType !== 'session' || !/^[a-f0-9]{64}$/u.test(fingerprint)) {
+      throw new TypeError('background learning requires a Session owner and SHA-256 fingerprint')
+    }
+  }
+
+  async #assertLearningOwner(transaction: RuntimeResourceOwnershipSqlExecutor,
+    lease: RuntimeResourceOwnership): Promise<void> {
+    await transaction.query(`SELECT 1 FROM ${this.#ownerships}
+      WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4 FOR UPDATE`,
+    resourceValues(lease))
+    await assertResourceOwnerInTables(transaction, this.#memberships, this.#ownerships, lease)
   }
 
   /** Bounded operator read: never mutates ownership, claims, or unresolved effects. */
@@ -639,6 +715,130 @@ export class PostgresRuntimeResourceOwnershipStore {
         $1,$2,$3,$4) AS dispatch`,
       [normalized.organizationId, normalized.unitId, normalized.resourceId, effectId])
     return rows.rows[0]?.dispatch ?? null
+  }
+
+  /** Scoped incident inspection only; attempted extraction is not safe to replay. */
+  async inspectOperatorLearningJobs(scope: RuntimeResourceScope, limit = 20): Promise<Array<{
+    fingerprint: string; status: 'pending' | 'attempted' | 'completed'
+    ownerGeneration: bigint | null; createdAt: Date; attemptedAt: Date | null
+    completedAt: Date | null; error: string | null
+  }>> {
+    const normalized = validateResourceScope(scope)
+    if (normalized.resourceType !== 'session' || !Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new TypeError('learning inspection requires a Session and limit of 1..100')
+    }
+    const rows = await this.database.query<{
+      fingerprint: string; status: 'pending' | 'attempted' | 'completed'
+      owner_generation: string | null; created_at: Date; attempted_at: Date | null
+      completed_at: Date | null; error: string | null
+    }>(`SELECT * FROM ${this.#arenaOperatorState.replace(/kala_arena_operator_state$/u, 'kala_operator_learning_jobs')}(
+      $1,$2,$3,$4)`,
+    [normalized.organizationId, normalized.unitId, normalized.resourceId, limit])
+    return rows.rows.map((row) => ({
+      fingerprint: row.fingerprint, status: row.status,
+      ownerGeneration: row.owner_generation === null ? null : BigInt(row.owner_generation),
+      createdAt: row.created_at, attemptedAt: row.attempted_at,
+      completedAt: row.completed_at, error: row.error,
+    }))
+  }
+
+  /** Only PG's locked, still-prepared effect row proves no Executor frame could have been emitted. */
+  async reconcileLearningPrepared(input: {
+    scope: RuntimeResourceScope; effectId: string; generation: bigint; workspaceId: string
+    operatorId: string; incidentId: string
+  }): Promise<void> {
+    const scope = validateResourceScope(input.scope)
+    if (scope.resourceType !== 'session'
+      || !/^(?:skill-file-[0-9A-HJKMNP-TV-Z]{26}|memory-file-[a-f0-9]{64})$/u.test(input.effectId)
+      || input.generation < 1n) throw new TypeError('invalid prepared learning effect')
+    for (const [value, field] of [[input.workspaceId, 'workspaceId'],
+      [input.operatorId, 'operatorId'], [input.incidentId, 'incidentId']] as const) validateText(value, field)
+    try {
+      await this.database.query(`SELECT ${this.#arenaOperatorState.replace(/kala_arena_operator_state$/u, 'kala_reconcile_learning_prepared')}(
+        $1,$2,$3,$4,$5::bigint,$6,$7,$8)`,
+      [scope.organizationId, scope.unitId, scope.resourceId, input.effectId,
+        input.generation.toString(), input.workspaceId, input.operatorId, input.incidentId])
+    } catch (error) {
+      if ((error as { code?: string }).code === 'P0001') throw new RuntimeResourceOwnershipFencedError()
+      throw error
+    }
+  }
+
+  /** Scoped operator-only release after an independent original-journal/process/target inspection. */
+  async reconcileLearningCompleted(input: {
+    scope: RuntimeResourceScope; effectId: string; generation: bigint; workspaceId: string
+    operatorId: string; incidentId: string; evidence: Record<string, unknown>
+  }): Promise<void> {
+    const scope = validateResourceScope(input.scope)
+    if (scope.resourceType !== 'session'
+      || !/^(?:skill-file-[0-9A-HJKMNP-TV-Z]{26}|memory-file-[a-f0-9]{64})$/u.test(input.effectId)
+      || input.generation < 1n || !input.evidence || JSON.stringify(input.evidence).length > 16_000) {
+      throw new TypeError('invalid completed learning effect')
+    }
+    for (const [value, field] of [[input.workspaceId, 'workspaceId'],
+      [input.operatorId, 'operatorId'], [input.incidentId, 'incidentId']] as const) validateText(value, field)
+    try {
+      await this.database.query(`SELECT ${this.#arenaOperatorState.replace(/kala_arena_operator_state$/u, 'kala_reconcile_learning_completed')}(
+        $1,$2,$3,$4,$5::bigint,$6,$7,$8,$9::jsonb)`,
+      [scope.organizationId, scope.unitId, scope.resourceId, input.effectId,
+        input.generation.toString(), input.workspaceId, input.operatorId, input.incidentId,
+        JSON.stringify(input.evidence)])
+    } catch (error) {
+      if ((error as { code?: string }).code === 'P0001') throw new RuntimeResourceOwnershipFencedError()
+      throw error
+    }
+  }
+
+  /** Scoped incident resolution only for an original durable negative admission. */
+  async reconcileLearningDenied(input: {
+    scope: RuntimeResourceScope; effectId: string; generation: bigint; workspaceId: string
+    operatorId: string; incidentId: string; evidence: Record<string, unknown>
+  }): Promise<void> {
+    const scope = validateResourceScope(input.scope)
+    if (scope.resourceType !== 'session'
+      || !/^(?:skill-file-[0-9A-HJKMNP-TV-Z]{26}|memory-file-[a-f0-9]{64})$/u.test(input.effectId)
+      || input.generation < 1n || !input.evidence || JSON.stringify(input.evidence).length > 16_000) {
+      throw new TypeError('invalid denied learning effect')
+    }
+    for (const [value, field] of [[input.workspaceId, 'workspaceId'],
+      [input.operatorId, 'operatorId'], [input.incidentId, 'incidentId']] as const) validateText(value, field)
+    try {
+      await this.database.query(`SELECT ${this.#arenaOperatorState.replace(/kala_arena_operator_state$/u, 'kala_reconcile_learning_denied')}(
+        $1,$2,$3,$4,$5::bigint,$6,$7,$8,$9::jsonb)`,
+      [scope.organizationId, scope.unitId, scope.resourceId, input.effectId,
+        input.generation.toString(), input.workspaceId, input.operatorId, input.incidentId,
+        JSON.stringify(input.evidence)])
+    } catch (error) {
+      if ((error as { code?: string }).code === 'P0001') throw new RuntimeResourceOwnershipFencedError()
+      throw error
+    }
+  }
+
+  /** Read-only tenant-operator proof that the original PG effect was finally removed. */
+  async inspectOperatorLearningFinalization(scope: RuntimeResourceScope, effectId: string): Promise<{
+    generation: bigint; workspaceId: string; requestDigest: string
+  } | null> {
+    const normalized = validateResourceScope(scope)
+    if (normalized.resourceType !== 'session'
+      || !/^(?:skill-file-[0-9A-HJKMNP-TV-Z]{26}|memory-file-[a-f0-9]{64})$/u.test(effectId)) {
+      throw new TypeError('invalid learning finalization scope')
+    }
+    let rows: Array<{ generation: string; workspace_id: string; request_digest: string }>
+    try {
+      const result = await this.database.query<{
+        generation: string; workspace_id: string; request_digest: string
+      }>(`SELECT * FROM ${this.#arenaOperatorState.replace(/kala_arena_operator_state$/u, 'kala_operator_learning_finalization')}(
+        $1,$2,$3,$4)`,
+      [normalized.organizationId, normalized.unitId, normalized.resourceId, effectId])
+      rows = result.rows
+    } catch (error) {
+      if ((error as { code?: string }).code === 'P0001') throw new RuntimeResourceOwnershipFencedError()
+      throw error
+    }
+    const row = rows[0]
+    return row ? {
+      generation: BigInt(row.generation), workspaceId: row.workspace_id, requestDigest: row.request_digest,
+    } : null
   }
 
   /** Scoped read for the legacy release-before-effect crash window; NULL is not proof of no other tenant's claim. */

@@ -13,7 +13,8 @@
  */
 
 import { hostname, platform } from 'node:os'
-import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { isAbsolute, join } from 'node:path'
 import process from 'node:process'
 
 import type {
@@ -46,8 +47,11 @@ import { loadOrCreateWorkspaceId } from './workspace-id.js'
 import { collectIpAddresses, normalizeOs } from './announce-info.js'
 import { subscribeBackgroundTasks } from './tools/background-shell.js'
 import { createTerminalManager } from './terminal-manager.js'
-import { conflictingExecutionResult, executionRequestDigest, ExecutionReceiptStore, unknownExecutionResult } from './execution-receipts.js'
+import { conflictingExecutionResult, executionRequestDigest, ExecutionReceiptStore, unknownExecutionResult,
+  type LearningEffectTarget } from './execution-receipts.js'
 import { arenaGroupRecorder, leaderIdentity, type ArenaProcessGroup } from './tools/arena-process-groups.js'
+import { skillFileTool, workspaceSkillTarget } from './tools/skill-file.js'
+import { memoryTool, workspaceMemoryTarget } from './tools/memory.js'
 import { assertArenaKeeper } from './arena-keeper.js'
 import type { RuntimeLogger } from './logger.js'
 import { executorReleaseVersion } from './build-info.js'
@@ -305,6 +309,8 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
   const knownMcpToolNames = new Set<string>()
   type AnnounceWithMcp = ExecutorAnnounce & { mcpTools?: McpToolDescriptor[] }
   const createAnnouncement = (keeperHealthy: boolean): AnnounceWithMcp => ({
+    ...(receiptStore && keeperHealthy && tools.get('skill_file') === skillFileTool ? { skillFileEffectVersion: 2 as const } : {}),
+    ...(receiptStore && keeperHealthy && tools.get('memory') === memoryTool ? { memoryEffectVersion: 2 as const } : {}),
     ...(keeperHealthy ? { arenaKeeperVersion: 1 as const } : {}),
     appDebugVersion: 1,
     ...(options.tools === undefined && tools.has('computer_use') ? { computerUsePolicyVersion: 1 as const, computerUseFeaturePolicyVersion: 1 as const } : {}),
@@ -328,6 +334,45 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
     pid: process.pid,
     startedAt: new Date(Date.now() - Math.round(process.uptime() * 1000)).toISOString(),
   })
+  const learningTarget = async (call: ToolCallMessage, signal: AbortSignal): Promise<LearningEffectTarget> => {
+    if (!call.cwd || !isAbsolute(call.cwd)) throw new Error('fenced learning requires an absolute workspace cwd')
+    let path: string, action: LearningEffectTarget['action']
+    if (call.name === 'skill_file') {
+      if (typeof call.input.name !== 'string' || call.input.name.length > 64
+        || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(call.input.name)
+        || !['create', 'replace', 'delete'].includes(String(call.input.action))) {
+        throw new Error('invalid skill target for durable evidence')
+      }
+      action = call.input.action as LearningEffectTarget['action']
+      path = await workspaceSkillTarget(call.input.name, call.cwd, sandbox)
+    } else {
+      if (!['write', 'delete'].includes(String(call.input.operation))
+        || call.input.scope !== 'workspace') throw new Error('invalid memory target for durable evidence')
+      action = call.input.operation as LearningEffectTarget['action']
+      path = await workspaceMemoryTarget(call.input, {
+        sessionId: call.sessionId, callId: call.callId, sandbox, signal, cwd: call.cwd,
+      })
+    }
+    if (action !== 'delete' && typeof call.input.content !== 'string') {
+      throw new Error('learning write requires content for durable evidence')
+    }
+    if (call.name === 'skill_file' && call.input.expected_revision !== undefined
+      && (typeof call.input.expected_revision !== 'string'
+        || !/^[a-f0-9]{64}$/u.test(call.input.expected_revision))) {
+      throw new Error('invalid expected skill revision')
+    }
+    return {
+      tool: call.name as LearningEffectTarget['tool'], action,
+      ...((call.name === 'skill_file' ? tools.get('skill_file') === skillFileTool
+        : tools.get('memory') === memoryTool) ? { implementation: 'builtin-v2' as const } : {}),
+      pathDigest: createHash('sha256').update(path).digest('hex'),
+      ...(action === 'delete' ? {} : {
+        contentDigest: createHash('sha256').update(call.input.content as string).digest('hex'),
+      }),
+      ...(call.name === 'skill_file' && typeof call.input.expected_revision === 'string'
+        ? { expectedRevision: call.input.expected_revision } : {}),
+    }
+  }
   const applyMcpCatalog = (nextTools: readonly Tool[], descriptors: readonly McpToolDescriptor[]): void => {
     for (const name of mcpToolNames) tools.delete(name)
     mcpToolNames.clear()
@@ -494,11 +539,43 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
   socket.on('tool:call', async (payload: ToolCallMessage, ack) => {
     const internal = payload.name.startsWith('__')
     const arenaAction = ['probe', 'status', 'diff', 'init', 'apply', 'cleanup'].find((action) => payload.name === `arena_git_${action}`)
+    if (payload.name === 'skill_file' && payload.input.action !== 'read' && payload.ownerGeneration
+      && (!receiptStore || payload.origin !== 'host'
+        || payload.input.ownerGeneration !== payload.ownerGeneration
+        || !/^skill-file-[0-9A-HJKMNP-TV-Z]{26}$/u.test(payload.callId))) {
+      ack({ callId: payload.callId, ok: false, content: 'ERROR: EACCES: skill mutation requires generation-bound Host admission' })
+      return
+    }
+    if (payload.name === 'memory' && ['write', 'delete'].includes(String(payload.input.operation))
+      && payload.ownerGeneration && payload.input.scope === 'workspace'
+      && (!receiptStore || payload.origin !== 'host'
+        || payload.input.ownerGeneration !== payload.ownerGeneration
+        || !/^memory-file-[a-f0-9]{64}$/u.test(payload.callId))) {
+      ack({ callId: payload.callId, ok: false, content: 'ERROR: EACCES: memory mutation requires generation-bound Host admission' })
+      return
+    }
     if (arenaAction && (!receiptStore || payload.origin !== 'host'
       || !payload.ownerGeneration || payload.input.ownerGeneration !== payload.ownerGeneration
       || !payload.callId.startsWith(`arena-${arenaAction}-`))) {
       ack({ callId: payload.callId, ok: false, content: 'ERROR: EACCES: arena action requires durable generation-bound admission' })
       return
+    }
+    const fencedLearning = Boolean(payload.ownerGeneration
+      && ((payload.name === 'skill_file' && payload.input.action !== 'read')
+        || (payload.name === 'memory' && payload.input.scope === 'workspace'
+          && ['write', 'delete'].includes(String(payload.input.operation)))))
+    if (fencedLearning) {
+      try { await assertArenaKeeper(options.arenaKeeperIdentityFile) }
+      catch {
+        try {
+          await receiptStoreReady
+          ack(await receiptStore!.denyLearning(receiptKey(payload.sessionId, payload.callId),
+            payload.callId, executionRequestDigest(payload), payload.ownerGeneration!))
+        } catch {
+          ack(unknownExecutionResult(payload.callId))
+        }
+        return
+      }
     }
     if (arenaAction) {
       try { await assertArenaKeeper(options.arenaKeeperIdentityFile) }
@@ -597,10 +674,19 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
           shellApprovalVerified = true
         }
       }
+      let target: LearningEffectTarget | undefined
+      if (fencedLearning) {
+        try { target = await learningTarget(payload, controller.signal) }
+        catch {
+          replyResult = await receiptStore!.denyLearning(key, payload.callId, requestDigest, payload.ownerGeneration!)
+          return
+        }
+      }
       if (!internal) await receiptStore?.begin(key, payload.callId, requestDigest, payload.ownerGeneration,
-        payload.name.startsWith('arena_git_') ? await leaderIdentity(process.pid) : undefined)
+        payload.name.startsWith('arena_git_') || fencedLearning ? await leaderIdentity(process.pid) : undefined,
+        target)
       executionStarted = true
-      if (arenaAction) await assertArenaKeeper(options.arenaKeeperIdentityFile)
+      if (arenaAction || fencedLearning) await assertArenaKeeper(options.arenaKeeperIdentityFile)
       logger.info({ sessionId: payload.sessionId, callId: payload.callId, tool: payload.name, internal, ...(!desktopCall && !knownMcpToolNames.has(payload.name) ? { input: safeToolInput(payload.input) } : {}), ...(payload.cwd ? { cwd: payload.cwd } : {}) }, 'tool execution started')
       const rawResult = await runOne(tools, sandbox, controller.signal, payload, overflowConfig, shellApprovalVerified, options.networkPolicy, async (event) => {
         await new Promise<void>((resolve, reject) => socket.timeout(5_000).emit('executor:network_audit', event, (error, result) => error || !result?.accepted ? reject(error ?? new Error('network audit rejected')) : resolve()))
@@ -889,6 +975,7 @@ const OVERFLOW_EXEMPT_TOOLS: ReadonlySet<string> = new Set([
   'computer_use',
   'memory',
   'bash_output',
+  'skill_file',
   'arena_git_status',
   'arena_git_diff',
   'arena_git_init',

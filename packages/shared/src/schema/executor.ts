@@ -108,6 +108,8 @@ export const McpToolDescriptorSchema = z.object({
 }).strict() satisfies z.ZodType<McpToolDescriptor>
 
 export const ExecutorAnnounceSchema = z.object({
+  skillFileEffectVersion: z.union([z.literal(1), z.literal(2)]).optional(),
+  memoryEffectVersion: z.union([z.literal(1), z.literal(2)]).optional(),
   arenaKeeperVersion: z.literal(1).optional(),
   computerUsePolicyVersion: z.literal(1).optional(),
   computerUseFeaturePolicyVersion: z.literal(1).optional(),

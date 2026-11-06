@@ -7,9 +7,21 @@ import { selectHooks, type HookPayload } from './hooks.js'
 import { runPostToolHooks, runPreToolHooks } from './hooks-runner.js'
 import { guardShellToolDispatch } from './shell-ast-safety.js'
 import { isSkillManager, runSkillTool } from './skills.js'
+import { runSkillManagerTool } from './skill-manager.js'
+import {
+  persistLearningCadence, removeLearningCheckpoints, restoreLearningCadence,
+  resumeBackgroundLearning, scheduleBackgroundLearning,
+} from './background-learning.js'
 import { runScheduledTaskTool } from './scheduled-task-tool.js'
 import { runTodoGraphTool } from './todo-graph.js'
-import { consolidateMemory } from './memory-consolidation.js'
+import {
+  advanceTurnLearningMetrics,
+  consolidateMemory,
+  getOrCreateLearningMetrics,
+  injectLearningNudgeIfEligible,
+  recordToolDispatchForLearning,
+  resetLearningMetrics,
+} from './memory-consolidation.js'
 import { runToolCatalogTool } from './tool-catalog.js'
 import { runDagPlanTool } from '../dag/tool.js'
 import { runDagWorkerTool } from '../dag/worker-tool.js'
@@ -29,6 +41,7 @@ export const BUILTIN_HOST_TOOL_HANDLERS = [
   'tool_search',
   'tool_describe',
   'skill',
+  'skill_manager',
   'dag_plan',
   'dag_report_progress',
   'dag_request_decision',
@@ -112,6 +125,9 @@ export function createBuiltinExtensionRegistry(additional: readonly HostExtensio
             effect.input,
           )
         },
+        async skill_manager({ deps, sessionId, effect }) {
+          return await runSkillManagerTool(deps, sessionId, effect)
+        },
         async dag_plan(context) {
           return await runDagPlanTool(context)
         },
@@ -183,6 +199,39 @@ export function createBuiltinExtensionRegistry(additional: readonly HostExtensio
       version: '2026-09-29',
       maintenance: {
         consolidateMemory,
+      },
+      lifecycle: {
+        async onSessionLoaded({ deps, record }) {
+          try {
+            await restoreLearningCadence(deps, record.sessionId)
+            await resumeBackgroundLearning(deps, record.sessionId)
+          } catch (error) {
+            process.emitWarning(`learning recovery failed: ${String(error)}`, { code: 'KALA_BACKGROUND_LEARNING' })
+          }
+        },
+        afterToolDispatch({ sessionId, effect }, result) {
+          recordToolDispatchForLearning(sessionId, effect.name, effect.input, result.ok)
+        },
+        beforeModelCall({ deps, sessionId, messages }) {
+          const record = deps.store.get(sessionId)
+          return injectLearningNudgeIfEligible(sessionId, messages,
+            !!record && !deps.assertSessionEffectOwner && (!record.workspaceId || !!record.state.cwd))
+        },
+        async afterTurn({ deps, sessionId }) {
+          const metrics = { ...getOrCreateLearningMetrics(sessionId) }
+          advanceTurnLearningMetrics(sessionId)
+          try {
+            await persistLearningCadence(deps, sessionId)
+            await resumeBackgroundLearning(deps, sessionId)
+            await scheduleBackgroundLearning(deps, sessionId, metrics)
+          } catch (error) {
+            process.emitWarning(`learning checkpoint failed: ${String(error)}`, { code: 'KALA_BACKGROUND_LEARNING' })
+          }
+        },
+        async onSessionDeleted({ record }) {
+          resetLearningMetrics(record.sessionId)
+          if (record.logPath) await removeLearningCheckpoints(record.logPath)
+        },
       },
     },
     {

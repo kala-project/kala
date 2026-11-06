@@ -247,6 +247,27 @@ describe('skills', () => {
     expect(reads).toEqual([path, path])
   })
 
+  it('discovers workspace skills when the Executor uses the trusted unrestricted filesystem mode', async () => {
+    const cwd = '/outside-executor-process-cwd/project'
+    const root = join(cwd, '.agent', 'skills')
+    const store = new SessionStore(join(dir, 'sessions'))
+    const record = await store.create({ sessionId: 'unrestricted', config: createConfig({ tools: [] }),
+      initialCwd: cwd, workspaceId: 'ws-unrestricted' })
+    const body = '---\nname: local-skill\ndescription: Trusted workspace.\n---\n\n# Body\n'
+    const registry = await createSkillManager(store, record.config, {
+      async listDirs(workspaceId, requested, requestId) {
+        return { requestId, workspaceId, path: requested!, roots: ['/executor-process-cwd'],
+          unrestricted: true,
+          entries: [{ name: 'local-skill', path: join(root, 'local-skill'), type: 'directory' as const }] }
+      },
+      async workspaceReadBinary(request) {
+        return { requestId: request.requestId, base64: Buffer.from(body).toString('base64'),
+          mime: 'text/plain', size: Buffer.byteLength(body) }
+      },
+    }).refreshSession(record)
+    expect(registry.get('local-skill')).toBeDefined()
+  })
+
   it('discovers workspace skills through a Windows Executor path', async () => {
     const cwd = String.raw`C:\workspace\example-project`
     const root = String.raw`C:\workspace\example-project\.agent\skills`

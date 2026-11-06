@@ -2107,6 +2107,7 @@ export function configureDashboardNamespace(
         requestId: p.requestId,
         sessionId: p.sessionId,
         saved: outcome.saved,
+        ...(outcome.savedSkills !== undefined ? { savedSkills: outcome.savedSkills } : {}),
         skipped: outcome.skipped,
         ...(outcome.reason !== undefined ? { reason: outcome.reason } : {}),
         ...(outcome.error !== undefined ? { error: outcome.error } : {}),

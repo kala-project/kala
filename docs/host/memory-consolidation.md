@@ -1,6 +1,6 @@
 # Memory consolidation
 
-**Status**: design accepted, implementation in progress.
+**Status**: Manual consolidation runs for non-owner-fenced Host-local and Executor-bound sessions with a bound cwd. Background extraction runs only for non-Executor-bound, non-owner-fenced Host-local sessions. Shared-owner Runtimes reject workspace consolidation before extraction because Executor memory writes lack final-effect fencing. Host-local background attempts use transcript-keyed, persistent at-most-once checkpoints, not guaranteed replay after an interrupted effect.
 **Depends on**: three-tier memory ([`../executor/tools.md`](../reference/executor/tools.md) §2.10, [`../planning/feature-gaps.md`](../research/proposals/feature-gaps.md) §1.22).
 **Pattern reference**: `references/claude-code-collection/memory/consolidator.py`.
 
@@ -10,13 +10,13 @@ The current memory system exposes three scopes (`session` / `workspace` / `globa
 
 **Impulse writes miss the durable-signal pass.** The agent writes a memory when *the current turn* looks noteworthy, without seeing the whole session. By the time a session ends, the model has learned things — user preferences, corrections, project decisions — that were never distilled into `MEMORY.md` because no single turn was the right moment to write them.
 
-Claude Code's fix: expose a **single slash command** (`/consolidate-memory`) that reads the current session's messages, asks a lightweight LLM call to pull out durable signal, and writes results directly to the workspace memory root. No auto-trigger, no `.staging/` intermediate, no two-phase pipeline. One command, one call, done.
+The original design exposed a **single slash command** (`/consolidate-memory`) that reads the session's messages and asks an LLM for durable signal. Manual consolidation also works on Executor-bound sessions without a shared Owner fence: the memory tool targets the sandbox root containing the session cwd, or the cwd when unrestricted. The Host-local implementation has a bounded background trigger. Neither route uses a `.staging/` directory; background extraction remains blocked for Executor-bound or owner-fenced workspaces.
 
 ## 2. What we build
 
 ### 2.1 Trigger
 
-Only one path: user types `/consolidate-memory` in the dashboard composer. Nothing runs automatically — not on session-done, not on turn count, not on threshold.
+The manual path is `/consolidate-memory` in the dashboard composer. Host-local sessions may also schedule one background attempt after an eligible turn (8 tool calls, two recovered failures, or a delivered/periodic learning nudge). Background attempts are checkpointed beside the session log; an additional transcript queued during active extraction runs after it finishes, and pending work resumes on the next load. An attempt interrupted after it begins is not replayed because the write outcome is unknown. Executor-bound/owner-fenced sessions do not schedule.
 
 Skips (silent no-op returning a short toast):
 
@@ -75,7 +75,7 @@ The `source: consolidator` field is what enables the "don't downgrade" check on 
 ### 2.5 What the consolidator does not do
 
 - **No `.staging/` directory.** Direct write.
-- **No auto-fire on session-done.** Slash command only.
+- **No unconditional auto-fire on session-done.** Host-local extraction requires a complexity/recovery/learning-nudge trigger.
 - **No cross-session consolidation.** Runs against the *current* session's messages, not accumulated staged extracts.
 - **No global-scope consolidation.** Workspace only (`<workspace>/.kala/memory/`). Global memory lives at `~/.kala/memory/` and grows via explicit `memory { operation: "write" }` — cross-workspace signal is harder to reason about and out of scope.
 - **No merging into existing files.** If the LLM emits a name that collides with an existing memory, we either skip (higher confidence exists) or overwrite (equal or lower). We do not read the existing content and hand it back to the LLM for a merge pass. Simpler; matches Claude Code.

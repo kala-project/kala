@@ -396,6 +396,19 @@ async function main(): Promise<void> {
         ...(persistentStorage ? {
           sessionAuthority: persistentStorage.sessionAuthority,
           ...(sessionOwnership ? { requireArenaEffectBarrier: true } : {}),
+          ...(sessionOwnership ? { requireSkillEffectBarrier: true } : {}),
+          ...(persistentStorage.registerSkillEffect ? {
+            registerSkillEffect: persistentStorage.registerSkillEffect,
+            beginSkillDispatch: persistentStorage.beginSkillDispatch,
+            releaseNeverDispatchedSkillEffect: persistentStorage.releaseNeverDispatchedSkillEffect,
+          } : {}),
+          ...(persistentStorage.registerMemoryEffect ? {
+            registerMemoryEffect: persistentStorage.registerMemoryEffect,
+            beginMemoryDispatch: persistentStorage.beginMemoryDispatch,
+          } : {}),
+          ...(persistentStorage.backgroundLearningJobs ? {
+            backgroundLearningJobs: persistentStorage.backgroundLearningJobs,
+          } : {}),
           ...(persistentStorage.registerArenaEffect ? { registerArenaEffect: persistentStorage.registerArenaEffect } : {}),
           ...(persistentStorage.releaseNeverDispatchedArenaEffect ? {
             releaseNeverDispatchedArenaEffect: persistentStorage.releaseNeverDispatchedArenaEffect,
@@ -769,6 +782,52 @@ async function createExperimentalUnitStorage(
           const owner = await sessionOwnership.ensure(sessionId)
           if (String(owner.generation) !== generation || !replicaStore) throw new Error('Arena dispatch owner changed')
           await replicaStore.beginWorkspaceEffectDispatch(owner, callId, requestDigest)
+        },
+        registerSkillEffect: async (sessionId: string, generation: string, callId: string, workspaceId: string) => {
+          if (!/^skill-file-[0-9A-HJKMNP-TV-Z]{26}$/u.test(callId) || !workspaceId) {
+            throw new Error('Invalid Skill effect identity')
+          }
+          const owner = await sessionOwnership.ensure(sessionId)
+          if (String(owner.generation) !== generation || !replicaStore) throw new Error('Skill owner generation changed')
+          await replicaStore.registerWorkspaceEffect(owner, callId, workspaceId, undefined, undefined, true)
+          return async () => await replicaStore.completeWorkspaceEffect(owner, callId)
+        },
+        beginSkillDispatch: async (sessionId: string, generation: string, callId: string, digest: string) => {
+          const owner = await sessionOwnership.ensure(sessionId)
+          if (String(owner.generation) !== generation || !replicaStore) throw new Error('Skill dispatch owner changed')
+          await replicaStore.beginWorkspaceEffectDispatch(owner, callId, digest)
+        },
+        releaseNeverDispatchedSkillEffect: async (
+          sessionId: string, generation: string, callId: string, workspaceId: string,
+        ) => {
+          const owner = await sessionOwnership.ensure(sessionId)
+          if (String(owner.generation) !== generation || !replicaStore) throw new Error('Skill refusal owner changed')
+          await replicaStore.completeNeverDispatchedWorkspaceEffect(owner, callId, workspaceId,
+            'skill_host_pre_dispatch_rejection')
+        },
+        registerMemoryEffect: async (sessionId: string, generation: string, callId: string, workspaceId: string) => {
+          if (!/^memory-file-[a-f0-9]{64}$/u.test(callId) || !workspaceId) {
+            throw new Error('Invalid memory effect identity')
+          }
+          const owner = await sessionOwnership.ensure(sessionId)
+          if (String(owner.generation) !== generation || !replicaStore) throw new Error('Memory owner generation changed')
+          await replicaStore.registerWorkspaceEffect(owner, callId, workspaceId, undefined, undefined, true)
+          return async () => await replicaStore.completeWorkspaceEffect(owner, callId)
+        },
+        beginMemoryDispatch: async (sessionId: string, generation: string, callId: string, digest: string) => {
+          const owner = await sessionOwnership.ensure(sessionId)
+          if (String(owner.generation) !== generation || !replicaStore) throw new Error('Memory dispatch owner changed')
+          await replicaStore.beginWorkspaceEffectDispatch(owner, callId, digest)
+        },
+        backgroundLearningJobs: {
+          enqueue: async (sessionId: string, fingerprint: string) =>
+            await replicaStore!.enqueueBackgroundLearning(await sessionOwnership.ensure(sessionId), fingerprint),
+          claim: async (sessionId: string, fingerprint: string) =>
+            await replicaStore!.claimBackgroundLearning(await sessionOwnership.ensure(sessionId), fingerprint),
+          complete: async (sessionId: string, fingerprint: string, error?: string) =>
+            await replicaStore!.finishBackgroundLearning(await sessionOwnership.ensure(sessionId), fingerprint, error),
+          pending: async (sessionId: string) =>
+            await replicaStore!.pendingBackgroundLearning(await sessionOwnership.ensure(sessionId)),
         },
         releaseNeverDispatchedArenaEffect: async (
           sessionId: string, generation: string, callId: string, workspaceId: string,

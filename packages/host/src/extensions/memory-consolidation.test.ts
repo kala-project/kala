@@ -263,6 +263,99 @@ describe('consolidateMemory', () => {
     expect(out.skipped).toBe(1)
   })
 
+  it('stops on an indeterminate Executor write instead of dispatching later candidates', async () => {
+    const { deps, callTool } = makeDeps({
+      llmText: JSON.stringify({ memories: [goodEntry, { ...goodEntry, name: 'another-memory' }] }),
+      callTool: async () => ({ ok: false, content: 'ack timed out; outcome unknown',
+        failure: { code: 'tool_ack_timeout', category: 'infrastructure', outcome: 'indeterminate' } }),
+    })
+    const out = await consolidateMemory(deps, 's1')
+    expect(out).toMatchObject({ saved: [], skipped: 0,
+      error: expect.stringContaining('memory write outcome unknown') })
+    expect(callTool).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops after a rejected ownership-fenced memory dispatch instead of attempting more writes', async () => {
+    const { deps, callTool } = makeDeps({
+      llmText: JSON.stringify({ memories: [goodEntry, { ...goodEntry, name: 'another-memory' }] }),
+      callTool: async () => { throw new Error('owner generation fenced') },
+    })
+    const out = await consolidateMemory(deps, 's1')
+    expect(out).toMatchObject({ saved: [], skipped: 0, error: 'owner generation fenced' })
+    expect(callTool).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not even extract candidates on owner-fenced Runtimes without final-effect fencing', async () => {
+    const { deps, callTool, llmCall } = makeDeps({
+      llmText: JSON.stringify({ memories: [goodEntry] }),
+    })
+    deps.assertSessionEffectOwner = async () => ({ ownerGeneration: 'generation-1' })
+    const out = await consolidateMemory(deps, 's1')
+    expect(out).toMatchObject({
+      saved: [],
+      error: expect.stringContaining('final-effect fencing'),
+    })
+    expect(llmCall).not.toHaveBeenCalled()
+    expect(callTool).not.toHaveBeenCalled()
+  })
+
+  it('consolidates on a bound shared-owner Executor only with the durable generic memory barrier', async () => {
+      const { deps, callTool, llmCall } = makeDeps({
+        llmText: JSON.stringify({ memories: [goodEntry] }),
+      })
+      const record = deps.store.get('s1')!
+      Object.assign(record, { workspaceId: 'owner-workspace' })
+      record.state = { ...record.state, cwd: '/remote/workspace' }
+      deps.assertSessionEffectOwner = async () => ({ ownerGeneration: '9' })
+      deps.requireMemoryEffectBarrier = true
+      const outcome = await consolidateMemory(deps, 's1')
+      expect(outcome).toEqual({ saved: ['user-prefers-concise'], skipped: 0 })
+      expect(llmCall).toHaveBeenCalledOnce()
+      expect(callTool).toHaveBeenCalledWith('s1', expect.objectContaining({
+        name: 'memory', cwd: '/remote/workspace',
+        input: expect.objectContaining({ scope: 'workspace', operation: 'write' }),
+      }))
+  })
+
+  it('consolidates into the bound Executor workspace when no shared-owner fence is required', async () => {
+    const { deps, callTool, llmCall } = makeDeps({
+      llmText: JSON.stringify({ memories: [goodEntry] }),
+    })
+    const record = deps.store.get('s1')!
+    Object.assign(record, { workspaceId: 'executor-workspace' })
+    record.state = { ...record.state, cwd: '/remote/workspace' }
+    const out = await consolidateMemory(deps, 's1')
+    expect(out.saved).toEqual(['user-prefers-concise'])
+    expect(llmCall).toHaveBeenCalledOnce()
+    expect(callTool).toHaveBeenCalledWith('s1', expect.objectContaining({
+      name: 'memory', cwd: '/remote/workspace',
+      input: expect.objectContaining({ scope: 'workspace', operation: 'write' }),
+    }))
+  })
+
+  it('rejects Executor-bound consolidation with no session cwd before calling the model', async () => {
+    const { deps, callTool, llmCall } = makeDeps()
+    Object.assign(deps.store.get('s1')!, { workspaceId: 'executor-workspace' })
+    expect((await consolidateMemory(deps, 's1')).error).toContain('requires a session cwd')
+    expect(llmCall).not.toHaveBeenCalled()
+    expect(callTool).not.toHaveBeenCalled()
+  })
+
+  it('does not write candidates after ownership changes during the LLM call', async () => {
+    const { deps, callTool } = makeDeps({ llmText: JSON.stringify({ memories: [goodEntry] }) })
+    let active = true
+    deps.captureSessionEffectOwner = () => () => active
+    const originalCall = deps.llm.call
+    deps.llm.call = async (...args) => {
+      const response = await originalCall(...args)
+      active = false
+      return response
+    }
+    const out = await consolidateMemory(deps, 's1')
+    expect(out.error).toContain('ownership changed')
+    expect(callTool).not.toHaveBeenCalled()
+  })
+
   it('honors maxPerRun by writing at most N memories', async () => {
     const entries = [
       { ...goodEntry, name: 'one' },

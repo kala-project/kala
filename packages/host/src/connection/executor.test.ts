@@ -400,6 +400,7 @@ describe('ExecutorRegistry', () => {
       expect(generation).toBe('9')
       if (fence) throw new Error('PG owner fenced before dispatch')
     })
+
     const registry = createExecutorRegistry(fakeIo() as never, {
       ...makeResolver({ x: 'ws-default' }),
       assertSessionEffectOwner: async () => ({ ownerGeneration: '9' }),
@@ -427,6 +428,158 @@ describe('ExecutorRegistry', () => {
     }))
     socket.emitted[0]!.ack!({ callId: effect.callId, ok: true, content: '{}' })
     await expect(running).resolves.toMatchObject({ ok: true })
+  })
+
+  it('refuses old Executors and commits registered Skill intent before emitting a mutation', async () => {
+    let admitted = true
+    const socket = makeFakeSocket('skill-executor')
+    const beginSkillDispatch = vi.fn(async () => {
+      expect(socket.emitted).toHaveLength(0)
+    })
+
+    const registry = createExecutorRegistry(fakeIo() as never, {
+      ...makeResolver({ x: 'ws-default' }),
+      requireSkillEffectBarrier: true,
+      approvedSkillEffect: () => admitted,
+      beginSkillDispatch,
+      assertSessionEffectOwner: async () => ({ ownerGeneration: '9' }),
+    }, 5_000)
+    registry.attach(socket as never, announceOf('skill-executor'))
+    const effect = { kind: 'call_tool' as const, callId: 'skill-file-01ARZ3NDEKTSV4RRFFQ69G5FAV',
+      name: 'skill_file', input: { action: 'create', name: 'procedure', content: 'body', ownerGeneration: '9' } }
+    expect(await registry.callTool('x', effect)).toMatchObject({
+      ok: false, failure: { code: 'skill_pre_dispatch_rejected' },
+    })
+    expect(beginSkillDispatch).not.toHaveBeenCalled()
+    registry.attach(socket as never, { ...announceOf('skill-executor'), skillFileEffectVersion: 1, arenaKeeperVersion: 1 })
+    expect(await registry.callTool('x', effect)).toMatchObject({
+      ok: false, failure: { code: 'skill_pre_dispatch_rejected' },
+    })
+    registry.attach(socket as never, { ...announceOf('skill-executor'), skillFileEffectVersion: 2 })
+    expect(await registry.callTool('x', effect)).toMatchObject({
+      ok: false, failure: { code: 'skill_pre_dispatch_rejected' },
+    })
+    expect(beginSkillDispatch).not.toHaveBeenCalled()
+    registry.attach(socket as never, { ...announceOf('skill-executor'), skillFileEffectVersion: 2, arenaKeeperVersion: 1 })
+    admitted = false
+    expect(await registry.callTool('x', effect)).toMatchObject({ ok: false })
+    expect(beginSkillDispatch).not.toHaveBeenCalled()
+    admitted = true
+    const running = registry.callTool('x', effect)
+    await vi.waitFor(() => expect(socket.emitted).toHaveLength(1))
+    expect(beginSkillDispatch).toHaveBeenCalledWith('x', '9', effect.callId, executionRequestDigest({
+      sessionId: 'x', callId: effect.callId, name: effect.name, input: effect.input, origin: 'host',
+    }))
+    expect(socket.emitted[0]!.payload).toMatchObject({
+      name: 'skill_file', origin: 'host', ownerGeneration: '9',
+    })
+    socket.emitted[0]!.ack!({ callId: effect.callId, ok: true, content: '{}' })
+    expect(await running).toMatchObject({ ok: true })
+  })
+
+  it('reports provably pre-dispatch Skill denial after async socket revoke or stale bind', async () => {
+    let authorize!: (allowed: boolean) => void
+    let ownerCheck!: () => void
+    const authorizeSocket = vi.fn(async () => await new Promise<boolean>((resolve) => { authorize = resolve }))
+    const beginSkillDispatch = vi.fn()
+    const registry = createExecutorRegistry(fakeIo() as never, {
+      ...makeResolver({ x: 'ws-default' }),
+      requireSkillEffectBarrier: true,
+      approvedSkillEffect: () => true,
+      beginSkillDispatch,
+      assertSessionEffectOwner: async () => await new Promise<{ ownerGeneration: string }>((resolve) => {
+        ownerCheck = () => resolve({ ownerGeneration: '9' })
+      }),
+    }, 5_000, undefined, 0, authorizeSocket)
+    const old = makeFakeSocket('old')
+    registry.attach(old as never, { ...announceOf('old'), skillFileEffectVersion: 2, arenaKeeperVersion: 1 })
+    const effect = { kind: 'call_tool' as const, callId: 'skill-file-01ARZ3NDEKTSV4RRFFQ69G5FAV',
+      name: 'skill_file', input: { action: 'create', name: 'procedure', content: 'body', ownerGeneration: '9' } }
+    const refused = registry.callTool('x', effect)
+    await vi.waitFor(() => expect(authorizeSocket).toHaveBeenCalledTimes(1))
+    authorize(false)
+    await expect(refused).resolves.toMatchObject({ ok: false,
+      failure: { code: 'skill_pre_dispatch_rejected' } })
+    const stale = registry.callTool('x', effect)
+    await vi.waitFor(() => expect(authorizeSocket).toHaveBeenCalledTimes(2))
+    authorize(true)
+    await vi.waitFor(() => expect(ownerCheck).toBeTypeOf('function'))
+    registry.revoke(old as never, 'credential_revoked')
+    const replacement = makeFakeSocket('new')
+    registry.attach(replacement as never, { ...announceOf('new'), skillFileEffectVersion: 2, arenaKeeperVersion: 1 })
+    ownerCheck()
+    await expect(stale).resolves.toMatchObject({ ok: false,
+      failure: { code: 'skill_pre_dispatch_rejected' } })
+    expect(beginSkillDispatch).not.toHaveBeenCalled()
+    expect(old.emitted.filter((event) => event.event === 'tool:call')).toEqual([])
+    expect(replacement.emitted.filter((event) => event.event === 'tool:call')).toEqual([])
+  })
+
+  it('blocks unfenced shared-owner workspace/global memory writes without blocking reads', async () => {
+    const registry = createExecutorRegistry(fakeIo() as never, {
+      ...makeResolver({ x: 'ws-default' }), requireSkillEffectBarrier: true,
+    }, 5_000)
+    const socket = makeFakeSocket('shared-memory')
+    registry.attach(socket as never, announceOf('shared-memory'))
+    for (const scope of ['workspace', 'global']) {
+      expect(await registry.callTool('x', callEffect(`memory-${scope}`, 'memory', undefined,
+        { operation: 'write', scope, key: 'note', content: 'must not write' }))).toMatchObject({
+        ok: false, failure: { code: scope === 'global' ? 'memory_effect_unavailable' : 'memory_pre_dispatch_rejected' },
+      })
+
+    }
+    expect(socket.emitted).toHaveLength(0)
+    const reading = registry.callTool('x', callEffect('memory-read', 'memory', undefined,
+      { operation: 'read', scope: 'workspace', key: 'note' }))
+    await vi.waitFor(() => expect(socket.emitted).toHaveLength(1))
+    socket.emitted[0]!.ack!({ callId: 'memory-read', ok: true, content: 'read' })
+    expect(await reading).toMatchObject({ ok: true })
+  })
+
+  it('releases a registered workspace memory effect only on an exact durable final receipt', async () => {
+    let completed = 0
+    let receiptStatus: 'completed' | 'started_unknown' | 'denied' = 'completed'
+    const registerMemoryEffect = vi.fn(async () => async () => { completed++ })
+    const beginMemoryDispatch = vi.fn(async () => { expect(completed).toBe(0) })
+    const registry = createExecutorRegistry(fakeIo() as never, {
+      ...makeResolver({ x: 'ws-default' }), requireSkillEffectBarrier: true,
+      assertSessionEffectOwner: async () => ({ ownerGeneration: '9' }),
+      registerMemoryEffect, beginMemoryDispatch,
+    }, 5_000)
+    const socket = makeFakeSocket('fenced-memory')
+    const emit = socket.emit
+    socket.emit = (event, payload, ack) => {
+      emit(event, payload, ack)
+      if (event === 'tool:call') ack?.(receiptStatus === 'denied'
+        ? { callId: (payload as ToolCallMessage).callId, ok: false,
+          content: 'no tool ran', failure: { code: 'learning_not_admitted', category: 'precondition',
+            outcome: 'blocked', retryable: false, responsibility: 'workspace' } } as never
+        : { callId: (payload as ToolCallMessage).callId, ok: true, content: 'written' })
+      if (event === 'tool:receipt_query') {
+        const query = payload as { callId: string }
+        ack?.(receiptStatus === 'completed'
+          ? { status: 'completed', result: { callId: query.callId, ok: true, content: 'written' } } as never
+          : { status: receiptStatus } as never)
+      }
+    }
+    registry.attach(socket as never, { ...announceOf('fenced-memory'), memoryEffectVersion: 2, arenaKeeperVersion: 1 })
+    const input = { operation: 'write', scope: 'workspace', key: 'note', content: 'written' }
+    expect(await registry.callTool('x', callEffect('memory-parent-1', 'memory', undefined, input)))
+      .toMatchObject({ ok: true })
+    expect(completed).toBe(1)
+    const frame = socket.emitted.find((entry) => entry.event === 'tool:call')!.payload as ToolCallMessage
+    expect(frame).toMatchObject({ origin: 'host', ownerGeneration: '9',
+      input: { ownerGeneration: '9' } })
+    expect(frame.callId).toMatch(/^memory-file-[a-f0-9]{64}$/u)
+    expect(beginMemoryDispatch).toHaveBeenCalledWith('x', '9', frame.callId, executionRequestDigest(frame))
+    receiptStatus = 'started_unknown'
+    const unknown = await registry.callTool('x', callEffect('memory-parent-2', 'memory', undefined, input))
+    expect(unknown).toMatchObject({ ok: false, failure: { outcome: 'indeterminate' } })
+    expect(completed).toBe(1)
+    receiptStatus = 'denied'
+    const denied = await registry.callTool('x', callEffect('memory-parent-3', 'memory', undefined, input))
+    expect(denied).toMatchObject({ ok: false, failure: { outcome: 'indeterminate' } })
+    expect(completed).toBe(1)
   })
 
   it('measures Host to Executor latency and reports an offline workspace', async () => {

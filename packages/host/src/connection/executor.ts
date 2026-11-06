@@ -18,6 +18,7 @@
 import { createHash } from 'node:crypto'
 import type { Server, Socket } from 'socket.io'
 import { createTerminalRequestManager, TERMINAL_CREATE_ACK_TIMEOUT_MS, APP_DEBUG_ACK_MS, appDebugFailure, appDebugWait } from '@agent-kernel/shared'
+import { executionRequestDigest } from '@agent-kernel/executor'
 import type { AppDebugTarget } from './app-debug.js'
 
 import type {
@@ -116,8 +117,28 @@ export type WorkspaceResolver = {
   desktopFeaturePolicy?(sessionId: string): { computerUseEnabled: boolean; desktopPreviewEnabled: boolean }
   assertSessionEffectOwner?(sessionId: string): Promise<void | { ownerGeneration: string }>
   beginArenaDispatch?(sessionId: string, generation: string, callId: string, requestDigest: string): Promise<void>
+  requireSkillEffectBarrier?: boolean
+  approvedSkillEffect?(sessionId: string, callId: string): boolean
+  beginSkillDispatch?(sessionId: string, generation: string, callId: string, requestDigest: string): Promise<void>
+  registerMemoryEffect?(sessionId: string, generation: string, callId: string, workspaceId: string): Promise<() => Promise<void>>
+  beginMemoryDispatch?(sessionId: string, generation: string, callId: string, requestDigest: string): Promise<void>
   /** Session-snapshotted MCP input schema; never substitute a new same-name tool. */
   mcpSchemaHashFor?(sessionId: string, toolName: string): string | undefined
+}
+
+/** Commits the exact Executor request identity before the first tool frame. */
+async function beginWorkspaceDispatch(
+  sessionId: string,
+  effect: CallToolEffect,
+  ownerGeneration: string,
+  begin: (sessionId: string, generation: string, callId: string, requestDigest: string) => Promise<void>,
+): Promise<string> {
+  const digest = executionRequestDigest({
+    sessionId, callId: effect.callId, name: effect.name, input: effect.input,
+    ...(effect.cwd !== undefined ? { cwd: effect.cwd } : {}), origin: 'host',
+  })
+  await begin(sessionId, ownerGeneration, effect.callId, digest)
+  return digest
 }
 
 type PublishLocalImageRequest = { requestId: string; path: string; cwd?: string }
@@ -392,7 +413,9 @@ export function createExecutorRegistry(
             callId: p.callId,
             name: p.name,
             input: p.input,
-            ...(p.name.startsWith('arena_git_') ? { origin: 'host' as const } : {}),
+            ...(p.name.startsWith('arena_git_') || p.name === 'skill_file' && p.input.action !== 'read'
+              || p.name === 'memory' && p.input.ownerGeneration
+              ? { origin: 'host' as const } : {}),
             ...(p.cwd !== undefined ? { cwd: p.cwd } : {}),
             ackTimeoutMs,
             ...(ownerGeneration !== undefined ? { ownerGeneration } : {}),
@@ -635,7 +658,7 @@ export function createExecutorRegistry(
           }
           const timer = setTimeout(() => settle(unavailable), Math.min(toolAckTimeoutMs, 5_000))
           bind.socket.emit('tool:cancel_ack', request, (response) => {
-            if (!response || !['cancel_requested', 'completed', 'started_unknown', 'absent_with_valid_journal', 'conflict', 'unavailable'].includes(response.status)
+            if (!response || !['cancel_requested', 'denied', 'completed', 'started_unknown', 'absent_with_valid_journal', 'conflict', 'unavailable'].includes(response.status)
               || (response.status === 'completed' && (!response.result || response.result.callId !== request.callId
                 || typeof response.result.ok !== 'boolean' || typeof response.result.content !== 'string'))) {
               settle(unavailable)
@@ -675,7 +698,7 @@ export function createExecutorRegistry(
           }
           const timer = setTimeout(() => settle(unavailable), Math.min(toolAckTimeoutMs, 5_000))
           bind.socket.emit('tool:receipt_query', query, (response) => {
-            if (!response || !['completed', 'started_unknown', 'absent_with_valid_journal', 'conflict', 'unavailable'].includes(response.status)) {
+            if (!response || !['denied', 'completed', 'started_unknown', 'absent_with_valid_journal', 'conflict', 'unavailable'].includes(response.status)) {
               settle(unavailable)
               return
             }
@@ -892,9 +915,23 @@ export function createExecutorRegistry(
     },
     async callTool(sessionId, eff: CallToolEffect, turnId?: string) {
       const arenaAction = ['probe', 'status', 'diff', 'init', 'apply', 'cleanup'].find((action) => eff.name === `arena_git_${action}`) as 'probe' | 'status' | 'diff' | 'init' | 'apply' | 'cleanup' | undefined
+      const skillMutation = eff.name === 'skill_file' && eff.input.action !== 'read'
+      const fencedSkill = skillMutation && resolver.requireSkillEffectBarrier
+      const memoryMutation = resolver.requireSkillEffectBarrier && eff.name === 'memory'
+        && ['write', 'delete'].includes(String(eff.input.operation))
+      const fencedMemory = memoryMutation && eff.input.scope === 'workspace'
+      if (memoryMutation && eff.input.scope !== 'workspace' && eff.input.scope !== 'session') {
+        return {
+          ok: false,
+          content: 'shared-owner Executor global memory writes are unavailable',
+          failure: { code: 'memory_effect_unavailable', category: 'precondition' as const,
+            outcome: 'blocked' as const, retryable: false, responsibility: 'system' as const },
+        }
+      }
       const preDispatchDenied = (content: string) => ({
         ok: false, content,
-        failure: { code: 'arena_pre_dispatch_rejected', category: 'precondition' as const,
+        failure: { code: fencedSkill ? 'skill_pre_dispatch_rejected' : fencedMemory ? 'memory_pre_dispatch_rejected'
+          : 'arena_pre_dispatch_rejected', category: 'precondition' as const,
           outcome: 'blocked' as const, retryable: false, responsibility: 'system' as const },
       })
       if (arenaAction && (typeof eff.input.parentCallId !== 'string'
@@ -902,16 +939,29 @@ export function createExecutorRegistry(
           typeof eff.input.parentAction === 'string' ? eff.input.parentAction : undefined))) {
         return preDispatchDenied(`${eff.name} requires an approved worktree_arena ${arenaAction} parent call`)
       }
+      if (fencedSkill && (!/^skill-file-[0-9A-HJKMNP-TV-Z]{26}$/u.test(eff.callId)
+        || !resolver.approvedSkillEffect?.(sessionId, eff.callId)
+        || typeof eff.input.ownerGeneration !== 'string')) {
+        return preDispatchDenied('skill_file mutation requires a registered PostgreSQL effect')
+      }
       const picked = pickBindFor(sessionId)
-      if (!picked.ok) return arenaAction ? preDispatchDenied(picked.reason)
+      if (!picked.ok) return arenaAction || fencedSkill ? preDispatchDenied(picked.reason)
         : { ok: false, content: picked.reason, failure: { code: 'workspace_offline', category: 'precondition', outcome: 'blocked', retryable: true, responsibility: 'workspace' } }
       const bind = picked.bind
       if (arenaAction && bind.announcement.arenaKeeperVersion !== 1) {
         return preDispatchDenied('Named Arena Git requires an updated Executor with an independent PID-namespace keeper')
       }
+      if (fencedSkill && (bind.announcement.skillFileEffectVersion !== 2
+        || bind.announcement.arenaKeeperVersion !== 1)) {
+        return preDispatchDenied('skill_file mutation requires a Linux keeper and pinned process-identified Executor receipts')
+      }
+      if (fencedMemory && (bind.announcement.memoryEffectVersion !== 2
+        || bind.announcement.arenaKeeperVersion !== 1)) {
+        return preDispatchDenied('memory mutation requires a Linux keeper and pinned process-identified Executor receipts')
+      }
       const authorization = authorizeCurrent(bind)
       const authorized = typeof authorization === 'boolean' ? authorization : await authorization
-      if (!authorized) return arenaAction ? preDispatchDenied('executor unavailable') : { ok: false, content: 'executor unavailable' }
+      if (!authorized) return arenaAction || fencedSkill ? preDispatchDenied('executor unavailable') : { ok: false, content: 'executor unavailable' }
       if (isUnavailableMcpTool(bind.announcement, eff.name, knownMcpToolNames, resolver.mcpSchemaHashFor?.(sessionId, eff.name))) {
         return {
           ok: false,
@@ -921,7 +971,7 @@ export function createExecutorRegistry(
       }
       const ackTimeoutMs = ackTimeoutMsFor(eff.name, eff.input, toolAckTimeoutMs)
       const owner = resolver.assertSessionEffectOwner ? await resolver.assertSessionEffectOwner(sessionId) : undefined
-      if (!isCurrent(bind)) return arenaAction ? preDispatchDenied('executor unavailable before dispatch') : { ok: false, content: 'executor unavailable before dispatch' }
+      if (!isCurrent(bind)) return arenaAction || fencedSkill ? preDispatchDenied('executor unavailable before dispatch') : { ok: false, content: 'executor unavailable before dispatch' }
       const desktopManualAuthorizationRequired = eff.name === 'computer_use'
         ? resolver.desktopManualAuthorizationRequired?.(sessionId) ?? true : undefined
       const features = eff.name === 'computer_use' ? resolver.desktopFeaturePolicy?.(sessionId) : undefined
@@ -943,17 +993,40 @@ export function createExecutorRegistry(
         if (!owner || eff.input.ownerGeneration !== owner.ownerGeneration) {
           return preDispatchDenied('Arena request owner generation changed before dispatch')
         }
-        const request = [sessionId, eff.callId, eff.name, eff.input, eff.cwd ?? null, 'host']
-        const canonical = JSON.stringify(request, (_key, value: unknown) =>
-          value && typeof value === 'object' && !Array.isArray(value)
-            ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
-            : value)
-        await resolver.beginArenaDispatch(sessionId, owner.ownerGeneration, eff.callId,
-          createHash('sha256').update(canonical).digest('hex'))
+        await beginWorkspaceDispatch(sessionId, eff, owner.ownerGeneration, resolver.beginArenaDispatch)
+      }
+      if (fencedSkill) {
+        if (!owner?.ownerGeneration || eff.input.ownerGeneration !== owner.ownerGeneration || !resolver.beginSkillDispatch) {
+          return preDispatchDenied('skill_file owner generation or durable dispatch authority unavailable')
+        }
+        await beginWorkspaceDispatch(sessionId, eff, owner.ownerGeneration, resolver.beginSkillDispatch)
+      }
+      let memoryComplete: (() => Promise<void>) | undefined
+      let memoryDigest: string | undefined
+      if (fencedMemory) {
+        if (!owner?.ownerGeneration || !resolver.registerMemoryEffect || !resolver.beginMemoryDispatch) {
+          return preDispatchDenied('shared-owner memory write requires a PostgreSQL owner and active effect barrier')
+        }
+        eff = {
+          ...eff,
+          callId: `memory-file-${createHash('sha256').update(JSON.stringify([sessionId, eff.callId])).digest('hex')}`,
+          input: { ...eff.input, ownerGeneration: owner.ownerGeneration },
+        }
+        try {
+          memoryComplete = await resolver.registerMemoryEffect(sessionId, owner.ownerGeneration,
+            eff.callId, bind.announcement.workspaceId)
+          memoryDigest = await beginWorkspaceDispatch(sessionId, eff, owner.ownerGeneration, resolver.beginMemoryDispatch)
+        } catch {
+          return {
+            ok: false, content: `UNKNOWN memory effect ${eff.callId}: PostgreSQL admission unconfirmed; no Executor frame emitted`,
+            failure: { code: 'memory_effect_unknown', category: 'infrastructure', outcome: 'indeterminate',
+              retryable: false, responsibility: 'system' },
+          }
+        }
       }
       const key = JSON.stringify([sessionId, eff.callId])
       audit?.log({ action: 'tool.dispatch', actor: { kind: 'system' }, target: { sessionId, workspaceId: bind.announcement.workspaceId, callId: eff.callId, toolName: eff.name }, outcome: 'ok', metadata: { cwd: eff.cwd } })
-      return await new Promise<{ ok: boolean; content: string; failure?: import('@agent-kernel/kernel').ToolFailure; durationMs?: number }>((resolve) => {
+      const result = await new Promise<{ ok: boolean; content: string; failure?: import('@agent-kernel/kernel').ToolFailure; durationMs?: number }>((resolve) => {
         const deadlineAt = Date.now() + ackTimeoutMs
         const timer = setTimeout(() => {
           if (bind.pending.delete(key)) {
@@ -984,7 +1057,7 @@ export function createExecutorRegistry(
             callId: eff.callId,
             name: eff.name,
             input: eff.input,
-            ...(arenaAction ? { origin: 'host' as const } : {}),
+            ...(arenaAction || fencedSkill || fencedMemory ? { origin: 'host' as const } : {}),
             ...(eff.cwd !== undefined ? { cwd: eff.cwd } : {}),
             ackTimeoutMs,
             ...(turnId ? { turnId } : {}),
@@ -1006,6 +1079,28 @@ export function createExecutorRegistry(
           },
         )
       })
+      if (memoryComplete) {
+        const receipt = await this.queryExecutionReceipt({
+          sessionId, callId: eff.callId, ownerGeneration: owner!.ownerGeneration, requestDigest: memoryDigest!,
+        }).catch(() => ({ status: 'unavailable' as const }))
+        if (receipt.status !== 'completed' || receipt.result.callId !== eff.callId
+          || receipt.result.ok !== result.ok || receipt.result.content !== result.content
+          || JSON.stringify(receipt.result.failure) !== JSON.stringify(result.failure)) {
+          return {
+            ok: false, content: `UNKNOWN memory effect ${eff.callId}: no matching durable final Executor receipt`,
+            failure: { code: 'memory_effect_unknown', category: 'infrastructure', outcome: 'indeterminate',
+              retryable: false, responsibility: 'system' },
+          }
+        }
+        try { await memoryComplete() } catch {
+          return {
+            ok: false, content: `UNKNOWN memory effect ${eff.callId}: PostgreSQL completion unconfirmed`,
+            failure: { code: 'memory_effect_unknown', category: 'infrastructure', outcome: 'indeterminate',
+              retryable: false, responsibility: 'system' },
+          }
+        }
+      }
+      return result
     },
     async callToolWhenAvailable(sessionId, eff, turnId) {
       const deadlineAt = Date.now() + PLANNED_CONTINUATION_EXECUTOR_WAIT_MS

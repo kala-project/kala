@@ -725,6 +725,7 @@ export const DirListResultSchema = z.object({
   workspaceId: z.string(),
   path: z.string(),
   roots: z.array(z.string()),
+  unrestricted: z.boolean().optional(),
   entries: z.array(DirListEntrySchema),
   error: z.string().optional(),
 }) satisfies z.ZodType<DirListResult>

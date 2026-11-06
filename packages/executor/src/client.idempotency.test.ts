@@ -10,14 +10,33 @@
  */
 
 import { describe, expect, it, vi } from 'vitest'
+import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { mkdtemp } from 'node:fs/promises'
+import { once } from 'node:events'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createExecutorSharedExecution, startExecutor } from './client.js'
-import { executionRequestDigest } from './execution-receipts.js'
+import { ExecutionReceiptStore, executionRequestDigest } from './execution-receipts.js'
 import type { Tool } from './tools/registry.js'
+import { skillFileTool } from './tools/skill-file.js'
+import { memoryTool } from './tools/memory.js'
+import { leaderIdentity } from './tools/arena-process-groups.js'
+
+async function testKeeper(root: string) {
+  const keeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 60000)'], { stdio: 'ignore' })
+  if (!keeper.pid) throw new Error('test keeper did not start')
+  const path = join(root, 'keeper.json')
+  await writeFile(path, JSON.stringify(await leaderIdentity(keeper.pid)), { mode: 0o600 })
+  return { path, stop: async () => {
+    if (keeper.exitCode === null && keeper.signalCode === null) {
+      keeper.kill('SIGTERM')
+      await once(keeper, 'exit')
+    }
+  } }
+}
 
 type Handler = (...args: unknown[]) => void
 
@@ -61,6 +80,206 @@ function makeMockSocket() {
 }
 
 describe('executor idempotency', () => {
+  it.skipIf(process.platform !== 'linux')('advertises recoverable v2 effects only for exact built-ins with a live keeper', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kala-learning-capability-'))
+    const keeper = await testKeeper(root)
+    const socket = makeMockSocket()
+    const handle = startExecutor({
+      host: 'http://localhost', workspaceId: 'ws-builtins', executorId: 'executor-builtins',
+      sandboxRoots: [root], tools: [skillFileTool, memoryTool],
+      arenaKeeperIdentityFile: keeper.path, ioFactory: (() => socket) as never,
+    })
+    try {
+      socket.__trigger('connect')
+      await vi.waitFor(() => expect(socket.__emitted.find((entry) => entry.event === 'executor:announce')?.args[0])
+        .toMatchObject({ skillFileEffectVersion: 2, memoryEffectVersion: 2, arenaKeeperVersion: 1 }))
+    } finally { await handle.close(); await keeper.stop(); await rm(root, { recursive: true, force: true }) }
+  })
+
+  it.skipIf(process.platform !== 'linux')('durably receipts a generation-bound skill mutation and replays without a second filesystem write', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kala-skill-receipt-'))
+    const keeper = await testKeeper(root)
+    const socket = makeMockSocket()
+    const run = vi.fn(skillFileTool.run)
+    const handle = startExecutor({
+      host: 'http://localhost', workspaceId: 'ws-skill', executorId: 'executor-skill',
+      sandboxRoots: [root], tools: [{ name: 'skill_file', run }],
+      arenaKeeperIdentityFile: keeper.path,
+      ioFactory: (() => socket) as never,
+    })
+
+    try {
+      const call = {
+        sessionId: 'session-skill', callId: 'skill-file-01ARZ3NDEKTSV4RRFFQ69G5FAV',
+        name: 'skill_file', input: { action: 'create', name: 'procedure', content: 'durable skill',
+          ownerGeneration: '7' },
+        origin: 'host' as const, ownerGeneration: '7', cwd: root,
+      }
+      const ack = vi.fn()
+      socket.__trigger('tool:call', { ...call, origin: undefined }, ack)
+      await vi.waitFor(() => expect(ack).toHaveBeenCalledWith(
+        expect.objectContaining({ ok: false, content: expect.stringContaining('generation-bound Host admission') })))
+      expect(run).not.toHaveBeenCalled()
+      socket.__trigger('tool:call', call, ack)
+      await vi.waitFor(() => expect(ack).toHaveBeenLastCalledWith(expect.objectContaining({ ok: true })))
+      const query = { sessionId: call.sessionId, callId: call.callId,
+        ownerGeneration: '7', requestDigest: executionRequestDigest(call) }
+      const proof = vi.fn()
+      socket.__trigger('tool:receipt_query', query, proof)
+      await vi.waitFor(() => expect(proof).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'completed', result: expect.objectContaining({ ok: true }) })))
+      const journalPath = join(root, '.kala', 'execution-receipts.json')
+      const journal = new ExecutionReceiptStore(journalPath)
+      await journal.load()
+      expect(journal.inspectArena(`${call.sessionId}:${call.callId}`)).toMatchObject({
+        state: 'completed',
+        ownerGeneration: '7', requestDigest: query.requestDigest,
+        executorProcess: await leaderIdentity(process.pid),
+        target: { tool: 'skill_file', action: 'create',
+          pathDigest: createHash('sha256').update(join(root, '.agent', 'skills', 'procedure', 'SKILL.md')).digest('hex'),
+          contentDigest: createHash('sha256').update('durable skill').digest('hex') },
+      })
+      expect(await readFile(journalPath, 'utf8')).not.toContain('durable skill')
+      const replay = vi.fn()
+      socket.__trigger('tool:call', call, replay)
+      await vi.waitFor(() => expect(replay).toHaveBeenCalledWith(
+        expect.objectContaining({ ok: true })))
+      expect(run).toHaveBeenCalledTimes(1)
+      expect(await readFile(join(root, '.agent', 'skills', 'procedure', 'SKILL.md'), 'utf8')).toBe('durable skill')
+    } finally {
+      await handle.close()
+      await keeper.stop()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform !== 'linux')('durably receipts generation-bound generic memory writes and rejects non-Host admission', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kala-memory-receipt-'))
+    const keeper = await testKeeper(root)
+    const socket = makeMockSocket()
+    const run = vi.fn(memoryTool.run)
+    const handle = startExecutor({
+      host: 'http://localhost', workspaceId: 'ws-memory', executorId: 'executor-memory',
+      sandboxRoots: [root], tools: [{ name: 'memory', run }],
+      arenaKeeperIdentityFile: keeper.path,
+      ioFactory: (() => socket) as never,
+    })
+    try {
+      const call = {
+        sessionId: 'session-memory', callId: `memory-file-${'a'.repeat(64)}`,
+        name: 'memory', input: { operation: 'write', scope: 'workspace',
+          key: 'note', content: 'first write', ownerGeneration: '9' },
+        origin: 'host' as const, ownerGeneration: '9', cwd: root,
+      }
+      const denied = vi.fn()
+      socket.__trigger('tool:call', { ...call, origin: undefined }, denied)
+      await vi.waitFor(() => expect(denied).toHaveBeenCalledWith(
+        expect.objectContaining({ ok: false, content: expect.stringContaining('generation-bound Host admission') })))
+      expect(run).not.toHaveBeenCalled()
+      const written = vi.fn()
+      socket.__trigger('tool:call', call, written)
+      await vi.waitFor(() => expect(written).toHaveBeenCalledWith(expect.objectContaining({ ok: true })))
+      const query = { sessionId: call.sessionId, callId: call.callId,
+        ownerGeneration: '9', requestDigest: executionRequestDigest(call) }
+      const final = vi.fn()
+      socket.__trigger('tool:receipt_query', query, final)
+      await vi.waitFor(() => expect(final).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'completed', result: expect.objectContaining({ ok: true }) })))
+      const journalPath = join(root, '.kala', 'execution-receipts.json')
+      const journal = new ExecutionReceiptStore(journalPath)
+      await journal.load()
+      expect(journal.inspectArena(`${call.sessionId}:${call.callId}`)).toMatchObject({
+        state: 'completed',
+        ownerGeneration: '9', requestDigest: query.requestDigest,
+        executorProcess: await leaderIdentity(process.pid),
+        target: { tool: 'memory', action: 'write',
+          pathDigest: createHash('sha256').update(join(root, '.kala', 'memory', 'note.md')).digest('hex'),
+          contentDigest: createHash('sha256').update('first write').digest('hex') },
+      })
+      expect(await readFile(journalPath, 'utf8')).not.toContain('first write')
+      const replay = vi.fn()
+      socket.__trigger('tool:call', call, replay)
+      await vi.waitFor(() => expect(replay).toHaveBeenCalledWith(written.mock.calls[0]![0]))
+      expect(run).toHaveBeenCalledTimes(1)
+      expect(await readFile(join(root, '.kala', 'memory', 'note.md'), 'utf8')).toBe('first write')
+    } finally {
+      await handle.close()
+      await keeper.stop()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it.skipIf(process.platform !== 'linux')('refuses fenced learning mutation before journal admission without a keeper', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kala-learning-no-keeper-'))
+    const socket = makeMockSocket()
+    const run = vi.fn(skillFileTool.run)
+    const handle = startExecutor({
+      host: 'http://localhost', workspaceId: 'ws-no-keeper', executorId: 'executor-no-keeper',
+      sandboxRoots: [root], tools: [{ name: 'skill_file', run }],
+      ioFactory: (() => socket) as never,
+    })
+    try {
+      const call = {
+        sessionId: 'no-keeper', callId: 'skill-file-01ARZ3NDEKTSV4RRFFQ69G5FAV',
+        name: 'skill_file', input: { action: 'create', name: 'procedure', content: 'blocked', ownerGeneration: '7' },
+        origin: 'host' as const, ownerGeneration: '7', cwd: root,
+      }
+      const ack = vi.fn()
+      socket.__trigger('tool:call', call, ack)
+      await vi.waitFor(() => expect(ack).toHaveBeenCalledWith(
+        expect.objectContaining({ ok: false, failure: expect.objectContaining({ code: 'learning_not_admitted' }) })))
+      expect(run).not.toHaveBeenCalled()
+      const journal = new ExecutionReceiptStore(join(root, '.kala', 'execution-receipts.json'))
+      await journal.load()
+      expect(journal.inspectArena(`${call.sessionId}:${call.callId}`)).toMatchObject({
+        state: 'denied', requestDigest: executionRequestDigest(call), ownerGeneration: '7',
+      })
+    } finally { await handle.close(); await rm(root, { recursive: true, force: true }) }
+  })
+
+  it.skipIf(process.platform !== 'linux')('durably denies invalid fenced memory content and Skill cwd before any tool runs', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kala-learning-negative-admission-'))
+    const keeper = await testKeeper(root)
+    const socket = makeMockSocket()
+    const memoryRun = vi.fn(memoryTool.run)
+    const skillRun = vi.fn(skillFileTool.run)
+    const journalPath = join(root, 'receipts.json')
+    const handle = startExecutor({
+      host: 'http://localhost', workspaceId: 'ws-negative-admission', executorId: 'executor-negative-admission',
+      sandboxRoots: [root], receiptStorePath: journalPath,
+      tools: [{ name: 'memory', run: memoryRun }, { name: 'skill_file', run: skillRun }],
+      arenaKeeperIdentityFile: keeper.path, ioFactory: (() => socket) as never,
+    })
+    try {
+      const calls = [
+        { sessionId: 'session', callId: `memory-file-${'d'.repeat(64)}`, name: 'memory',
+          input: { operation: 'write', scope: 'workspace', key: 'note', ownerGeneration: '2' },
+          ownerGeneration: '2', origin: 'host' as const, cwd: root },
+        { sessionId: 'session', callId: 'skill-file-01ARZ3NDEKTSV4RRFFQ69G5FAV', name: 'skill_file',
+          input: { action: 'create', name: 'note', content: 'not written', ownerGeneration: '2' },
+          ownerGeneration: '2', origin: 'host' as const, cwd: 'relative-cwd' },
+      ]
+      for (const call of calls) {
+        const ack = vi.fn()
+        socket.__trigger('tool:call', call, ack)
+        await vi.waitFor(() => expect(ack).toHaveBeenCalledWith(
+          expect.objectContaining({ ok: false, failure: expect.objectContaining({ code: 'learning_not_admitted' }) })))
+        const receipts = new ExecutionReceiptStore(journalPath)
+        await receipts.load()
+        expect(receipts.inspectArena(`${call.sessionId}:${call.callId}`)).toMatchObject({
+          state: 'denied', requestDigest: executionRequestDigest(call), ownerGeneration: '2',
+        })
+        expect(await receipts.query({ sessionId: call.sessionId, callId: call.callId,
+          requestDigest: executionRequestDigest(call), ownerGeneration: '2' })).toEqual({ status: 'denied' })
+        const replay = vi.fn()
+        socket.__trigger('tool:call', call, replay)
+        await vi.waitFor(() => expect(replay).toHaveBeenCalledWith(ack.mock.calls[0]![0]))
+      }
+      expect(memoryRun).not.toHaveBeenCalled()
+      expect(skillRun).not.toHaveBeenCalled()
+    } finally { await handle.close(); await keeper.stop(); await rm(root, { recursive: true, force: true }) }
+  })
+
   it('only aborts the matching live runner after the Stop intent is durable', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kala-stop-wire-'))
     const sharedExecution = createExecutorSharedExecution(join(dir, 'receipts.json'))

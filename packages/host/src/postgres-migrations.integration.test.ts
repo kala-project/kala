@@ -66,13 +66,13 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
   it('migrates from zero idempotently, then supports core DML while rejecting Runtime DDL', async () => {
     await expect(migratePostgres({ connectionString: adminUrl })).resolves.toMatchObject({
       previousVersion: 0,
-      currentVersion: 27,
-      appliedVersions: Array.from({ length: 27 }, (_, i) => i + 1),
+      currentVersion: 32,
+      appliedVersions: Array.from({ length: 32 }, (_, i) => i + 1),
     })
 
     await expect(migratePostgres({ connectionString: adminUrl })).resolves.toMatchObject({
-      previousVersion: 27,
-      currentVersion: 27,
+      previousVersion: 32,
+      currentVersion: 32,
       appliedVersions: [],
     })
 
@@ -194,7 +194,7 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
     await expect(runtime.query(`SELECT kala_arena_repair_init(
       'x','x','x','arena-init-A',1,'x','x','kala_runtime','incident','{}','{}','{}')`))
       .rejects.toMatchObject({ code: '42501' })
-    await expect(assertPostgresSchemaCurrent(runtime)).resolves.toBe(27)
+    await expect(assertPostgresSchemaCurrent(runtime)).resolves.toBe(32)
     await expect(runtime.query('SELECT * FROM tenant_session_agent_boards')).resolves.toMatchObject({ rowCount: 0 })
     await expect(runtime.query('SELECT * FROM tenant_session_child_commands')).resolves.toMatchObject({ rowCount: 0 })
     await expect(runtime.query('SELECT * FROM tenant_runtime_unit_protocol_gates')).resolves.toMatchObject({ rowCount: 0 })
@@ -280,7 +280,8 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
       expect(routine.rows[0]?.routine).toBeNull()
       await admin.query(`DROP FUNCTION "${schema}".kala_arena_operator_state(text,text)`)
       await expect(migratePostgres({ connectionString: adminUrl, schema }))
-        .resolves.toMatchObject({ previousVersion: 22, currentVersion: 27, appliedVersions: [23,24,25,26,27] })
+        .resolves.toMatchObject({ previousVersion: 22, currentVersion: 32,
+          appliedVersions: Array.from({ length: 10 }, (_, i) => i + 23) })
       await expect(grantOnly()).resolves.toMatchObject({ stdout: expect.stringContaining('"grantOnly":true') })
       const operator = new Pool({ connectionString: arenaOperatorUrl })
       try {
@@ -442,7 +443,7 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
     }
   }, 120_000)
 
-  it('upgrades an isolated v11 schema through Board v12–v18 and Arena v19–v27 without rewriting prior checksums', async () => {
+  it('upgrades an isolated v11 schema through Board, Arena and learning migrations without rewriting prior checksums', async () => {
     const schema = `combined_v11_${randomUUID().replaceAll('-', '')}`
     const admin = new Pool({ connectionString: adminUrl })
     try {
@@ -451,7 +452,7 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
         .resolves.toMatchObject({ currentVersion: 11 })
       const before = await admin.query(`SELECT version, checksum FROM "${schema}".kala_schema_migrations ORDER BY version`)
       await expect(migratePostgres({ connectionString: adminUrl, schema })).resolves.toMatchObject({
-        previousVersion: 11, currentVersion: 27, appliedVersions: Array.from({ length: 16 }, (_, i) => i + 12),
+        previousVersion: 11, currentVersion: 32, appliedVersions: Array.from({ length: 21 }, (_, i) => i + 12),
       })
       const after = await admin.query(`SELECT version, checksum FROM "${schema}".kala_schema_migrations
         WHERE version <= 11 ORDER BY version`)
@@ -464,6 +465,39 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
         arena: `${schema}.tenant_runtime_arena_non_admissions`,
       })
     } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
+      await admin.end()
+    }
+  }, 120_000)
+
+  it('upgrades v27 to learning v32 without changing prior checksums or granting an existing operator implicitly', async () => {
+    const schema = `learning_v27_${randomUUID().replaceAll('-', '')}`
+    const admin = new Pool({ connectionString: adminUrl })
+    const operator = new Pool({ connectionString: arenaOperatorUrl })
+    const effectId = `memory-file-${'a'.repeat(64)}`
+    const finalization = `SELECT * FROM "${schema}".kala_operator_learning_finalization($1,$2,$3,$4)`
+    const args = [operatorOrganizationId, 'unit', 'session', effectId]
+    try {
+      await admin.query(`CREATE SCHEMA "${schema}"`)
+      await runPostgresMigrations(admin as unknown as PostgresMigrationPool, { schema, throughVersion: 27 })
+      const before = await admin.query(`SELECT version, checksum FROM "${schema}".kala_schema_migrations ORDER BY version`)
+      await expect(migratePostgres({ connectionString: adminUrl, schema })).resolves.toMatchObject({
+        previousVersion: 27, currentVersion: 32, appliedVersions: [28, 29, 30, 31, 32],
+      })
+      const after = await admin.query(`SELECT version, checksum FROM "${schema}".kala_schema_migrations
+        WHERE version <= 27 ORDER BY version`)
+      expect(after.rows).toEqual(before.rows)
+      await expect(operator.query(finalization, args)).rejects.toMatchObject({ code: '42501' })
+      await grantPostgresArenaOperator({
+        connectionString: adminUrl, schema, operatorRole, organizationId: operatorOrganizationId,
+      })
+      await expect(operator.query(finalization, args)).resolves.toMatchObject({ rowCount: 0 })
+      await expect(operator.query(finalization, [randomUUID(), ...args.slice(1)]))
+        .rejects.toMatchObject({ code: 'P0001' })
+      await expect(operator.query(`SELECT * FROM "${schema}".tenant_runtime_learning_effect_finalizations`))
+        .rejects.toMatchObject({ code: '42501' })
+    } finally {
+      await operator.end()
       await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
       await admin.end()
     }

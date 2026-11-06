@@ -822,6 +822,336 @@ const migrations: readonly PostgresMigration[] = [
       ]
     },
   },
+  {
+    version: 28,
+    name: 'durable_shared_owner_background_learning_claims',
+    statements: (schema) => [
+      `CREATE TABLE IF NOT EXISTS ${schema}.tenant_runtime_background_learning_jobs (
+        organization_id text NOT NULL,
+        unit_id text NOT NULL,
+        resource_id text NOT NULL,
+        fingerprint text NOT NULL CHECK (fingerprint ~ '^[a-f0-9]{64}$'),
+        status text NOT NULL CHECK (status IN ('pending', 'attempted', 'completed')),
+        owner_generation bigint,
+        created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        attempted_at timestamptz,
+        completed_at timestamptz,
+        error text,
+        PRIMARY KEY (organization_id, unit_id, resource_id, fingerprint),
+        CHECK ((status = 'pending' AND owner_generation IS NULL AND attempted_at IS NULL)
+          OR (status IN ('attempted', 'completed') AND owner_generation > 0 AND attempted_at IS NOT NULL))
+      )`,
+      `CREATE INDEX IF NOT EXISTS tenant_runtime_background_learning_pending_idx
+        ON ${schema}.tenant_runtime_background_learning_jobs
+        (organization_id, unit_id, resource_id, created_at) WHERE status = 'pending'`,
+    ],
+  },
+  {
+    version: 29,
+    name: 'scoped_learning_prepared_effect_reconciliation',
+    statements: (schema) => [
+      `CREATE TABLE ${schema}.tenant_runtime_learning_reconciliations (
+        organization_id text NOT NULL,
+        unit_id text NOT NULL,
+        resource_id text NOT NULL,
+        effect_id text NOT NULL,
+        generation bigint NOT NULL,
+        workspace_id text NOT NULL,
+        operator_id text NOT NULL,
+        incident_id text NOT NULL,
+        proof text NOT NULL CHECK (proof = 'never_dispatched'),
+        recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        PRIMARY KEY (organization_id, unit_id, resource_id, effect_id)
+      )`,
+      `CREATE FUNCTION ${schema}.kala_reconcile_learning_prepared(
+        p_org text, p_unit text, p_session text, p_effect text, p_generation bigint,
+        p_workspace text, p_operator text, p_incident text)
+        RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $learning$
+        DECLARE owner_row record; effect_row record;
+        BEGIN
+          IF session_user IS DISTINCT FROM 'arena_operator_' || replace(p_org, '-', '')
+            OR p_org !~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+            OR p_operator IS DISTINCT FROM session_user OR COALESCE(p_incident, '') = ''
+            OR COALESCE(p_session, '') = '' OR COALESCE(p_workspace, '') = ''
+            OR p_generation < 1 OR NOT (
+              COALESCE(p_effect, '') ~ '^skill-file-[0-9A-HJKMNP-TV-Z]{26}$'
+              OR COALESCE(p_effect, '') ~ '^memory-file-[a-f0-9]{64}$'
+            ) THEN
+            RAISE EXCEPTION 'invalid scoped learning reconciliation' USING ERRCODE = 'P0001';
+          END IF;
+          SELECT owner_token, generation, expires_at INTO owner_row
+            FROM ${schema}.tenant_runtime_resource_ownerships
+            WHERE organization_id = p_org AND unit_id = p_unit
+              AND resource_type = 'session' AND resource_id = p_session FOR UPDATE;
+          SELECT owner_token, generation, workspace_id, repository_identity, dispatch_started, request_digest
+            INTO effect_row FROM ${schema}.tenant_runtime_active_workspace_effects
+            WHERE organization_id = p_org AND unit_id = p_unit AND resource_type = 'session'
+              AND resource_id = p_session AND effect_id = p_effect FOR UPDATE;
+          IF NOT FOUND OR owner_row.generation IS NULL OR owner_row.expires_at > clock_timestamp()
+            OR owner_row.owner_token IS DISTINCT FROM effect_row.owner_token
+            OR owner_row.generation IS DISTINCT FROM p_generation
+            OR effect_row.generation IS DISTINCT FROM p_generation
+            OR effect_row.workspace_id IS DISTINCT FROM p_workspace
+            OR effect_row.repository_identity IS NOT NULL
+            OR effect_row.dispatch_started IS DISTINCT FROM false
+            OR effect_row.request_digest IS NOT NULL THEN
+            RAISE EXCEPTION 'learning effect not proven never dispatched' USING ERRCODE = 'P0001';
+          END IF;
+          PERFORM 1 FROM ${schema}.tenant_session_latest_projection
+            WHERE tenant_id = p_org AND session_id = p_session AND document IS NOT NULL
+              AND NOT document ? '__kalaSessionDeletion' FOR SHARE;
+          IF NOT FOUND THEN RAISE EXCEPTION 'learning Session is not live' USING ERRCODE = 'P0001'; END IF;
+          INSERT INTO ${schema}.tenant_runtime_learning_reconciliations
+            (organization_id, unit_id, resource_id, effect_id, generation, workspace_id,
+              operator_id, incident_id, proof)
+            VALUES (p_org, p_unit, p_session, p_effect, p_generation, p_workspace,
+              p_operator, p_incident, 'never_dispatched');
+          DELETE FROM ${schema}.tenant_runtime_active_workspace_effects
+            WHERE organization_id = p_org AND unit_id = p_unit AND resource_type = 'session'
+              AND resource_id = p_session AND effect_id = p_effect
+              AND owner_token = effect_row.owner_token AND generation = p_generation
+              AND workspace_id = p_workspace AND dispatch_started = false AND request_digest IS NULL;
+          IF NOT FOUND THEN RAISE EXCEPTION 'learning effect changed' USING ERRCODE = 'P0001'; END IF;
+        END
+        $learning$`,
+      `REVOKE ALL ON FUNCTION ${schema}.kala_reconcile_learning_prepared(
+        text,text,text,text,bigint,text,text,text) FROM PUBLIC`,
+      `CREATE FUNCTION ${schema}.kala_operator_learning_jobs(
+        p_org text, p_unit text, p_session text, p_limit integer)
+        RETURNS TABLE(fingerprint text, status text, owner_generation bigint,
+          created_at timestamptz, attempted_at timestamptz, completed_at timestamptz, error text)
+        LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $learning$
+        BEGIN
+          IF session_user IS DISTINCT FROM 'arena_operator_' || replace(p_org, '-', '')
+            OR p_org !~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+            OR p_limit NOT BETWEEN 1 AND 100 THEN
+            RAISE EXCEPTION 'learning operator tenant mismatch' USING ERRCODE = 'P0001';
+          END IF;
+          RETURN QUERY SELECT jobs.fingerprint, jobs.status, jobs.owner_generation,
+            jobs.created_at, jobs.attempted_at, jobs.completed_at, jobs.error
+            FROM ${schema}.tenant_runtime_background_learning_jobs AS jobs
+            WHERE jobs.organization_id = p_org AND jobs.unit_id = p_unit AND jobs.resource_id = p_session
+            ORDER BY jobs.created_at, jobs.fingerprint LIMIT p_limit;
+        END
+        $learning$`,
+      `REVOKE ALL ON FUNCTION ${schema}.kala_operator_learning_jobs(text,text,text,integer) FROM PUBLIC`,
+    ],
+  },
+  {
+    version: 30,
+    name: 'scoped_completed_learning_effect_reconciliation',
+    statements: (schema) => [
+      `CREATE TABLE ${schema}.tenant_runtime_learning_completed_reconciliations (
+        organization_id text NOT NULL, unit_id text NOT NULL, resource_id text NOT NULL,
+        effect_id text NOT NULL, generation bigint NOT NULL, workspace_id text NOT NULL,
+        request_digest text NOT NULL CHECK (request_digest ~ '^[a-f0-9]{64}$'),
+        operator_id text NOT NULL, incident_id text NOT NULL, evidence jsonb NOT NULL,
+        recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        PRIMARY KEY (organization_id, unit_id, resource_id, effect_id)
+      )`,
+      `CREATE FUNCTION ${schema}.kala_reconcile_learning_completed(
+        p_org text, p_unit text, p_session text, p_effect text, p_generation bigint,
+        p_workspace text, p_operator text, p_incident text, p_evidence jsonb)
+        RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $learning$
+        DECLARE owner_row record; effect_row record;
+        BEGIN
+          IF session_user IS DISTINCT FROM 'arena_operator_' || replace(p_org, '-', '')
+            OR p_org !~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+            OR p_operator IS DISTINCT FROM session_user OR COALESCE(p_incident, '') = ''
+            OR COALESCE(p_session, '') = '' OR COALESCE(p_workspace, '') = ''
+            OR p_generation < 1 OR NOT (
+              COALESCE(p_effect, '') ~ '^skill-file-[0-9A-HJKMNP-TV-Z]{26}$'
+              OR COALESCE(p_effect, '') ~ '^memory-file-[a-f0-9]{64}$'
+            ) OR jsonb_typeof(p_evidence) IS DISTINCT FROM 'object'
+            OR length(p_evidence::text) > 16000
+            OR COALESCE(p_evidence->>'journalSha256', '') !~ '^[a-f0-9]{64}$'
+            OR COALESCE(p_evidence->>'targetPathDigest', '') !~ '^[a-f0-9]{64}$'
+            OR COALESCE(p_evidence->>'requestDigest', '') !~ '^[a-f0-9]{64}$'
+            OR COALESCE(p_evidence->>'resultDigest', '') !~ '^[a-f0-9]{64}$'
+            OR p_evidence->>'receiptState' IS DISTINCT FROM 'completed'
+            OR p_evidence->>'receiptGeneration' IS DISTINCT FROM p_generation::text
+            OR p_evidence->>'toolImplementation' IS DISTINCT FROM 'builtin-v2'
+            OR p_evidence->>'resultOk' IS DISTINCT FROM 'true'
+            OR p_evidence->>'executorStopped' IS DISTINCT FROM 'true'
+            OR p_evidence->>'processGroupsStopped' IS DISTINCT FROM 'true'
+            OR p_evidence->>'keeperVerified' IS DISTINCT FROM 'true'
+            OR p_evidence->>'finalStateVerified' IS DISTINCT FROM 'true'
+            OR (p_effect LIKE 'skill-file-%' AND p_evidence->>'tool' IS DISTINCT FROM 'skill_file')
+            OR (p_effect LIKE 'memory-file-%' AND p_evidence->>'tool' IS DISTINCT FROM 'memory')
+            OR (p_evidence->>'tool' = 'skill_file'
+              AND COALESCE(p_evidence->>'action', '') NOT IN ('create', 'replace', 'delete'))
+            OR (p_evidence->>'tool' = 'memory'
+              AND COALESCE(p_evidence->>'action', '') NOT IN ('write', 'delete'))
+            OR (p_evidence->>'action' IN ('create', 'replace', 'write')
+              AND (COALESCE(p_evidence->>'contentDigest', '') !~ '^[a-f0-9]{64}$'
+                OR p_evidence->>'contentDigest' IS DISTINCT FROM p_evidence->>'observedDigest'))
+            OR (p_evidence->>'action' = 'delete' AND p_evidence ? 'contentDigest')
+          THEN RAISE EXCEPTION 'invalid completed learning evidence' USING ERRCODE = 'P0001'; END IF;
+          SELECT owner_token, generation, expires_at INTO owner_row
+            FROM ${schema}.tenant_runtime_resource_ownerships
+            WHERE organization_id = p_org AND unit_id = p_unit
+              AND resource_type = 'session' AND resource_id = p_session FOR UPDATE;
+          SELECT owner_token, generation, workspace_id, repository_identity, dispatch_started, request_digest
+            INTO effect_row FROM ${schema}.tenant_runtime_active_workspace_effects
+            WHERE organization_id = p_org AND unit_id = p_unit AND resource_type = 'session'
+              AND resource_id = p_session AND effect_id = p_effect FOR UPDATE;
+          IF NOT FOUND OR owner_row.generation IS NULL OR owner_row.expires_at > clock_timestamp()
+            OR owner_row.owner_token IS DISTINCT FROM effect_row.owner_token
+            OR owner_row.generation IS DISTINCT FROM p_generation
+            OR effect_row.generation IS DISTINCT FROM p_generation
+            OR effect_row.workspace_id IS DISTINCT FROM p_workspace
+            OR effect_row.repository_identity IS NOT NULL
+            OR effect_row.dispatch_started IS DISTINCT FROM true
+            OR effect_row.request_digest IS DISTINCT FROM p_evidence->>'requestDigest' THEN
+            RAISE EXCEPTION 'learning effect ownership or dispatch changed' USING ERRCODE = 'P0001';
+          END IF;
+          PERFORM 1 FROM ${schema}.tenant_session_latest_projection
+            WHERE tenant_id = p_org AND session_id = p_session AND document IS NOT NULL
+              AND NOT document ? '__kalaSessionDeletion' FOR SHARE;
+          IF NOT FOUND THEN RAISE EXCEPTION 'learning Session is not live' USING ERRCODE = 'P0001'; END IF;
+          INSERT INTO ${schema}.tenant_runtime_learning_completed_reconciliations
+            (organization_id, unit_id, resource_id, effect_id, generation, workspace_id,
+              request_digest, operator_id, incident_id, evidence)
+            VALUES (p_org, p_unit, p_session, p_effect, p_generation, p_workspace,
+              effect_row.request_digest, p_operator, p_incident, p_evidence);
+          DELETE FROM ${schema}.tenant_runtime_active_workspace_effects
+            WHERE organization_id = p_org AND unit_id = p_unit AND resource_type = 'session'
+              AND resource_id = p_session AND effect_id = p_effect
+              AND owner_token = effect_row.owner_token AND generation = p_generation
+              AND workspace_id = p_workspace AND dispatch_started = true
+              AND request_digest = effect_row.request_digest;
+          IF NOT FOUND THEN RAISE EXCEPTION 'learning effect changed' USING ERRCODE = 'P0001'; END IF;
+        END
+        $learning$`,
+      `REVOKE ALL ON FUNCTION ${schema}.kala_reconcile_learning_completed(
+        text,text,text,text,bigint,text,text,text,jsonb) FROM PUBLIC`,
+    ],
+  },
+  {
+    version: 31,
+    name: 'scoped_never_admitted_learning_effect_reconciliation',
+    statements: (schema) => [
+      `CREATE TABLE ${schema}.tenant_runtime_learning_denied_reconciliations (
+        organization_id text NOT NULL, unit_id text NOT NULL, resource_id text NOT NULL,
+        effect_id text NOT NULL, generation bigint NOT NULL, workspace_id text NOT NULL,
+        request_digest text NOT NULL CHECK (request_digest ~ '^[a-f0-9]{64}$'),
+        operator_id text NOT NULL, incident_id text NOT NULL, evidence jsonb NOT NULL,
+        recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        PRIMARY KEY (organization_id, unit_id, resource_id, effect_id)
+      )`,
+      `CREATE FUNCTION ${schema}.kala_reconcile_learning_denied(
+        p_org text, p_unit text, p_session text, p_effect text, p_generation bigint,
+        p_workspace text, p_operator text, p_incident text, p_evidence jsonb)
+        RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $learning$
+        DECLARE owner_row record; effect_row record;
+        BEGIN
+          IF session_user IS DISTINCT FROM 'arena_operator_' || replace(p_org, '-', '')
+            OR p_org !~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+            OR p_operator IS DISTINCT FROM session_user OR COALESCE(p_incident, '') = ''
+            OR COALESCE(p_session, '') = '' OR COALESCE(p_workspace, '') = ''
+            OR p_generation < 1 OR NOT (
+              COALESCE(p_effect, '') ~ '^skill-file-[0-9A-HJKMNP-TV-Z]{26}$'
+              OR COALESCE(p_effect, '') ~ '^memory-file-[a-f0-9]{64}$'
+            ) OR jsonb_typeof(p_evidence) IS DISTINCT FROM 'object'
+            OR length(p_evidence::text) > 16000
+            OR COALESCE(p_evidence->>'journalSha256', '') !~ '^[a-f0-9]{64}$'
+            OR COALESCE(p_evidence->>'requestDigest', '') !~ '^[a-f0-9]{64}$'
+            OR (p_evidence ? 'archiveSha256'
+              AND COALESCE(p_evidence->>'archiveSha256', '') !~ '^[a-f0-9]{64}$')
+            OR p_evidence->>'receiptState' IS DISTINCT FROM 'denied'
+            OR p_evidence->>'neverAdmitted' IS DISTINCT FROM 'true'
+            OR p_evidence->>'failureCode' IS DISTINCT FROM 'learning_not_admitted'
+            OR p_evidence->>'receiptGeneration' IS DISTINCT FROM p_generation::text
+          THEN RAISE EXCEPTION 'invalid never-admitted learning evidence' USING ERRCODE = 'P0001'; END IF;
+          SELECT owner_token, generation, expires_at INTO owner_row
+            FROM ${schema}.tenant_runtime_resource_ownerships
+            WHERE organization_id = p_org AND unit_id = p_unit
+              AND resource_type = 'session' AND resource_id = p_session FOR UPDATE;
+          SELECT owner_token, generation, workspace_id, repository_identity, dispatch_started, request_digest
+            INTO effect_row FROM ${schema}.tenant_runtime_active_workspace_effects
+            WHERE organization_id = p_org AND unit_id = p_unit AND resource_type = 'session'
+              AND resource_id = p_session AND effect_id = p_effect FOR UPDATE;
+          IF NOT FOUND OR owner_row.generation IS NULL OR owner_row.expires_at > clock_timestamp()
+            OR owner_row.owner_token IS DISTINCT FROM effect_row.owner_token
+            OR owner_row.generation IS DISTINCT FROM p_generation
+            OR effect_row.generation IS DISTINCT FROM p_generation
+            OR effect_row.workspace_id IS DISTINCT FROM p_workspace
+            OR effect_row.repository_identity IS NOT NULL
+            OR effect_row.dispatch_started IS DISTINCT FROM true
+            OR effect_row.request_digest IS DISTINCT FROM p_evidence->>'requestDigest' THEN
+            RAISE EXCEPTION 'learning effect ownership or dispatch changed' USING ERRCODE = 'P0001';
+          END IF;
+          PERFORM 1 FROM ${schema}.tenant_session_latest_projection
+            WHERE tenant_id = p_org AND session_id = p_session AND document IS NOT NULL
+              AND NOT document ? '__kalaSessionDeletion' FOR SHARE;
+          IF NOT FOUND THEN RAISE EXCEPTION 'learning Session is not live' USING ERRCODE = 'P0001'; END IF;
+          INSERT INTO ${schema}.tenant_runtime_learning_denied_reconciliations
+            (organization_id, unit_id, resource_id, effect_id, generation, workspace_id,
+              request_digest, operator_id, incident_id, evidence)
+            VALUES (p_org, p_unit, p_session, p_effect, p_generation, p_workspace,
+              effect_row.request_digest, p_operator, p_incident, p_evidence);
+          DELETE FROM ${schema}.tenant_runtime_active_workspace_effects
+            WHERE organization_id = p_org AND unit_id = p_unit AND resource_type = 'session'
+              AND resource_id = p_session AND effect_id = p_effect
+              AND owner_token = effect_row.owner_token AND generation = p_generation
+              AND workspace_id = p_workspace AND dispatch_started = true
+              AND request_digest = effect_row.request_digest;
+          IF NOT FOUND THEN RAISE EXCEPTION 'learning effect changed' USING ERRCODE = 'P0001'; END IF;
+        END
+        $learning$`,
+      `REVOKE ALL ON FUNCTION ${schema}.kala_reconcile_learning_denied(
+        text,text,text,text,bigint,text,text,text,jsonb) FROM PUBLIC`,
+    ],
+  },
+  {
+    version: 32,
+    name: 'learning_effect_finalization_evidence',
+    statements: (schema) => [
+      `CREATE TABLE ${schema}.tenant_runtime_learning_effect_finalizations (
+        organization_id text NOT NULL, unit_id text NOT NULL, resource_id text NOT NULL,
+        effect_id text NOT NULL, generation bigint NOT NULL, workspace_id text NOT NULL,
+        request_digest text NOT NULL CHECK (request_digest ~ '^[a-f0-9]{64}$'),
+        finalized_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        PRIMARY KEY (organization_id, unit_id, resource_id, effect_id)
+      )`,
+      `CREATE FUNCTION ${schema}.kala_record_learning_effect_finalization()
+        RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $learning$
+        BEGIN
+          INSERT INTO ${schema}.tenant_runtime_learning_effect_finalizations
+            (organization_id, unit_id, resource_id, effect_id, generation, workspace_id, request_digest)
+            VALUES (OLD.organization_id, OLD.unit_id, OLD.resource_id, OLD.effect_id,
+              OLD.generation, OLD.workspace_id, OLD.request_digest);
+          RETURN OLD;
+        END
+        $learning$`,
+      `CREATE TRIGGER kala_learning_effect_finalization
+        AFTER DELETE ON ${schema}.tenant_runtime_active_workspace_effects
+        FOR EACH ROW WHEN (
+          OLD.dispatch_started = true AND OLD.workspace_id IS NOT NULL
+          AND OLD.request_digest ~ '^[a-f0-9]{64}$'
+          AND OLD.repository_identity IS NULL
+          AND (OLD.effect_id ~ '^skill-file-[0-9A-HJKMNP-TV-Z]{26}$'
+            OR OLD.effect_id ~ '^memory-file-[a-f0-9]{64}$'))
+        EXECUTE FUNCTION ${schema}.kala_record_learning_effect_finalization()`,
+      `CREATE FUNCTION ${schema}.kala_operator_learning_finalization(
+        p_org text, p_unit text, p_session text, p_effect text)
+        RETURNS TABLE(generation bigint, workspace_id text, request_digest text)
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $learning$
+        BEGIN
+          IF p_org !~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+            OR session_user IS DISTINCT FROM 'arena_operator_' || replace(p_org, '-', '') THEN
+            RAISE EXCEPTION 'wrong learning operator scope' USING ERRCODE = 'P0001';
+          END IF;
+          RETURN QUERY SELECT f.generation, f.workspace_id, f.request_digest
+            FROM ${schema}.tenant_runtime_learning_effect_finalizations f
+            WHERE f.organization_id = p_org AND f.unit_id = p_unit
+              AND f.resource_id = p_session AND f.effect_id = p_effect;
+        END
+        $learning$`,
+      `REVOKE ALL ON FUNCTION ${schema}.kala_operator_learning_finalization(text,text,text,text) FROM PUBLIC`,
+      `REVOKE ALL ON FUNCTION ${schema}.kala_record_learning_effect_finalization() FROM PUBLIC`,
+    ],
+  },
 ]
 
 export const LATEST_POSTGRES_SCHEMA_VERSION = migrations.at(-1)?.version ?? 0
@@ -894,7 +1224,10 @@ export async function grantPostgresArenaOperator(options: {
     await client.query('BEGIN')
     await assertPostgresSchemaCurrent(client, { schema: schemaName })
     const guarded = [...new Set([...postgresRuntimeTables(), 'tenant_runtime_arena_reconciliations',
-      'tenant_runtime_arena_state_repairs', POSTGRES_MIGRATION_TABLE])]
+      'tenant_runtime_arena_state_repairs', 'tenant_runtime_learning_reconciliations',
+      'tenant_runtime_learning_completed_reconciliations',
+      'tenant_runtime_learning_denied_reconciliations',
+      'tenant_runtime_learning_effect_finalizations', POSTGRES_MIGRATION_TABLE])]
       .map((table) => `${schema}.${quoteIdentifier(table)}`)
     const rights = await client.query<{ login: boolean; elevated: boolean; inherits: boolean;
       ddl: boolean; owns: boolean; dml: boolean; excessive_read: boolean }>(`SELECT
@@ -935,6 +1268,16 @@ export async function grantPostgresArenaOperator(options: {
       text, text, text, text, bigint, text, text, text, jsonb, jsonb) TO ${role}`)
     await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.kala_arena_operator_claim(
       text, text, text, text) TO ${role}`)
+    await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.kala_reconcile_learning_prepared(
+      text,text,text,text,bigint,text,text,text) TO ${role}`)
+    await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.kala_operator_learning_jobs(
+      text,text,text,integer) TO ${role}`)
+    await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.kala_reconcile_learning_completed(
+      text,text,text,text,bigint,text,text,text,jsonb) TO ${role}`)
+    await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.kala_reconcile_learning_denied(
+      text,text,text,text,bigint,text,text,text,jsonb) TO ${role}`)
+    await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.kala_operator_learning_finalization(
+      text,text,text,text) TO ${role}`)
     await client.query('COMMIT')
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined)

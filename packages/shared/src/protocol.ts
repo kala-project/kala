@@ -904,6 +904,8 @@ export type ExecutorMcpConfigStatusAck = {
 }
 
 export type ExecutorAnnounce = {
+  skillFileEffectVersion?: 1 | 2
+  memoryEffectVersion?: 1 | 2
   /** Named Arena Git actions recheck an independent Linux keeper before admission. */
   arenaKeeperVersion?: 1
   computerUsePolicyVersion?: 1
@@ -961,6 +963,7 @@ export type DirListResult = {
   workspaceId: string
   path: string
   roots: readonly string[]
+  unrestricted?: boolean
   entries: readonly DirListEntry[]
   error?: string
 }
@@ -1473,6 +1476,7 @@ export type ConsolidateMemoryResult = {
   requestId: string
   sessionId: string
   saved: readonly string[]
+  savedSkills?: readonly string[]
   skipped: number
   reason?: string
   error?: string
@@ -1530,12 +1534,12 @@ export type ExecutionReceiptQuery = {
 
 export type ExecutionReceiptQueryResult =
   | { status: 'completed'; result: ToolResultAck }
-  | { status: 'started_unknown' | 'absent_with_valid_journal' | 'conflict' | 'unavailable' }
+  | { status: 'denied' | 'started_unknown' | 'absent_with_valid_journal' | 'conflict' | 'unavailable' }
 
 /** Owner-fenced cancellation signal; acknowledgement is not proof of rollback. */
 export type ExecutionCancelRequest = ExecutionReceiptQuery & { stopCommandId: string }
 export type ExecutionCancelAck =
-  | { status: 'cancel_requested' | 'started_unknown' | 'absent_with_valid_journal' | 'conflict' | 'unavailable' }
+  | { status: 'cancel_requested' | 'denied' | 'started_unknown' | 'absent_with_valid_journal' | 'conflict' | 'unavailable' }
   | { status: 'completed'; result: ToolResultAck }
 
 // ============================================================================

@@ -18,6 +18,7 @@ export { killShellTool } from './kill-shell.js'
 export { processTool } from './process.js'
 export { webfetchTool } from './webfetch.js'
 export { memoryTool } from './memory.js'
+export { skillFileTool } from './skill-file.js'
 export { internalDirectTools } from './internal.js'
 export { agentToolSchema } from './agent.js'
 export { createToolRegistry, ToolError } from './registry.js'
@@ -44,6 +45,7 @@ import { killShellTool } from './kill-shell.js'
 import { processTool } from './process.js'
 import { webfetchTool } from './webfetch.js'
 import { memoryTool } from './memory.js'
+import { skillFileTool } from './skill-file.js'
 import { internalDirectTools } from './internal.js'
 
 export const allTools: readonly Tool[] = [
@@ -70,5 +72,6 @@ export const allTools: readonly Tool[] = [
   processTool,
   webfetchTool,
   memoryTool,
+  skillFileTool,
   ...internalDirectTools,
 ]

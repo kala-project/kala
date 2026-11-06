@@ -1,4 +1,5 @@
 import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { createServer, type Server as HttpServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -8,6 +9,8 @@ import { once } from 'node:events'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import type { ToolCallMessage, ToolResultAck } from '@agent-kernel/shared'
+import { ExecutionReceiptStore, executionRequestDigest } from './execution-receipts.js'
+import { assertExecutorStopped, leaderIdentity } from './tools/arena-process-groups.js'
 
 type ExecutorSocket = {
   readonly id: string
@@ -106,12 +109,19 @@ describe('executor process crash recovery', () => {
     if (testRoot) await rm(testRoot, { recursive: true, force: true })
   })
 
-  it.skipIf(process.platform === 'win32')('does not repeat an unresolved shell effect after SIGKILL and still replays completed calls', async () => {
+  it.skipIf(process.platform !== 'linux')('does not repeat an unresolved shell effect after SIGKILL and still replays completed calls', async () => {
     testRoot = await mkdtemp(join(process.cwd(), 'kala-executor-crash-'))
     const markerPath = join(testRoot, 'effects.log')
     const gatePath = join(testRoot, 'release-first-shell')
     const shellPidPath = join(testRoot, 'first-shell.pid')
     const receiptStorePath = join(testRoot, 'execution-receipts.json')
+    const keeperFile = join(testRoot, 'keeper.json')
+    const keeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 60000)'], {
+      cwd: testRoot, stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    spawned.add(keeper)
+    if (!keeper.pid) throw new Error('test keeper did not start')
+    await writeFile(keeperFile, JSON.stringify(await leaderIdentity(keeper.pid)), { mode: 0o600 })
 
     http = createServer()
     io = new Server(http, { transports: ['websocket'] })
@@ -143,7 +153,7 @@ describe('executor process crash recovery', () => {
     const startFixture = (): ChildProcessWithoutNullStreams => {
       const child = spawn(process.execPath, ['--import', tsxLoaderPath, fixturePath, host, testRoot!, receiptStorePath], {
         cwd: testRoot,
-        env: { ...process.env, NO_COLOR: '1' },
+        env: { ...process.env, NO_COLOR: '1', ARENA_TEST_KEEPER: keeperFile },
         stdio: ['pipe', 'pipe', 'pipe'],
       })
       spawned.add(child)
@@ -253,5 +263,43 @@ describe('executor process crash recovery', () => {
     await new Promise((resolve) => setTimeout(resolve, 150))
     expect(lines(await readFile(markerPath, 'utf8')).filter((line) => line === 'BENIGN')).toHaveLength(1)
     expect(lines(await readFile(markerPath, 'utf8'))).not.toContain('CONFLICT')
-  }, 20_000)
+
+    const skill: ToolCallMessage = {
+      sessionId: 'session-crash-regression',
+      callId: 'skill-file-01ARZ3NDEKTSV4RRFFQ69G5FAV',
+      name: 'skill_file',
+      cwd: testRoot,
+      ownerGeneration: '9',
+      origin: 'host',
+      input: { action: 'create', name: 'crash-skill', content: 'first and only write', ownerGeneration: '9' },
+    }
+    thirdSocket.emit('tool:call', skill, () => undefined)
+    await waitFor(async () => !!(await readIfPresent(join(testRoot!, 'skill-final-effect-finished')) ||
+      await readIfPresent(join(testRoot!, '.agent', 'skills', 'crash-skill', 'SKILL.md'))),
+    'skill final filesystem effect did not finish')
+    const remotePath = join(testRoot, '.agent', 'skills', 'crash-skill', 'SKILL.md')
+    expect(await readFile(remotePath, 'utf8')).toBe('first and only write')
+    await stopFixture(third)
+    const journal = new ExecutionReceiptStore(receiptStorePath)
+    await journal.load()
+    const stored = JSON.parse(await readFile(receiptStorePath, 'utf8'))[
+      `${skill.sessionId}:${skill.callId}`] as { executorProcess?: Awaited<ReturnType<typeof leaderIdentity>>;
+        target?: { pathDigest: string; contentDigest: string } }
+    expect(stored.executorProcess?.pgid).toBe(third.pid)
+    expect(stored.target).toEqual({ tool: 'skill_file', action: 'create',
+      pathDigest: createHash('sha256').update(remotePath).digest('hex'),
+      contentDigest: createHash('sha256').update('first and only write').digest('hex') })
+    await assertExecutorStopped(stored.executorProcess!)
+    const query = {
+      sessionId: skill.sessionId, callId: skill.callId,
+      ownerGeneration: '9', requestDigest: executionRequestDigest(skill),
+    }
+    expect(await journal.query(query)).toEqual({ status: 'started_unknown' })
+    const fourth = startFixture()
+    const fourthSocket = await nextSocket(fourth)
+    const unknownSkill = await dispatch(fourthSocket, skill)
+    expect(unknownSkill).toMatchObject({ ok: false, failure: { outcome: 'indeterminate' } })
+    expect(await readFile(remotePath, 'utf8')).toBe('first and only write')
+    expect(await journal.query(query)).toEqual({ status: 'started_unknown' })
+  }, 30_000)
 })

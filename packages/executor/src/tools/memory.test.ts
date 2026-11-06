@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, readdirSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -16,6 +16,7 @@ vi.mock('node:os', async () => {
 })
 
 import { memoryTool } from './memory.js'
+import { createSandbox } from '../sandbox.js'
 import { makeCtx } from './_test-helpers.js'
 import { ToolError } from './registry.js'
 
@@ -96,6 +97,26 @@ describe('memory tools', () => {
     const file = join(workspace, '.kala', 'memory', 'build_cmd.md')
     expect(existsSync(file)).toBe(true)
     expect(readFileSync(file, 'utf8')).toBe('pnpm build')
+  })
+
+  it('uses the bound session cwd instead of the Executor process cwd without configured roots', async () => {
+    const ctx = { ...makeCtx(workspace), sandbox: createSandbox({ roots: [] }), cwd: workspace }
+    await memoryTool.run({ operation: 'write', scope: 'workspace', key: 'bound', content: 'remote' }, ctx)
+    expect(readFileSync(join(workspace, '.kala', 'memory', 'bound.md'), 'utf8')).toBe('remote')
+    await expect(memoryTool.run({ operation: 'read', scope: 'workspace', key: 'bound' }, {
+      ...ctx, cwd: 'relative-path',
+    })).rejects.toThrow('absolute session cwd')
+  })
+
+  it('selects the root containing the bound cwd when the Executor serves multiple workspaces', async () => {
+    const rootA = join(workspace, 'a')
+    const rootB = join(workspace, 'b')
+    mkdirSync(rootA)
+    mkdirSync(rootB)
+    const ctx = { ...makeCtx(workspace), sandbox: createSandbox({ roots: [rootA, rootB] }), cwd: rootB }
+    await memoryTool.run({ operation: 'write', scope: 'workspace', key: 'bound', content: 'b-only' }, ctx)
+    expect(readFileSync(join(rootB, '.kala', 'memory', 'bound.md'), 'utf8')).toBe('b-only')
+    expect(existsSync(join(rootA, '.kala', 'memory', 'bound.md'))).toBe(false)
   })
 
   it('unified memory tool writes, reads, lists, and deletes workspace entries', async () => {

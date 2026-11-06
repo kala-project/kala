@@ -131,6 +131,7 @@ export type SubAgentFinishedPayload = {
 }
 
 export type ToolDispatcher = {
+  queryExecutionReceipt?(query: import('@agent-kernel/shared').ExecutionReceiptQuery): Promise<import('@agent-kernel/shared').ExecutionReceiptQueryResult>
   /** Read-only durable Executor evidence; never infer non-admission from absence or transport failure. */
   inspectArenaReceipt?(sessionId: string, callId: string): Promise<{
     state: 'absent' | 'started' | 'completed' | 'denied' | 'unavailable'
@@ -212,6 +213,21 @@ export type HostLoopDeps = {
   assertSessionEffectOwner?: (sessionId: string) => Promise<void | { ownerGeneration: string }>
   /** Fail closed for Arena on PG-owned Sessions until Executor final-effect admission is available. */
   requireArenaEffectBarrier?: boolean
+  requireSkillEffectBarrier?: boolean
+  /** Only the PostgreSQL-backed Host registry may authorize generic Executor memory mutations. */
+  requireMemoryEffectBarrier?: boolean
+  backgroundLearningJobs?: {
+    enqueue(sessionId: string, fingerprint: string): Promise<void>
+    claim(sessionId: string, fingerprint: string): Promise<boolean>
+    complete(sessionId: string, fingerprint: string, error?: string): Promise<void>
+    pending(sessionId: string): Promise<string[]>
+  }
+  registerSkillEffect?: (
+    sessionId: string, generation: string, callId: string, workspaceId: string,
+  ) => Promise<() => Promise<void>>
+  releaseNeverDispatchedSkillEffect?: (
+    sessionId: string, generation: string, callId: string, workspaceId: string,
+  ) => Promise<void>
   /** PostgreSQL declaration committed before a named Executor call; completion requires its final stopped receipt. */
   registerArenaEffect?: (
     sessionId: string, generation: string, callId: string, workspaceId: string,

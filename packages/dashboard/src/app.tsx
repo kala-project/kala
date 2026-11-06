@@ -1173,14 +1173,17 @@ export function App(): JSX.Element {
       }
       if (result.error) {
         setConsolidateBanner({ kind: 'error', message: t('app.consolidateFailed', { error: result.error }) })
-      } else if (result.saved.length > 0) {
+      } else if (result.saved.length > 0 || (result.savedSkills?.length ?? 0) > 0) {
         setConsolidateBanner({
           kind: 'success',
-          message: t('app.savedMemories', {
-            count: result.saved.length,
-            label: t(result.saved.length === 1 ? 'app.memory_one' : 'app.memory_other'),
-            items: result.saved.join(', '),
-          }),
+          message: [
+            ...(result.saved.length > 0 ? [t('app.savedMemories', {
+              count: result.saved.length,
+              label: t(result.saved.length === 1 ? 'app.memory_one' : 'app.memory_other'),
+              items: result.saved.join(', '),
+            })] : []),
+            ...(result.savedSkills?.length ? [t('app.savedSkills', { items: result.savedSkills.join(', ') })] : []),
+          ].join(' · '),
         })
       } else {
         setConsolidateBanner({

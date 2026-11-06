@@ -6,9 +6,8 @@
  *                 shared across every workspace on this machine.
  *   - workspace → <firstSandboxRoot>/.kala/memory/<key>.md
  *                 shared across every session in this workspace.
- *                 (falls back to process.cwd()/.kala/memory when
- *                 no sandbox roots are configured — same rule the executor
- *                 uses for its own working directory)
+ *                 (falls back to the session cwd, then process.cwd(),
+ *                 when no sandbox roots are configured)
  *   - session   → NOT on disk; the kernel intercepts the tool_result and
  *                 lifts the (key, content) into state.memory. Session
  *                 memory dies with the session (unless forked).
@@ -24,11 +23,12 @@
 import { mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, isAbsolute, join } from 'node:path'
 
 import type { Tool, ToolContext } from './registry.js'
 import { ToolError, throwIfAborted } from './registry.js'
 import { requireString } from './schema.js'
+import { isPathInsideRoot } from '../sandbox.js'
 
 const KEY_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/
 const MAX_CONTENT_BYTES = 128 * 1024 // 128 KB per entry — memory is notes, not files
@@ -72,14 +72,25 @@ function requireKey(input: Record<string, unknown>): string {
   return key
 }
 
-function memoryDirFor(scope: Exclude<Scope, 'session'>, ctx: ToolContext): string {
+async function memoryDirFor(scope: Exclude<Scope, 'session'>, ctx: ToolContext): Promise<string> {
   if (scope === 'global') {
     return join(homedir(), '.kala', 'memory')
   }
   // workspace
   const roots = ctx.sandbox.roots
-  const base = roots.length > 0 ? roots[0]! : process.cwd()
+  if (ctx.cwd && !isAbsolute(ctx.cwd)) {
+    throw new ToolError('EACCES', 'workspace memory requires an absolute session cwd')
+  }
+  const cwd = ctx.cwd ? await ctx.sandbox.resolve(ctx.cwd) : undefined
+  const base = cwd && roots.length > 0
+    ? roots.filter((root) => isPathInsideRoot(cwd, root)).sort((a, b) => b.length - a.length)[0]!
+    : roots[0] ?? cwd ?? process.cwd()
   return join(base, '.kala', 'memory')
+}
+
+/** Read-only target resolution shared by execution admission and the workspace memory tool. */
+export async function workspaceMemoryTarget(input: Record<string, unknown>, ctx: ToolContext): Promise<string> {
+  return join(await memoryDirFor('workspace', ctx), `${requireKey(input)}.md`)
 }
 
 async function ensureDir(dir: string): Promise<void> {
@@ -118,8 +129,8 @@ async function readMemory(
     return `Session-scope memory lives in state.memory (visible in the transcript). Key "${key}" is not on disk; ask the state view.`
   }
 
-  const dir = memoryDirFor(scope, ctx)
-  const file = join(dir, `${key}.md`)
+  const dir = await memoryDirFor(scope, ctx)
+  const file = scope === 'workspace' ? await workspaceMemoryTarget(input, ctx) : join(dir, `${key}.md`)
   if (!existsSync(file)) {
     throw new ToolError('ENOENT', `no memory entry: scope=${scope} key=${key}`)
   }
@@ -132,7 +143,7 @@ async function listKeys(scope: Scope, ctx: ToolContext): Promise<string> {
   if (scope === 'session') {
     return `Session-scope memory lives in state.memory. Look at the state view for current entries.`
   }
-  const dir = memoryDirFor(scope, ctx)
+  const dir = await memoryDirFor(scope, ctx)
   if (!existsSync(dir)) {
     return `(empty — no memory entries at scope=${scope})`
   }
@@ -169,10 +180,10 @@ async function writeMemory(
   }
 
   throwIfAborted(ctx)
-  const dir = memoryDirFor(scope, ctx)
+  const dir = await memoryDirFor(scope, ctx)
   await ensureDir(dir)
   throwIfAborted(ctx)
-  const file = join(dir, `${key}.md`)
+  const file = scope === 'workspace' ? await workspaceMemoryTarget(input, ctx) : join(dir, `${key}.md`)
   const existed = existsSync(file)
   await writeFile(file, content, 'utf8')
   return existed
@@ -193,7 +204,7 @@ async function deleteMemory(
   }
 
   throwIfAborted(ctx)
-  const dir = memoryDirFor(scope, ctx)
+  const dir = await memoryDirFor(scope, ctx)
   const file = join(dir, `${key}.md`)
   if (!existsSync(file)) {
     // Idempotent delete — treat missing as success. LLMs sometimes retry.

@@ -61,6 +61,7 @@ import { AgentTelemetryBridge } from './agent-telemetry.js'
 import {
   createExecutorRegistry,
   DEFAULT_TOOL_ACK_TIMEOUT_MS,
+  type WorkspaceResolver,
 } from './connection/executor.js'
 import {
   collectSessionDescendants,
@@ -153,6 +154,13 @@ export type HostServerOptions = {
   /** Optional SQL-checked Session owner gate before external model and tool effects. */
   assertSessionEffectOwner?: (sessionId: string) => Promise<void | { ownerGeneration: string }>
   requireArenaEffectBarrier?: boolean
+  requireSkillEffectBarrier?: boolean
+  registerSkillEffect?: HostLoopDeps['registerSkillEffect']
+  releaseNeverDispatchedSkillEffect?: HostLoopDeps['releaseNeverDispatchedSkillEffect']
+  beginSkillDispatch?: (sessionId: string, generation: string, callId: string, requestDigest: string) => Promise<void>
+  registerMemoryEffect?: NonNullable<WorkspaceResolver['registerMemoryEffect']>
+  beginMemoryDispatch?: NonNullable<WorkspaceResolver['beginMemoryDispatch']>
+  backgroundLearningJobs?: HostLoopDeps['backgroundLearningJobs']
   registerArenaEffect?: HostLoopDeps['registerArenaEffect']
   prepareArenaInitEffect?: HostLoopDeps['prepareArenaInitEffect']
   releaseNeverDispatchedArenaEffect?: HostLoopDeps['releaseNeverDispatchedArenaEffect']
@@ -657,6 +665,7 @@ export async function startHostServer(
 
   const arenaAdmissions = new Set<string>()
   const arenaAdmissionKey = (sessionId: string, callId: string) => `${sessionId}\0${callId}`
+  const skillAdmissions = new Set<string>()
   let authorizeExecutorSocket: Parameters<typeof createExecutorRegistry>[5] = async () => false
   const executors = createExecutorRegistry(
     io,
@@ -690,6 +699,11 @@ export async function startHostServer(
       } : {}),
       ...(options.assertSessionEffectOwner ? { assertSessionEffectOwner: options.assertSessionEffectOwner } : {}),
       ...(options.beginArenaDispatch ? { beginArenaDispatch: options.beginArenaDispatch } : {}),
+      ...(options.requireSkillEffectBarrier ? { requireSkillEffectBarrier: true } : {}),
+      approvedSkillEffect: (sid, callId) => skillAdmissions.has(arenaAdmissionKey(sid, callId)),
+      ...(options.beginSkillDispatch ? { beginSkillDispatch: options.beginSkillDispatch } : {}),
+      ...(options.registerMemoryEffect ? { registerMemoryEffect: options.registerMemoryEffect } : {}),
+      ...(options.beginMemoryDispatch ? { beginMemoryDispatch: options.beginMemoryDispatch } : {}),
       mcpSchemaHashFor: (sid, name) => store.get(sid)?.config.tools.find((tool) => tool.name === name && tool.name.includes('__') && !tool.name.startsWith('__') && tool.schemaHash && tool.version === tool.schemaHash)?.schemaHash,
     },
     options.toolTimeoutMs ?? DEFAULT_TOOL_ACK_TIMEOUT_MS,
@@ -2245,6 +2259,27 @@ export async function startHostServer(
 
   const extensions = createBuiltinExtensionRegistry(options.extensions)
   const loopDeps: HostLoopDeps = {
+    ...(options.backgroundLearningJobs ? { backgroundLearningJobs: options.backgroundLearningJobs } : {}),
+    ...(options.requireSkillEffectBarrier && options.registerMemoryEffect && options.beginMemoryDispatch
+      ? { requireMemoryEffectBarrier: true } : {}),
+    ...(options.requireSkillEffectBarrier ? { requireSkillEffectBarrier: true } : {}),
+    ...(options.registerSkillEffect ? { registerSkillEffect: async (
+      sessionId: string, generation: string, callId: string, workspaceId: string,
+    ) => {
+      const complete = await options.registerSkillEffect!(sessionId, generation, callId, workspaceId)
+      const key = arenaAdmissionKey(sessionId, callId)
+      skillAdmissions.add(key)
+      return async () => {
+        await complete()
+        skillAdmissions.delete(key)
+      }
+    } } : {}),
+    ...(options.releaseNeverDispatchedSkillEffect ? { releaseNeverDispatchedSkillEffect: async (
+      sessionId: string, generation: string, callId: string, workspaceId: string,
+    ) => {
+      await options.releaseNeverDispatchedSkillEffect!(sessionId, generation, callId, workspaceId)
+      skillAdmissions.delete(arenaAdmissionKey(sessionId, callId))
+    } } : {}),
     ...(options.requireArenaEffectBarrier ? { requireArenaEffectBarrier: true } : {}),
     ...(options.registerArenaEffect ? { registerArenaEffect: async (
       sessionId: string, ownerGeneration: string, callId: string, workspaceId: string,

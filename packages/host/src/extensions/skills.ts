@@ -160,7 +160,7 @@ async function sessionSkills(
       if (listing.error) {
         if (!/ENOENT|not found/i.test(listing.error)) warn('workspace skill root unavailable (executor offline or access denied)')
       } else if (listing.workspaceId !== workspaceId || listing.path !== root ||
-        !listing.roots.some((allowed) => withinWorkspace(remotePath, allowed, root))) {
+        (!listing.unrestricted && !listing.roots.some((allowed) => withinWorkspace(remotePath, allowed, root)))) {
         warn('workspace skill root outside executor workspace')
       } else {
         for (const entry of listing.entries.slice(0, 256)) {

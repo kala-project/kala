@@ -68,6 +68,7 @@ export async function listDirs(
       workspaceId,
       path: resolved,
       roots,
+      unrestricted: sandbox.roots.length === 0,
       entries: items,
     }
   } catch (err) {
@@ -76,6 +77,7 @@ export async function listDirs(
       workspaceId,
       path: requested,
       roots,
+      unrestricted: sandbox.roots.length === 0,
       entries: [],
       error: err instanceof Error ? err.message : String(err),
     }

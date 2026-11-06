@@ -2,9 +2,9 @@ import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
 import { execFileSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { basename, join } from 'node:path'
 import { promisify } from 'node:util'
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -36,8 +36,9 @@ import { runWorktreeArenaTool, WORKTREE_ARENA_METADATA_ACTION } from '../extensi
 import type { HostLoopDeps } from '../loop-types.js'
 import { createExecutorRegistry } from '../connection/executor.js'
 import { assertArenaKeeper } from '../../../executor/src/arena-keeper.js'
-import { ExecutionReceiptStore, executionRequestDigest } from '../../../executor/src/execution-receipts.js'
-import { assertGroupStopped } from '../../../executor/src/tools/arena-process-groups.js'
+import { ExecutionReceiptStore, executionRequestDigest, learningReceiptArchivePath,
+  learningReceiptIndexPath } from '../../../executor/src/execution-receipts.js'
+import { assertGroupStopped, leaderIdentity } from '../../../executor/src/tools/arena-process-groups.js'
 
 const execFileAsync = promisify(execFile)
 const integrationDescribe = process.env.KALA_RUN_POSTGRES_INTEGRATION === '1' ? describe : describe.skip
@@ -112,6 +113,65 @@ integrationDescribe('PostgresRuntimeResourceOwnershipStore isolated PostgreSQL i
       replicaId: ownerB.replicaId, origin: replicaB.origin, generation: 1n,
     })
     await expect(first.lookupResourceOwner({ ...sessionA, organizationId: randomUUID() })).resolves.toBeUndefined()
+  })
+
+  it('isolates cross-tenant Skill/memory UNKNOWN from Arena claims while retaining legacy NULL Arena stops', async () => {
+    const genericOrg = randomUUID(), genericUnit = parseTenantRuntimeUnitId(randomUUID())
+    const genericReplica = await first.registerReplica({
+      organizationId: genericOrg, unitId: genericUnit, replicaId: randomUUID(),
+      membershipToken: randomUUID(), origin: 'https://generic.example',
+    }, 5_000)
+    const genericReplicaB = await second.registerReplica({
+      organizationId: genericOrg, unitId: genericUnit, replicaId: randomUUID(),
+      membershipToken: randomUUID(), origin: 'https://generic-b.example',
+    }, 5_000)
+    const genericScope = resource(genericOrg, genericUnit, 'session')
+    const generic = await first.acquireResourceOwner(genericScope, genericReplica, randomUUID(), 300)
+    await first.registerWorkspaceEffect(generic, 'skill-file-01ARZ3NDEKTSV4RRFFQ69G5FAV',
+      `skill-${randomUUID()}`, undefined, undefined, true)
+    await first.registerWorkspaceEffect(generic, `memory-file-${'a'.repeat(64)}`,
+      `memory-${randomUUID()}`, undefined, undefined, true)
+    await first.beginWorkspaceEffectDispatch(generic, `memory-file-${'a'.repeat(64)}`, 'b'.repeat(64))
+
+    const arenaOrg = randomUUID(), arenaUnit = parseTenantRuntimeUnitId(randomUUID())
+    const arenaReplica = await second.registerReplica({
+      organizationId: arenaOrg, unitId: arenaUnit, replicaId: randomUUID(),
+      membershipToken: randomUUID(), origin: 'https://arena.example',
+    }, 5_000)
+    const arenaScope = resource(arenaOrg, arenaUnit, 'session')
+    const arena = await second.acquireResourceOwner(arenaScope, arenaReplica, randomUUID(), 5_000)
+    const claimIdentity = `git-common-inode:${randomUUID()}`, initIdentity = `git-common-inode:${randomUUID()}`
+    await second.claimArenaRepository(arena, claimIdentity, 'independent')
+    await second.prepareArenaInitEffect(arena, 'arena-init-INDEPENDENT', `init-${randomUUID()}`,
+      initIdentity, 'independent-init')
+
+    const legacyOrg = randomUUID(), legacyUnit = parseTenantRuntimeUnitId(randomUUID())
+    const legacyReplica = await first.registerReplica({
+      organizationId: legacyOrg, unitId: legacyUnit, replicaId: randomUUID(),
+      membershipToken: randomUUID(), origin: 'https://legacy.example',
+    }, 5_000)
+    const legacyScope = resource(legacyOrg, legacyUnit, 'session')
+    const legacy = await first.acquireResourceOwner(legacyScope, legacyReplica, randomUUID(), 5_000)
+    await first.registerWorkspaceEffect(legacy, 'arena-probe-UNKNOWN', `legacy-${randomUUID()}`,
+      undefined, undefined, true)
+    const blockedOrg = randomUUID(), blockedUnit = parseTenantRuntimeUnitId(randomUUID())
+    const blockedReplica = await second.registerReplica({
+      organizationId: blockedOrg, unitId: blockedUnit, replicaId: randomUUID(),
+      membershipToken: randomUUID(), origin: 'https://blocked.example',
+    }, 5_000)
+    const blockedScope = resource(blockedOrg, blockedUnit, 'session')
+    const blocked = await second.acquireResourceOwner(blockedScope, blockedReplica, randomUUID(), 5_000)
+    await expect(second.claimArenaRepository(blocked, `git-common-inode:${randomUUID()}`, 'blocked'))
+      .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+    await expect(second.prepareArenaInitEffect(blocked, 'arena-init-BLOCKED', `blocked-${randomUUID()}`,
+      `git-common-inode:${randomUUID()}`, 'blocked'))
+      .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+    await first.completeWorkspaceEffect(legacy, 'arena-probe-UNKNOWN')
+    await second.claimArenaRepository(blocked, `git-common-inode:${randomUUID()}`, 'after-stop')
+
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    await expect(second.acquireResourceOwner(genericScope, genericReplicaB, randomUUID(), 5_000))
+      .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
   })
 
   it('claims a real Git common directory across workspace aliases, Sessions and tenants until final cleanup', async () => {
@@ -509,6 +569,619 @@ integrationDescribe('PostgresRuntimeResourceOwnershipStore isolated PostgreSQL i
     expect(successor.generation).toBe(owner.generation + 1n)
     await expect(first.registerWorkspaceEffect(owner, randomUUID()))
       .rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+  })
+
+  it('fences Skill dispatch across replicas and releases only never-dispatched or completed effects', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+    const a = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://skill-a.example',
+    }, 5_000)
+    const b = await second.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://skill-b.example',
+    }, 5_000)
+    const scope = resource(organizationId, unitId, 'session')
+    const owner = await first.acquireResourceOwner(scope, a, randomUUID(), 300)
+    const workspaceId = randomUUID(), effectId = 'skill-file-01ARZ3NDEKTSV4RRFFQ69G5FAV'
+    const refusedId = 'skill-file-01ARZ3NDEKTSV4RRFFQ69G5FAW'
+    await first.registerWorkspaceEffect(owner, refusedId, workspaceId, undefined, undefined, true)
+    await first.completeNeverDispatchedWorkspaceEffect(owner, refusedId, workspaceId,
+      'skill_host_pre_dispatch_rejection')
+    expect(await first.inspectWorkspaceEffects(scope)).toHaveLength(0)
+    await first.registerWorkspaceEffect(owner, effectId, workspaceId, undefined, undefined, true)
+    await expect(second.acquireResourceOwner(scope, b, randomUUID(), 5_000))
+      .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+    await first.beginWorkspaceEffectDispatch(owner, effectId, 'a'.repeat(64))
+    await expect(first.completeNeverDispatchedWorkspaceEffect(owner, effectId, workspaceId, 'blocked'))
+      .rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+    const operatorId = `arena_operator_${organizationId.replaceAll('-', '')}`
+    const operatorPassword = `test-${randomUUID()}`
+    await first.database.query(`CREATE ROLE "${operatorId}" LOGIN PASSWORD '${operatorPassword}'`)
+    await grantPostgresArenaOperator({ connectionString, operatorRole: operatorId, organizationId })
+    const operatorUrl = new URL(connectionString)
+    operatorUrl.username = operatorId
+    operatorUrl.password = operatorPassword
+    const operator = createPostgresRuntimeResourceOwnershipStore({ connectionString: operatorUrl.href })
+    try {
+      expect((await operator.inspectOperatorArenaEffects(scope)).find((effect) => effect.effectId === effectId))
+        .toMatchObject({ generation: owner.generation, workspaceId })
+      expect(await operator.inspectOperatorArenaDispatch(scope, effectId))
+        .toEqual({ started: true, digest: 'a'.repeat(64) })
+      await expect(operator.completeWorkspaceEffect(owner, effectId)).rejects.toBeDefined()
+    } finally { await operator.close() }
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    await expect(second.acquireResourceOwner(scope, b, randomUUID(), 5_000))
+      .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+    await first.completeWorkspaceEffect(owner, effectId)
+    const finalized = createPostgresRuntimeResourceOwnershipStore({ connectionString: operatorUrl.href })
+    try {
+      expect(await finalized.inspectOperatorLearningFinalization(scope, effectId))
+        .toMatchObject({ generation: owner.generation, workspaceId, requestDigest: 'a'.repeat(64) })
+      expect(await finalized.inspectOperatorLearningFinalization(scope, refusedId)).toBeNull()
+    } finally { await finalized.close() }
+    await second.acquireResourceOwner(scope, b, randomUUID(), 5_000)
+  })
+
+  it('keeps a generic memory write UNKNOWN across lease expiry and replica takeover', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+    const a = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://memory-a.example',
+    }, 5_000)
+    const b = await second.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://memory-b.example',
+    }, 5_000)
+    const scope = resource(organizationId, unitId, 'session')
+    const owner = await first.acquireResourceOwner(scope, a, randomUUID(), 300)
+    const effectId = `memory-file-${'a'.repeat(64)}`
+    await first.registerWorkspaceEffect(owner, effectId, randomUUID(), undefined, undefined, true)
+    await first.beginWorkspaceEffectDispatch(owner, effectId, 'b'.repeat(64))
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    await expect(second.acquireResourceOwner(scope, b, randomUUID(), 5_000))
+      .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+    expect(await second.inspectWorkspaceEffects(scope)).toEqual([
+      expect.objectContaining({ effectId, generation: owner.generation }),
+    ])
+    await first.completeWorkspaceEffect(owner, effectId)
+    await second.acquireResourceOwner(scope, b, randomUUID(), 5_000)
+  })
+
+  it('reconciles original remote completed Skill and memory receipts after lost ACK only after their Executors stop', async () => {
+    const root = mkdtempSync(join(process.cwd(), 'learning-completed-'))
+    const journal = join(root, 'original-receipts.json')
+    const keeperPath = join(root, 'keeper.json')
+    const secret = join(root, 'operator-url')
+    const http = createServer()
+    const io = new Server(http)
+    const children: ChildProcess[] = []
+    let mountedCold: string | undefined
+    try {
+      const keeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 60000)'], { stdio: 'ignore' })
+      children.push(keeper)
+      if (!keeper.pid) throw new Error('test keeper did not start')
+      writeFileSync(keeperPath, JSON.stringify(await leaderIdentity(keeper.pid)), { mode: 0o600 })
+      await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', resolve))
+      const address = http.address()
+      if (!address || typeof address === 'string') throw new Error('test HTTP server did not bind')
+      const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+      const a = await first.registerReplica({
+        organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(),
+        origin: 'https://learning-completed-a.example',
+      }, 30_000)
+      const b = await second.registerReplica({
+        organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(),
+        origin: 'https://learning-completed-b.example',
+      }, 30_000)
+      const scope = resource(organizationId, unitId, 'session')
+      const authority = new PostgresSessionAuthority(createPostgresHotStateStore({ connectionString }),
+        organizationId, { schemaManagement: 'external' })
+      await authority.create({ sessionId: scope.resourceId, state: { cursor: 0 }, config: {} })
+      await authority.close()
+      let owner = await first.acquireResourceOwner(scope, a, randomUUID(), 750)
+      const workspaceId = `learning-completed-${randomUUID()}`
+      const effectId = 'skill-file-01ARZ3NDEKTSV4RRFFQ69G5FAV'
+      const droppedCalls = new Set([effectId])
+      const role = `arena_operator_${organizationId.replaceAll('-', '')}`
+      const password = `test-${randomUUID()}`
+      await first.database.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}'`)
+      await grantPostgresArenaOperator({ connectionString, operatorRole: role, organizationId })
+      const url = new URL(connectionString)
+      url.username = role; url.password = password
+      writeFileSync(secret, url.href, { mode: 0o600 })
+      await first.registerWorkspaceEffect(owner, effectId, workspaceId, undefined, undefined, true)
+      let droppedAck: unknown
+      const registry = createExecutorRegistry(io, {
+        workspaceIdFor: () => workspaceId,
+        requireSkillEffectBarrier: true,
+        approvedSkillEffect: () => true,
+        assertSessionEffectOwner: async () => ({ ownerGeneration: String(owner.generation) }),
+        beginSkillDispatch: async (_session, generation, id, digest) => {
+          expect(generation).toBe(String(owner.generation))
+          await first.beginWorkspaceEffectDispatch(owner, id, digest)
+        },
+        registerMemoryEffect: async (_session, generation, id, workspace) => {
+          expect(generation).toBe(String(owner.generation))
+          await second.registerWorkspaceEffect(owner, id, workspace, undefined, undefined, true)
+          return async () => await second.completeWorkspaceEffect(owner, id)
+        },
+        beginMemoryDispatch: async (_session, generation, id, digest) => {
+          expect(generation).toBe(String(owner.generation))
+          await second.beginWorkspaceEffectDispatch(owner, id, digest)
+        },
+      }, 300, undefined, 0)
+      io.of('/executor').on('connection', (socket) => {
+        const emit = socket.emit.bind(socket) as (...args: unknown[]) => boolean
+        socket.emit = ((event: string, ...args: unknown[]) => {
+          if (event === 'tool:call'
+            && droppedCalls.has((args[0] as { callId?: string } | undefined)?.callId ?? '')) {
+            args[args.length - 1] = (reply: unknown) => { droppedAck = reply }
+          }
+          return emit(event, ...args)
+        }) as typeof socket.emit
+        socket.on('executor:announce', (announcement) => registry.attach(socket, announcement))
+        socket.on('disconnect', () => registry.detach(socket))
+      })
+      const child = spawn(process.execPath, ['--import', 'tsx',
+        join(process.cwd(), 'src', 'tenant-runtime', 'learning-executor-crash-helper.mjs')], {
+        cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, LEARNING_TEST_HOST: `http://127.0.0.1:${address.port}`,
+          LEARNING_TEST_WORKSPACE: workspaceId, LEARNING_TEST_EXECUTOR: `executor-${randomUUID()}`,
+          LEARNING_TEST_ROOT: root, LEARNING_TEST_RECEIPTS: journal, LEARNING_TEST_KEEPER: keeperPath },
+      })
+      children.push(child)
+      await eventually(async () => {
+        if (registry.snapshot()[0]?.skillFileEffectVersion !== 2) throw new Error('V2 Executor not connected')
+      }, 8_000)
+      const effect = { kind: 'call_tool' as const, callId: effectId, name: 'skill_file',
+        cwd: root, input: { action: 'create', name: 'learned', content: 'verified content',
+          ownerGeneration: String(owner.generation) } }
+      const digest = executionRequestDigest({
+        sessionId: scope.resourceId, callId: effectId, name: effect.name, input: effect.input,
+        cwd: root, origin: 'host',
+      })
+      const unanswered = registry.callTool(scope.resourceId, effect)
+      const receiptStore = new ExecutionReceiptStore(journal)
+      await eventually(async () => {
+        const result = await receiptStore.query({
+          sessionId: scope.resourceId, callId: effectId, requestDigest: digest,
+          ownerGeneration: String(owner.generation),
+        })
+        if (result.status !== 'completed' || !droppedAck) throw new Error('Remote final receipt not durable')
+      }, 8_000)
+      await expect(unanswered).resolves.toMatchObject({ ok: false,
+        failure: { outcome: 'indeterminate' } })
+      await new Promise((resolve) => setTimeout(resolve, 850))
+      await expect(second.acquireResourceOwner(scope, b, randomUUID(), 5_000))
+        .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      const target = join(root, '.agent', 'skills', 'learned', 'SKILL.md')
+      const cli = (id = effectId, inspectedTarget = target, confirmation = `verify-stopped:${id}`) =>
+        execFileAsync(process.execPath, [
+        join(process.cwd(), 'dist', 'bin', 'learning-effect-reconcile-completed.js'),
+        organizationId, unitId, scope.resourceId, id, root, inspectedTarget, journal, keeperPath,
+        'lost-ack-incident', confirmation], {
+        cwd: process.cwd(), env: { ...process.env,
+          KALA_ARENA_RECONCILE_OPERATOR_URL_FILE: secret, KALA_ARENA_OPERATOR_ID: role,
+          KALA_ARENA_EXPECTED_PID_NAMESPACE: readlinkSync('/proc/self/ns/pid') },
+      })
+      const cold = join(root, 'test-offline-archive')
+      if (process.env.KALA_RUN_LEARNING_ARCHIVE_MOUNT_E2E === '1') {
+        mkdirSync(cold, { mode: 0o700 })
+        execFileSync('sudo', ['-n', 'mount', '-t', 'tmpfs', '-o',
+          `size=4m,mode=700,uid=${process.getuid?.()},gid=${process.getgid?.()}`, 'tmpfs', cold])
+        mountedCold = cold
+        expect(statSync(cold).dev).not.toBe(statSync(journal).dev)
+      }
+      const retireCli = (org = organizationId) => execFileAsync(process.execPath, [
+        join(process.cwd(), 'dist', 'bin', 'learning-receipt-archive.js'),
+        'retire', org, unitId, scope.resourceId, effectId,
+        journal, keeperPath, cold, 'retirement-incident', `verify-finalized:${effectId}`,
+      ], { cwd: process.cwd(), env: { ...process.env,
+        KALA_ARENA_RECONCILE_OPERATOR_URL_FILE: secret, KALA_ARENA_OPERATOR_ID: role,
+        KALA_ARENA_EXPECTED_PID_NAMESPACE: readlinkSync('/proc/self/ns/pid') } })
+      if (mountedCold) {
+        await expect(retireCli()).rejects.toThrow('Exact PostgreSQL learning effect finalization is not proven')
+        expect(readdirSync(cold)).toEqual([])
+      }
+      await expect(cli()).rejects.toThrow(/Executor process .*still running/u)
+      child.kill('SIGKILL')
+      await once(child, 'exit')
+      const originalJournal = readFileSync(journal, 'utf8')
+      const skillArchivePath = learningReceiptArchivePath(journal, `${scope.resourceId}:${effectId}`)
+      const skillIndexPath = learningReceiptIndexPath(journal, `${scope.resourceId}:${effectId}`)
+      const originalArchive = readFileSync(skillArchivePath, 'utf8')
+      const originalIndex = readFileSync(skillIndexPath, 'utf8')
+      for (const [field, replacement] of [
+        ['requestDigest', 'a'.repeat(64)],
+        ['ownerGeneration', '9999'],
+        ['result.ok', false],
+        ['target.implementation', undefined],
+      ] as const) {
+        const archived = JSON.parse(originalArchive) as { receipt: Record<string, unknown> }
+        const entry = archived.receipt
+        if (field === 'result.ok') (entry.result as Record<string, unknown>).ok = replacement
+        else if (field === 'target.implementation') delete (entry.target as Record<string, unknown>).implementation
+        else entry[field] = replacement
+        const rewrittenArchive = JSON.stringify(archived)
+        writeFileSync(skillArchivePath, rewrittenArchive, { mode: 0o600 })
+        const index = JSON.parse(originalIndex) as { archiveDigest: string }
+        index.archiveDigest = createHash('sha256').update(rewrittenArchive).digest('hex')
+        writeFileSync(skillIndexPath, JSON.stringify(index), { mode: 0o600 })
+        await expect(cli()).rejects.toThrow('Original journal lacks an exact completed built-in receipt')
+      }
+      writeFileSync(skillArchivePath, originalArchive, { mode: 0o600 })
+      writeFileSync(skillIndexPath, originalIndex, { mode: 0o600 })
+      writeFileSync(journal, originalJournal, { mode: 0o600 })
+      writeFileSync(target, 'changed after the original completion')
+      await expect(cli()).rejects.toThrow('Skill final content revision differs from original request')
+      writeFileSync(target, 'verified content')
+      expect(await cli()).toMatchObject({ stdout: expect.stringContaining('"durable_completed_receipt_and_final_state"') })
+      expect((await second.database.query('SELECT incident_id, request_digest FROM tenant_runtime_learning_completed_reconciliations WHERE effect_id=$1',
+        [effectId])).rows).toEqual([{ incident_id: 'lost-ack-incident', request_digest: digest }])
+      const { stdout: archiveStatus } = await execFileAsync(process.execPath, [
+        join(process.cwd(), 'dist', 'bin', 'learning-receipt-archive.js'), 'status', journal,
+      ], { cwd: process.cwd() })
+      expect(JSON.parse(archiveStatus)).toMatchObject({ indexed: 1, retired: 0, atCapacity: false })
+      const finalizationStore = createPostgresRuntimeResourceOwnershipStore({ connectionString: url.href })
+      try {
+        expect(await finalizationStore.inspectOperatorLearningFinalization(scope, effectId))
+          .toMatchObject({ generation: owner.generation, workspaceId, requestDigest: digest })
+        await expect(finalizationStore.inspectOperatorLearningFinalization(
+          { ...scope, organizationId: randomUUID() }, effectId))
+          .rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+      } finally { await finalizationStore.close() }
+      if (mountedCold) {
+        await expect(retireCli(randomUUID())).rejects.toThrow('RuntimeResourceOwnershipFencedError')
+        const liveArchive = JSON.parse(originalArchive) as { receipt: Record<string, unknown> }
+        liveArchive.receipt.executorProcess = await leaderIdentity(process.pid)
+        const liveText = JSON.stringify(liveArchive)
+        const liveIndex = JSON.parse(originalIndex) as { archiveDigest: string }
+        liveIndex.archiveDigest = createHash('sha256').update(liveText).digest('hex')
+        writeFileSync(skillArchivePath, liveText, { mode: 0o600 })
+        writeFileSync(skillIndexPath, JSON.stringify(liveIndex), { mode: 0o600 })
+        try { await expect(retireCli()).rejects.toThrow(/Executor process .*still running/u) }
+        finally {
+          writeFileSync(skillArchivePath, originalArchive, { mode: 0o600 })
+          writeFileSync(skillIndexPath, originalIndex, { mode: 0o600 })
+        }
+        expect((await retireCli()).stdout).toContain(`"retired":"${effectId}"`)
+        const coldFile = join(cold, basename(skillArchivePath))
+        expect(readFileSync(coldFile, 'utf8')).toBe(originalArchive)
+        expect(existsSync(skillArchivePath)).toBe(false)
+        writeFileSync(coldFile, 'damaged')
+        await expect(retireCli()).rejects.toThrow('offline learning archive does not match')
+        writeFileSync(coldFile, originalArchive, { mode: 0o600 })
+        copyFileSync(coldFile, skillArchivePath)
+        expect((await retireCli()).stdout).toContain(`"retired":"${effectId}"`)
+        expect(existsSync(skillArchivePath)).toBe(false)
+      } else {
+        mkdirSync(cold, { mode: 0o700 })
+        const offlineStore = new ExecutionReceiptStore(journal)
+        await offlineStore.load()
+        await offlineStore.retireFinalizedLearning(`${scope.resourceId}:${effectId}`,
+          digest, String(owner.generation), cold, 'validated-finalization')
+      }
+      const { stdout: verifiedOffline } = await execFileAsync(process.execPath, [
+        join(process.cwd(), 'dist', 'bin', 'learning-receipt-archive.js'),
+        'verify', journal, cold, scope.resourceId, effectId,
+      ], { cwd: process.cwd() })
+      expect(verifiedOffline).toContain(`"verified":"${effectId}"`)
+      const reopened = new ExecutionReceiptStore(journal)
+      await reopened.load()
+      expect(reopened.get(`${scope.resourceId}:${effectId}`, digest)?.ok).toBe(false)
+      await expect(reopened.begin(`${scope.resourceId}:${effectId}`, effectId, digest,
+        String(owner.generation))).rejects.toThrow('already recorded')
+      expect(readFileSync(target, 'utf8')).toBe('verified content')
+      const successor = await second.acquireResourceOwner(scope, b, randomUUID(), 2_000)
+      expect(successor.generation).toBe(owner.generation + 1n)
+      owner = successor
+      const memoryParentId = `memory-parent-${randomUUID()}`
+      const memoryEffectId = `memory-file-${createHash('sha256')
+        .update(JSON.stringify([scope.resourceId, memoryParentId])).digest('hex')}`
+      droppedCalls.add(memoryEffectId)
+      const memoryChild = spawn(process.execPath, ['--import', 'tsx',
+        join(process.cwd(), 'src', 'tenant-runtime', 'learning-executor-crash-helper.mjs')], {
+        cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, LEARNING_TEST_HOST: `http://127.0.0.1:${address.port}`,
+          LEARNING_TEST_WORKSPACE: workspaceId, LEARNING_TEST_EXECUTOR: `executor-${randomUUID()}`,
+          LEARNING_TEST_ROOT: root, LEARNING_TEST_RECEIPTS: journal, LEARNING_TEST_KEEPER: keeperPath },
+      })
+      children.push(memoryChild)
+      await eventually(async () => {
+        if (registry.snapshot()[0]?.memoryEffectVersion !== 2) throw new Error('Memory Executor not connected')
+      }, 8_000)
+      const memoryInput = { operation: 'write', scope: 'workspace', key: 'note', content: 'durable memory' }
+      const memoryCall = registry.callTool(scope.resourceId, {
+        kind: 'call_tool', callId: memoryParentId, name: 'memory', cwd: root, input: memoryInput,
+      })
+      const memoryDigest = executionRequestDigest({
+        sessionId: scope.resourceId, callId: memoryEffectId, name: 'memory',
+        input: { ...memoryInput, ownerGeneration: String(owner.generation) }, cwd: root, origin: 'host',
+      })
+      await eventually(async () => {
+        const receipt = await receiptStore.query({
+          sessionId: scope.resourceId, callId: memoryEffectId,
+          requestDigest: memoryDigest, ownerGeneration: String(owner.generation),
+        })
+        if (receipt.status !== 'completed') throw new Error('Remote memory completion not durable')
+      }, 8_000)
+      await expect(memoryCall).resolves.toMatchObject({ ok: false, failure: { outcome: 'indeterminate' } })
+      memoryChild.kill('SIGKILL')
+      await once(memoryChild, 'exit')
+      await new Promise((resolve) => setTimeout(resolve, 2_100))
+      await expect(first.acquireResourceOwner(scope, a, randomUUID(), 5_000))
+        .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      const memoryTarget = join(root, '.kala', 'memory', 'note.md')
+      expect(await cli(memoryEffectId, memoryTarget)).toMatchObject({
+        stdout: expect.stringContaining('"durable_completed_receipt_and_final_state"'),
+      })
+      expect(readFileSync(memoryTarget, 'utf8')).toBe('durable memory')
+      owner = await first.acquireResourceOwner(scope, a, randomUUID(), 2_000)
+      const deleteParentId = `memory-delete-${randomUUID()}`
+      const deleteEffectId = `memory-file-${createHash('sha256')
+        .update(JSON.stringify([scope.resourceId, deleteParentId])).digest('hex')}`
+      droppedCalls.add(deleteEffectId)
+      const deleteChild = spawn(process.execPath, ['--import', 'tsx',
+        join(process.cwd(), 'src', 'tenant-runtime', 'learning-executor-crash-helper.mjs')], {
+        cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, LEARNING_TEST_HOST: `http://127.0.0.1:${address.port}`,
+          LEARNING_TEST_WORKSPACE: workspaceId, LEARNING_TEST_EXECUTOR: `executor-${randomUUID()}`,
+          LEARNING_TEST_ROOT: root, LEARNING_TEST_RECEIPTS: journal, LEARNING_TEST_KEEPER: keeperPath },
+      })
+      children.push(deleteChild)
+      await eventually(async () => {
+        if (registry.snapshot()[0]?.memoryEffectVersion !== 2) throw new Error('Memory Executor not connected')
+      }, 8_000)
+      const deleteInput = { operation: 'delete', scope: 'workspace', key: 'note' }
+      const deleteCall = registry.callTool(scope.resourceId, {
+        kind: 'call_tool', callId: deleteParentId, name: 'memory', cwd: root, input: deleteInput,
+      })
+      const deleteDigest = executionRequestDigest({
+        sessionId: scope.resourceId, callId: deleteEffectId, name: 'memory',
+        input: { ...deleteInput, ownerGeneration: String(owner.generation) }, cwd: root, origin: 'host',
+      })
+      await eventually(async () => {
+        const receipt = await receiptStore.query({
+          sessionId: scope.resourceId, callId: deleteEffectId,
+          requestDigest: deleteDigest, ownerGeneration: String(owner.generation),
+        })
+        if (receipt.status !== 'completed') throw new Error('Remote memory deletion not durable')
+      }, 8_000)
+      await expect(deleteCall).resolves.toMatchObject({ ok: false, failure: { outcome: 'indeterminate' } })
+      deleteChild.kill('SIGKILL')
+      await once(deleteChild, 'exit')
+      await new Promise((resolve) => setTimeout(resolve, 2_100))
+      expect(existsSync(memoryTarget)).toBe(false)
+      expect(await cli(deleteEffectId, memoryTarget)).toMatchObject({
+        stdout: expect.stringContaining('"durable_completed_receipt_and_final_state"'),
+      })
+      expect((await second.database.query('SELECT request_digest FROM tenant_runtime_learning_completed_reconciliations WHERE effect_id=$1',
+        [deleteEffectId])).rows).toEqual([{ request_digest: deleteDigest }])
+      owner = await first.acquireResourceOwner(scope, a, randomUUID(), 2_000)
+      const negativeParentId = `memory-invalid-${randomUUID()}`
+      const negativeEffectId = `memory-file-${createHash('sha256')
+        .update(JSON.stringify([scope.resourceId, negativeParentId])).digest('hex')}`
+      droppedCalls.add(negativeEffectId)
+      const negativeChild = spawn(process.execPath, ['--import', 'tsx',
+        join(process.cwd(), 'src', 'tenant-runtime', 'learning-executor-crash-helper.mjs')], {
+        cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, LEARNING_TEST_HOST: `http://127.0.0.1:${address.port}`,
+          LEARNING_TEST_WORKSPACE: workspaceId, LEARNING_TEST_EXECUTOR: `executor-${randomUUID()}`,
+          LEARNING_TEST_ROOT: root, LEARNING_TEST_RECEIPTS: journal, LEARNING_TEST_KEEPER: keeperPath },
+      })
+      children.push(negativeChild)
+      await eventually(async () => {
+        if (registry.snapshot()[0]?.memoryEffectVersion !== 2) throw new Error('Memory Executor not connected')
+      }, 8_000)
+      const negativeInput = { operation: 'write', scope: 'workspace', key: 'invalid' }
+      const negativeCall = registry.callTool(scope.resourceId, {
+        kind: 'call_tool', callId: negativeParentId, name: 'memory', cwd: root, input: negativeInput,
+      })
+      const negativeDigest = executionRequestDigest({
+        sessionId: scope.resourceId, callId: negativeEffectId, name: 'memory',
+        input: { ...negativeInput, ownerGeneration: String(owner.generation) }, cwd: root, origin: 'host',
+      })
+      await eventually(async () => {
+        const receipts = new ExecutionReceiptStore(journal)
+        await receipts.load()
+        const denied = receipts.inspectArena(`${scope.resourceId}:${negativeEffectId}`)
+        if (denied.state !== 'denied') throw new Error('Remote invalid memory admission not durable')
+        expect(denied).toMatchObject({ requestDigest: negativeDigest,
+          ownerGeneration: String(owner.generation),
+          result: { failure: { code: 'learning_not_admitted' } } })
+      }, 8_000)
+      await expect(negativeCall).resolves.toMatchObject({ ok: false, failure: { outcome: 'indeterminate' } })
+      negativeChild.kill('SIGKILL')
+      await once(negativeChild, 'exit')
+      await new Promise((resolve) => setTimeout(resolve, 2_100))
+      const operatorStore = createPostgresRuntimeResourceOwnershipStore({ connectionString: url.href })
+      try {
+        const deniedInput = {
+          scope, effectId: negativeEffectId, generation: owner.generation,
+          workspaceId, operatorId: role, incidentId: 'negative-scope-check',
+          evidence: {
+            receiptState: 'denied', neverAdmitted: true, failureCode: 'learning_not_admitted',
+            receiptGeneration: String(owner.generation), requestDigest: negativeDigest,
+            journalSha256: createHash('sha256').update(readFileSync(journal)).digest('hex'),
+          },
+        }
+        await expect(operatorStore.reconcileLearningDenied({
+          ...deniedInput, generation: owner.generation + 1n,
+        })).rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+        await expect(operatorStore.reconcileLearningDenied({
+          ...deniedInput, scope: { ...scope, organizationId: randomUUID() },
+        })).rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+        await expect(operatorStore.reconcileLearningDenied({
+          ...deniedInput, evidence: { ...deniedInput.evidence, requestDigest: 'a'.repeat(64) },
+        })).rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+      } finally { await operatorStore.close() }
+      await expect(first.acquireResourceOwner(scope, a, randomUUID(), 5_000))
+        .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      const beforeNegativeConflict = readFileSync(journal, 'utf8')
+      const conflictingJournal = JSON.parse(beforeNegativeConflict) as Record<string, unknown>
+      conflictingJournal[`${scope.resourceId}:${negativeEffectId}`] = {
+        startedAt: Date.now(), callId: negativeEffectId,
+        requestDigest: negativeDigest, ownerGeneration: String(owner.generation),
+      }
+      writeFileSync(journal, JSON.stringify(conflictingJournal), { mode: 0o600 })
+      try {
+        await expect(cli(negativeEffectId, join(root, '.kala', 'memory', 'invalid.md'),
+          `verify-never-admitted:${negativeEffectId}`))
+          .rejects.toThrow('negative learning archive conflicts with original journal')
+        expect(await receiptStore.query({
+          sessionId: scope.resourceId, callId: negativeEffectId, requestDigest: negativeDigest,
+          ownerGeneration: String(owner.generation),
+        })).toEqual({ status: 'unavailable' })
+        await expect(first.acquireResourceOwner(scope, a, randomUUID(), 5_000))
+          .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      } finally { writeFileSync(journal, beforeNegativeConflict, { mode: 0o600 }) }
+      expect(await cli(negativeEffectId, join(root, '.kala', 'memory', 'invalid.md'),
+        `verify-never-admitted:${negativeEffectId}`)).toMatchObject({
+        stdout: expect.stringContaining('"durable_never_admitted_receipt"'),
+      })
+      expect((await second.database.query('SELECT request_digest FROM tenant_runtime_learning_denied_reconciliations WHERE effect_id=$1',
+        [negativeEffectId])).rows).toEqual([{ request_digest: negativeDigest }])
+      const afterDenied = createPostgresRuntimeResourceOwnershipStore({ connectionString: url.href })
+      try {
+        expect(await afterDenied.inspectOperatorLearningFinalization(scope, negativeEffectId))
+          .toMatchObject({ generation: owner.generation, workspaceId, requestDigest: negativeDigest })
+      } finally { await afterDenied.close() }
+      owner = await first.acquireResourceOwner(scope, a, randomUUID(), 350)
+      const startedId = `memory-file-${'d'.repeat(64)}`
+      const startedDigest = 'e'.repeat(64)
+      await first.registerWorkspaceEffect(owner, startedId, workspaceId, undefined, undefined, true)
+      await first.beginWorkspaceEffectDispatch(owner, startedId, startedDigest)
+      const startedJournal = new ExecutionReceiptStore(journal)
+      await startedJournal.load()
+      await startedJournal.begin(`${scope.resourceId}:${startedId}`, startedId, startedDigest,
+        String(owner.generation), await leaderIdentity(process.pid), {
+          tool: 'memory', implementation: 'builtin-v2', action: 'write',
+          pathDigest: 'a'.repeat(64), contentDigest: 'b'.repeat(64),
+        })
+      await new Promise((resolve) => setTimeout(resolve, 450))
+      await expect(cli(startedId, join(root, '.kala', 'memory', 'note.md')))
+        .rejects.toThrow('Original journal lacks an exact completed built-in receipt')
+      await expect(cli(startedId, join(root, '.kala', 'memory', 'note.md'),
+        `verify-never-admitted:${startedId}`))
+        .rejects.toThrow('Original journal lacks an exact durable never-admitted learning receipt')
+      await expect(second.acquireResourceOwner(scope, b, randomUUID(), 5_000))
+        .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+    } finally {
+      for (const child of children) {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      }
+      await Promise.all(children.map(async (child) => {
+        if (child.exitCode === null && child.signalCode === null) await once(child, 'exit')
+      }))
+      await new Promise<void>((resolve) => io.close(() => resolve()))
+      if (http.listening) await new Promise<void>((resolve) => http.close(() => resolve()))
+      if (mountedCold) execFileSync('sudo', ['-n', 'umount', mountedCold])
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it('claims a transcript at most once across replicas and does not retry interrupted attempts', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+    const a = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://learning-a.example',
+    }, 5_000)
+    const b = await second.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://learning-b.example',
+    }, 5_000)
+    const scope = resource(organizationId, unitId, 'session')
+    const owner = await first.acquireResourceOwner(scope, a, randomUUID(), 300)
+    const fingerprint = 'a'.repeat(64)
+    await Promise.all([
+      first.enqueueBackgroundLearning(owner, fingerprint),
+      second.enqueueBackgroundLearning(owner, fingerprint),
+    ])
+    expect(await first.pendingBackgroundLearning(owner)).toEqual([fingerprint])
+    const claimed = await Promise.all([
+      first.claimBackgroundLearning(owner, fingerprint),
+      second.claimBackgroundLearning(owner, fingerprint),
+    ])
+    expect(claimed.sort()).toEqual([false, true])
+    expect(await second.pendingBackgroundLearning(owner)).toEqual([])
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    const successor = await second.acquireResourceOwner(scope, b, randomUUID(), 5_000)
+    expect(await second.pendingBackgroundLearning(successor)).toEqual([])
+    expect(await second.claimBackgroundLearning(successor, fingerprint)).toBe(false)
+    await expect(first.finishBackgroundLearning(owner, fingerprint))
+      .rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+    const next = 'b'.repeat(64)
+    await second.enqueueBackgroundLearning(successor, next)
+    expect(await second.claimBackgroundLearning(successor, next)).toBe(true)
+    await second.finishBackgroundLearning(successor, next)
+    expect(await second.pendingBackgroundLearning(successor)).toEqual([])
+  })
+
+  it('audits only never-dispatched Skill/memory effects under the tenant operator and leaves started UNKNOWN fenced', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+    const a = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://learning-a.example',
+    }, 5_000)
+    const b = await second.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://learning-b.example',
+    }, 5_000)
+    const scope = resource(organizationId, unitId, 'session')
+    const authority = new PostgresSessionAuthority(createPostgresHotStateStore({ connectionString }),
+      organizationId, { schemaManagement: 'external' })
+    await authority.create({ sessionId: scope.resourceId, state: { cursor: 0 }, config: {} })
+    await authority.close()
+    const role = `arena_operator_${organizationId.replaceAll('-', '')}`
+    const password = `test-${randomUUID()}`
+    await first.database.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}'`)
+    await grantPostgresArenaOperator({ connectionString, operatorRole: role, organizationId })
+    const url = new URL(connectionString)
+    url.username = role; url.password = password
+    const operator = createPostgresRuntimeResourceOwnershipStore({ connectionString: url.href })
+    const secretDir = mkdtempSync(join(process.cwd(), 'learning-operator-'))
+    const secret = join(secretDir, 'operator-url')
+    writeFileSync(secret, url.href, { mode: 0o600 })
+    const owner = await first.acquireResourceOwner(scope, a, randomUUID(), 350)
+    const workspaceId = `learning-${randomUUID()}`
+    const preparedId = 'skill-file-01ARZ3NDEKTSV4RRFFQ69G5FAV'
+    const dispatchedId = `memory-file-${'a'.repeat(64)}`
+    const preparedMemoryId = `memory-file-${'d'.repeat(64)}`
+    try {
+      await first.registerWorkspaceEffect(owner, preparedId, workspaceId, undefined, undefined, true)
+      await first.registerWorkspaceEffect(owner, dispatchedId, `${workspaceId}-memory`, undefined, undefined, true)
+      await first.registerWorkspaceEffect(owner, preparedMemoryId, `${workspaceId}-prepared`, undefined, undefined, true)
+      await first.beginWorkspaceEffectDispatch(owner, dispatchedId, 'b'.repeat(64))
+      await first.enqueueBackgroundLearning(owner, 'c'.repeat(64))
+      expect(await operator.inspectOperatorLearningJobs(scope)).toMatchObject([
+        { fingerprint: 'c'.repeat(64), status: 'pending', ownerGeneration: null },
+      ])
+      await expect(operator.inspectOperatorLearningJobs({ ...scope, organizationId: randomUUID() }))
+        .rejects.toMatchObject({ code: 'P0001' })
+      await new Promise((resolve) => setTimeout(resolve, 450))
+      await expect(second.acquireResourceOwner(scope, b, randomUUID(), 5_000))
+        .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      const prepared = { scope, effectId: preparedId, generation: owner.generation, workspaceId,
+        operatorId: role, incidentId: 'prepared-incident' }
+      await expect(operator.reconcileLearningPrepared({ ...prepared, scope: { ...scope, organizationId: randomUUID() } }))
+        .rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+      await expect(operator.reconcileLearningPrepared({ ...prepared, generation: owner.generation + 1n }))
+        .rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+      const command = [join(process.cwd(), 'bin', 'learning-effect-reconcile.ts'),
+        organizationId, unitId, scope.resourceId, preparedId, 'prepared-incident',
+        `verify-never-dispatched:${preparedId}`]
+      const result = await execFileAsync(process.execPath, ['--import', 'tsx', ...command], {
+        cwd: process.cwd(), env: { ...process.env,
+          KALA_ARENA_RECONCILE_OPERATOR_URL_FILE: secret, KALA_ARENA_OPERATOR_ID: role },
+      })
+      expect(result.stdout).toContain('"never_dispatched"')
+      await expect(operator.reconcileLearningPrepared(prepared))
+        .rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+      expect((await second.database.query('SELECT proof FROM tenant_runtime_learning_reconciliations WHERE effect_id=$1',
+        [preparedId])).rows).toEqual([{ proof: 'never_dispatched' }])
+      await operator.reconcileLearningPrepared({ ...prepared, effectId: preparedMemoryId,
+        workspaceId: `${workspaceId}-prepared` })
+      expect((await second.database.query('SELECT proof FROM tenant_runtime_learning_reconciliations WHERE effect_id=$1',
+        [preparedMemoryId])).rows).toEqual([{ proof: 'never_dispatched' }])
+      await expect(operator.reconcileLearningPrepared({ ...prepared, effectId: dispatchedId,
+        workspaceId: `${workspaceId}-memory` }))
+        .rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+      await expect(second.acquireResourceOwner(scope, b, randomUUID(), 5_000))
+        .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+    } finally { await operator.close(); rmSync(secretDir, { recursive: true, force: true }) }
   })
 
   it('serializes competing registration, release and takeover on the owner row across replicas', async () => {

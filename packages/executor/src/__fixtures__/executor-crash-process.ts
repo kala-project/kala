@@ -2,6 +2,7 @@ import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { startExecutor } from '../client.js'
 import { shellTool } from '../tools/bash.js'
+import { skillFileTool } from '../tools/skill-file.js'
 
 const [host, workspaceRoot, receiptStorePath] = process.argv.slice(2)
 
@@ -18,7 +19,18 @@ const executor = startExecutor({
   executorId: 'executor-crash-regression',
   sandboxRoots: [workspaceRoot],
   receiptStorePath,
-  tools: [shellTool],
+  arenaKeeperIdentityFile: process.env.ARENA_TEST_KEEPER,
+  tools: [shellTool, {
+    name: 'skill_file',
+    async run(input, ctx) {
+      const result = await skillFileTool.run(input, ctx)
+      if (input.action !== 'read') {
+        await writeFile(join(workspaceRoot, 'skill-final-effect-finished'), '')
+        await new Promise<never>(() => undefined)
+      }
+      return result
+    },
+  }],
 })
 
 const shutdown = async (): Promise<void> => {
