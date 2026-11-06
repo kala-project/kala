@@ -45,7 +45,6 @@ import { effectiveDelegationDepth, SessionNotFoundError, SessionStore, type Sess
 import { slimEffect, type SessionOperationMatch } from './store/log.js'
 import type { SessionAuthority } from './store/session-authority.js'
 import type { PostgresSessionAuthority } from './store/postgres-session-authority.js'
-import { PostgresSessionAuthority as PostgresSessionAuthorityClass } from './store/postgres-session-authority.js'
 import { PostgresStorageInventory } from './store/postgres-storage-inventory.js'
 import { SqliteSessionAuthority } from './store/sqlite-session-authority.js'
 import { SqliteMessageQueueStore } from './store/sqlite-message-queue.js'
@@ -596,8 +595,9 @@ export async function startHostServer(
     })
     await safeCleanup.recover(new Set())
     store.installStorageTombstones(await safeCleanup.listTombstonedSessionIds())
-  } else if (options.sessionAuthority instanceof PostgresSessionAuthorityClass && options.objectStorage) {
-    storageInventory = new PostgresStorageInventory(options.sessionAuthority)
+  } else if (options.sessionAuthority && options.objectStorage
+    && 'storageEntries' in options.sessionAuthority && typeof options.sessionAuthority.storageEntries === 'function') {
+    storageInventory = new PostgresStorageInventory(options.sessionAuthority as Pick<PostgresSessionAuthority, 'storageEntries'>)
   }
   const ownsStateStore = options.stateStore === undefined
   const stateStore = options.stateStore ?? new KalaStateStore(join(options.sessionsDir, '..', 'memos'), {
