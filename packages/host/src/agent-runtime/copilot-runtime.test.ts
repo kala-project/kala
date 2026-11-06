@@ -2029,6 +2029,49 @@ describe('Copilot runtime custom tools', () => {
     await runtime.close()
   })
 
+  it('does not request approval for high-risk shell calls in an allow-all Session', async () => {
+    const callTool = vi.fn(async () => ({ ok: true, content: 'validation complete' }))
+    const onApprovalRequired = vi.fn()
+    const record = await store.create({
+      sessionId: 'copilot-allow-all-shell',
+      agentRuntime: 'copilot',
+      initialApprovalMode: 'allow_all',
+      config: createConfig({
+        tools: [{
+          name: 'shell',
+          description: 'Run a command',
+          inputSchema: { type: 'object' },
+          requiresApproval: true,
+          executionKind: 'executor',
+          executionHandler: 'shell',
+        }],
+      }),
+    })
+    const runtime = new CopilotAgentRuntime({
+      store,
+      tools: { callTool, cancelPending() {} },
+      broadcast: {
+        onState() {},
+        onTokenDelta() {},
+        onApprovalRequired,
+        onError() {},
+      },
+    }, { enabled: true, sessionsDir: dir })
+
+    await runtime.start()
+    await runtime.send(record, { text: 'Run the tests.' })
+    const tool = sdk.configs.at(-1)?.tools.find((candidate) => candidate.name === 'shell')
+    const result = await tool?.handler({
+      command: 'python3 -m unittest discover -v && python3 -m py_compile server.py test_server.py',
+    }, { toolCallId: 'call-validate' })
+
+    expect(result).toMatchObject({ resultType: 'success', textResultForLlm: 'validation complete' })
+    expect(callTool).toHaveBeenCalledOnce()
+    expect(onApprovalRequired).not.toHaveBeenCalled()
+    expect(record.state.pendingCalls).toEqual([])
+    await runtime.close()
+  })
+
   it('does not dispatch a tool when Stop arrives during the durable tool-call projection', async () => {
     const callTool = vi.fn(async () => ({ ok: true, content: 'must not run' }))
     const record = await store.create({

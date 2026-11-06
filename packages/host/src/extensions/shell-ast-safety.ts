@@ -42,6 +42,9 @@ export function evaluateShellApprovalDecision(
   }
 
   if (report.risk === 'high_risk') {
+    if (mode === 'allow_all') {
+      return { decision: 'dispatch', report }
+    }
     if (mode === 'deny') {
       return {
         decision: 'reject',
@@ -96,11 +99,11 @@ export function guardShellToolDispatch(
   }
   if (report.risk === 'high_risk') {
     const isSubAgent = record ? isHeadlessSubAgentSession(record) : false
-    if (isSubAgent || !record?.state.pendingCalls.some((call) =>
+    if (isSubAgent && record?.state.approvalMode !== 'allow_all' || !record?.state.pendingCalls.some((call) =>
       call.callId === effect.callId
       && call.name === effect.name
       && call.status === 'dispatched'
-      && call.explicitlyApproved === true
+      && (record.state.approvalMode === 'allow_all' || call.explicitlyApproved === true)
       && call.input.command === command
     )) {
       return formatShellSafetyBlock(report, { isSubAgent })

@@ -152,7 +152,7 @@ describe('shell AST safety analyzer', () => {
       const report = analyzeShellCommand(command)
       expect(report.risk, command).toBe('high_risk')
       expect(report.findings.map((finding) => finding.ruleId), command).toContain(ruleId)
-      expect(evaluateShellApprovalDecision('allow_all', false, command).decision, command).toBe('ask')
+      expect(evaluateShellApprovalDecision('auto', false, command).decision, command).toBe('ask')
     }
   })
 
@@ -184,10 +184,16 @@ describe('shell AST safety analyzer', () => {
   it('evaluates approval decisions across allow_all, auto, ask, and deny modes', () => {
     expect(
       evaluateShellApprovalDecision('allow_all', false, 'git push --force origin main').decision,
-    ).toBe('ask')
+    ).toBe('dispatch')
     expect(
       evaluateShellApprovalDecision('allow_all', false, 'git push --force origin main', { isSubAgent: true }).decision,
-    ).toBe('reject')
+    ).toBe('dispatch')
+    expect(
+      evaluateShellApprovalDecision('allow_all', true, 'python3 -m unittest discover -v && python3 -m py_compile server.py test_server.py').decision,
+    ).toBe('dispatch')
+    expect(
+      evaluateShellApprovalDecision('auto', true, 'python3 -m unittest discover -v && python3 -m py_compile server.py test_server.py').decision,
+    ).toBe('ask')
     expect(
       evaluateShellApprovalDecision('deny', false, 'git reset --hard').decision,
     ).toBe('reject')
@@ -222,12 +228,14 @@ describe('kernel reducer + fold deterministic replay with shell AST safety', () 
     tools: [SHELL_TOOL_NO_APPROVAL],
   })
 
-  it('escalates high_risk shell commands to awaiting_approval even in allow_all mode and replays cleanly via fold()', () => {
-    const initial = createInitialState({
-      sessionId: 'sess-allow-all-escalate',
-      systemPrompt: 'sys',
-      approvalMode: 'allow_all',
-    })
+  it('escalates high_risk shell commands in auto mode and replays explicit approval cleanly via fold()', () => {
+    const initial = {
+      ...createInitialState({
+        sessionId: 'sess-auto-escalate',
+        systemPrompt: 'sys',
+      }),
+      approvalMode: 'auto' as const,
+    }
     const events = [
       { kind: 'user_message' as const, text: 'force push main' },
       {
@@ -268,8 +276,8 @@ describe('kernel reducer + fold deterministic replay with shell AST safety', () 
       ...createInitialState({
         sessionId: 'sess-blocked',
         systemPrompt: 'sys',
-        approvalMode: 'allow_all',
       }),
+      approvalMode: 'allow_all' as const,
       status: 'thinking' as const,
     }
     const { next, effects } = step(
@@ -306,7 +314,7 @@ describe('multi-deployment runtime & executor integration', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('auto-rejects high_risk shell commands in headless sub-agent sessions without deadlocking on awaiting_approval (Portable & Shared Authority)', async () => {
+  it('auto-rejects high_risk shell commands in auto-mode headless sub-agent sessions without deadlocking on awaiting_approval (Portable & Shared Authority)', async () => {
     const authority = new SqliteSessionAuthority(join(dir, 'authority.sqlite'))
     const store = new SessionStore(join(dir, 'sessions'), { authority })
     await store.initialize()
@@ -314,14 +322,13 @@ describe('multi-deployment runtime & executor integration', () => {
     const config = createConfig({
       systemPrompt: 'sub-agent',
       tools: [SHELL_TOOL_APPROVAL],
-      approvalMode: 'allow_all',
     })
     const child = await store.create({
       sessionId: 'subagent-child-1',
       parentSessionId: 'parent-root-1',
       delegationDepth: 1,
       config,
-      initialApprovalMode: 'allow_all',
+      initialApprovalMode: 'auto',
       organizationId: 'org-cloud',
       principal: 'user-1',
       organizationRole: 'member',
@@ -455,12 +462,29 @@ describe('multi-deployment runtime & executor integration', () => {
     expect(guardShellToolDispatch(record, highRiskEffect)).toBeNull()
     expect(guardShellToolDispatch(record, { ...highRiskEffect, input: { command: 'git reset --hard HEAD~1' } }))
       .toContain('shell.git.reset_hard')
+    record.state.approvalMode = 'allow_all'
+    record.state.pendingCalls = [{
+      callId: 'unapproved',
+      name: 'shell',
+      input: { command: 'git reset --hard HEAD~1' },
+      status: 'dispatched',
+    }]
+    expect(guardShellToolDispatch(record, { ...highRiskEffect, input: { command: 'git reset --hard HEAD~1' } })).toBeNull()
+    expect(guardShellToolDispatch(record, highRiskEffect)).toContain('shell.git.reset_hard')
+    expect(guardShellToolDispatch(record, { ...highRiskEffect, input: { command: 'eval "$x"' } }))
+      .toContain('shell.obfuscation.eval')
     const workspaceRecord = await store.create({
       sessionId: 'shell-authority',
       workspaceId: 'workspace-proof',
       config: createConfig({ tools: [SHELL_TOOL_NO_APPROVAL] }),
     })
-    workspaceRecord.state.pendingCalls = [...record.state.pendingCalls]
+    workspaceRecord.state.pendingCalls = [{
+      callId: 'unapproved',
+      name: 'shell',
+      input: { command: 'git reset --hard HEAD' },
+      status: 'dispatched',
+      explicitlyApproved: true,
+    }]
     const authorization = {
       sessionId: workspaceRecord.sessionId,
       callId: 'unapproved',
@@ -473,6 +497,18 @@ describe('multi-deployment runtime & executor integration', () => {
     expect(authorizeExecutorShellCall(workspaceRecord, 'workspace-proof', { ...authorization, callId: 'forged' })).toBe(false)
     expect(authorizeExecutorShellCall(workspaceRecord, 'workspace-proof', { ...authorization, command: 'git reset --hard HEAD~1' })).toBe(false)
     expect(authorizeExecutorShellCall({ ...workspaceRecord, parentSessionId: 'headless-parent' }, 'workspace-proof', authorization)).toBe(false)
+    workspaceRecord.state.pendingCalls = []
+    workspaceRecord.state.approvalMode = 'allow_all'
+    expect(authorizeExecutorShellCall(workspaceRecord, 'workspace-proof', authorization)).toBe(false)
+    workspaceRecord.state.pendingCalls = [{
+      callId: 'unapproved',
+      name: 'shell',
+      input: { command: 'git reset --hard HEAD' },
+      status: 'dispatched',
+    }]
+    expect(authorizeExecutorShellCall(workspaceRecord, 'workspace-proof', authorization)).toBe(true)
+    expect(authorizeExecutorShellCall(workspaceRecord, 'other-workspace', authorization)).toBe(false)
+    expect(authorizeExecutorShellCall(workspaceRecord, 'workspace-proof', { ...authorization, sessionId: 'other-session' })).toBe(false)
 
     await expect(
       bashTool.run(

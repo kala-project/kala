@@ -165,7 +165,7 @@ export function onLlmResponse(
             rejectionReason: formatShellSafetyBlock(safety),
           }
         }
-        if (safety.risk === 'high_risk') {
+        if (safety.risk === 'high_risk' && state.approvalMode !== 'allow_all') {
           if (state.approvalMode === 'deny') {
             return {
               call: tc,
