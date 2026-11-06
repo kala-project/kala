@@ -71,6 +71,7 @@ describe('SqliteSessionAuthority', () => {
     expect(root.config.tools).toEqual([])
     await expect(writer.upgradeSessionTools(child.sessionId, [scheduled.name], catalog)).rejects.toThrow('root')
     await expect(writer.upgradeSessionTools(root.sessionId, ['unknown'], catalog)).rejects.toThrow('available')
+    root.state = { ...root.state, status: 'done' }
     await expect(writer.upgradeSessionTools(root.sessionId, [scheduled.name], catalog)).resolves.toEqual([scheduled.name])
     expect(root.config.tools.map((tool) => tool.name)).toEqual([scheduled.name])
     expect(root.toolLock).toHaveProperty(scheduled.name)

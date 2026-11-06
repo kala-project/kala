@@ -443,8 +443,9 @@ export function SessionMetadataDialog({
           </FieldRow>
         </div>
         {toolUpgrades.length > 0 && !summary?.parentSessionId ? (
-          <section className="grid gap-2 border-t border-border/50 pt-3 text-sm" aria-label={t('sessionMetadata.toolUpgrades.title')}>
-            <span className="font-medium">{t('sessionMetadata.toolUpgrades.title')}</span>
+          <details className="border-t border-border/50 pt-3 text-sm" data-testid="session-tool-upgrades">
+            <summary className="cursor-pointer font-medium">{t('sessionMetadata.toolUpgrades.title')}</summary>
+            <div className="mt-2 grid gap-2">
             <p className="text-xs text-muted-foreground">{t('sessionMetadata.toolUpgrades.description')}</p>
             <div className="flex flex-wrap gap-2">
               {toolUpgrades.map((name) => (
@@ -472,7 +473,8 @@ export function SessionMetadataDialog({
                 <Button type="button" size="sm" variant="outline" disabled={!canUpgradeTools || selectedTools.size === 0} onClick={() => setToolUpgradeReview(true)}>{t('sessionMetadata.toolUpgrades.review')}</Button>
               )}
             </div>
-          </section>
+            </div>
+          </details>
         ) : null}
         {toolUpgradeError ? <p role="alert" className="text-xs text-destructive">{toolUpgradeError}</p> : null}
         </>

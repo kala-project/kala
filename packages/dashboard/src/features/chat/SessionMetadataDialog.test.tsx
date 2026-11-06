@@ -104,6 +104,7 @@ describe('SessionMetadataDialog', () => {
     })
 
     render(<SessionMetadataDialog open onOpenChange={() => {}} sessionId={baseSummary.sessionId} summary={baseSummary} state={baseState} selectedModel={null} storageSocket={{ emit } as never} onRename={() => {}} onOpenChangeCwdDialog={() => {}} onChangeApprovalMode={() => {}} onChangeToolCardMode={() => {}} />)
+    fireEvent.click(await screen.findByText('Add tools to this session'))
     const review = await screen.findByRole('button', { name: 'Review tools' })
     expect(review.hasAttribute('disabled')).toBe(true)
     fireEvent.click(screen.getByRole('checkbox', { name: 'scheduled_task' }))
