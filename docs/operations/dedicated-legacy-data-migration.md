@@ -76,6 +76,12 @@ correctly refused the newer database schemas. Do not start that recovery Compose
 file against the live databases. Production now uses Runtime schema 11 and
 control-plane schema 10; the corrected complete LXC restart retained the intended
 images, healthy services, address takeover and all original Executor connections.
+That schema-10 observation describes the earlier restart, not the current
+database: a read-only check on 2026-11-06 found control migration 11 already
+applied on 2026-11-02, with the version-10 and version-11 migration checksums
+matching this checkout. This observation does not establish how that migration
+was backed up or whether its recovery was rehearsed. Verify the live schema
+and migration provenance before selecting any further upgrade lane.
 
 The broker uses the short `/run/kala-native-posix` shared root and an `rslave`
 Runtime bind. Keep it short enough for Unix sockets. Startup detaches stale
