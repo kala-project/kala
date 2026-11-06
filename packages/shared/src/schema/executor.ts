@@ -212,6 +212,13 @@ export const ToolCallMessageSchema = z.object({
   turnId: WireIdSchema.optional(),
 }) satisfies z.ZodType<ToolCallMessage>
 
+export const ShellAuthorizationRequestSchema = z.object({
+  sessionId: SessionIdSchema,
+  callId: WireIdSchema,
+  name: z.enum(['shell', 'bash']),
+  command: z.string(),
+})
+
 export const ToolCancelMessageSchema = z.object({
   sessionId: SessionIdSchema,
   callId: WireIdSchema,

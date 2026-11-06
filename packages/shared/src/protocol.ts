@@ -1494,6 +1494,13 @@ export type ToolCallMessage = {
   ownerGeneration?: string
 }
 
+export type ShellAuthorizationRequest = {
+  sessionId: string
+  callId: string
+  name: 'shell' | 'bash'
+  command: string
+}
+
 export type ToolCancelMessage = {
   sessionId: string
   callId: string
@@ -2275,6 +2282,7 @@ export type ExecutorClientToServerEvents = {
   'executor:terminal_output': (payload: ServerTerminalOutput) => void
   'executor:terminal_exit': (payload: ServerTerminalExit) => void
   'executor:network_audit': (payload: import('./network-audit.js').NetworkAuditEvent, ack: (result: { accepted: boolean }) => void) => void
+  'executor:shell_authorize': (payload: ShellAuthorizationRequest, ack: (result: { authorized: boolean }) => void) => void
 }
 
 /**

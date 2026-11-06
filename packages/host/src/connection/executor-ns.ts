@@ -17,6 +17,7 @@ import type {
   ServerTerminalExit,
   ServerTerminalOutput,
   SessionErrorScope,
+  ShellAuthorizationRequest,
 } from '@agent-kernel/shared'
 import { isCompatibleVersion, schema } from '@agent-kernel/shared'
 import type { AgentConfig } from '@agent-kernel/kernel'
@@ -34,6 +35,22 @@ import { sessionRoom, terminalOwnerSessionId, terminalSessionRoom } from './room
 import { executorAnnouncedConnectionMeta, executorPendingConnectionMeta, type ConnectionMeta } from './socket-metadata.js'
 import type { ExecutorInstallationStorage } from '../store/executor-installation.js'
 import { validateMcpToolDescriptors } from '../mcp-tools.js'
+import { analyzeShellCommand, guardShellToolDispatch } from '../extensions/shell-ast-safety.js'
+
+export function authorizeExecutorShellCall(
+  record: import('../store/session.js').SessionRecord | undefined,
+  workspaceId: string,
+  request: ShellAuthorizationRequest,
+): boolean {
+  return record?.sessionId === request.sessionId
+    && record.workspaceId === workspaceId
+    && analyzeShellCommand(request.command).risk === 'high_risk'
+    && guardShellToolDispatch(record, {
+      callId: request.callId,
+      name: request.name,
+      input: { command: request.command },
+    }) === null
+}
 
 export type ExecutorNs = Namespace<
   ExecutorClientToServerEvents,
@@ -309,6 +326,23 @@ export function configureExecutorNamespace(
         metadata: { evidenceLevel: payload.evidenceLevel, enforcementMode: payload.enforcementMode, phase: payload.phase, statusCode: payload.statusCode, matchedRuleId: payload.matchedRuleId },
       })
       ack({ accepted: true })
+    })
+    socket.on('executor:shell_authorize', async (rawPayload, ack) => {
+      if (typeof ack !== 'function') return
+      const request = parseWire(schema.ShellAuthorizationRequestSchema, rawPayload, {
+        channel: 'executor:shell_authorize',
+        peer: socket.id,
+      })
+      if (!request || !await authorizeSocket(socket)) { ack({ authorized: false }); return }
+      const announcement = executorAnnouncements.get(socket)
+      if (!announcement) { ack({ authorized: false }); return }
+      try {
+        const record = deps.store.get(request.sessionId)
+          ?? await deps.store.load(request.sessionId, { recoverDangling: false })
+        ack({ authorized: authorizeExecutorShellCall(record, announcement.workspaceId, request) })
+      } catch {
+        ack({ authorized: false })
+      }
     })
     socket.on('executor:bg_task_updated', async (rawPayload: ServerBgTaskUpdated) => {
       const payload = parseWire(schema.ServerBgTaskUpdatedSchema, rawPayload, {

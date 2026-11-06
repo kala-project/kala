@@ -13,6 +13,7 @@ import { createPostgresHotStateStore, LeaseFencedError, type PostgresHotStateSto
 import { PostgresSessionAuthority, SessionDeletingError } from './postgres-session-authority.js'
 import { SessionNotFoundError, SessionStore } from './session.js'
 import { NATIVE_POSIX_BLOCK_BYTES } from './native-posix-fs.js'
+import { authorizeExecutorShellCall } from '../connection/executor-ns.js'
 
 const execFileAsync = promisify(execFile)
 const integrationDescribe = process.env.KALA_RUN_POSTGRES_INTEGRATION === '1' ? describe : describe.skip
@@ -259,6 +260,7 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
       organizationId: 'org-a',
       workspaceId: 'workspace-a',
     })
+
     const event = { kind: 'user_message', text: 'persist me' } as const
     const transition = step(record.state, event, record.config)
     await first.store.record(record.sessionId, event, transition.effects, transition.next)
@@ -271,6 +273,68 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     expect(await second.store.listSessionIdsForOrganization('org-a')).toEqual(['recovery-session'])
     expect((await second.store.listSummaries())[0]).toMatchObject({ sessionId: 'recovery-session', eventCount: 1 })
     expect(existsSync(second.root)).toBe(false)
+  })
+
+  it('replays explicit shell approval and command identity from PostgreSQL authority', async () => {
+    const authority = makeAuthority('shell-approval-writer', 'shell-approval')
+    const writer = new SessionStore(join(process.cwd(), '.kala-pg-shell-writer'), {
+      authority,
+    })
+    const shellConfig = createConfig({
+      systemPrompt: 'shell test',
+      tools: [{
+        name: 'bash',
+        description: 'Shell',
+        inputSchema: { type: 'object' },
+        requiresApproval: false,
+        executionKind: 'executor',
+        executionHandler: 'bash',
+      }],
+    })
+    const sessionId = `pg-shell-${randomUUID()}`
+    const record = await writer.create({
+      sessionId, config: shellConfig, workspaceId: 'pg-shell-workspace', initialApprovalMode: 'allow_all',
+    })
+    const events = [
+      { kind: 'user_message' as const, text: 'test approval' },
+      {
+        kind: 'llm_response' as const,
+        message: {
+          role: 'assistant' as const,
+          content: [{
+            type: 'tool_call' as const,
+            callId: 'shell-approved',
+            name: 'bash',
+            input: { command: 'git reset --hard HEAD' },
+          }],
+        },
+      },
+    ]
+    for (const event of events) {
+      const transition = step(record.state, event, shellConfig)
+      await writer.record(sessionId, event, transition.effects, transition.next)
+    }
+    expect(record.state.pendingCalls[0]?.status).toBe('awaiting_approval')
+    const approval = { kind: 'user_approve' as const, callId: 'shell-approved' }
+    const next = step(record.state, approval, shellConfig)
+    await writer.record(sessionId, approval, next.effects, next.next)
+    await authority.hotState.database.query(
+      'DELETE FROM tenant_session_latest_projection WHERE tenant_id=$1 AND session_id=$2',
+      ['shell-approval', sessionId],
+    )
+    const reader = new SessionStore(join(process.cwd(), '.kala-pg-shell-reader'), {
+      authority: makeAuthority('shell-approval-reader', 'shell-approval'),
+    })
+    const recovered = await reader.load(sessionId, { recoverDangling: false })
+    expect(recovered.state.pendingCalls[0]).toMatchObject({
+      callId: 'shell-approved', status: 'dispatched', explicitlyApproved: true,
+    })
+    expect(authorizeExecutorShellCall(recovered, 'pg-shell-workspace', {
+      sessionId, callId: 'shell-approved', name: 'bash', command: 'git reset --hard HEAD',
+    })).toBe(true)
+    expect(authorizeExecutorShellCall(recovered, 'pg-shell-workspace', {
+      sessionId, callId: 'shell-approved', name: 'bash', command: 'git reset --hard HEAD~1',
+    })).toBe(false)
   })
 
   it('preserves NUL and lone surrogate tool text in projections, audit replay and extracted history', async () => {

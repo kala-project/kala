@@ -16,6 +16,7 @@ import {
   startBackgroundShell,
   waitForBackgroundShell,
 } from './background-shell.js'
+import { analyzeShellCommand, formatShellSafetyBlock } from './shell-ast-safety.js'
 import { selectShell, shellArgv, shellResourceLimitsFromEnv } from './shell-runtime.js'
 
 const DEFAULT_TIMEOUT_MS = 30_000
@@ -65,6 +66,13 @@ async function runShell(input: Record<string, unknown>, ctx: Parameters<Tool['ru
     const command = requireString(input, 'command')
     if (command.trim().length === 0) {
       throw new ToolError('EINVAL', 'command is empty')
+    }
+    const safety = analyzeShellCommand(command)
+    if (safety.risk === 'blocked') {
+      throw new ToolError('EACCES', formatShellSafetyBlock(safety))
+    }
+    if (safety.risk === 'high_risk' && ctx.shellApprovalVerified !== true) {
+      throw new ToolError('EACCES', 'High-risk shell command requires verified Host approval')
     }
     const cwdInput = optionalString(input, 'cwd')
     const runInBackground = optionalBoolean(input, 'run_in_background') ?? optionalBoolean(input, 'background') ?? false

@@ -4,6 +4,7 @@ import { runCompact } from './compaction.js'
 import { preemptivelyPruneToolResults } from '../context/preemptive-pruning.js'
 import { selectHooks, type HookPayload } from './hooks.js'
 import { runPostToolHooks, runPreToolHooks } from './hooks-runner.js'
+import { guardShellToolDispatch } from './shell-ast-safety.js'
 import { isSkillManager, runSkillTool } from './skills.js'
 import { runScheduledTaskTool } from './scheduled-task-tool.js'
 import { runTodoGraphTool } from './todo-graph.js'
@@ -118,6 +119,8 @@ export function createBuiltinExtensionRegistry(additional: readonly HostExtensio
           await runSessionHooks('session_end', context)
         },
         async beforeToolDispatch({ deps, sessionId, effect }) {
+          const shellBlocked = guardShellToolDispatch(deps.store.get(sessionId), effect)
+          if (shellBlocked) return { ok: false, content: shellBlocked }
           const blocked = await runPreToolHooks(deps, sessionId, effect)
           return blocked ? { ok: false, content: blocked } : null
         },

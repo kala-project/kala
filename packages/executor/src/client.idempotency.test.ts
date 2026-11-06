@@ -47,6 +47,7 @@ function makeMockSocket() {
     off: (event: string, handler: Handler) => {
       emitter.off(event, handler)
     },
+    timeout: (_ms: number) => socket,
     disconnect: () => {
       socket.connected = false
     },
@@ -59,6 +60,68 @@ function makeMockSocket() {
 }
 
 describe('executor idempotency', () => {
+  it('fails closed on high-risk shell calls without a Host approval and admits verified calls', async () => {
+    const runs = vi.fn(async (_input: Record<string, unknown>, _ctx: Parameters<Tool['run']>[1]) => 'executed')
+    const socket = makeMockSocket()
+    const handle = startExecutor({
+      host: 'http://localhost',
+      workspaceId: 'ws-shell-proof',
+      executorId: 'exec-shell-proof',
+      receiptStorePath: false,
+      tools: [{ name: 'bash', run: runs }],
+      ioFactory: (() => socket) as never,
+    })
+    const call = { sessionId: 'session', callId: 'shell-1', name: 'bash', input: { command: 'git reset --hard HEAD' } }
+    const denied = vi.fn()
+    socket.__trigger('tool:call', call, denied)
+    await vi.waitFor(() => expect(socket.__emitted.some((e) => e.event === 'executor:shell_authorize')).toBe(true))
+    const duplicate = vi.fn()
+    socket.__trigger('tool:call', call, duplicate)
+    expect(socket.__emitted.filter((e) => e.event === 'executor:shell_authorize')).toHaveLength(1)
+    const firstAuth = socket.__emitted.find((e) => e.event === 'executor:shell_authorize')!
+    expect(firstAuth.args[0]).toEqual({
+      sessionId: 'session', callId: 'shell-1', name: 'bash', command: 'git reset --hard HEAD',
+    })
+    ;(firstAuth.args[1] as (error: Error | undefined, reply?: { authorized: boolean }) => void)(undefined, { authorized: false })
+    await vi.waitFor(() => expect(denied).toHaveBeenCalled())
+    expect(duplicate).toHaveBeenCalledWith(denied.mock.calls[0]![0])
+    expect(denied.mock.calls[0]![0]).toMatchObject({ ok: false, content: expect.stringContaining('EACCES') })
+    expect(runs).not.toHaveBeenCalled()
+
+    const allowed = vi.fn()
+    socket.__trigger('tool:call', { ...call, callId: 'shell-2' }, allowed)
+    await vi.waitFor(() => expect(socket.__emitted.filter((e) => e.event === 'executor:shell_authorize')).toHaveLength(2))
+    const secondAuth = socket.__emitted.filter((e) => e.event === 'executor:shell_authorize')[1]!
+    ;(secondAuth.args[1] as (error: Error | undefined, reply?: { authorized: boolean }) => void)(undefined, { authorized: true })
+    await vi.waitFor(() => expect(allowed).toHaveBeenCalled())
+    expect(allowed.mock.calls[0]![0]).toMatchObject({ ok: true, content: 'executed' })
+    expect(runs).toHaveBeenCalledTimes(1)
+    expect(runs.mock.calls[0]?.[1]).toMatchObject({ shellApprovalVerified: true })
+
+    const unavailable = vi.fn()
+    socket.__trigger('tool:call', { ...call, callId: 'shell-3' }, unavailable)
+    await vi.waitFor(() => expect(socket.__emitted.filter((e) => e.event === 'executor:shell_authorize')).toHaveLength(3))
+    const thirdAuth = socket.__emitted.filter((e) => e.event === 'executor:shell_authorize')[2]!
+    ;(thirdAuth.args[1] as (error: Error) => void)(new Error('host approval RPC unavailable'))
+    await vi.waitFor(() => expect(unavailable).toHaveBeenCalled())
+    expect(unavailable.mock.calls[0]![0]).toMatchObject({ ok: false, content: expect.stringContaining('EACCES') })
+    expect(runs).toHaveBeenCalledTimes(1)
+
+    const blocked = vi.fn()
+    socket.__trigger('tool:call', { ...call, callId: 'shell-4', input: { command: 'echo "$(git reset --hard' } }, blocked)
+    await vi.waitFor(() => expect(blocked).toHaveBeenCalled())
+    expect(blocked.mock.calls[0]![0]).toMatchObject({ ok: false, content: expect.stringContaining('shell.parse.incomplete') })
+    expect(socket.__emitted.filter((e) => e.event === 'executor:shell_authorize')).toHaveLength(3)
+
+    const safe = vi.fn()
+    socket.__trigger('tool:call', { ...call, callId: 'shell-5', input: { command: 'git status' } }, safe)
+    await vi.waitFor(() => expect(safe).toHaveBeenCalled())
+    expect(safe.mock.calls[0]![0]).toMatchObject({ ok: true })
+    expect(socket.__emitted.filter((e) => e.event === 'executor:shell_authorize')).toHaveLength(3)
+    expect(runs).toHaveBeenCalledTimes(2)
+    await handle.close()
+  })
+
   it('rejects different requests sharing an execution identity while running and after completion', async () => {
     let finish!: (value: string) => void
     const runs = vi.fn(() => new Promise<string>((resolve) => { finish = resolve }))

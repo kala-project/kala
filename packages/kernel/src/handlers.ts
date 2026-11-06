@@ -31,6 +31,7 @@ import {
   noop,
   rejectInvalidEvent,
 } from './helpers.js'
+import { analyzeShellCommand, formatShellSafetyBlock } from './shell-safety.js'
 import { transitionAgentState } from './state.js'
 
 export function onUserMessage(
@@ -150,10 +151,31 @@ export function onLlmResponse(
   // so the LLM can respond to the refusal on the next turn without the host
   // ever dispatching anything.
   type Decision = 'dispatch' | 'ask' | 'reject'
-  const decisions: Array<{ call: ToolCallContent; decision: Decision }> =
+  const decisions: Array<{ call: ToolCallContent; decision: Decision; rejectionReason?: string }> =
     toolCalls.map((tc) => {
       const schema = config.tools.find((t) => t.name === tc.name)
       const needsApproval = schema?.requiresApproval ?? true
+      if (tc.name === 'shell' || tc.name === 'bash') {
+        const command = typeof tc.input?.command === 'string' ? tc.input.command : ''
+        const safety = analyzeShellCommand(command)
+        if (safety.risk === 'blocked') {
+          return {
+            call: tc,
+            decision: 'reject',
+            rejectionReason: formatShellSafetyBlock(safety),
+          }
+        }
+        if (safety.risk === 'high_risk') {
+          if (state.approvalMode === 'deny') {
+            return {
+              call: tc,
+              decision: 'reject',
+              rejectionReason: 'rejected: approval mode is "deny"',
+            }
+          }
+          return { call: tc, decision: 'ask' }
+        }
+      }
       const decision = decide(state.approvalMode, needsApproval)
       return { call: tc, decision }
     })
@@ -167,7 +189,7 @@ export function onLlmResponse(
       type: 'tool_result',
       callId: d.call.callId,
       ok: false,
-      content: 'rejected: approval mode is "deny"',
+      content: d.rejectionReason ?? 'rejected: approval mode is "deny"',
     }))
 
   const pending: PendingToolCall[] = decisions
@@ -283,7 +305,7 @@ export function onUserApprove(state: AgentState, callId: string): HandlerResult 
   if (!target || target.status !== 'awaiting_approval') return rejectInvalidEvent(state)
 
   const pendingCalls = state.pendingCalls.map((c) =>
-    c.callId === callId ? { ...c, status: 'dispatched' as const } : c,
+    c.callId === callId ? { ...c, status: 'dispatched' as const, explicitlyApproved: true } : c,
   )
 
   const effect: Effect = {

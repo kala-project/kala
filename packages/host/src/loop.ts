@@ -47,6 +47,13 @@ import type { SessionRecord } from './store/session.js'
 import { maybeAutoCompact } from './extensions/compaction.js'
 import { isCancelledSubAgentChild, type SubAgentRuntimeController } from './extensions/agent-tool.js'
 import { createBuiltinExtensionRegistry } from './extensions/builtin-registry.js'
+import {
+  analyzeShellCommand,
+  formatShellSafetyBlock,
+  guardShellToolDispatch,
+  isHeadlessSubAgentSession,
+  isShellToolName,
+} from './extensions/shell-ast-safety.js'
 import { todoGraphContinuationState } from './extensions/todo-graph.js'
 import { dispatchConfiguredTool, type ToolExecutionResult } from './agent-modules/execution.js'
 import { resolveKernelMessageAttachments } from './message-attachment-resolver.js'
@@ -104,6 +111,8 @@ export async function dispatchRuntimeTool(
   if (memoryPolicyBlock) return { ok: false, content: memoryPolicyBlock }
 
   await deps.assertSessionEffectOwner?.(sessionId)
+  const shellPolicyBlock = guardShellToolDispatch(deps.store.get(sessionId), effect)
+  if (shellPolicyBlock) return { ok: false, content: shellPolicyBlock }
   const blocked = await extensions.beforeToolDispatch(context)
   if (blocked) return blocked
   // Extension hooks may await network work while another replica takes over.
@@ -738,6 +747,22 @@ async function performEffect(
     case 'call_tool':
       return performCallTool(deps, record.sessionId, effect, aborts, runtime)
     case 'request_approval':
+      if (isHeadlessSubAgentSession(record)) {
+        const reason =
+          isShellToolName(effect.name) && typeof effect.input?.command === 'string'
+            ? formatShellSafetyBlock(analyzeShellCommand(effect.input.command), { isSubAgent: true })
+            : 'Tool call requires explicit user approval and cannot be approved in a headless sub-agent session.'
+        await dispatchOne(
+          deps,
+          record.sessionId,
+          { kind: 'user_reject', callId: effect.callId, reason },
+          aborts,
+          undefined,
+          undefined,
+          runtime,
+        )
+        return
+      }
       safeBroadcast(() => deps.broadcast.onApprovalRequired(record.sessionId, effect))
       return
     case 'finish':

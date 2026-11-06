@@ -4,6 +4,11 @@ import { dirname, join } from 'node:path'
 
 import { parseComputerScreenshotResult } from '@agent-kernel/shared'
 import { formatToolFailureForAgent } from '../tool-feedback.js'
+import {
+  evaluateShellApprovalDecision,
+  isHeadlessSubAgentSession,
+  isShellToolName,
+} from '../extensions/shell-ast-safety.js'
 import type {
   AgentState,
   ApprovalMode,
@@ -662,13 +667,34 @@ export class CopilotAgentRuntime implements AgentRuntime {
           input,
           status: 'dispatched',
         }
+        const shellDecision = isShellToolName(schema.name)
+          ? evaluateShellApprovalDecision(
+              record.state.approvalMode,
+              schema.requiresApproval,
+              typeof input.command === 'string' ? input.command : '',
+              { isSubAgent: isHeadlessSubAgentSession(record) },
+            )
+          : undefined
+        if (shellDecision?.decision === 'reject') {
+          await this.projectToolCall(record, { ...pending, status: 'awaiting_approval' })
+          const denied = toolResult(
+            false,
+            shellDecision.rejectionMessage === 'rejected: approval mode is "deny"'
+              ? 'rejected by approval policy'
+              : (shellDecision.rejectionMessage ?? 'rejected by approval policy'),
+            'denied',
+            schema.name,
+          )
+          await this.projectToolResult(record, pending, false, denied.textResultForLlm)
+          return denied
+        }
         if (record.state.approvalMode === 'deny' && schema.requiresApproval) {
           await this.projectToolCall(record, { ...pending, status: 'awaiting_approval' })
           const denied = toolResult(false, 'rejected by approval policy', 'denied', schema.name)
           await this.projectToolResult(record, pending, false, denied.textResultForLlm)
           return denied
         }
-        if (requiresApproval(record.state.approvalMode, schema.requiresApproval)) {
+        if (shellDecision?.decision === 'ask' || requiresApproval(record.state.approvalMode, schema.requiresApproval)) {
           pending.status = 'awaiting_approval'
           const decisionPromise = new Promise<ApprovalDecision>((resolve) => {
             this.approvals.set(approvalKey(record.sessionId, pending.callId), { resolve })
@@ -693,7 +719,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
             ...state,
             status: 'executing_tools',
             pendingCalls: state.pendingCalls.map((call) => call.callId === pending.callId
-              ? { ...call, status: 'dispatched' }
+              ? { ...call, status: 'dispatched', explicitlyApproved: true }
               : call),
             error: undefined,
           }))

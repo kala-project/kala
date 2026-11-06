@@ -48,6 +48,7 @@ import { conflictingExecutionResult, executionRequestDigest, ExecutionReceiptSto
 import type { RuntimeLogger } from './logger.js'
 import { executorReleaseVersion } from './build-info.js'
 import { failureForToolError } from './tool-failure.js'
+import { analyzeShellCommand, formatShellSafetyBlock } from './tools/shell-ast-safety.js'
 import { McpClientManager, type McpToolDescriptor } from './mcp-client.js'
 import { parseDashboardMcpServers, type DashboardMcpServerConfig, type McpServerConfig } from './mcp-config.js'
 import { readDashboardMcpServers, writeDashboardMcpServers } from './mcp-managed-config.js'
@@ -487,12 +488,47 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
     const started = performance.now()
     const desktopCall = payload.name === 'computer_use' || payload.name === '__computer_use'
     let executionStarted = false
+    let shellApprovalVerified = false
     let replyResult: ToolResultAck = unknownExecutionResult(payload.callId)
     try {
+      if (payload.name === 'shell' || payload.name === 'bash') {
+        const shellName = payload.name
+        const command = typeof payload.input?.command === 'string' ? payload.input.command : ''
+        const report = analyzeShellCommand(command)
+        if (report.risk === 'blocked') {
+          replyResult = {
+            callId: payload.callId,
+            ok: false,
+            content: `ERROR: EACCES: ${formatShellSafetyBlock(report)}`,
+            failure: failureForToolError('EACCES'),
+          }
+          return
+        }
+        if (report.risk === 'high_risk') {
+          const authorized = await new Promise<boolean>((resolve) => {
+            socket.timeout(5_000).emit('executor:shell_authorize', {
+              sessionId: payload.sessionId,
+              callId: payload.callId,
+              name: shellName,
+              command,
+            }, (error, result) => resolve(!error && result?.authorized === true))
+          }).catch(() => false)
+          if (!authorized) {
+            replyResult = {
+              callId: payload.callId,
+              ok: false,
+              content: 'ERROR: EACCES: High-risk shell call has no verified, matching user approval from the Host',
+              failure: failureForToolError('EACCES'),
+            }
+            return
+          }
+          shellApprovalVerified = true
+        }
+      }
       if (!internal) await receiptStore?.begin(key, payload.callId, requestDigest, payload.ownerGeneration)
       executionStarted = true
       logger.info({ sessionId: payload.sessionId, callId: payload.callId, tool: payload.name, internal, ...(!desktopCall && !knownMcpToolNames.has(payload.name) ? { input: safeToolInput(payload.input) } : {}), ...(payload.cwd ? { cwd: payload.cwd } : {}) }, 'tool execution started')
-      const rawResult = await runOne(tools, sandbox, controller.signal, payload, overflowConfig, options.networkPolicy, async (event) => {
+      const rawResult = await runOne(tools, sandbox, controller.signal, payload, overflowConfig, shellApprovalVerified, options.networkPolicy, async (event) => {
         await new Promise<void>((resolve, reject) => socket.timeout(5_000).emit('executor:network_audit', event, (error, result) => error || !result?.accepted ? reject(error ?? new Error('network audit rejected')) : resolve()))
       })
       const result = { ...rawResult, durationMs: Math.max(0, Math.round(performance.now() - started)) }
@@ -766,6 +802,7 @@ async function runOne(
   signal: AbortSignal,
   payload: ToolCallMessage,
   overflowConfig: OverflowConfig,
+  shellApprovalVerified = false,
   networkPolicy?: import('@agent-kernel/shared').NetworkPolicy,
   emitNetworkAudit?: (event: import('@agent-kernel/shared').NetworkAuditEvent) => Promise<void>,
 ): Promise<ToolResultAck> {
@@ -779,6 +816,7 @@ async function runOne(
   }
   try {
     const content = await tool.run(payload.input, {
+      ...(shellApprovalVerified ? { shellApprovalVerified: true } : {}),
       ...(typeof payload.desktopComputerUseEnabled === 'boolean' ? { desktopComputerUseEnabled: payload.desktopComputerUseEnabled } : {}),
       ...(typeof payload.desktopPreviewEnabled === 'boolean' ? { desktopPreviewEnabled: payload.desktopPreviewEnabled } : {}),
       ...(typeof payload.desktopManualAuthorizationRequired === 'boolean'

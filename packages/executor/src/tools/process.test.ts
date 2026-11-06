@@ -187,7 +187,7 @@ describe('shell yield_time_ms and process tool', () => {
   })
 
   it('supports interactive stdin write and immediate output polling via process tool', async () => {
-    const ctx = { ...makeCtx(root), sessionId: 'sess-interactive' }
+    const ctx = { ...makeCtx(root), sessionId: 'sess-interactive', shellApprovalVerified: true }
     const started = JSON.parse(
       await bashTool.run(
         {
@@ -270,7 +270,7 @@ describe('shell yield_time_ms and process tool', () => {
   })
 
   it.skipIf(process.platform === 'win32')('bounds poll responses without skipping unread bytes', async () => {
-    const ctx = { ...makeCtx(root), sessionId: 'sess-budget' }
+    const ctx = { ...makeCtx(root), sessionId: 'sess-budget', shellApprovalVerified: true }
     const started = JSON.parse(await shellTool.run({
       command: 'node -e \'process.stdout.write("x".repeat(1200000))\'',
       run_in_background: true,

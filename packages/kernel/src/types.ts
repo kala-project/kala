@@ -251,6 +251,8 @@ export type PendingToolCall = {
   input: Record<string, unknown>
   intent?: string
   status: 'awaiting_approval' | 'approved' | 'rejected' | 'dispatched'
+  /** Set only by a persisted user_approve transition, never by auto-dispatch. */
+  explicitlyApproved?: boolean
 }
 
 export type UsageTotal = {
