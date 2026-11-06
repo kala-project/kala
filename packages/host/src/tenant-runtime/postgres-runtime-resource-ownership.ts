@@ -107,6 +107,14 @@ export class RuntimeResourceOwnershipExpiredError extends Error {
   }
 }
 
+export class RuntimeWorkspaceEffectActiveError extends Error {
+  readonly code = 'RUNTIME_WORKSPACE_EFFECT_ACTIVE'
+  constructor() {
+    super('runtime resource ownership cannot transfer while a workspace effect is unresolved')
+    this.name = 'RuntimeWorkspaceEffectActiveError'
+  }
+}
+
 type MembershipRow = QueryResultRow & {
   organization_id: string
   unit_id: string
@@ -142,12 +150,24 @@ type OwnershipRow = QueryResultRow & {
 export class PostgresRuntimeResourceOwnershipStore {
   readonly #memberships: string
   readonly #ownerships: string
+  readonly #effects: string
+  readonly #arenaClaims: string
+  readonly #arenaNonAdmissions: string
+  readonly #arenaReconcile: string
+  readonly #arenaOperatorState: string
+  readonly #arenaRepairInit: string
   #closed = false
 
   constructor(readonly database: RuntimeResourceOwnershipDatabase, options: { schema?: string } = {}) {
     const schema = quoteIdentifier(options.schema ?? 'public')
     this.#memberships = `${schema}.tenant_runtime_unit_replica_memberships`
     this.#ownerships = `${schema}.tenant_runtime_resource_ownerships`
+    this.#effects = `${schema}.tenant_runtime_active_workspace_effects`
+    this.#arenaClaims = `${schema}.tenant_runtime_arena_repository_claims`
+    this.#arenaNonAdmissions = `${schema}.tenant_runtime_arena_non_admissions`
+    this.#arenaReconcile = `${schema}.kala_reconcile_arena_effect`
+    this.#arenaOperatorState = `${schema}.kala_arena_operator_state`
+    this.#arenaRepairInit = `${schema}.kala_arena_repair_init`
   }
 
   async registerReplica(input: RegisterRuntimeUnitReplicaInput, ttlMs: number): Promise<RuntimeUnitReplicaMembership> {
@@ -245,6 +265,7 @@ export class PostgresRuntimeResourceOwnershipStore {
         FOR UPDATE`, resourceValues(normalizedScope))
       const current = selected.rows[0]
       if (!current) throw new Error('runtime resource ownership disappeared while being acquired')
+      await this.#assertNoWorkspaceEffects(transaction, normalizedScope)
       const claimed = await transaction.query<OwnershipRow>(`UPDATE ${this.#ownerships} AS ownership
         SET replica_id = $5,
             membership_generation = $6,
@@ -299,6 +320,15 @@ export class PostgresRuntimeResourceOwnershipStore {
   async releaseResourceOwner(lease: RuntimeResourceOwnership): Promise<void> {
     validateOwnership(lease)
     await this.#transaction(async (transaction) => {
+      const selected = await transaction.query<OwnershipRow>(`SELECT * FROM ${this.#ownerships}
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4
+        FOR UPDATE`, resourceValues(lease))
+      const current = selected.rows[0]
+      if (current && current.owner_token === lease.ownerToken && BigInt(current.generation) === lease.generation
+        && current.replica_id === lease.replicaId && current.membership_token === lease.membershipToken
+        && BigInt(current.membership_generation) === lease.membershipGeneration) {
+        await this.#assertNoWorkspaceEffects(transaction, lease)
+      }
       const released = await transaction.query(`UPDATE ${this.#ownerships} AS ownership
         SET expires_at = clock_timestamp(), updated_at = clock_timestamp()
         WHERE ownership.organization_id = $1 AND ownership.unit_id = $2
@@ -319,6 +349,433 @@ export class PostgresRuntimeResourceOwnershipStore {
         await throwOwnershipFailure(transaction, this.#memberships, this.#ownerships, lease)
       }
     })
+  }
+
+  /**
+   * Declares an effect before Executor admission. An unresolved row survives
+   * lease expiry, disconnects and crashes; only confirmed final process exit
+   * (including descendants capable of mutation) permits completion.
+   */
+  async registerWorkspaceEffect(
+    lease: RuntimeResourceOwnership, effectId: string, workspaceId?: string,
+    repositoryIdentity?: string, arenaId?: string, prepared = false,
+  ): Promise<void> {
+    validateOwnership(lease)
+    if (lease.resourceType !== 'session') throw new TypeError('workspace effects require a Session owner')
+    validateText(effectId, 'effectId')
+    if (workspaceId !== undefined) validateText(workspaceId, 'workspaceId')
+    if (repositoryIdentity !== undefined) {
+      validateText(repositoryIdentity, 'repositoryIdentity')
+      validateText(arenaId ?? '', 'arenaId')
+    }
+    await this.#transaction(async (transaction) => {
+      const selected = await transaction.query(`SELECT 1 FROM ${this.#ownerships}
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4
+        FOR UPDATE`, resourceValues(lease))
+      if (selected.rowCount !== 1) throw new RuntimeResourceOwnershipFencedError()
+      await assertResourceOwnerInTables(transaction, this.#memberships, this.#ownerships, lease)
+      if (repositoryIdentity) {
+        const claim = await transaction.query(`SELECT 1 FROM ${this.#arenaClaims}
+          WHERE repository_identity = $1 AND organization_id = $2 AND unit_id = $3
+            AND resource_id = $4 AND arena_id = $5 FOR UPDATE`,
+        [repositoryIdentity, lease.organizationId, lease.unitId, lease.resourceId, arenaId])
+        if (claim.rowCount !== 1) throw new RuntimeResourceOwnershipFencedError()
+      }
+      await transaction.query(`INSERT INTO ${this.#effects}
+        (organization_id, unit_id, resource_type, resource_id, effect_id, owner_token, generation, workspace_id, repository_identity, dispatch_started)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [...resourceValues(lease), effectId, lease.ownerToken, lease.generation.toString(),
+        workspaceId ?? null, repositoryIdentity ?? null, !prepared])
+    })
+  }
+
+  /** Durable one-way authorization; commit this before emitting even one Executor tool frame. */
+  async beginWorkspaceEffectDispatch(lease: RuntimeResourceOwnership, effectId: string, requestDigest?: string): Promise<void> {
+    validateOwnership(lease)
+    validateText(effectId, 'effectId')
+    if (requestDigest !== undefined && !/^[a-f0-9]{64}$/u.test(requestDigest)) throw new TypeError('Invalid Arena request digest')
+    await this.#transaction(async (transaction) => {
+      await transaction.query(`SELECT 1 FROM ${this.#ownerships}
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4 FOR UPDATE`,
+      resourceValues(lease))
+      await assertResourceOwnerInTables(transaction, this.#memberships, this.#ownerships, lease)
+      const changed = await transaction.query(`UPDATE ${this.#effects} SET dispatch_started = true, request_digest = $8
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4
+          AND effect_id = $5 AND owner_token = $6 AND generation = $7 AND dispatch_started = false`,
+      [...resourceValues(lease), effectId, lease.ownerToken, lease.generation.toString(), requestDigest ?? null])
+      if (changed.rowCount !== 1) throw new RuntimeResourceOwnershipFencedError()
+    })
+  }
+
+  /** Audit and remove only a registered, still-never-dispatched identity. No remote absence is used as proof. */
+  async completeNeverDispatchedWorkspaceEffect(
+    lease: RuntimeResourceOwnership, effectId: string, workspaceId: string, reason: string,
+  ): Promise<void> {
+    validateOwnership(lease)
+    for (const [value, field] of [[effectId, 'effectId'], [workspaceId, 'workspaceId'], [reason, 'reason']] as const) {
+      validateText(value, field)
+    }
+    await this.#transaction(async (transaction) => {
+      await transaction.query(`SELECT 1 FROM ${this.#ownerships}
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4 FOR UPDATE`,
+      resourceValues(lease))
+      await assertResourceOwnerInTables(transaction, this.#memberships, this.#ownerships, lease)
+      const removed = await transaction.query(`DELETE FROM ${this.#effects}
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4
+          AND effect_id = $5 AND owner_token = $6 AND generation = $7 AND workspace_id = $8
+          AND dispatch_started = false`,
+      [...resourceValues(lease), effectId, lease.ownerToken, lease.generation.toString(), workspaceId])
+      if (removed.rowCount !== 1) throw new RuntimeResourceOwnershipFencedError()
+      await transaction.query(`INSERT INTO ${this.#arenaNonAdmissions}
+        (organization_id, unit_id, resource_id, effect_id, generation, workspace_id, reason)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [lease.organizationId, lease.unitId, lease.resourceId, effectId, lease.generation.toString(), workspaceId, reason])
+    })
+  }
+
+  /** A claim persists throughout the Arena lifetime, not just while a Git call runs. */
+  async claimArenaRepository(lease: RuntimeResourceOwnership, repositoryIdentity: string, arenaId: string): Promise<void> {
+    validateOwnership(lease)
+    if (lease.resourceType !== 'session') throw new TypeError('Arena claims require Session ownership')
+    validateText(repositoryIdentity, 'repositoryIdentity')
+    validateText(arenaId, 'arenaId')
+    await this.#transaction(async (transaction) => {
+      await transaction.query(`SELECT 1 FROM ${this.#ownerships}
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4 FOR UPDATE`,
+      resourceValues(lease))
+      await assertResourceOwnerInTables(transaction, this.#memberships, this.#ownerships, lease)
+      const unscoped = await transaction.query(`SELECT 1 FROM ${this.#effects}
+        WHERE repository_identity IS NULL OR repository_identity = $1 LIMIT 1`, [repositoryIdentity])
+      if (unscoped.rowCount) throw new RuntimeWorkspaceEffectActiveError()
+      await transaction.query(`INSERT INTO ${this.#arenaClaims}
+        (repository_identity, organization_id, unit_id, resource_id, arena_id)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (repository_identity) DO NOTHING`,
+      [repositoryIdentity, lease.organizationId, lease.unitId, lease.resourceId, arenaId])
+      const claim = await transaction.query(`SELECT 1 FROM ${this.#arenaClaims}
+        WHERE repository_identity = $1 AND organization_id = $2 AND unit_id = $3
+          AND resource_id = $4 AND arena_id = $5 FOR UPDATE`,
+      [repositoryIdentity, lease.organizationId, lease.unitId, lease.resourceId, arenaId])
+      if (claim.rowCount !== 1) throw new RuntimeResourceOwnershipHeldError('arena-repository', lease.expiresAt)
+    })
+  }
+
+  /** One commit either owns both the repository and its never-dispatched init effect, or neither. */
+  async prepareArenaInitEffect(
+    lease: RuntimeResourceOwnership, effectId: string, workspaceId: string,
+    repositoryIdentity: string, arenaId: string,
+  ): Promise<void> {
+    validateOwnership(lease)
+    if (lease.resourceType !== 'session' || !/^arena-init-[A-Z0-9]+$/u.test(effectId)) {
+      throw new TypeError('Arena init requires a Session and named init effect')
+    }
+    for (const [value, field] of [[workspaceId, 'workspaceId'], [repositoryIdentity, 'repositoryIdentity'],
+      [arenaId, 'arenaId']] as const) validateText(value, field)
+    await this.#transaction(async (transaction) => {
+      await transaction.query(`SELECT 1 FROM ${this.#ownerships}
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4 FOR UPDATE`,
+      resourceValues(lease))
+      await assertResourceOwnerInTables(transaction, this.#memberships, this.#ownerships, lease)
+      const blocked = await transaction.query(`SELECT 1 FROM ${this.#effects}
+        WHERE repository_identity IS NULL OR repository_identity = $1 LIMIT 1`, [repositoryIdentity])
+      if (blocked.rowCount) throw new RuntimeWorkspaceEffectActiveError()
+      const claimed = await transaction.query(`INSERT INTO ${this.#arenaClaims}
+        (repository_identity, organization_id, unit_id, resource_id, arena_id)
+        VALUES ($1,$2,$3,$4,$5) ON CONFLICT (repository_identity) DO NOTHING RETURNING 1`,
+      [repositoryIdentity, lease.organizationId, lease.unitId, lease.resourceId, arenaId])
+      if (claimed.rowCount !== 1) throw new RuntimeResourceOwnershipHeldError('arena-repository', lease.expiresAt)
+      await transaction.query(`INSERT INTO ${this.#effects}
+        (organization_id, unit_id, resource_type, resource_id, effect_id,
+          owner_token, generation, workspace_id, repository_identity, dispatch_started)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,false)`,
+      [...resourceValues(lease), effectId, lease.ownerToken, lease.generation.toString(),
+        workspaceId, repositoryIdentity])
+    })
+  }
+
+  /** Legacy two-step release, retained for pre-v27 incident fixtures; production Host uses completeArenaCleanupEffect. */
+  async releaseArenaRepository(
+    lease: RuntimeResourceOwnership, repositoryIdentity: string, arenaId: string, cleanupEffectId: string,
+  ): Promise<void> {
+    validateOwnership(lease)
+    for (const [value, label] of [[repositoryIdentity, 'repositoryIdentity'], [arenaId, 'arenaId'], [cleanupEffectId, 'cleanupEffectId']] as const) {
+      validateText(value, label)
+    }
+    await this.#transaction(async (transaction) => {
+      const selected = await transaction.query<OwnershipRow>(`SELECT * FROM ${this.#ownerships}
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4 FOR UPDATE`,
+      resourceValues(lease))
+      const current = selected.rows[0]
+      if (!current || current.owner_token !== lease.ownerToken || BigInt(current.generation) !== lease.generation) {
+        throw new RuntimeResourceOwnershipFencedError()
+      }
+      const effect = await transaction.query(`SELECT 1 FROM ${this.#effects}
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4
+          AND effect_id = $5 AND owner_token = $6 AND generation = $7 AND repository_identity = $8`,
+      [...resourceValues(lease), cleanupEffectId, lease.ownerToken, lease.generation.toString(), repositoryIdentity])
+      if (effect.rowCount !== 1) throw new RuntimeResourceOwnershipFencedError()
+      const removed = await transaction.query(`DELETE FROM ${this.#arenaClaims}
+        WHERE repository_identity = $1 AND organization_id = $2 AND unit_id = $3
+          AND resource_id = $4 AND arena_id = $5`,
+      [repositoryIdentity, lease.organizationId, lease.unitId, lease.resourceId, arenaId])
+      if (removed.rowCount !== 1) throw new RuntimeResourceOwnershipFencedError()
+    })
+  }
+
+  /** Completes the final stopped cleanup and releases its claim in one owner-fenced commit. */
+  async completeArenaCleanupEffect(
+    lease: RuntimeResourceOwnership, effectId: string, repositoryIdentity: string, arenaId: string,
+  ): Promise<void> {
+    validateOwnership(lease)
+    if (lease.resourceType !== 'session' || !/^arena-cleanup-[A-Z0-9]+$/u.test(effectId)) {
+      throw new TypeError('Arena cleanup requires a Session and named cleanup effect')
+    }
+    for (const [value, field] of [[repositoryIdentity, 'repositoryIdentity'],
+      [arenaId, 'arenaId']] as const) validateText(value, field)
+    await this.#transaction(async (transaction) => {
+      const selected = await transaction.query<OwnershipRow>(`SELECT * FROM ${this.#ownerships}
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4
+        FOR UPDATE`, resourceValues(lease))
+      const owner = selected.rows[0]
+      if (!owner || owner.owner_token !== lease.ownerToken || BigInt(owner.generation) !== lease.generation
+        || owner.replica_id !== lease.replicaId || owner.membership_token !== lease.membershipToken
+        || BigInt(owner.membership_generation) !== lease.membershipGeneration) {
+        throw new RuntimeResourceOwnershipFencedError()
+      }
+      const effect = await transaction.query(`SELECT 1 FROM ${this.#effects}
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4
+          AND effect_id = $5 AND owner_token = $6 AND generation = $7 AND repository_identity = $8
+        FOR UPDATE`,
+      [...resourceValues(lease), effectId, lease.ownerToken, lease.generation.toString(), repositoryIdentity])
+      if (effect.rowCount !== 1) throw new RuntimeResourceOwnershipFencedError()
+      const claim = await transaction.query(`DELETE FROM ${this.#arenaClaims}
+        WHERE repository_identity = $1 AND organization_id = $2 AND unit_id = $3
+          AND resource_id = $4 AND arena_id = $5`,
+      [repositoryIdentity, lease.organizationId, lease.unitId, lease.resourceId, arenaId])
+      if (claim.rowCount !== 1) throw new RuntimeResourceOwnershipFencedError()
+      const removed = await transaction.query(`DELETE FROM ${this.#effects}
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4
+          AND effect_id = $5 AND owner_token = $6 AND generation = $7 AND repository_identity = $8`,
+      [...resourceValues(lease), effectId, lease.ownerToken, lease.generation.toString(), repositoryIdentity])
+      if (removed.rowCount !== 1) throw new RuntimeResourceOwnershipFencedError()
+    })
+  }
+
+  /** Does not attest success; callers must prove the entire mutation tree has stopped. */
+  async completeWorkspaceEffect(lease: RuntimeResourceOwnership, effectId: string): Promise<void> {
+    validateOwnership(lease)
+    if (lease.resourceType !== 'session') throw new TypeError('workspace effects require a Session owner')
+    validateText(effectId, 'effectId')
+    await this.#transaction(async (transaction) => {
+      const selected = await transaction.query<OwnershipRow>(`SELECT * FROM ${this.#ownerships}
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4
+        FOR UPDATE`, resourceValues(lease))
+      const current = selected.rows[0]
+      if (!current || current.owner_token !== lease.ownerToken || BigInt(current.generation) !== lease.generation
+        || current.replica_id !== lease.replicaId || current.membership_token !== lease.membershipToken
+        || BigInt(current.membership_generation) !== lease.membershipGeneration) {
+        throw new RuntimeResourceOwnershipFencedError()
+      }
+      const removed = await transaction.query(`DELETE FROM ${this.#effects}
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4
+          AND effect_id = $5 AND owner_token = $6 AND generation = $7`,
+      [...resourceValues(lease), effectId, lease.ownerToken, lease.generation.toString()])
+      if (removed.rowCount !== 1) throw new RuntimeResourceOwnershipFencedError()
+    })
+  }
+
+  /** Bounded operator read: never mutates ownership, claims, or unresolved effects. */
+  async inspectWorkspaceEffects(scope: RuntimeResourceScope, limit = 20): Promise<Array<{
+    effectId: string; generation: bigint; workspaceId: string | null
+    repositoryIdentity: string | null; createdAt: Date
+  }>> {
+    const normalized = validateResourceScope(scope)
+    if (normalized.resourceType !== 'session' || !Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new TypeError('Arena inspection requires a Session and limit of 1..100')
+    }
+    const rows = await this.database.query<{
+      effect_id: string; generation: string; workspace_id: string | null
+      repository_identity: string | null; created_at: Date
+    }>(`SELECT effect_id, generation, workspace_id, repository_identity, created_at
+      FROM ${this.#effects}
+      WHERE organization_id = $1 AND unit_id = $2 AND resource_type = 'session' AND resource_id = $3
+      ORDER BY created_at, effect_id LIMIT $4`,
+    [normalized.organizationId, normalized.unitId, normalized.resourceId, limit])
+    return rows.rows.map((row) => ({
+      effectId: row.effect_id, generation: BigInt(row.generation),
+      workspaceId: row.workspace_id, repositoryIdentity: row.repository_identity, createdAt: row.created_at,
+    }))
+  }
+
+  /** Operator LOGIN sees only effects in its own organization through a scoped definer function. */
+  async inspectOperatorArenaEffects(scope: RuntimeResourceScope, limit = 20): Promise<Array<{
+    effectId: string; generation: bigint; workspaceId: string | null
+    repositoryIdentity: string | null; createdAt: Date
+  }>> {
+    const normalized = validateResourceScope(scope)
+    if (normalized.resourceType !== 'session' || !Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new TypeError('Arena inspection requires a Session and limit of 1..100')
+    }
+    const rows = await this.database.query<{
+      effect_id: string; generation: string; workspace_id: string | null
+      repository_identity: string | null; created_at: Date
+    }>(`SELECT * FROM ${this.#arenaOperatorState.replace(/operator_state$/u, 'operator_effects')}($1,$2,$3,$4)`,
+    [normalized.organizationId, normalized.unitId, normalized.resourceId, limit])
+    return rows.rows.map((row) => ({
+      effectId: row.effect_id, generation: BigInt(row.generation),
+      workspaceId: row.workspace_id, repositoryIdentity: row.repository_identity, createdAt: row.created_at,
+    }))
+  }
+
+  /** Tenant-scoped durable pre-dispatch marker; NULL means the effect is absent. */
+  async inspectOperatorArenaDispatch(scope: RuntimeResourceScope, effectId: string): Promise<{
+    started: boolean; digest: string | null
+  } | null> {
+    const normalized = validateResourceScope(scope)
+    if (normalized.resourceType !== 'session') throw new TypeError('Arena inspection requires a Session')
+    validateText(effectId, 'effectId')
+    const rows = await this.database.query<{ dispatch: { started: boolean; digest: string | null } | null }>(
+      `SELECT ${this.#arenaOperatorState.replace(/operator_state$/u, 'operator_dispatch')}(
+        $1,$2,$3,$4) AS dispatch`,
+      [normalized.organizationId, normalized.unitId, normalized.resourceId, effectId])
+    return rows.rows[0]?.dispatch ?? null
+  }
+
+  /** Scoped read for the legacy release-before-effect crash window; NULL is not proof of no other tenant's claim. */
+  async inspectOperatorArenaClaim(scope: RuntimeResourceScope, repositoryIdentity: string): Promise<string | null> {
+    const normalized = validateResourceScope(scope)
+    if (normalized.resourceType !== 'session') throw new TypeError('Arena inspection requires a Session')
+    validateText(repositoryIdentity, 'repositoryIdentity')
+    const rows = await this.database.query<{ arena_id: string | null }>(
+      `SELECT ${this.#arenaOperatorState.replace(/operator_state$/u, 'operator_claim')}(
+        $1,$2,$3,$4) AS arena_id`,
+      [normalized.organizationId, normalized.unitId, normalized.resourceId, repositoryIdentity])
+    return rows.rows[0]?.arena_id ?? null
+  }
+
+  /** Only the scoped operator can atomically audit and release a proven never-dispatched or completed probe effect. */
+  async reconcileArenaOffline(input: {
+    scope: RuntimeResourceScope; effectId: string; generation: bigint; workspaceId: string
+    operatorId: string; incidentId: string; evidence: Record<string, unknown>
+    arenaState: unknown; mode: 'prepared' | 'probe'
+  }): Promise<void> {
+    const scope = validateResourceScope(input.scope)
+    if (scope.resourceType !== 'session') throw new TypeError('Arena reconciliation requires a Session')
+    for (const [value, field] of [[input.effectId, 'effectId'], [input.workspaceId, 'workspaceId'],
+      [input.operatorId, 'operatorId'], [input.incidentId, 'incidentId']] as const) validateText(value, field)
+    if (input.generation < 1n || !input.evidence
+      || JSON.stringify(input.evidence).length > 32_000) throw new TypeError('Invalid Arena evidence')
+    try {
+      await this.database.query(`SELECT ${this.#arenaOperatorState.replace(/kala_arena_operator_state$/u, 'kala_reconcile_arena_offline')}(
+        $1,$2,$3,$4,$5::bigint,$6,$7,$8,$9::jsonb,$10::jsonb,$11)`,
+      [scope.organizationId, scope.unitId, scope.resourceId, input.effectId,
+        input.generation.toString(), input.workspaceId, input.operatorId, input.incidentId,
+        JSON.stringify(input.evidence), input.arenaState == null ? null : JSON.stringify(input.arenaState), input.mode])
+    } catch (error) {
+      if ((error as { code?: string }).code === 'P0001') throw new RuntimeResourceOwnershipFencedError()
+      throw error
+    }
+  }
+
+  /** Prepared init is special: the claim, effect and any initializing metadata are compensated together. */
+  async reconcileArenaPreparedInit(input: {
+    scope: RuntimeResourceScope; effectId: string; generation: bigint; workspaceId: string
+    operatorId: string; incidentId: string; evidence: Record<string, unknown>; arenaState: unknown
+  }): Promise<void> {
+    const scope = validateResourceScope(input.scope)
+    if (scope.resourceType !== 'session' || !/^arena-init-[A-Z0-9]+$/u.test(input.effectId)
+      || input.generation < 1n || JSON.stringify(input.evidence).length > 32_000) {
+      throw new TypeError('Invalid prepared Arena init evidence')
+    }
+    for (const [value, field] of [[input.workspaceId, 'workspaceId'], [input.operatorId, 'operatorId'],
+      [input.incidentId, 'incidentId']] as const) validateText(value, field)
+    try {
+      await this.database.query(`SELECT ${this.#arenaOperatorState.replace(/kala_arena_operator_state$/u, 'kala_reconcile_arena_prepared_init')}(
+        $1,$2,$3,$4,$5::bigint,$6,$7,$8,$9::jsonb,$10::jsonb)`,
+      [scope.organizationId, scope.unitId, scope.resourceId, input.effectId,
+        input.generation.toString(), input.workspaceId, input.operatorId, input.incidentId,
+        JSON.stringify(input.evidence), input.arenaState == null ? null : JSON.stringify(input.arenaState)])
+    } catch (error) {
+      if ((error as { code?: string }).code === 'P0001') throw new RuntimeResourceOwnershipFencedError()
+      throw error
+    }
+  }
+
+  /** Exposes only the latest durable Arena metadata for a live Session, never arbitrary Session contents. */
+  async readArenaAuthorityState(scope: RuntimeResourceScope): Promise<unknown> {
+    const normalized = validateResourceScope(scope)
+    if (normalized.resourceType !== 'session') throw new TypeError('Arena state requires a Session')
+    const result = await this.database.query<{ arena: unknown }>(`SELECT ${this.#arenaOperatorState}($1, $2) AS arena`,
+      [normalized.organizationId, normalized.resourceId])
+    return result.rows[0]?.arena
+  }
+
+  /** Repairs only a fully verified init intent; leaves the active effect UNKNOWN for separate reconciliation. */
+  async repairArenaInit(input: {
+    scope: RuntimeResourceScope; effectId: string; generation: bigint; workspaceId: string
+    repositoryIdentity: string; operatorId: string; incidentId: string
+    oldState: Record<string, unknown>; newState: Record<string, unknown>; evidence: Record<string, unknown>
+  }): Promise<void> {
+    const scope = validateResourceScope(input.scope)
+    if (scope.resourceType !== 'session') throw new TypeError('Arena init repair requires a Session')
+    for (const [value, field] of [[input.effectId, 'effectId'], [input.workspaceId, 'workspaceId'],
+      [input.repositoryIdentity, 'repositoryIdentity'], [input.operatorId, 'operatorId'],
+      [input.incidentId, 'incidentId']] as const) validateText(value, field)
+    if (input.generation < 1n || !input.oldState || !input.newState || !input.evidence
+      || JSON.stringify(input.oldState).length > 32_000 || JSON.stringify(input.newState).length > 32_000
+      || JSON.stringify(input.evidence).length > 32_000) throw new TypeError('Invalid Arena init repair evidence')
+    try {
+      await this.database.query(`SELECT ${this.#arenaRepairInit}(
+        $1, $2, $3, $4, $5::bigint, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb)`,
+      [scope.organizationId, scope.unitId, scope.resourceId, input.effectId,
+        input.generation.toString(), input.workspaceId, input.repositoryIdentity,
+        input.operatorId, input.incidentId, JSON.stringify(input.oldState),
+        JSON.stringify(input.newState), JSON.stringify(input.evidence)])
+    } catch (error) {
+      if ((error as { code?: string }).code === 'P0001') throw new RuntimeResourceOwnershipFencedError()
+      throw error
+    }
+  }
+
+  /** Operator-only call after independent Linux process and repository verification. Never run on UNKNOWN automatically. */
+  async reconcileArenaEffect(input: {
+    scope: RuntimeResourceScope; effectId: string; generation: bigint; workspaceId: string
+    repositoryIdentity: string | null; operatorId: string; incidentId: string
+    evidence: Record<string, unknown>; arenaState: Record<string, unknown>; releaseClaimArenaId?: string
+  }): Promise<void> {
+    const scope = validateResourceScope(input.scope)
+    if (scope.resourceType !== 'session') throw new TypeError('Arena reconciliation requires a Session')
+    for (const [value, field] of [[input.effectId, 'effectId'], [input.workspaceId, 'workspaceId'],
+      [input.operatorId, 'operatorId'], [input.incidentId, 'incidentId']] as const) validateText(value, field)
+    if (input.repositoryIdentity !== null) validateText(input.repositoryIdentity, 'repositoryIdentity')
+    if (input.releaseClaimArenaId) {
+      validateText(input.releaseClaimArenaId, 'releaseClaimArenaId')
+      if (input.evidence?.action !== 'cleanup') throw new TypeError('Only reconciled cleanup may release an Arena claim')
+    }
+    if (input.generation < 1n || !input.evidence || !input.arenaState
+      || JSON.stringify(input.evidence).length > 32_000 || JSON.stringify(input.arenaState).length > 32_000) {
+      throw new TypeError('Invalid or oversized Arena reconciliation evidence')
+    }
+    try {
+      await this.database.query(`SELECT ${this.#arenaReconcile}(
+        $1, $2, $3, $4, $5::bigint, $6, $7, $8, $9, $10::jsonb, $11, $12::jsonb)`,
+      [scope.organizationId, scope.unitId, scope.resourceId, input.effectId, input.generation.toString(),
+        input.workspaceId, input.repositoryIdentity, input.operatorId, input.incidentId,
+        JSON.stringify(input.evidence), input.releaseClaimArenaId ?? null, JSON.stringify(input.arenaState)])
+    } catch (error) {
+      if ((error as { code?: string }).code === 'P0001') throw new RuntimeResourceOwnershipFencedError()
+      throw error
+    }
+  }
+
+  async #assertNoWorkspaceEffects(
+    transaction: RuntimeResourceOwnershipSqlExecutor,
+    scope: RuntimeResourceScope,
+  ): Promise<void> {
+    const active = await transaction.query(`SELECT 1 FROM ${this.#effects}
+      WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4
+      LIMIT 1`, resourceValues(scope))
+    if (active.rowCount !== 0) throw new RuntimeWorkspaceEffectActiveError()
   }
 
   /** Returns an owner only while both ownership and its exact organization membership are live. */

@@ -1,10 +1,16 @@
-import { execFile } from 'node:child_process'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
+import { once } from 'node:events'
+import { createServer } from 'node:http'
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { Server } from 'socket.io'
 
-import { migratePostgres } from '../postgres-migrations.js'
+import { grantPostgresArenaOperator, migratePostgres } from '../postgres-migrations.js'
 import type { ArtifactObjectStore } from '../artifacts/object-store.js'
 import { PostgresObjectMetadataLog } from '../artifacts/postgres-object-metadata.js'
 import { PostgresObjectCapacityLedger } from '../artifacts/postgres-object-capacity.js'
@@ -17,13 +23,21 @@ import {
   createPostgresRuntimeResourceOwnershipStore,
   RuntimeResourceOwnershipFencedError,
   RuntimeResourceOwnershipHeldError,
+  RuntimeWorkspaceEffectActiveError,
   RuntimeUnitReplicaMembershipFencedError,
   type PostgresRuntimeResourceOwnershipStore,
+  type RuntimeResourceOwnership,
   type RuntimeResourceScope,
 } from './postgres-runtime-resource-ownership.js'
 import { parseTenantRuntimeUnitId } from './unit.js'
 import { RuntimeResourceOwnershipManager } from './runtime-resource-ownership.js'
 import { RuntimeSessionOwnership } from './runtime-session-ownership.js'
+import { runWorktreeArenaTool, WORKTREE_ARENA_METADATA_ACTION } from '../extensions/worktree-arena.js'
+import type { HostLoopDeps } from '../loop-types.js'
+import { createExecutorRegistry } from '../connection/executor.js'
+import { assertArenaKeeper } from '../../../executor/src/arena-keeper.js'
+import { ExecutionReceiptStore, executionRequestDigest } from '../../../executor/src/execution-receipts.js'
+import { assertGroupStopped } from '../../../executor/src/tools/arena-process-groups.js'
 
 const execFileAsync = promisify(execFile)
 const integrationDescribe = process.env.KALA_RUN_POSTGRES_INTEGRATION === '1' ? describe : describe.skip
@@ -31,6 +45,7 @@ const integrationDescribe = process.env.KALA_RUN_POSTGRES_INTEGRATION === '1' ? 
 integrationDescribe('PostgresRuntimeResourceOwnershipStore isolated PostgreSQL integration', () => {
   const project = `kala-resource-owner-${randomUUID()}`
   const container = `${project}-postgres`
+  const volume = `${project}-data`
   const databaseName = `kala_resource_owner_${randomUUID().replaceAll('-', '')}`
   const password = `test-${randomUUID()}`
   let connectionString = ''
@@ -41,7 +56,7 @@ integrationDescribe('PostgresRuntimeResourceOwnershipStore isolated PostgreSQL i
     await docker('run', '--detach', '--rm',
       '--name', container,
       '--label', `dev.kala.test.project=${project}`,
-      '--tmpfs', '/var/lib/postgresql/data:rw,noexec,nosuid,size=256m',
+      '--mount', `type=volume,source=${volume},target=/var/lib/postgresql/data`,
       '--env', `POSTGRES_PASSWORD=${password}`,
       '--env', `POSTGRES_DB=${databaseName}`,
       '--publish', '127.0.0.1::5432',
@@ -61,6 +76,7 @@ integrationDescribe('PostgresRuntimeResourceOwnershipStore isolated PostgreSQL i
   afterAll(async () => {
     await Promise.allSettled([first?.close(), second?.close()])
     await docker('rm', '--force', container).catch(() => undefined)
+    await docker('volume', 'rm', volume).catch(() => undefined)
   }, 30_000)
 
   it('registers two replicas for one Unit and lets each own a different Session', async () => {
@@ -96,6 +112,1437 @@ integrationDescribe('PostgresRuntimeResourceOwnershipStore isolated PostgreSQL i
       replicaId: ownerB.replicaId, origin: replicaB.origin, generation: 1n,
     })
     await expect(first.lookupResourceOwner({ ...sessionA, organizationId: randomUUID() })).resolves.toBeUndefined()
+  })
+
+  it('claims a real Git common directory across workspace aliases, Sessions and tenants until final cleanup', async () => {
+    const root = mkdtempSync(join(process.cwd(), 'pg-arena-repository-'))
+    try {
+      execFileSync('git', ['init', '-b', 'main'], { cwd: root })
+      const alias = `${root}-alias`
+      symlinkSync(root, alias)
+      try {
+        const common = (at: string) => execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+          { cwd: at, encoding: 'utf8' }).trim()
+        const identity = (at: string) => {
+          const entry = statSync(common(at), { bigint: true })
+          return `git-common-inode:${entry.dev}:${entry.ino}`
+        }
+        expect(identity(root)).toBe(identity(alias))
+        const ownerOf = async (store: PostgresRuntimeResourceOwnershipStore, organizationId: string) => {
+          const unitId = parseTenantRuntimeUnitId(randomUUID())
+          const replica = await store.registerReplica({
+            organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(),
+            origin: `https://${randomUUID()}.example`,
+          }, 8_000)
+          return await store.acquireResourceOwner(resource(organizationId, unitId, 'session'), replica, randomUUID(), 8_000)
+        }
+        const ownerA = await ownerOf(first, randomUUID())
+        const ownerB = await ownerOf(second, randomUUID())
+        await first.claimArenaRepository(ownerA, identity(root), 'arenaA')
+        await first.registerWorkspaceEffect(ownerA, 'mutationA', 'workspaceA', identity(root), 'arenaA')
+        await expect(second.claimArenaRepository(ownerB, identity(alias), 'arenaB'))
+          .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+        await first.completeWorkspaceEffect(ownerA, 'mutationA')
+        await expect(second.claimArenaRepository(ownerB, identity(alias), 'arenaB'))
+          .rejects.toBeInstanceOf(RuntimeResourceOwnershipHeldError)
+        await first.registerWorkspaceEffect(ownerA, 'cleanupA', 'workspaceA', identity(root), 'arenaA')
+        await first.releaseArenaRepository(ownerA, identity(root), 'arenaA', 'cleanupA')
+        await first.completeWorkspaceEffect(ownerA, 'cleanupA')
+        await second.claimArenaRepository(ownerB, identity(alias), 'arenaB')
+        await second.registerWorkspaceEffect(ownerB, 'mutationB', 'workspaceB', identity(alias), 'arenaB')
+        await second.completeWorkspaceEffect(ownerB, 'mutationB')
+        await second.registerWorkspaceEffect(ownerB, 'cleanupB', 'workspaceB', identity(alias), 'arenaB')
+        await second.releaseArenaRepository(ownerB, identity(alias), 'arenaB', 'cleanupB')
+        await second.completeWorkspaceEffect(ownerB, 'cleanupB')
+        const competing = await Promise.allSettled([
+          first.claimArenaRepository(ownerA, identity(root), 'arenaA2'),
+          second.claimArenaRepository(ownerB, identity(alias), 'arenaB2'),
+        ])
+        expect(competing.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+        expect(competing.filter((result) => result.status === 'rejected'))
+          .toEqual([expect.objectContaining({ reason: expect.objectContaining({ code: 'RUNTIME_RESOURCE_OWNERSHIP_HELD' }) })])
+        const winner = competing[0]?.status === 'fulfilled'
+          ? { store: first, lease: ownerA, arena: 'arenaA2', workspace: 'workspaceA' }
+          : { store: second, lease: ownerB, arena: 'arenaB2', workspace: 'workspaceB' }
+        await winner.store.registerWorkspaceEffect(winner.lease, 'cleanup-race', winner.workspace, identity(root), winner.arena)
+        await winner.store.releaseArenaRepository(winner.lease, identity(root), winner.arena, 'cleanup-race')
+        await winner.store.completeWorkspaceEffect(winner.lease, 'cleanup-race')
+      } finally { rmSync(alias, { force: true }) }
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('keeps UNKNOWN while a real Git worktree child survives Executor SIGKILL and PG restart', async () => {
+    const root = mkdtempSync(join(process.cwd(), 'arena-executor-crash-'))
+    const keeperRoot = mkdtempSync(join(process.cwd(), 'arena-keeper-'))
+    const keeperFile = join(keeperRoot, 'keeper.json')
+    const receipts = join(root, 'receipts.json')
+    const operatorSecretPath = join(root, 'operator-url')
+    const http = createServer()
+    const io = new Server(http)
+    const children: ChildProcess[] = []
+    let pausedGitPid: number | undefined, pausedPgid: number | undefined
+    try {
+      execFileSync('git', ['init', '-b', 'main'], { cwd: root })
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: root })
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: root })
+      writeFileSync(join(root, 'a.txt'), 'base\n')
+      execFileSync('git', ['add', 'a.txt'], { cwd: root })
+      execFileSync('git', ['commit', '-m', 'base'], { cwd: root })
+      await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', resolve))
+      const address = http.address()
+      if (!address || typeof address === 'string') throw new Error('test HTTP server did not bind')
+      const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+      const a = await first.registerReplica({
+        organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://crash-a.example',
+      }, 30_000)
+      const b = await second.registerReplica({
+        organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://crash-b.example',
+      }, 30_000)
+      const scope = resource(organizationId, unitId, 'session')
+      const owner = await first.acquireResourceOwner(scope, a, randomUUID(), 500)
+      const workspaceId = `crash-${randomUUID()}`
+      const repositoryIdentity = `git-common-inode:${statSync(join(root, '.git'), { bigint: true }).dev}:${statSync(join(root, '.git'), { bigint: true }).ino}`
+      const operatorId = `arena_operator_${organizationId.replaceAll('-', '')}`
+      const operatorPassword = `test-${randomUUID()}`
+      await first.database.query(`CREATE ROLE "${operatorId}" LOGIN PASSWORD '${operatorPassword.replaceAll("'", "''")}'`)
+      await grantPostgresArenaOperator({ connectionString, operatorRole: operatorId, organizationId })
+      const updateOperatorUrl = () => {
+        const url = new URL(connectionString)
+        url.username = operatorId
+        url.password = operatorPassword
+        writeFileSync(operatorSecretPath, url.href, { mode: 0o600 })
+      }
+      updateOperatorUrl()
+      const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
+      const authority = createPostgresHotStateStore({ connectionString })
+      const session = new PostgresSessionAuthority(authority, organizationId, { schemaManagement: 'external' })
+      await session.create({ sessionId: scope.resourceId, state: { cursor: 0 }, config: {} })
+      const persistArenaState = async (target: PostgresSessionAuthority, status: 'initializing' | 'active') =>
+        await target.mutate(scope.resourceId, {
+          mutationId: randomUUID(), eventType: `runtime.metadata.${WORKTREE_ARENA_METADATA_ACTION}`,
+          entry: { kind: 'runtime_metadata', ts: new Date().toISOString(), sessionId: scope.resourceId,
+            action: WORKTREE_ARENA_METADATA_ACTION,
+            payload: { arena: { arenaId: 'crash', repoRoot: status === 'active' ? root : '',
+              ...(status === 'active' ? { repositoryIdentity } : {}), baseRef: 'HEAD',
+              baseSha: status === 'active' ? baseSha : '', status,
+              candidates: status === 'active' ? [{ id: 'one', branch: 'kala-arena/crash/one',
+                worktreePath: join(root, '.kala-arena', 'crash', 'one'), status: 'active', label: 'one' }]
+                : [{ id: 'one', branch: 'kala-arena/crash/one', worktreePath: '', status: 'pending', label: 'one' }] } } },
+          apply(current) { if (!current) throw new Error('test Session not found'); return current },
+        })
+      await persistArenaState(session, 'initializing')
+      await authority.close()
+      const callId = 'arena-init-CRASH'
+      await first.claimArenaRepository(owner, repositoryIdentity, 'crash')
+      await first.registerWorkspaceEffect(owner, callId, workspaceId, repositoryIdentity, 'crash')
+      const registry = createExecutorRegistry(io, {
+        workspaceIdFor: () => workspaceId,
+        approvedArenaReadParent: () => true,
+        assertSessionEffectOwner: async () => ({ ownerGeneration: String(owner.generation) }),
+      }, 12_000, undefined, 100)
+      io.of('/executor').on('connection', (socket) => {
+        socket.on('executor:announce', (announcement) => registry.attach(socket, announcement))
+        socket.on('disconnect', () => registry.detach(socket))
+      })
+      const helper = join(process.cwd(), 'src', 'tenant-runtime', 'arena-executor-crash-helper.mjs')
+      await execFileAsync('pnpm', ['--dir', '../executor', 'build'], { cwd: process.cwd() })
+      const startKeeper = () => {
+        const child = spawn(process.execPath, [
+          join(process.cwd(), '..', 'executor', 'dist', 'bin', 'kala-executor.js'),
+          'arena-keeper', keeperFile,
+        ], { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] })
+        children.push(child)
+        return child
+      }
+      let keeper = startKeeper()
+      await eventually(async () => {
+        if (!existsSync(keeperFile)) throw new Error('independent Arena keeper did not register')
+        await assertArenaKeeper(keeperFile)
+      }, 8_000)
+      const start = (executorId: string) => {
+        const child = spawn(process.execPath, ['--import', 'tsx', helper], {
+          cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env, ARENA_TEST_HOST: `http://127.0.0.1:${address.port}`,
+            ARENA_TEST_WORKSPACE: workspaceId, ARENA_TEST_EXECUTOR: executorId,
+            ARENA_TEST_ROOT: root, ARENA_TEST_RECEIPTS: receipts,
+            ARENA_TEST_KEEPER: keeperFile,
+            KALA_ARENA_TEST_PAUSE_GIT: 'worktree-add',
+          },
+        })
+        children.push(child)
+        return child
+      }
+      const firstExecutor = start(`first-${randomUUID()}`)
+      await eventually(async () => {
+        if (registry.snapshot().length < 1) throw new Error('first Executor not connected')
+      }, 8_000)
+      const running = registry.callTool(scope.resourceId, {
+        kind: 'call_tool', callId, name: 'arena_git_init',
+        input: {
+          ownerGeneration: String(owner.generation), parentCallId: 'approved',
+          arenaId: 'crash', baseRef: 'HEAD', candidates: ['one'], repositoryIdentity,
+        },
+      })
+      await eventually(async () => {
+        const journal = JSON.parse(readFileSync(receipts, 'utf8')) as Record<string, {
+          processGroups?: Array<{ pgid: number; leaderStartTicks: string }>
+        }>
+        const groups = journal[`${scope.resourceId}:${callId}`]?.processGroups ?? []
+        for (const name of readdirSync('/proc')) {
+          if (!/^\d+$/u.test(name)) continue
+          try {
+            const stat = readFileSync(`/proc/${name}/stat`, 'utf8')
+            const fields = stat.slice(stat.lastIndexOf(') ') + 2).trim().split(/\s+/u)
+            const command = readFileSync(`/proc/${name}/cmdline`, 'utf8')
+            const group = groups.find((entry) => entry.pgid === Number(fields[2]))
+            if (group && fields[0] === 'T' && command.includes('worktree\0add\0')) {
+              pausedGitPid = Number(name)
+              pausedPgid = group.pgid
+              break
+            }
+          } catch { /* Process exited during inspection. */ }
+        }
+        if (!pausedGitPid) throw new Error('real Git worktree child has not paused in its recorded group')
+      }, 8_000)
+      const caFile = join(keeperRoot, 'isolated-ca.pem')
+      const configFile = join(keeperRoot, 'external-executor.json')
+      writeFileSync(caFile, 'isolated CA fixture\n', { mode: 0o600 })
+      writeFileSync(configFile, JSON.stringify({
+        version: 1, host: 'https://isolated-runtime.example', arenaKeeperIdentityFile: keeperFile,
+      }), { mode: 0o600 })
+      const preflight = async () => await execFileAsync(process.execPath, [
+        join(process.cwd(), '..', '..', 'deploy', 'private-cloud', 'check-arena-executor-readiness.mjs'),
+        configFile, root, receipts, caFile, operatorSecretPath,
+      ], { cwd: process.cwd(), env: { ...process.env, KALA_ARENA_ACCEPTANCE_DOCKER: 'sudo' } })
+      await expect(preflight()).resolves.toMatchObject({
+        stdout: expect.stringContaining('"oldComposeOwnsExecutor":false'),
+      })
+      const { stdout: images } = await docker('image', 'ls', '--format', '{{.ID}} {{.Repository}}')
+      const imageId = images.split('\n').find((entry) => entry.endsWith(' node'))?.split(' ')[0]
+      if (!imageId) throw new Error('Locally cached Node image required for host PID-namespace operator test')
+      const { stdout: image } = await docker('image', 'inspect', imageId, '--format', '{{.Id}}')
+      const inspectFromKeeper = () => execFileAsync('sg', [
+        'docker', '-c', `sh ../../deploy/private-cloud/run-arena-operator.sh inspect ${organizationId} ${unitId} ${scope.resourceId}`,
+      ], { cwd: process.cwd(), env: {
+        ...process.env, KALA_ARENA_EXECUTOR_PID_ANCHOR: 'host',
+        KALA_ARENA_KEEPER_IDENTITY_FILE: keeperFile,
+        KALA_ARENA_EXPECTED_PID_NAMESPACE: readlinkSync('/proc/self/ns/pid'),
+        KALA_ARENA_OPERATOR_IMAGE: image.trim(),
+        KALA_ARENA_OPERATOR_NETWORK: 'host',
+        KALA_ARENA_WORKSPACE_HOST: root,
+        KALA_ARENA_OPERATOR_URL_FILE: operatorSecretPath,
+        KALA_ARENA_OPERATOR_ID: operatorId,
+      } })
+      await expect(inspectFromKeeper()).resolves.toMatchObject({
+        stdout: expect.stringContaining(callId),
+      })
+      firstExecutor.kill('SIGKILL')
+      await once(firstExecutor, 'exit')
+      keeper.kill('SIGKILL')
+      await once(keeper, 'exit')
+      await expect(preflight()).rejects.toThrow()
+      await expect(inspectFromKeeper()).rejects.toThrow('keeper is unavailable')
+      expect(readFileSync(`/proc/${pausedGitPid}/stat`, 'utf8')).toContain(' T ')
+      expect(existsSync(join(root, '.kala-arena', 'crash', 'one', 'a.txt'))).toBe(false)
+      const reconcile = async (operatorIdentity = operatorId, mode?: '--repair-init') => await execFileAsync(process.execPath, [
+        '--import', 'tsx', join(process.cwd(), 'bin', 'arena-effect-reconcile.ts'),
+        organizationId, unitId, scope.resourceId, callId, root, receipts,
+        'incident-fixture', `verify-stopped:${callId}`, ...(mode ? [mode] : []),
+      ], { cwd: process.cwd(), env: { ...process.env,
+        KALA_ARENA_RECONCILE_OPERATOR_URL_FILE: operatorSecretPath, KALA_ARENA_OPERATOR_ID: operatorIdentity } })
+      await expect(reconcile()).rejects.toThrow(/still contains a live process/u)
+      await expect(reconcile(operatorId, '--repair-init')).rejects.toThrow(/still contains a live process/u)
+      expect(await first.inspectWorkspaceEffects(scope)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ effectId: callId }),
+      ]))
+      await docker('restart', container)
+      const { stdout: restartedPort } = await docker('inspect', '--format',
+        '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}', container)
+      connectionString = `postgresql://postgres:${encodeURIComponent(password)}@127.0.0.1:${restartedPort.trim()}/${databaseName}`
+      updateOperatorUrl()
+      await Promise.allSettled([first.close(), second.close()])
+      first = createPostgresRuntimeResourceOwnershipStore({ connectionString, applicationName: `${project}-a-restarted` })
+      second = createPostgresRuntimeResourceOwnershipStore({ connectionString, applicationName: `${project}-b-restarted` })
+      await eventually(async () => {
+        await first.database.query('SELECT 1')
+        await second.database.query('SELECT 1')
+      }, 8_000)
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      await expect(second.acquireResourceOwner(scope, b, randomUUID(), 8_000))
+        .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      keeper = startKeeper()
+      await eventually(async () => {
+        const recorded = JSON.parse(readFileSync(keeperFile, 'utf8')) as { pgid: number }
+        if (recorded.pgid !== keeper.pid) throw new Error('new independent keeper not registered yet')
+        await assertArenaKeeper(keeperFile)
+      }, 8_000)
+      await expect(preflight()).resolves.toMatchObject({
+        stdout: expect.stringContaining('"independentKeeper":true'),
+      })
+      process.kill(pausedGitPid!, 'SIGCONT')
+      await eventually(async () => {
+        if (!existsSync(join(root, '.kala-arena', 'crash', 'one', 'a.txt'))) {
+          throw new Error('orphaned Git child has not completed its final worktree file effect')
+        }
+      }, 8_000)
+      const secondExecutor = start(`second-${randomUUID()}`)
+      await eventually(async () => {
+        if (registry.snapshot().length < 1 || (await registry.inspectArenaReceipt(scope.resourceId, callId)).state !== 'started') {
+          throw new Error('second Executor has not loaded UNKNOWN receipt')
+        }
+      }, 8_000)
+      expect(await registry.inspectArenaReceipt(scope.resourceId, callId)).toMatchObject({
+        state: 'started', ownerGeneration: String(owner.generation),
+        processGroups: expect.arrayContaining([expect.objectContaining({ pgid: pausedPgid })]),
+      })
+      await expect(running).resolves.toMatchObject({ ok: false })
+      await expect(second.acquireResourceOwner(scope, b, randomUUID(), 8_000))
+        .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      await eventually(async () => {
+        try {
+          const stats = readFileSync(`/proc/${pausedGitPid}/stat`, 'utf8')
+          if (!stats.includes(' Z ')) throw new Error('Git child has not yet exited')
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        }
+      }, 8_000)
+      await expect(reconcile()).rejects.toThrow()
+      expect(await second.inspectWorkspaceEffects(scope)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ effectId: callId }),
+      ]))
+      const recoveredHot = createPostgresHotStateStore({ connectionString })
+      const recoveredSession = new PostgresSessionAuthority(recoveredHot, organizationId, { schemaManagement: 'external' })
+      chmodSync(operatorSecretPath, 0o644)
+      try { await expect(reconcile()).rejects.toThrow(/without group\/other access/u) }
+      finally { chmodSync(operatorSecretPath, 0o600) }
+      await expect(reconcile('forged-operator')).rejects.toThrow(/Authenticated PostgreSQL LOGIN/u)
+      expect(await second.inspectWorkspaceEffects(scope)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ effectId: callId }),
+      ]))
+      await expect(first.reconcileArenaEffect({
+        scope, effectId: callId, generation: owner.generation + 1n, workspaceId,
+        repositoryIdentity, operatorId, incidentId: 'wrong-generation', evidence: { checked: true }, arenaState: {},
+      })).rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+      const operatorDb = createPostgresRuntimeResourceOwnershipStore({
+        connectionString: readFileSync(operatorSecretPath, 'utf8'),
+      })
+      try {
+        await expect(operatorDb.reconcileArenaEffect({
+          scope, effectId: callId, generation: owner.generation, workspaceId, repositoryIdentity,
+          operatorId, incidentId: 'stale-state', evidence: { action: 'init' }, arenaState: { status: 'initializing' },
+        })).rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+        await expect(operatorDb.reconcileArenaEffect({
+          scope: { ...scope, organizationId: randomUUID() }, effectId: callId,
+          generation: owner.generation, workspaceId, repositoryIdentity,
+          operatorId, incidentId: 'wrong-tenant', evidence: { action: 'init' }, arenaState: {},
+        })).rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+      } finally { await operatorDb.close() }
+      expect(await second.inspectWorkspaceEffects(scope)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ effectId: callId }),
+      ]))
+      await expect(reconcile(operatorId, '--repair-init'))
+        .resolves.toMatchObject({ stdout: expect.stringContaining('"effectStillUnknown":true') })
+      expect(await recoveredSession.findLatestRuntimeMetadata(scope.resourceId, WORKTREE_ARENA_METADATA_ACTION))
+        .toMatchObject({ payload: { arena: { status: 'active', repoRoot: root, repositoryIdentity } } })
+      const replay = await recoveredSession.readHistory(scope.resourceId)
+      expect(replay.runtimeMetadata.at(-1)).toMatchObject({ payload: { arena: { status: 'active' } } })
+      await recoveredHot.close()
+      expect(await second.inspectWorkspaceEffects(scope)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ effectId: callId }),
+      ]))
+      const repairs = await second.database.query(`SELECT operator_id, incident_id
+        FROM tenant_runtime_arena_state_repairs WHERE effect_id = $1`, [callId])
+      expect(repairs.rows).toEqual([expect.objectContaining({ operator_id: operatorId, incident_id: 'incident-fixture' })])
+      expect(await reconcile()).toMatchObject({ stdout: expect.stringContaining(`"reconciled":"${callId}"`) })
+      expect(await second.inspectWorkspaceEffects(scope)).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ effectId: callId }),
+      ]))
+      const audit = await second.database.query(`SELECT operator_id, incident_id, evidence
+        FROM tenant_runtime_arena_reconciliations WHERE effect_id = $1`, [callId])
+      expect(audit.rows).toEqual([expect.objectContaining({
+        operator_id: operatorId, incident_id: 'incident-fixture',
+        evidence: expect.objectContaining({ repositoryIdentity, action: 'init' }),
+      })])
+      const recoveredReplica = await second.registerReplica({
+        organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(),
+        origin: 'https://crash-b-recovered.example',
+      }, 10_000)
+      await expect(second.acquireResourceOwner(scope, recoveredReplica, randomUUID(), 8_000)).resolves.toMatchObject({
+        generation: owner.generation + 1n,
+      })
+      secondExecutor.kill('SIGKILL')
+      await once(secondExecutor, 'exit')
+    } finally {
+      if (pausedPgid) { try { process.kill(-pausedPgid, 'SIGKILL') } catch {} }
+      for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      await new Promise<void>((resolve) => io.close(() => resolve()))
+      rmSync(root, { recursive: true, force: true })
+      rmSync(keeperRoot, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  it('keeps unresolved workspace effects across expiry, release attempts and replica loss until confirmed exit', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+    const a = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://effect-a.example',
+    }, 5_000)
+    const b = await second.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://effect-b.example',
+    }, 5_000)
+    const scope = resource(organizationId, unitId, 'session')
+    const owner = await first.acquireResourceOwner(scope, a, randomUUID(), 100)
+    const effectId = randomUUID()
+    await first.registerWorkspaceEffect(owner, effectId)
+    await expect(first.registerWorkspaceEffect(owner, effectId)).rejects.toMatchObject({ code: '23505' })
+    await expect(first.releaseResourceOwner(owner)).rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+    await first.releaseReplica(a)
+    await expect(second.acquireResourceOwner(scope, b, randomUUID(), 5_000))
+      .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    await expect(second.acquireResourceOwner(scope, b, randomUUID(), 5_000))
+      .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+    await expect(second.completeWorkspaceEffect({ ...owner, ownerToken: randomUUID() }, effectId))
+      .rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+    await first.completeWorkspaceEffect(owner, effectId)
+    const successor = await second.acquireResourceOwner(scope, b, randomUUID(), 5_000)
+    expect(successor.generation).toBe(owner.generation + 1n)
+    await expect(first.registerWorkspaceEffect(owner, randomUUID()))
+      .rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+  })
+
+  it('serializes competing registration, release and takeover on the owner row across replicas', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+    const a = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://race-a.example',
+    }, 5_000)
+    const b = await second.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://race-b.example',
+    }, 5_000)
+    const scope = resource(organizationId, unitId, 'session')
+    const owner = await first.acquireResourceOwner(scope, a, randomUUID(), 5_000)
+    const effectId = randomUUID()
+    const lock = await first.database.connect()
+    try {
+      await lock.query('BEGIN')
+      await lock.query(`SELECT 1 FROM tenant_runtime_resource_ownerships
+        WHERE organization_id = $1 AND unit_id = $2 AND resource_type = $3 AND resource_id = $4 FOR UPDATE`,
+      [scope.organizationId, scope.unitId, scope.resourceType, scope.resourceId])
+      const registering = second.registerWorkspaceEffect(owner, effectId)
+      const releasing = first.releaseResourceOwner(owner)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      await lock.query('COMMIT')
+      const results = await Promise.allSettled([registering, releasing])
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+      if (results[0]?.status === 'fulfilled') {
+        expect(results[1]).toMatchObject({ status: 'rejected', reason: { code: 'RUNTIME_WORKSPACE_EFFECT_ACTIVE' } })
+        await expect(second.acquireResourceOwner(scope, b, randomUUID(), 5_000))
+          .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+        await second.completeWorkspaceEffect(owner, effectId)
+        await first.releaseResourceOwner(owner)
+      } else {
+        expect(results[0]).toMatchObject({ status: 'rejected', reason: { code: 'RUNTIME_RESOURCE_OWNERSHIP_FENCED' } })
+      }
+      const successor = await second.acquireResourceOwner(scope, b, randomUUID(), 5_000)
+      expect(successor.generation).toBe(owner.generation + 1n)
+      await expect(first.registerWorkspaceEffect(owner, randomUUID()))
+        .rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+    } finally {
+      await lock.query('ROLLBACK').catch(() => undefined)
+      lock.release()
+    }
+  })
+
+  it('fences G1 registration racing G2 takeover after membership loss', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+    const a = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://takeover-a.example',
+    }, 5_000)
+    const b = await second.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://takeover-b.example',
+    }, 5_000)
+    const scope = resource(organizationId, unitId, 'session')
+    const old = await first.acquireResourceOwner(scope, a, randomUUID(), 5_000)
+    await first.releaseReplica(a)
+    const [registration, takeover] = await Promise.allSettled([
+      first.registerWorkspaceEffect(old, randomUUID()),
+      second.acquireResourceOwner(scope, b, randomUUID(), 5_000),
+    ])
+    expect(registration).toMatchObject({ status: 'rejected', reason: { code: 'RUNTIME_RESOURCE_OWNERSHIP_FENCED' } })
+    expect(takeover).toMatchObject({ status: 'fulfilled', value: { generation: old.generation + 1n } })
+  })
+
+  it('serializes independent Sessions sharing one Executor workspace across replicas', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+    const a = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://shared-a.example',
+    }, 8_000)
+    const b = await second.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://shared-b.example',
+    }, 8_000)
+    const owners = await Promise.all([
+      first.acquireResourceOwner(resource(organizationId, unitId, 'session'), a, randomUUID(), 8_000),
+      second.acquireResourceOwner(resource(organizationId, unitId, 'session'), b, randomUUID(), 8_000),
+    ])
+    const workspaceId = randomUUID()
+    const ids = [randomUUID(), randomUUID()]
+    const attempts = await Promise.allSettled([
+      first.registerWorkspaceEffect(owners[0]!, ids[0]!, workspaceId),
+      second.registerWorkspaceEffect(owners[1]!, ids[1]!, workspaceId),
+    ])
+    expect(attempts.filter((attempt) => attempt.status === 'fulfilled')).toHaveLength(1)
+    expect(attempts.filter((attempt) => attempt.status === 'rejected'))
+      .toEqual([expect.objectContaining({ reason: expect.objectContaining({ code: '23505' }) })])
+    const winner = attempts[0]?.status === 'fulfilled' ? 0 : 1
+    await [first, second][winner]!.completeWorkspaceEffect(owners[winner]!, ids[winner]!)
+    await [first, second][1 - winner]!.registerWorkspaceEffect(owners[1 - winner]!, ids[1 - winner]!, workspaceId)
+    expect((await first.database.query('SELECT count(*)::integer AS n FROM tenant_runtime_active_workspace_effects WHERE workspace_id = $1', [workspaceId])).rows)
+      .toEqual([{ n: 1 }])
+    await [first, second][1 - winner]!.completeWorkspaceEffect(owners[1 - winner]!, ids[1 - winner]!)
+  })
+
+  it('audits a never-dispatched Arena refusal while fencing concurrent dispatch and G2 takeover', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+    const a = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://arena-a.example',
+    }, 8_000)
+    const b = await second.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://arena-b.example',
+    }, 8_000)
+    const scope = resource(organizationId, unitId, 'session')
+    const owner = await first.acquireResourceOwner(scope, a, randomUUID(), 8_000)
+    const workspaceId = `no-dispatch-${randomUUID()}`
+    const rejectedId = 'arena-probe-NEVERADMITTED'
+    await first.registerWorkspaceEffect(owner, rejectedId, workspaceId, undefined, undefined, true)
+    const refused = await first.completeNeverDispatchedWorkspaceEffect(owner, rejectedId, workspaceId, 'host_pre_dispatch_rejection')
+    expect(refused).toBeUndefined()
+    const audit = await second.database.query<{ generation: string; reason: string }>(
+      'SELECT generation, reason FROM tenant_runtime_arena_non_admissions WHERE organization_id = $1 AND resource_id = $2 AND effect_id = $3',
+      [organizationId, scope.resourceId, rejectedId])
+    expect(audit.rows).toEqual([{ generation: String(owner.generation), reason: 'host_pre_dispatch_rejection' }])
+    await expect(second.beginWorkspaceEffectDispatch(owner, rejectedId))
+      .rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+
+    const racedId = 'arena-probe-RACED'
+    await first.registerWorkspaceEffect(owner, racedId, workspaceId, undefined, undefined, true)
+    const [dispatch, refusal] = await Promise.allSettled([
+      second.beginWorkspaceEffectDispatch(owner, racedId),
+      first.completeNeverDispatchedWorkspaceEffect(owner, racedId, workspaceId, 'host_pre_dispatch_rejection'),
+    ])
+    expect([dispatch.status, refusal.status].sort()).toEqual(['fulfilled', 'rejected'])
+    if (dispatch.status === 'fulfilled') {
+      await first.releaseReplica(a)
+      await expect(second.acquireResourceOwner(scope, b, randomUUID(), 5_000))
+        .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      await first.completeWorkspaceEffect(owner, racedId)
+    } else {
+      expect((refusal as PromiseFulfilledResult<void>).value).toBeUndefined()
+      await first.releaseReplica(a)
+    }
+    const successor = await second.acquireResourceOwner(scope, b, randomUUID(), 5_000)
+    expect(successor.generation).toBe(owner.generation + 1n)
+    await expect(first.beginWorkspaceEffectDispatch(owner, racedId))
+      .rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+  })
+
+  it('atomically prepares init claim/effect, rolls back a failed insert, and audits both prepared crash windows', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+    const a = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://init-crash-a.example',
+    }, 20_000)
+    const b = await second.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://init-crash-b.example',
+    }, 20_000)
+    const scope = resource(organizationId, unitId, 'session')
+    const otherScope = resource(organizationId, unitId, 'session')
+    const hot = createPostgresHotStateStore({ connectionString })
+    const authority = new PostgresSessionAuthority(hot, organizationId, { schemaManagement: 'external' })
+    await authority.create({ sessionId: scope.resourceId, state: { cursor: 0 }, config: {} })
+    const owner = await first.acquireResourceOwner(scope, a, randomUUID(), 3_000)
+    const other = await second.acquireResourceOwner(otherScope, b, randomUUID(), 10_000)
+    const identity = `git-common-inode:41:${Date.now()}11`
+    const occupiedIdentity = `git-common-inode:41:${Date.now()}12`
+    const occupiedWorkspace = `init-conflict-${randomUUID()}`
+    await second.claimArenaRepository(other, occupiedIdentity, 'occupied')
+    await second.registerWorkspaceEffect(other, 'arena-status-OCCUPIED', occupiedWorkspace,
+      occupiedIdentity, 'occupied')
+    const failedId = 'arena-init-ROLLBACK'
+    await expect(first.prepareArenaInitEffect(owner, failedId, occupiedWorkspace, identity, 'fresh'))
+      .rejects.toMatchObject({ code: '23505' })
+    expect((await first.database.query('SELECT 1 FROM tenant_runtime_arena_repository_claims WHERE repository_identity=$1',
+      [identity])).rowCount).toBe(0)
+    expect(await first.inspectWorkspaceEffects(scope)).toEqual([])
+    await second.completeWorkspaceEffect(other, 'arena-status-OCCUPIED')
+    const workspaceId = `init-atomic-${randomUUID()}`
+    const initId = 'arena-init-NOINTENT'
+    await first.prepareArenaInitEffect(owner, initId, workspaceId, identity, 'first')
+    expect(await second.inspectWorkspaceEffects(scope)).toEqual([
+      expect.objectContaining({ effectId: initId, repositoryIdentity: identity }),
+    ])
+    const role = `arena_operator_${organizationId.replaceAll('-', '')}`
+    const password = `test-${randomUUID()}`
+    await first.database.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}'`)
+    await grantPostgresArenaOperator({ connectionString, operatorRole: role, organizationId })
+    const url = new URL(connectionString)
+    url.username = role; url.password = password
+    const secretDir = mkdtempSync(join(process.cwd(), 'arena-init-atomic-'))
+    const secret = join(secretDir, 'operator-url')
+    writeFileSync(secret, url.href, { mode: 0o600 })
+    const operator = createPostgresRuntimeResourceOwnershipStore({ connectionString: url.href })
+    const run = (effectId: string) => execFileAsync(process.execPath, [
+      '--import', 'tsx', join(process.cwd(), 'bin', 'arena-effect-reconcile.ts'),
+      organizationId, unitId, scope.resourceId, effectId, '-', '-', 'init-crash-incident',
+      `verify-stopped:${effectId}`, '--prepared',
+    ], { cwd: process.cwd(), env: { ...process.env, KALA_ARENA_RECONCILE_OPERATOR_URL_FILE: secret,
+      KALA_ARENA_OPERATOR_ID: role, KALA_ARENA_EXPECTED_PID_NAMESPACE: readlinkSync('/proc/self/ns/pid') } })
+    try {
+      await new Promise((done) => setTimeout(done, 3_100))
+      await expect(second.acquireResourceOwner(scope, b, randomUUID(), 5_000))
+        .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      await expect(operator.reconcileArenaOffline({
+        scope, effectId: initId, generation: owner.generation, workspaceId,
+        operatorId: role, incidentId: 'wrong-routine', arenaState: null, mode: 'prepared',
+        evidence: { action: 'prepared', dispatchStarted: false },
+      })).rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+      expect(await run(initId)).toMatchObject({ stdout: expect.stringContaining('"never_dispatched"') })
+      expect(await first.inspectWorkspaceEffects(scope)).toEqual([])
+      expect((await first.database.query('SELECT 1 FROM tenant_runtime_arena_repository_claims WHERE repository_identity=$1',
+        [identity])).rowCount).toBe(0)
+      const successor = await second.acquireResourceOwner(scope, b, randomUUID(), 3_000)
+      const secondId = 'arena-init-INTENTSAVED'
+      await second.prepareArenaInitEffect(successor, secondId, workspaceId, identity, 'second')
+      await authority.mutate(scope.resourceId, {
+        mutationId: randomUUID(), eventType: 'runtime.metadata.worktree_arena.state',
+        entry: { kind: 'runtime_metadata', ts: new Date().toISOString(), sessionId: scope.resourceId,
+          action: WORKTREE_ARENA_METADATA_ACTION, payload: { arena: {
+            arenaId: 'second', repoRoot: '', baseRef: 'HEAD', baseSha: '',
+            status: 'initializing', candidates: [{ id: 'one', branch: 'kala-arena/second/one',
+              worktreePath: '', status: 'pending' }],
+          } } },
+        apply(current) { if (!current) throw new Error('test Session not found'); return current },
+      })
+      await new Promise((done) => setTimeout(done, 3_100))
+      await expect(run(secondId)).resolves.toMatchObject({ stdout: expect.stringContaining('"never_dispatched"') })
+      expect(await operator.readArenaAuthorityState(scope)).toBeNull()
+      const audit = await first.database.query<{ evidence: { claimReleased: string; priorArenaRestored: boolean } }>(
+        'SELECT evidence FROM tenant_runtime_arena_reconciliations WHERE resource_id=$1 ORDER BY reconciled_at',
+        [scope.resourceId])
+      expect(audit.rows).toEqual([
+        { evidence: expect.objectContaining({ claimReleased: 'first', priorArenaRestored: false }) },
+        { evidence: expect.objectContaining({ claimReleased: 'second', priorArenaRestored: true }) },
+      ])
+      const recovered = await first.registerReplica({
+        organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(),
+        origin: 'https://init-crash-recovered.example',
+      }, 10_000)
+      const third = await first.acquireResourceOwner(scope, recovered, randomUUID(), 500)
+      expect(third.generation).toBe(successor.generation + 1n)
+      await first.prepareArenaInitEffect(third, 'arena-init-AFTERRESET', workspaceId, identity, 'third')
+      await new Promise((done) => setTimeout(done, 550))
+      await expect(run('arena-init-AFTERRESET'))
+        .resolves.toMatchObject({ stdout: expect.stringContaining('"never_dispatched"') })
+      expect(await operator.readArenaAuthorityState(scope)).toBeNull()
+    } finally { await operator.close(); await authority.close(); rmSync(secretDir, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('commits final cleanup claim/effect atomically and restricts legacy missing-claim reconciliation', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+    const a = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://cleanup-a.example',
+    }, 15_000)
+    const b = await second.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://cleanup-b.example',
+    }, 15_000)
+    const scope = resource(organizationId, unitId, 'session')
+    const owner = await first.acquireResourceOwner(scope, a, randomUUID(), 10_000)
+    const identity = `git-common-inode:41:${Date.now()}21`
+    await first.claimArenaRepository(owner, identity, 'atomic')
+    const effectId = 'arena-cleanup-ATOMIC'
+    await first.registerWorkspaceEffect(owner, effectId, `cleanup-${randomUUID()}`, identity, 'atomic')
+    await expect(first.completeArenaCleanupEffect(owner, effectId, identity, 'wrong'))
+      .rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+    expect(await second.inspectWorkspaceEffects(scope)).toEqual([
+      expect.objectContaining({ effectId, repositoryIdentity: identity }),
+    ])
+    expect((await second.database.query('SELECT arena_id FROM tenant_runtime_arena_repository_claims WHERE repository_identity=$1',
+      [identity])).rows).toEqual([{ arena_id: 'atomic' }])
+    await first.completeArenaCleanupEffect(owner, effectId, identity, 'atomic')
+    expect(await second.inspectWorkspaceEffects(scope)).toEqual([])
+    expect((await second.database.query('SELECT 1 FROM tenant_runtime_arena_repository_claims WHERE repository_identity=$1',
+      [identity])).rowCount).toBe(0)
+    await first.releaseReplica(a)
+    expect((await second.acquireResourceOwner(scope, b, randomUUID(), 5_000)).generation).toBe(owner.generation + 1n)
+
+    const recovered = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(),
+      origin: 'https://cleanup-legacy.example',
+    }, 15_000)
+    const legacy = resource(organizationId, unitId, 'session')
+    const hot = createPostgresHotStateStore({ connectionString })
+    const authority = new PostgresSessionAuthority(hot, organizationId, { schemaManagement: 'external' })
+    await authority.create({ sessionId: legacy.resourceId, state: { cursor: 0 }, config: {} })
+    const oldOwner = await first.acquireResourceOwner(legacy, recovered, randomUUID(), 600)
+    const oldIdentity = `git-common-inode:41:${Date.now()}22`
+    const oldArena = 'legacy', oldId = 'arena-cleanup-LEGACY', oldWorkspace = `cleanup-${randomUUID()}`
+    const state = { arenaId: oldArena, status: 'cleaned', repoRoot: '/verified-root',
+      repositoryIdentity: oldIdentity, baseSha: 'a'.repeat(40), candidates: [] }
+    await first.claimArenaRepository(oldOwner, oldIdentity, oldArena)
+    await first.registerWorkspaceEffect(oldOwner, oldId, oldWorkspace, oldIdentity, oldArena)
+    await authority.mutate(legacy.resourceId, {
+      mutationId: randomUUID(), eventType: 'runtime.metadata.worktree_arena.state',
+      entry: { kind: 'runtime_metadata', ts: new Date().toISOString(), sessionId: legacy.resourceId,
+        action: WORKTREE_ARENA_METADATA_ACTION, payload: { arena: state } },
+      apply(current) { if (!current) throw new Error('test Session not found'); return current },
+    })
+    await first.releaseArenaRepository(oldOwner, oldIdentity, oldArena, oldId)
+    expect((await second.database.query('SELECT 1 FROM tenant_runtime_arena_repository_claims WHERE repository_identity=$1',
+      [oldIdentity])).rowCount).toBe(0)
+    const otherScope = resource(organizationId, unitId, 'session')
+    const otherOwner = await second.acquireResourceOwner(otherScope, b, randomUUID(), 5_000)
+    await expect(second.claimArenaRepository(otherOwner, oldIdentity, 'stolen'))
+      .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+    const role = `arena_operator_${organizationId.replaceAll('-', '')}`
+    const password = `test-${randomUUID()}`
+    await first.database.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}'`)
+    await grantPostgresArenaOperator({ connectionString, operatorRole: role, organizationId })
+    const url = new URL(connectionString)
+    url.username = role; url.password = password
+    const operator = createPostgresRuntimeResourceOwnershipStore({ connectionString: url.href })
+    try {
+      await new Promise((done) => setTimeout(done, 650))
+      await expect(second.acquireResourceOwner(legacy, b, randomUUID(), 5_000))
+        .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      expect(await operator.inspectOperatorArenaClaim(legacy, oldIdentity)).toBeNull()
+      const input = {
+        scope: legacy, effectId: oldId, generation: oldOwner.generation, workspaceId: oldWorkspace,
+        repositoryIdentity: oldIdentity, operatorId: role, incidentId: 'legacy-crash',
+        arenaState: state, releaseClaimArenaId: oldArena,
+      }
+      await expect(operator.reconcileArenaEffect({ ...input, evidence: { action: 'cleanup' } }))
+        .rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+      await expect(operator.reconcileArenaEffect({
+        ...input, scope: { ...legacy, organizationId: randomUUID() },
+        evidence: { action: 'cleanup', claimMissing: true },
+      })).rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+      await operator.reconcileArenaEffect({ ...input,
+        evidence: { action: 'cleanup', claimMissing: true, processReview: 'isolated-fixture' } })
+      expect(await second.inspectWorkspaceEffects(legacy)).toEqual([])
+      const audit = await second.database.query<{ incident_id: string; evidence: { claimMissing: boolean } }>(
+        'SELECT incident_id, evidence FROM tenant_runtime_arena_reconciliations WHERE effect_id=$1', [oldId])
+      expect(audit.rows).toEqual([{ incident_id: 'legacy-crash',
+        evidence: expect.objectContaining({ claimMissing: true }) }])
+      expect((await second.acquireResourceOwner(legacy, b, randomUUID(), 5_000)).generation)
+        .toBe(oldOwner.generation + 1n)
+    } finally { await operator.close(); await authority.close() }
+  }, 20_000)
+
+  it('lets only the tenant operator audit a crashed prepared row; dispatched UNKNOWN remains fenced across replicas', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+    const a = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://prepared-a.example',
+    }, 8_000)
+    const b = await second.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://prepared-b.example',
+    }, 8_000)
+    const scope = resource(organizationId, unitId, 'session')
+    const authority = new PostgresSessionAuthority(createPostgresHotStateStore({ connectionString }),
+      organizationId, { schemaManagement: 'external' })
+    await authority.create({ sessionId: scope.resourceId, state: { cursor: 0 }, config: {} })
+    await authority.close()
+    const role = `arena_operator_${organizationId.replaceAll('-', '')}`
+    const password = `test-${randomUUID()}`
+    await first.database.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}'`)
+    await grantPostgresArenaOperator({ connectionString, operatorRole: role, organizationId })
+    const url = new URL(connectionString)
+    url.username = role; url.password = password
+    const operator = createPostgresRuntimeResourceOwnershipStore({ connectionString: url.href })
+    const secretDir = mkdtempSync(join(process.cwd(), 'arena-offline-operator-'))
+    const secret = join(secretDir, 'operator-url')
+    writeFileSync(secret, url.href, { mode: 0o600 })
+    const callId = 'arena-probe-PREPAREDCRASH', workspaceId = `prepared-${randomUUID()}`
+    const owner = await first.acquireResourceOwner(scope, a, randomUUID(), 350)
+    try {
+      await first.registerWorkspaceEffect(owner, callId, workspaceId, undefined, undefined, true)
+      expect(await operator.inspectOperatorArenaDispatch(scope, callId)).toEqual({ started: false, digest: null })
+      await expect(operator.inspectOperatorArenaDispatch({ ...scope, organizationId: randomUUID() }, callId))
+        .rejects.toMatchObject({ code: 'P0001' })
+      await new Promise((resolve) => setTimeout(resolve, 450))
+      await expect(second.acquireResourceOwner(scope, b, randomUUID(), 5_000))
+        .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      const run = async (effect: string, mode: string, root = '-', journal = '-') =>
+        await execFileAsync('pnpm', ['exec', 'tsx', 'bin/arena-effect-reconcile.ts',
+          organizationId, unitId, scope.resourceId, effect, root, journal, 'incident-crash',
+          `verify-stopped:${effect}`, mode], {
+          cwd: process.cwd(), env: { ...process.env,
+            KALA_ARENA_RECONCILE_OPERATOR_URL_FILE: secret, KALA_ARENA_OPERATOR_ID: role,
+            KALA_ARENA_EXPECTED_PID_NAMESPACE: readlinkSync('/proc/self/ns/pid') },
+        })
+      const [release, takeover] = await Promise.allSettled([
+        run(callId, '--prepared'), second.acquireResourceOwner(scope, b, randomUUID(), 5_000),
+      ])
+      if (release.status === 'rejected') throw release.reason
+      if (takeover.status === 'rejected') {
+        expect(takeover.reason).toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      }
+      const successor = takeover.status === 'fulfilled' ? takeover.value
+        : await second.acquireResourceOwner(scope, b, randomUUID(), 5_000)
+      expect(successor.generation).toBe(owner.generation + 1n)
+      const audit = await first.database.query<{ incident_id: string; evidence: { dispatchStarted: boolean } }>(
+        'SELECT incident_id, evidence FROM tenant_runtime_arena_reconciliations WHERE organization_id=$1 AND resource_id=$2 AND effect_id=$3',
+        [organizationId, scope.resourceId, callId])
+      expect(audit.rows).toEqual([{ incident_id: 'incident-crash',
+        evidence: expect.objectContaining({ dispatchStarted: false }) }])
+      await expect(run(callId, '--prepared')).rejects.toThrow('Exact Arena effect not found')
+      const started = 'arena-probe-LOSTACK'
+      await second.registerWorkspaceEffect(successor, started, workspaceId, undefined, undefined, true)
+      await second.beginWorkspaceEffectDispatch(successor, started, 'b'.repeat(64))
+      await new Promise((resolve) => setTimeout(resolve, 5_100))
+      await expect(first.acquireResourceOwner(scope, a, randomUUID(), 5_000))
+        .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      expect(await operator.inspectOperatorArenaDispatch(scope, started)).toEqual({
+        started: true, digest: 'b'.repeat(64),
+      })
+      await expect(run(started, '--prepared')).rejects.toThrow('No persistent never-dispatched proof')
+      await expect(run(started, '--probe', secretDir, join(secretDir, 'missing-receipt')))
+        .rejects.toThrow()
+      const recovered = await first.registerReplica({
+        organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(),
+        origin: 'https://prepared-recovered.example',
+      }, 10_000)
+      await expect(first.acquireResourceOwner(scope, recovered, randomUUID(), 5_000))
+        .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      // Remove only this isolated test fixture's unknown row so later repository-claim tests remain independent.
+      await second.completeWorkspaceEffect(successor, started)
+    } finally { await operator.close(); rmSync(secretDir, { recursive: true, force: true }) }
+  }, 30_000)
+
+  it('reconciles an original remote probe receipt after lost Socket.IO ACK but fences a live orphaned Git probe', async () => {
+    const root = mkdtempSync(join(process.cwd(), 'arena-remote-probe-'))
+    const keeperDir = mkdtempSync(join(process.cwd(), 'arena-remote-keeper-'))
+    const keeperFile = join(keeperDir, 'keeper.json')
+    const journal = join(root, 'original-receipts.json')
+    const secret = join(keeperDir, 'operator-url')
+    const server = createServer()
+    const io = new Server(server)
+    const children: ChildProcess[] = []
+    let survivingWorker: number | undefined
+    try {
+      execFileSync('git', ['init', '-q', root])
+      await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('No isolated Socket.IO listener')
+      const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+      const a = await first.registerReplica({
+        organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(),
+        origin: 'https://remote-probe-a.example',
+      }, 30_000)
+      const b = await second.registerReplica({
+        organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(),
+        origin: 'https://remote-probe-b.example',
+      }, 30_000)
+      const scope = resource(organizationId, unitId, 'session')
+      const authority = new PostgresSessionAuthority(createPostgresHotStateStore({ connectionString }),
+        organizationId, { schemaManagement: 'external' })
+      await authority.create({ sessionId: scope.resourceId, state: { cursor: 0 }, config: {} })
+      await authority.close()
+      const role = `arena_operator_${organizationId.replaceAll('-', '')}`
+      const password = `test-${randomUUID()}`
+      await first.database.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}'`)
+      await grantPostgresArenaOperator({ connectionString, operatorRole: role, organizationId })
+      const url = new URL(connectionString)
+      url.username = role; url.password = password
+      writeFileSync(secret, url.href, { mode: 0o600 })
+      const workspaceId = `remote-${randomUUID()}`
+      let owner = await first.acquireResourceOwner(scope, a, randomUUID(), 30_000)
+      let lostAckCallId = 'arena-probe-REMOTEACK'
+      let droppedAck: unknown
+      const registry = createExecutorRegistry(io, {
+        workspaceIdFor: () => workspaceId,
+        approvedArenaReadParent: (_session, parent) => parent === 'approved',
+        assertSessionEffectOwner: async () => ({ ownerGeneration: String(owner.generation) }),
+        beginArenaDispatch: async (_session, generation, callId, digest) => {
+          expect(generation).toBe(String(owner.generation))
+          await first.beginWorkspaceEffectDispatch(owner, callId, digest)
+        },
+      }, 4_000, undefined, 0)
+      io.of('/executor').on('connection', (socket) => {
+        const emit = socket.emit.bind(socket) as (...args: unknown[]) => boolean
+        socket.emit = ((event: string, ...args: unknown[]) => {
+          if (event === 'tool:call'
+            && (args[0] as { callId?: string } | undefined)?.callId === lostAckCallId) {
+            args[args.length - 1] = (reply: unknown) => { droppedAck = reply }
+          }
+          return emit(event, ...args)
+        }) as typeof socket.emit
+        socket.on('executor:announce', (announcement) => registry.attach(socket, announcement))
+        socket.on('disconnect', () => registry.detach(socket))
+      })
+      const keeper = spawn(process.execPath, [
+        '--import', 'tsx', join(process.cwd(), '..', 'executor', 'bin', 'kala-executor.ts'),
+        'arena-keeper', keeperFile,
+      ], { cwd: process.cwd(), stdio: 'ignore' })
+      children.push(keeper)
+      await eventually(async () => { await assertArenaKeeper(keeperFile) }, 8_000)
+      const start = (pause?: string) => {
+        const child = spawn(process.execPath, ['--import', 'tsx',
+          join(process.cwd(), 'src', 'tenant-runtime', 'arena-executor-crash-helper.mjs')], {
+          cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, ARENA_TEST_HOST: `http://127.0.0.1:${address.port}`,
+            ARENA_TEST_WORKSPACE: workspaceId, ARENA_TEST_EXECUTOR: `remote-${randomUUID()}`,
+            ARENA_TEST_ROOT: root, ARENA_TEST_RECEIPTS: journal, ARENA_TEST_KEEPER: keeperFile,
+            ...(pause ? { KALA_ARENA_TEST_PAUSE_GIT: pause } : {}) },
+        })
+        children.push(child)
+        return child
+      }
+      let executor = start()
+      await eventually(async () => {
+        if (registry.snapshot().length !== 1) throw new Error('Remote Executor is not connected')
+      }, 8_000)
+      const call = (callId: string) => ({
+        kind: 'call_tool' as const, callId, name: 'arena_git_probe',
+        input: { parentCallId: 'approved', ownerGeneration: String(owner.generation) }, cwd: root,
+      })
+      const completeId = lostAckCallId
+      const complete = call(completeId)
+      owner = await first.renewResourceOwner(owner, 6_000)
+      const completeDigest = executionRequestDigest({
+        sessionId: scope.resourceId, callId: completeId, name: complete.name, input: complete.input,
+        cwd: root, origin: 'host',
+      })
+      await first.registerWorkspaceEffect(owner, completeId, workspaceId, undefined, undefined, true)
+      const unanswered = registry.callTool(scope.resourceId, complete)
+      const receipts = new ExecutionReceiptStore(journal)
+      await eventually(async () => {
+        const proof = await receipts.query({
+          sessionId: scope.resourceId, callId: completeId,
+          requestDigest: completeDigest, ownerGeneration: String(owner.generation),
+        })
+        if (proof.status !== 'completed' || !proof.result.ok || !droppedAck) {
+          throw new Error('Original remote completion not durable before Host ACK loss')
+        }
+      }, 8_000)
+      expect((droppedAck as { ok: boolean }).ok).toBe(true)
+      const completed = await receipts.query({
+        sessionId: scope.resourceId, callId: completeId,
+        requestDigest: completeDigest, ownerGeneration: String(owner.generation),
+      })
+      expect(completed).toMatchObject({ status: 'completed', result: { ok: true } })
+      executor.kill('SIGKILL')
+      await once(executor, 'exit')
+      await expect(unanswered).resolves.toMatchObject({ ok: false })
+      expect(await registry.inspectArenaReceipt(scope.resourceId, completeId)).toEqual({ state: 'unavailable' })
+      await new Promise((done) => setTimeout(done, 6_100))
+      await expect(second.acquireResourceOwner(scope, b, randomUUID(), 8_000))
+        .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      const operator = createPostgresRuntimeResourceOwnershipStore({ connectionString: url.href })
+      try {
+        expect(await operator.inspectOperatorArenaDispatch(scope, completeId)).toEqual({
+          started: true, digest: completeDigest,
+        })
+        await expect(operator.reconcileArenaOffline({
+          scope, effectId: completeId, generation: owner.generation, workspaceId,
+          operatorId: role, incidentId: 'wrong-digest', mode: 'probe', arenaState: null,
+          evidence: { action: 'probe', receiptState: 'completed', receiptGeneration: String(owner.generation),
+            finalEffectStopped: true, executorStopped: true, gitGroupsStopped: true,
+            requestDigest: 'a'.repeat(64), journalSha256: 'a'.repeat(64) },
+        })).rejects.toBeInstanceOf(RuntimeResourceOwnershipFencedError)
+      } finally { await operator.close() }
+      await assertArenaKeeper(keeperFile)
+      const run = (callId: string) => execFileAsync(process.execPath, [
+        '--import', 'tsx', join(process.cwd(), 'bin', 'arena-effect-reconcile.ts'),
+        organizationId, unitId, scope.resourceId, callId, root, journal, 'remote-ack-incident',
+        `verify-stopped:${callId}`, '--probe',
+      ], { cwd: process.cwd(), env: { ...process.env,
+        KALA_ARENA_RECONCILE_OPERATOR_URL_FILE: secret, KALA_ARENA_OPERATOR_ID: role,
+        KALA_ARENA_EXPECTED_PID_NAMESPACE: readlinkSync('/proc/self/ns/pid') } })
+      expect(await run(completeId)).toMatchObject({ stdout: expect.stringContaining('"durable_probe_receipt"') })
+      const audit = await second.database.query<{ evidence: { requestDigest: string; receiptState: string } }>(
+        'SELECT evidence FROM tenant_runtime_arena_reconciliations WHERE effect_id=$1', [completeId])
+      expect(audit.rows).toEqual([{ evidence: expect.objectContaining({
+        requestDigest: completeDigest, receiptState: 'completed',
+      }) }])
+      owner = await second.acquireResourceOwner(scope, b, randomUUID(), 30_000)
+      lostAckCallId = ''
+      executor = start('probe-rev-parse')
+      await eventually(async () => {
+        if (registry.snapshot().length !== 1) throw new Error('Restarted Executor is not connected')
+      }, 8_000)
+      const unknownId = 'arena-probe-ORPHANED'
+      owner = await second.renewResourceOwner(owner, 6_000)
+      await second.registerWorkspaceEffect(owner, unknownId, workspaceId, undefined, undefined, true)
+      const orphan = registry.callTool(scope.resourceId, call(unknownId))
+      await eventually(async () => {
+        const raw = JSON.parse(readFileSync(journal, 'utf8')) as Record<string, {
+          processGroups?: Array<{ pgid: number }>
+        }>
+        const group = raw[`${scope.resourceId}:${unknownId}`]?.processGroups?.[0]
+        if (!group) throw new Error('Real Git group not durably recorded')
+        const observed: string[] = []
+        for (const name of readdirSync('/proc')) {
+          if (!/^\d+$/u.test(name)) continue
+          try {
+            const fields = readFileSync(`/proc/${name}/stat`, 'utf8').split(') ')[1]!.split(/\s+/u)
+            if (Number(fields[2]) !== group.pgid) continue
+            const command = readFileSync(`/proc/${name}/cmdline`, 'utf8')
+            observed.push(`${name}:${fields[0]}:${command.slice(0, 120)}`)
+            if (fields[0] === 'T' && command.includes('arena-git-worker.mjs')) {
+              survivingWorker = Number(name)
+              break
+            }
+          } catch { /* Process exited during inspection. */ }
+        }
+        if (!survivingWorker) throw new Error(`Recorded Git worker is not paused before launch: ${observed.join(';')}; group=${group.pgid}`)
+      }, 8_000)
+      executor.kill('SIGKILL')
+      await once(executor, 'exit')
+      expect(readFileSync(`/proc/${survivingWorker}/stat`, 'utf8')).toContain(' T ')
+      await expect(orphan).resolves.toMatchObject({ ok: false })
+      await new Promise((done) => setTimeout(done, 6_100))
+      const startedDigest = executionRequestDigest({
+        sessionId: scope.resourceId, callId: unknownId, name: 'arena_git_probe',
+        input: { parentCallId: 'approved', ownerGeneration: String(owner.generation) },
+        cwd: root, origin: 'host',
+      })
+      expect(await receipts.query({
+        sessionId: scope.resourceId, callId: unknownId, requestDigest: startedDigest,
+        ownerGeneration: String(owner.generation),
+      })).toMatchObject({ status: 'started_unknown' })
+      await expect(run(unknownId)).rejects.toThrow('no exact durable final receipt')
+      await expect(first.acquireResourceOwner(scope, a, randomUUID(), 5_000))
+        .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      expect((await second.database.query('SELECT count(*)::integer AS n FROM tenant_runtime_arena_reconciliations WHERE effect_id=$1',
+        [unknownId])).rows).toEqual([{ n: 0 }])
+      // The named worker is still capable of launching Git; stop it before test-only fixture teardown.
+      process.kill(survivingWorker, 'SIGKILL')
+      await receipts.load()
+      const groups = receipts.inspectArena(`${scope.resourceId}:${unknownId}`).processGroups
+      if (!groups?.length) throw new Error('Original probe group identity disappeared')
+      for (const group of groups) await eventually(async () => { await assertGroupStopped(group) }, 8_000)
+      await second.completeWorkspaceEffect(owner, unknownId)
+    } finally {
+      if (survivingWorker) { try { process.kill(survivingWorker, 'SIGKILL') } catch {} }
+      for (const child of children.reverse()) {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill('SIGKILL')
+          await once(child, 'exit')
+        }
+      }
+      await new Promise<void>((done) => io.close(() => done()))
+      if (server.listening) await new Promise<void>((done) => server.close(() => done()))
+      rmSync(root, { recursive: true, force: true })
+      rmSync(keeperDir, { recursive: true, force: true })
+    }
+  }, 55_000)
+
+  it('releases an Arena probe only when the matching PG-prepared refusal audit commits', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+    const a = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://arena-a.example',
+    }, 8_000)
+    const b = await second.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://arena-b.example',
+    }, 8_000)
+    const scope = resource(organizationId, unitId, 'session')
+    const owner = await first.acquireResourceOwner(scope, a, randomUUID(), 8_000)
+    const workspaceId = `no-executor-${randomUUID()}`
+    const deps = {
+      requireArenaEffectBarrier: true,
+      store: {
+        get: () => ({ workspaceId, state: { pendingCalls: [
+          { callId: 'approved', name: 'worktree_arena', status: 'dispatched', input: { action: 'status' } },
+        ] } }),
+        findLatestRuntimeMetadata: async () => ({ payload: { arena: {
+          arenaId: 'existing', repoRoot: '/workspace', repositoryIdentity: 'git-common-inode:41:72',
+          baseRef: 'HEAD', baseSha: 'a'.repeat(40), status: 'active', candidates: [],
+        } } }),
+      },
+      assertSessionEffectOwner: async () => ({ ownerGeneration: String(owner.generation) }),
+      claimArenaRepository: async () => { throw new Error('pre-dispatch probe must not claim a repository') },
+      registerArenaEffect: async (_id: string, generation: string, effectId: string, workspace: string) => {
+        expect(generation).toBe(String(owner.generation))
+        await first.registerWorkspaceEffect(owner, effectId, workspace, undefined, undefined, true)
+        return async () => await first.completeWorkspaceEffect(owner, effectId)
+      },
+      releaseNeverDispatchedArenaEffect: async (_id: string, generation: string, effectId: string, workspace: string) => {
+        expect(generation).toBe(String(owner.generation))
+        await first.completeNeverDispatchedWorkspaceEffect(owner, effectId, workspace, 'host_pre_dispatch_rejection')
+      },
+      tools: {
+        async callTool() {
+          return { ok: false, content: 'Executor disconnected before dispatch',
+            failure: { code: 'arena_pre_dispatch_rejected', category: 'precondition',
+              outcome: 'blocked', retryable: false, responsibility: 'system' } }
+        },
+        cancelPending() {},
+      },
+    } as unknown as HostLoopDeps
+    const refused = await runWorktreeArenaTool(deps, scope.resourceId, {
+      kind: 'call_tool', callId: 'approved', name: 'worktree_arena', input: { action: 'status' },
+    })
+    expect(refused.ok).toBe(false)
+    expect(refused.content).toContain('audited PG never-admitted proof')
+    expect(await second.inspectWorkspaceEffects(scope)).toEqual([])
+    const audit = await second.database.query('SELECT effect_id, generation FROM tenant_runtime_arena_non_admissions WHERE resource_id=$1',
+      [scope.resourceId])
+    expect(audit.rows).toHaveLength(1)
+    expect(audit.rows[0]).toMatchObject({ generation: String(owner.generation) })
+    await first.releaseReplica(a)
+    await expect(second.acquireResourceOwner(scope, b, randomUUID(), 5_000)).resolves.toBeDefined()
+  })
+
+  it('resolves a lost probe ACK only from a generation- and digest-matched read-only remote receipt', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+    const a = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://arena-a.example',
+    }, 8_000)
+    const b = await second.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://arena-b.example',
+    }, 8_000)
+    let blockedScope!: RuntimeResourceScope, completedScope!: RuntimeResourceScope
+    let blockedOwner!: RuntimeResourceOwnership
+    for (const matched of [true, false]) {
+      const scope = resource(organizationId, unitId, 'session')
+      if (matched) completedScope = scope
+      else blockedScope = scope
+      const owner = await first.acquireResourceOwner(scope, a, randomUUID(), 8_000)
+      if (!matched) blockedOwner = owner
+      const repositoryIdentity = `git-common-inode:41:${Date.now()}${matched ? '8' : '9'}`
+      const arena = {
+        arenaId: 'existing', repoRoot: '/workspace', repositoryIdentity, baseRef: 'HEAD', baseSha: 'a'.repeat(40),
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'active', candidates: [],
+      }
+      const deps = {
+        requireArenaEffectBarrier: true,
+        store: {
+          get: () => ({ workspaceId: `probe-ack-${scope.resourceId}`, state: { pendingCalls: [
+            { callId: 'parent', name: 'worktree_arena', status: 'dispatched', input: { action: 'status' } },
+          ] } }),
+          findLatestRuntimeMetadata: async () => ({ payload: { arena } }),
+        },
+        assertSessionEffectOwner: async () => ({ ownerGeneration: String(owner.generation) }),
+        claimArenaRepository: async () => await first.claimArenaRepository(owner, repositoryIdentity, 'existing'),
+        registerArenaEffect: async (_id: string, generation: string, effectId: string, workspaceId: string) => {
+          expect(generation).toBe(String(owner.generation))
+          await first.registerWorkspaceEffect(owner, effectId, workspaceId,
+            effectId.startsWith('arena-probe-') ? undefined : repositoryIdentity,
+            effectId.startsWith('arena-probe-') ? undefined : 'existing')
+          return async () => await first.completeWorkspaceEffect(owner, effectId)
+        },
+        tools: {
+          async callTool(_session: string, effect: { name: string }) {
+            return effect.name === 'arena_git_probe'
+              ? { ok: false, content: 'remote acknowledgement lost' }
+              : { ok: true, content: JSON.stringify({ finalEffectStopped: true, candidates: [] }) }
+          },
+          async inspectArenaReceipt(_session: string, id: string) {
+            const effect = captured.get(id)
+            if (!effect || !matched) return { state: 'unavailable' as const }
+            return { state: 'completed' as const, ownerGeneration: String(owner.generation),
+              requestDigest: executionRequestDigest({
+                sessionId: scope.resourceId, callId: id, name: effect.name, input: effect.input,
+                ...(effect.cwd ? { cwd: effect.cwd } : {}), origin: 'host',
+              }),
+              result: { callId: id, ok: true,
+                content: JSON.stringify({ finalEffectStopped: true, repoRoot: '/workspace', repositoryIdentity }) },
+            }
+          },
+          cancelPending() {},
+        },
+      } as unknown as HostLoopDeps
+      const captured = new Map<string, { name: string; input: Record<string, unknown>; cwd?: string }>()
+      const originalCall = deps.tools.callTool.bind(deps.tools)
+      deps.tools.callTool = async (session, effect, turnId) => {
+        captured.set(effect.callId, effect)
+        return originalCall(session, effect, turnId)
+      }
+      const result = await runWorktreeArenaTool(deps, scope.resourceId, {
+        kind: 'call_tool', callId: 'parent', name: 'worktree_arena', input: { action: 'status' },
+      })
+      expect(result.ok, result.content).toBe(matched)
+      const effects = await second.inspectWorkspaceEffects(scope)
+      expect(effects.length).toBe(matched ? 0 : 1)
+    }
+    await first.releaseReplica(a)
+    await expect(second.acquireResourceOwner(blockedScope, b, randomUUID(), 5_000))
+      .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+    await expect(second.acquireResourceOwner(completedScope, b, randomUUID(), 5_000)).resolves.toBeDefined()
+    const [unresolved] = await first.inspectWorkspaceEffects(blockedScope)
+    if (!unresolved) throw new Error('test fixture lost its deliberately UNKNOWN probe')
+    await first.completeWorkspaceEffect(blockedOwner, unresolved.effectId)
+  })
+
+  it('registers a named status effect before dispatch and holds G2 until its stopped receipt', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+    const a = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://arena-a.example',
+    }, 8_000)
+    const b = await second.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://arena-b.example',
+    }, 8_000)
+    const scope = resource(organizationId, unitId, 'session')
+    const owner = await first.acquireResourceOwner(scope, a, randomUUID(), 8_000)
+    let admitted!: () => void, finish!: () => void
+    const started = new Promise<void>((resolve) => { admitted = resolve })
+    const stopped = new Promise<void>((resolve) => { finish = resolve })
+    const callId = randomUUID()
+    const repositoryIdentity = `git-common-inode:41:${Date.now()}`
+    const arena = {
+      arenaId: 'existing', repoRoot: '/workspace', repositoryIdentity, baseRef: 'HEAD', baseSha: 'a'.repeat(40),
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'active',
+      candidates: [],
+    }
+    const deps = {
+      requireArenaEffectBarrier: true,
+      store: {
+        get: () => ({ workspaceId: 'pg-status-workspace', state: { pendingCalls: [{ callId, name: 'worktree_arena', status: 'dispatched', input: { action: 'status' } }] } }),
+        findLatestRuntimeMetadata: async () => ({ payload: { arena } }),
+      },
+      assertSessionEffectOwner: async () => {
+        if (!(await first.lookupResourceOwner(scope))) throw new Error('owner lost')
+        return { ownerGeneration: String(owner.generation) }
+      },
+      claimArenaRepository: async () => {
+        await first.claimArenaRepository(owner, repositoryIdentity, 'existing')
+      },
+      registerArenaEffect: async (_sessionId: string, generation: string, id: string) => {
+        expect(generation).toBe(String(owner.generation))
+        await first.registerWorkspaceEffect(owner, id, 'pg-status-workspace',
+          id.startsWith('arena-probe-') ? undefined : repositoryIdentity,
+          id.startsWith('arena-probe-') ? undefined : 'existing')
+        return async () => await first.completeWorkspaceEffect(owner, id)
+      },
+      tools: {
+        async callTool(_sessionId: string, effect: { name: string; callId: string; input: Record<string, unknown> }) {
+          if (effect.name === 'arena_git_probe') return { ok: true, content: JSON.stringify({
+            finalEffectStopped: true, repoRoot: '/workspace', repositoryIdentity,
+          }) }
+          expect(effect.name).toBe('arena_git_status')
+          expect(effect.input.ownerGeneration).toBe(String(owner.generation))
+          const registered = await second.database.query(`SELECT effect_id FROM tenant_runtime_active_workspace_effects
+            WHERE organization_id = $1 AND resource_id = $2`, [organizationId, scope.resourceId])
+          expect(registered.rows).toEqual([{ effect_id: effect.callId }])
+          admitted()
+          await stopped
+          return { ok: true, content: JSON.stringify({ finalEffectStopped: true, candidates: [] }) }
+        },
+        cancelPending() {},
+      },
+    } as unknown as HostLoopDeps
+    const call = { kind: 'call_tool' as const, callId, name: 'worktree_arena', input: { action: 'status' } }
+    const running = runWorktreeArenaTool(deps, scope.resourceId, call)
+    await started
+    await first.releaseReplica(a)
+    await expect(second.acquireResourceOwner(scope, b, randomUUID(), 5_000))
+      .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+    finish()
+    await running
+    const successor = await second.acquireResourceOwner(scope, b, randomUUID(), 5_000)
+    expect(successor.generation).toBe(owner.generation + 1n)
+    const unknownDeps = {
+      ...deps,
+      assertSessionEffectOwner: async () => ({ ownerGeneration: String(successor.generation) }),
+      claimArenaRepository: async () => await second.claimArenaRepository(successor, repositoryIdentity, 'existing'),
+      registerArenaEffect: async (_sessionId: string, generation: string, id: string) => {
+        expect(generation).toBe(String(successor.generation))
+        await second.registerWorkspaceEffect(successor, id, 'pg-status-workspace',
+          id.startsWith('arena-probe-') ? undefined : repositoryIdentity,
+          id.startsWith('arena-probe-') ? undefined : 'existing')
+        return async () => await second.completeWorkspaceEffect(successor, id)
+      },
+      tools: {
+        async callTool(_sessionId: string, effect: { name: string }) {
+          if (effect.name === 'arena_git_probe') return { ok: true, content: JSON.stringify({
+            finalEffectStopped: true, repoRoot: '/workspace', repositoryIdentity,
+          }) }
+          return {
+            ok: false, content: 'Executor acknowledgement lost',
+            failure: { code: 'execution_unknown', category: 'infrastructure', outcome: 'indeterminate', retryable: false, responsibility: 'system' },
+          }
+        },
+        cancelPending() {},
+      },
+    } as HostLoopDeps
+    const unknown = await runWorktreeArenaTool(unknownDeps, scope.resourceId, call)
+    expect(unknown.ok).toBe(false)
+    expect(unknown.content).toContain('unresolved final effect')
+    await expect(second.releaseResourceOwner(successor)).rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+  })
+
+  it('holds a new owner through admitted init until durable state and a final receipt, and retains an unknown effect', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+    const a = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://init-a.example',
+    }, 8_000)
+    const b = await second.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://init-b.example',
+    }, 8_000)
+    for (const known of [true, false]) {
+      const scope = resource(organizationId, unitId, 'session')
+      const owner = await first.acquireResourceOwner(scope, a, randomUUID(), 100)
+      const repositoryIdentity = `git-common-inode:44:${known ? 1 : 2}`
+      const arenaId = `pg${randomUUID().replaceAll('-', '').slice(0, 10)}`
+      const input = { action: 'init', arena_id: arenaId, candidates: ['one'] }
+      const parentCallId = randomUUID()
+      let metadata: { payload: { arena: Record<string, unknown> } } | undefined
+      let resume!: () => void, admitted!: () => void
+      const stopped = new Promise<void>((resolve) => { resume = resolve })
+      const started = new Promise<void>((resolve) => { admitted = resolve })
+      const deps = {
+        requireArenaEffectBarrier: true,
+        store: {
+          get: () => ({ workspaceId: `pg-init-${scope.resourceId}`, state: { pendingCalls: [
+            { callId: parentCallId, name: 'worktree_arena', status: 'dispatched', input },
+          ] } }),
+          findLatestRuntimeMetadata: async () => metadata,
+          appendRuntimeMetadata: async (_id: string, entry: { payload: { arena: Record<string, unknown> } }) => {
+            metadata = entry
+          },
+        },
+        assertSessionEffectOwner: async () => ({ ownerGeneration: String(owner.generation) }),
+        claimArenaRepository: async () => await first.claimArenaRepository(owner, repositoryIdentity, arenaId),
+        prepareArenaInitEffect: async (_id: string, generation: string, effectId: string, workspaceId: string) => {
+          expect(generation).toBe(String(owner.generation))
+          await first.prepareArenaInitEffect(owner, effectId, workspaceId, repositoryIdentity, arenaId)
+          return async () => {
+            expect(metadata?.payload.arena.status).toBe('active')
+            await first.completeWorkspaceEffect(owner, effectId)
+          }
+        },
+        registerArenaEffect: async (_id: string, generation: string, effectId: string, workspaceId: string) => {
+          expect(generation).toBe(String(owner.generation))
+          await first.registerWorkspaceEffect(owner, effectId, workspaceId,
+            effectId.startsWith('arena-probe-') ? undefined : repositoryIdentity,
+            effectId.startsWith('arena-probe-') ? undefined : arenaId)
+          return async () => {
+            if (!effectId.startsWith('arena-probe-')) expect(metadata?.payload.arena.status).toBe('active')
+            await first.completeWorkspaceEffect(owner, effectId)
+          }
+        },
+        tools: {
+          async callTool(_id: string, effect: { name: string; callId: string; input: Record<string, unknown> }) {
+            if (effect.name === 'arena_git_probe') return { ok: true, content: JSON.stringify({
+              finalEffectStopped: true, repoRoot: '/workspace', repositoryIdentity,
+            }) }
+            expect(effect.name).toBe('arena_git_init')
+            expect(effect.input.ownerGeneration).toBe(String(owner.generation))
+            expect(metadata?.payload.arena.status).toBe('initializing')
+            expect((await second.database.query('SELECT effect_id FROM tenant_runtime_active_workspace_effects WHERE resource_id = $1',
+              [scope.resourceId])).rows).toEqual([{ effect_id: effect.callId }])
+            admitted()
+            await stopped
+            return known ? {
+              ok: true, content: JSON.stringify({
+                finalEffectStopped: true, arenaId, repoRoot: '/workspace', baseSha: 'a'.repeat(40),
+                candidates: [{ id: 'one', branch: `kala-arena/${arenaId}/one`,
+                  worktreePath: `/workspace/.kala-arena/${arenaId}/one` }],
+              }),
+            } : {
+              ok: false, content: 'Executor receipt lost',
+              failure: { code: 'execution_unknown', category: 'infrastructure', outcome: 'indeterminate', retryable: false, responsibility: 'system' },
+            }
+          },
+          cancelPending() {},
+        },
+      } as unknown as HostLoopDeps
+      const running = runWorktreeArenaTool(deps, scope.resourceId, {
+        kind: 'call_tool', callId: parentCallId, name: 'worktree_arena', input,
+      })
+      await started
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      await expect(second.acquireResourceOwner(scope, b, randomUUID(), 8_000))
+        .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      resume()
+      const outcome = await running
+      expect(outcome.ok).toBe(known)
+      if (known) {
+        expect(metadata?.payload.arena.status).toBe('active')
+        expect((await second.acquireResourceOwner(scope, b, randomUUID(), 8_000)).generation).toBe(owner.generation + 1n)
+      } else {
+        expect(metadata?.payload.arena.status).toBe('initializing')
+        expect(await second.inspectWorkspaceEffects(scope)).toEqual([
+          expect.objectContaining({
+            effectId: expect.stringMatching(/^arena-init-/), generation: owner.generation,
+            repositoryIdentity, workspaceId: `pg-init-${scope.resourceId}`,
+          }),
+        ])
+        await expect(second.acquireResourceOwner(scope, b, randomUUID(), 8_000))
+          .rejects.toBeInstanceOf(RuntimeWorkspaceEffectActiveError)
+      }
+    }
+  })
+
+  it('executes named diff only after parent approval and completes an unsupported-file receipt without releasing uncertainty', async () => {
+    const organizationId = randomUUID(), unitId = parseTenantRuntimeUnitId(randomUUID())
+    const a = await first.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://diff-a.example',
+    }, 8_000)
+    const b = await second.registerReplica({
+      organizationId, unitId, replicaId: randomUUID(), membershipToken: randomUUID(), origin: 'https://diff-b.example',
+    }, 8_000)
+    const scope = resource(organizationId, unitId, 'session')
+    const owner = await first.acquireResourceOwner(scope, a, randomUUID(), 8_000)
+    const callId = randomUUID()
+    const repositoryIdentity = `git-common-inode:42:${Date.now()}`
+    const candidate = {
+      id: 'one', label: 'One', branch: 'kala-arena/existing/one',
+      worktreePath: '/workspace/.kala-arena/existing/one', status: 'active',
+    }
+    const arena = {
+      arenaId: 'existing', repoRoot: '/workspace', repositoryIdentity, baseRef: 'HEAD', baseSha: 'a'.repeat(40),
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'active',
+      candidates: [candidate],
+    }
+    const input = { action: 'diff', candidate_id: 'one', stat_only: true }
+    let response: Record<string, unknown> = {
+      finalEffectStopped: true, candidates: [{ ...candidate, stat: '1 file changed' }],
+    }
+    let dispatches = 0
+    const deps = {
+      requireArenaEffectBarrier: true,
+      store: {
+        get: () => ({ workspaceId: 'pg-diff-workspace', state: { pendingCalls: [{ callId, name: 'worktree_arena', status: 'dispatched', input }] } }),
+        findLatestRuntimeMetadata: async () => ({ payload: { arena } }),
+      },
+      assertSessionEffectOwner: async () => ({ ownerGeneration: String(owner.generation) }),
+      claimArenaRepository: async () => await first.claimArenaRepository(owner, repositoryIdentity, 'existing'),
+      registerArenaEffect: async (_sessionId: string, generation: string, id: string) => {
+        expect(generation).toBe(String(owner.generation))
+        await first.registerWorkspaceEffect(owner, id, 'pg-diff-workspace',
+          id.startsWith('arena-probe-') ? undefined : repositoryIdentity,
+          id.startsWith('arena-probe-') ? undefined : 'existing')
+        return async () => await first.completeWorkspaceEffect(owner, id)
+      },
+      tools: {
+        async callTool(_sessionId: string, effect: { name: string; callId: string; input: Record<string, unknown> }) {
+          if (effect.name === 'arena_git_probe') return { ok: true, content: JSON.stringify({
+            finalEffectStopped: true, repoRoot: '/workspace', repositoryIdentity,
+          }) }
+          expect(effect.name).toBe('arena_git_diff')
+          expect(effect.input.statOnly).toBe(true)
+          expect(effect.input.candidates).toHaveLength(1)
+          expect((await second.database.query('SELECT effect_id FROM tenant_runtime_active_workspace_effects WHERE organization_id = $1 AND resource_id = $2',
+            [organizationId, scope.resourceId])).rows).toEqual([{ effect_id: effect.callId }])
+          dispatches++
+          return { ok: true, content: JSON.stringify(response) }
+        },
+        cancelPending() {},
+      },
+    } as unknown as HostLoopDeps
+    const call = { kind: 'call_tool' as const, callId, name: 'worktree_arena', input }
+    const initBlocked = await runWorktreeArenaTool(deps, scope.resourceId, {
+      ...call, input: { action: 'init', candidates: ['one'] },
+    })
+    expect(initBlocked).toMatchObject({ ok: false, content: expect.stringContaining('No command was dispatched') })
+    expect(dispatches).toBe(0)
+    const normal = await runWorktreeArenaTool(deps, scope.resourceId, call)
+    expect(normal).toMatchObject({ ok: true, content: expect.stringContaining('1 file changed') })
+    response = { finalEffectStopped: true, error: 'Arena diff cannot include untracked files without changing the index' }
+    const unsupported = await runWorktreeArenaTool(deps, scope.resourceId, call)
+    expect(unsupported).toMatchObject({ ok: false, content: expect.stringContaining('untracked files') })
+    expect(dispatches).toBe(2)
+    await first.releaseResourceOwner(owner)
+    expect((await second.acquireResourceOwner(scope, b, randomUUID(), 5_000)).generation).toBe(owner.generation + 1n)
   })
 
   it('manages two independent owner leases on one Unit and rejects a released writer in PG', async () => {

@@ -22,6 +22,25 @@ The source-only shared Identity service below is a separate **development** Comp
 - `external-nfs`: explicit legacy external NFS experiment.
 - `postgres-s3`: opt-in **fresh-install evaluation** with separate externally operated control and Runtime PostgreSQL databases, external S3, PostgreSQL Gateway login state, versioned schema migrations and independent workload roles. Runtime and Gateway do not mount authoritative application-data volumes; host secret sources and other gaps remain. This is neither the supported release profile nor an in-place upgrade; read the [PG/S3 operator prerequisites and unsupported backup boundaries](../../docs/operations/private-cloud-postgres-s3-profile.md) before using it.
 
+Arena incident credentials are **not** Compose workload secrets: after an offline combined schema-v25
+migration, `packages/host/dist/bin/kala-arena-operator-provision.js` creates one
+restricted LOGIN and owner-only URL file per organization (and rotates only after
+active sessions drain). The separately operated external Executor must share a
+long-lived independent PID-namespace keeper **before** admitting effects. Configure
+the protected external Executor's opt-in `arenaKeeperIdentityFile` and use the
+separate systemd example (or an independently managed private container keeper).
+`check-arena-executor-readiness.mjs` is a mandatory read-only deployment preflight
+that rejects missing keeper/actual workspace journal and explicitly confirms
+the old Compose does **not** operate or automatically enroll the Executor.
+The output deliberately reports `readyForProduction: false`: an operator must
+separately attest a live trusted-CA TLS handshake, the original remote workspace
+and journal mounts, keeper PID namespace and tenant-scoped operator credential.
+The metadata-only preflight cannot supply those proofs. `run-arena-operator.sh` enters
+the original namespace for isolated inspection or human-confirmed reconciliation.
+Neither script is installed into the old Compose Runtime. See the
+[Arena incident runbook](../../docs/host/parallel-worktree-arena.md#222-unknown--lost-ack-operator-runbook);
+this is experimental and has not been run against production.
+
 ```bash
 docker compose --env-file deploy/identity/.secrets/deployment.env \
   -f deploy/identity/compose.yaml up -d --wait

@@ -131,7 +131,20 @@ export type SubAgentFinishedPayload = {
 }
 
 export type ToolDispatcher = {
+  /** Read-only durable Executor evidence; never infer non-admission from absence or transport failure. */
+  inspectArenaReceipt?(sessionId: string, callId: string): Promise<{
+    state: 'absent' | 'started' | 'completed' | 'denied' | 'unavailable'
+    ownerGeneration?: string; requestDigest?: string
+    result?: { callId: string; ok: boolean; content: string; failure?: import('@agent-kernel/kernel').ToolFailure }
+  }>
   callTool(sessionId: string, eff: CallToolEffect, turnId?: string): Promise<{
+    ok: boolean
+    content: string
+    failure?: import('@agent-kernel/kernel').ToolFailure
+    durationMs?: number
+  }>
+  /** Host-only synthetic Arena Bash call; bound to an explicitly approved parent. */
+  callArenaShell?(sessionId: string, parentCallId: string, eff: CallToolEffect): Promise<{
     ok: boolean
     content: string
     failure?: import('@agent-kernel/kernel').ToolFailure
@@ -197,6 +210,23 @@ export type HostLoopDeps = {
   tools: ToolDispatcher
   /** Optional fail-closed check immediately before each model or tool effect. */
   assertSessionEffectOwner?: (sessionId: string) => Promise<void | { ownerGeneration: string }>
+  /** Fail closed for Arena on PG-owned Sessions until Executor final-effect admission is available. */
+  requireArenaEffectBarrier?: boolean
+  /** PostgreSQL declaration committed before a named Executor call; completion requires its final stopped receipt. */
+  registerArenaEffect?: (
+    sessionId: string, generation: string, callId: string, workspaceId: string,
+    repositoryIdentity?: string, arenaId?: string,
+  ) => Promise<(releaseArenaId?: string) => Promise<void>>
+  /** One fenced PG transaction prepares both the claim and the init effect before persisting init intent. */
+  prepareArenaInitEffect?: (
+    sessionId: string, generation: string, callId: string, workspaceId: string,
+    repositoryIdentity: string, arenaId: string,
+  ) => Promise<() => Promise<void>>
+  /** Fenced PG proof that this prepared effect never entered the dispatch-intent phase. */
+  releaseNeverDispatchedArenaEffect?: (
+    sessionId: string, generation: string, callId: string, workspaceId: string,
+  ) => Promise<void>
+  claimArenaRepository?: (sessionId: string, generation: string, repositoryIdentity: string, arenaId: string) => Promise<void>
   /** Capture one healthy local owner activation; the returned predicate must never acquire/query SQL. */
   captureSessionEffectOwner?: (sessionId: string) => (() => boolean) | undefined
   /** Revoke ephemeral external channels synchronously before checkpoint waits. */

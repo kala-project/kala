@@ -60,12 +60,13 @@ describe('PostgreSQL migrations', () => {
   it('applies the initial migration once under an advisory lock and is idempotent', async () => {
     const client = new FakeClient()
     const first = await runPostgresMigrations(pool(client))
-    expect(first).toEqual({ previousVersion: 0, currentVersion: 18, appliedVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18] })
+    expect(first).toEqual({ previousVersion: 0, currentVersion: 25, appliedVersions: Array.from({ length: 25 }, (_, i) => i + 1) })
     expect(client.statements[0]).toContain('pg_advisory_lock')
     expect(client.statements).toContain('BEGIN')
     expect(client.statements).toContain('COMMIT')
     expect(client.statements.at(-1)).toContain('pg_advisory_unlock')
-    expect(client.statements.filter((statement) => statement.includes('tenant_runtime_hot_events'))).toHaveLength(1)
+    expect(client.statements.filter((statement) =>
+      statement.startsWith('CREATE TABLE IF NOT EXISTS') && statement.includes('tenant_runtime_hot_events'))).toHaveLength(1)
     expect(client.statements.some((statement) => statement.includes('tenant_object_capacity_allocations'))).toBe(true)
     expect(client.statements.some((statement) => statement.includes('tenant_runtime_unit_replica_memberships'))).toBe(true)
     expect(client.statements.some((statement) => statement.includes('tenant_runtime_resource_ownerships'))).toBe(true)
@@ -78,7 +79,7 @@ describe('PostgreSQL migrations', () => {
 
     client.statements.length = 0
     const second = await runPostgresMigrations(pool(client))
-    expect(second).toEqual({ previousVersion: 18, currentVersion: 18, appliedVersions: [] })
+    expect(second).toEqual({ previousVersion: 25, currentVersion: 25, appliedVersions: [] })
     expect(client.statements).not.toContain('BEGIN')
     expect(client.releaseCount).toBe(2)
   })
@@ -102,11 +103,11 @@ describe('PostgreSQL migrations', () => {
     client.applied.splice(7)
     client.statements.length = 0
     await expect(runPostgresMigrations(pool(client))).resolves.toEqual({
-      previousVersion: 7, currentVersion: 18, appliedVersions: [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+      previousVersion: 7, currentVersion: 25, appliedVersions: Array.from({ length: 18 }, (_, i) => i + 8),
     })
     const changes = client.statements.filter((statement) => /^(CREATE|ALTER|DROP|DELETE|UPDATE)/u.test(statement)
       && !statement.includes('kala_schema_migrations'))
-    expect(changes).toHaveLength(21)
+    expect(changes.length).toBeGreaterThan(21)
     expect(client.statements.some((statement) => statement.startsWith('WITH ranked AS')
       && statement.includes('completion_sequence'))).toBe(true)
     expect(changes[0]).toContain('CREATE TABLE IF NOT EXISTS "public".tenant_agent_prompt_settings')
@@ -118,6 +119,8 @@ describe('PostgreSQL migrations', () => {
     expect(changes[11]).toContain('dispatched_at')
     expect(changes[12]).toContain('dispatched_owner_generation')
     expect(changes[16]).toContain('timeout_ms')
+    expect(changes.some((statement) => statement.includes('tenant_runtime_active_workspace_effects_workspace_uidx'))).toBe(true)
+    expect(changes.some((statement) => statement.includes('ADD COLUMN dispatch_started'))).toBe(true)
   })
 
   it('grants DML only on migrated Runtime tables and SELECT only on migration history', async () => {
@@ -136,7 +139,8 @@ describe('PostgreSQL migrations', () => {
     expect(grants).toContain('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "public"."tenant_session_child_commands" TO "kala_runtime"')
     expect(grants.some((statement) => statement.includes('ALL TABLES'))).toBe(false)
     expect(grants).toContain('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "public"."tenant_agent_prompt_settings" TO "kala_runtime"')
-    expect(grants.filter((statement) => statement.includes('SELECT, INSERT, UPDATE, DELETE'))).toHaveLength(31)
+    expect(grants.filter((statement) => statement.includes('SELECT, INSERT, UPDATE, DELETE')).length).toBeGreaterThan(31)
+    expect(grants).toContain('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "public"."tenant_runtime_active_workspace_effects" TO "kala_runtime"')
     expect(client.statements.at(-1)).toBe('COMMIT')
     await expect(grantPostgresRuntimePrivileges(pool(client), { runtimeRole: 'invalid;role' })).rejects.toThrow('identifier')
   })

@@ -13,12 +13,14 @@ import { consolidateMemory } from './memory-consolidation.js'
 import { runToolCatalogTool } from './tool-catalog.js'
 import { runDagPlanTool } from '../dag/tool.js'
 import { runDagWorkerTool } from '../dag/worker-tool.js'
+import { runWorktreeArenaTool } from './worktree-arena.js'
 import { createExtensionRegistry, type HostExtension, type SessionLifecycleContext } from './registry.js'
 
 export const BUILTIN_HOST_TOOL_HANDLERS = [
   'ask_user_choice',
   'websearch',
   'agent',
+  'worktree_arena',
   'read_agent',
   'write_agent',
   'agent_board',
@@ -72,6 +74,9 @@ export function createBuiltinExtensionRegistry(additional: readonly HostExtensio
         },
         async agent({ deps, sessionId, effect, aborts, loop, runtimeController }) {
           return await runAgentTool(deps, sessionId, effect, aborts, loop, runtimeController)
+        },
+        async worktree_arena({ deps, sessionId, effect }) {
+          return await runWorktreeArenaTool(deps, sessionId, effect)
         },
         async read_agent({ deps, sessionId, effect }) {
           return await runReadAgentTool(deps, sessionId, effect)

@@ -9,6 +9,10 @@ export { replaceInFileTool } from './replace-in-file.js'
 export { replaceManyInFileTool } from './replace-many-in-file.js'
 export { applyFilePatchTool } from './apply-file-patch.js'
 export { bashTool, shellTool } from './bash.js'
+export { arenaGitStatusTool } from './arena-git-status.js'
+export { arenaGitDiffTool } from './arena-git-diff.js'
+export { arenaGitInitTool, arenaGitApplyTool, arenaGitCleanupTool } from './arena-git-mutation.js'
+export { arenaGitProbeTool } from './arena-git-probe.js'
 export { bashOutputTool } from './bash-output.js'
 export { killShellTool } from './kill-shell.js'
 export { processTool } from './process.js'
@@ -31,6 +35,10 @@ import { replaceInFileTool } from './replace-in-file.js'
 import { replaceManyInFileTool } from './replace-many-in-file.js'
 import { applyFilePatchTool } from './apply-file-patch.js'
 import { bashTool, shellTool } from './bash.js'
+import { arenaGitStatusTool } from './arena-git-status.js'
+import { arenaGitDiffTool } from './arena-git-diff.js'
+import { arenaGitInitTool, arenaGitApplyTool, arenaGitCleanupTool } from './arena-git-mutation.js'
+import { arenaGitProbeTool } from './arena-git-probe.js'
 import { bashOutputTool } from './bash-output.js'
 import { killShellTool } from './kill-shell.js'
 import { processTool } from './process.js'
@@ -51,6 +59,12 @@ export const allTools: readonly Tool[] = [
   gitContextTool,
   shellTool,
   bashTool,
+  arenaGitStatusTool,
+  arenaGitDiffTool,
+  arenaGitInitTool,
+  arenaGitApplyTool,
+  arenaGitCleanupTool,
+  arenaGitProbeTool,
   bashOutputTool,
   killShellTool,
   processTool,

@@ -47,6 +47,8 @@ import { collectIpAddresses, normalizeOs } from './announce-info.js'
 import { subscribeBackgroundTasks } from './tools/background-shell.js'
 import { createTerminalManager } from './terminal-manager.js'
 import { conflictingExecutionResult, executionRequestDigest, ExecutionReceiptStore, unknownExecutionResult } from './execution-receipts.js'
+import { arenaGroupRecorder, leaderIdentity, type ArenaProcessGroup } from './tools/arena-process-groups.js'
+import { assertArenaKeeper } from './arena-keeper.js'
 import type { RuntimeLogger } from './logger.js'
 import { executorReleaseVersion } from './build-info.js'
 import { failureForToolError } from './tool-failure.js'
@@ -149,6 +151,8 @@ export type ExecutorOptions = {
   /** Injectable Socket.IO factory — used by tests. */
   ioFactory?: typeof clientIO
   receiptStorePath?: string | false
+  /** Required for any named Arena Git effect; ignored for ordinary legacy tools. */
+  arenaKeeperIdentityFile?: string
   networkPolicy?: import('@agent-kernel/shared').NetworkPolicy
   mcpServers?: readonly McpServerConfig[]
   /** Capability supplied only by the CLI after parsing a private managed config. */
@@ -300,7 +304,8 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
   const mcpToolNames = new Set<string>()
   const knownMcpToolNames = new Set<string>()
   type AnnounceWithMcp = ExecutorAnnounce & { mcpTools?: McpToolDescriptor[] }
-  const createAnnouncement = (): AnnounceWithMcp => ({
+  const createAnnouncement = (keeperHealthy: boolean): AnnounceWithMcp => ({
+    ...(keeperHealthy ? { arenaKeeperVersion: 1 as const } : {}),
     appDebugVersion: 1,
     ...(options.tools === undefined && tools.has('computer_use') ? { computerUsePolicyVersion: 1 as const, computerUseFeaturePolicyVersion: 1 as const } : {}),
     executorId,
@@ -332,7 +337,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
       knownMcpToolNames.add(tool.name)
     }
     mcpDescriptors = descriptors
-    if (mcpInitialized && socket.connected) socket.emit('executor:announce', createAnnouncement())
+    if (mcpInitialized && socket.connected) void sendAnnouncement()
   }
 
   type McpCatalog = { tools: readonly Tool[]; descriptors: readonly McpToolDescriptor[] }
@@ -359,14 +364,23 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
   const initialMcp = createMcpManager(options.mcpServers ?? [], false)
   activeMcp = initialMcp.manager
   const mcpReady = activeMcp.initialize().then(() => { mcpInitialized = true })
+  const sendAnnouncement = async () => {
+    let keeperHealthy = false
+    if (options.arenaKeeperIdentityFile) {
+      try { await assertArenaKeeper(options.arenaKeeperIdentityFile); keeperHealthy = true }
+      catch { logger.warn('Arena keeper unavailable; named Git tools remain blocked') }
+    }
+    if (!socket.connected) return
+    const announcement = createAnnouncement(keeperHealthy)
+    logger.info({ socketId: socket.id, workspaceId, workspaceName, ...(options.installId ? { installId: options.installId } : {}), executorVersion: announcement.executorVersion }, 'socket connected; announcing workspace')
+    socket.emit('executor:announce', announcement)
+  }
 
   const ready = new Promise<void>((resolve) => {
     socket.on('connect', async () => {
       await mcpReady
       if (!socket.connected) return
-      const announcement = createAnnouncement()
-      logger.info({ socketId: socket.id, workspaceId, workspaceName, ...(options.installId ? { installId: options.installId } : {}), executorVersion: announcement.executorVersion }, 'socket connected; announcing workspace')
-      socket.emit('executor:announce', announcement)
+      await sendAnnouncement()
       resolve()
     })
   })
@@ -442,6 +456,20 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
     // recoverable — let socket.io keep retrying.
   })
 
+  socket.on('executor:arena_receipt_inspect', async (payload, ack) => {
+    if (typeof ack !== 'function') return
+    if (!payload || typeof payload.sessionId !== 'string' || typeof payload.callId !== 'string'
+      || !/^arena-(probe|init|apply|cleanup|status|diff)-[A-Z0-9]+$/u.test(payload.callId)
+      || payload.sessionId.length > 200) {
+      ack({ state: 'unavailable' })
+      return
+    }
+    try {
+      await receiptStoreReady
+      ack(receiptStore?.inspectArena(receiptKey(payload.sessionId, payload.callId)) ?? { state: 'unavailable' })
+    } catch { ack({ state: 'unavailable' }) }
+  })
+
   socket.on('tool:receipt_query', async (payload: ExecutionReceiptQuery, ack) => {
     try {
       await receiptStoreReady
@@ -465,6 +493,27 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
 
   socket.on('tool:call', async (payload: ToolCallMessage, ack) => {
     const internal = payload.name.startsWith('__')
+    const arenaAction = ['probe', 'status', 'diff', 'init', 'apply', 'cleanup'].find((action) => payload.name === `arena_git_${action}`)
+    if (arenaAction && (!receiptStore || payload.origin !== 'host'
+      || !payload.ownerGeneration || payload.input.ownerGeneration !== payload.ownerGeneration
+      || !payload.callId.startsWith(`arena-${arenaAction}-`))) {
+      ack({ callId: payload.callId, ok: false, content: 'ERROR: EACCES: arena action requires durable generation-bound admission' })
+      return
+    }
+    if (arenaAction) {
+      try { await assertArenaKeeper(options.arenaKeeperIdentityFile) }
+      catch {
+        try {
+          await receiptStoreReady
+          ack(await receiptStore!.denyArena(receiptKey(payload.sessionId, payload.callId),
+            payload.callId, executionRequestDigest(payload), payload.ownerGeneration!))
+        } catch {
+          ack({ callId: payload.callId, ok: false,
+            content: 'ERROR: EDURABILITY: keeper unavailable and negative admission could not be persisted; outcome remains unknown' })
+        }
+        return
+      }
+    }
     // Internal control-plane reads must never depend on a writable workspace
     // receipt directory. Ordinary tools require a durable replay barrier.
     if (!internal) {
@@ -548,12 +597,14 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
           shellApprovalVerified = true
         }
       }
-      if (!internal) await receiptStore?.begin(key, payload.callId, requestDigest, payload.ownerGeneration)
+      if (!internal) await receiptStore?.begin(key, payload.callId, requestDigest, payload.ownerGeneration,
+        payload.name.startsWith('arena_git_') ? await leaderIdentity(process.pid) : undefined)
       executionStarted = true
+      if (arenaAction) await assertArenaKeeper(options.arenaKeeperIdentityFile)
       logger.info({ sessionId: payload.sessionId, callId: payload.callId, tool: payload.name, internal, ...(!desktopCall && !knownMcpToolNames.has(payload.name) ? { input: safeToolInput(payload.input) } : {}), ...(payload.cwd ? { cwd: payload.cwd } : {}) }, 'tool execution started')
       const rawResult = await runOne(tools, sandbox, controller.signal, payload, overflowConfig, shellApprovalVerified, options.networkPolicy, async (event) => {
         await new Promise<void>((resolve, reject) => socket.timeout(5_000).emit('executor:network_audit', event, (error, result) => error || !result?.accepted ? reject(error ?? new Error('network audit rejected')) : resolve()))
-      })
+      }, async (group) => { if (!receiptStore) throw new Error('Arena process journal unavailable'); await receiptStore.recordProcessGroup(key, group) })
       const result = { ...rawResult, durationMs: Math.max(0, Math.round(performance.now() - started)) }
       replyResult = result
       if (!internal) await receiptStore?.set(key, result)
@@ -838,6 +889,12 @@ const OVERFLOW_EXEMPT_TOOLS: ReadonlySet<string> = new Set([
   'computer_use',
   'memory',
   'bash_output',
+  'arena_git_status',
+  'arena_git_diff',
+  'arena_git_init',
+  'arena_git_apply',
+  'arena_git_cleanup',
+  'arena_git_probe',
 ])
 
 async function runOne(
@@ -849,6 +906,7 @@ async function runOne(
   shellApprovalVerified = false,
   networkPolicy?: import('@agent-kernel/shared').NetworkPolicy,
   emitNetworkAudit?: (event: import('@agent-kernel/shared').NetworkAuditEvent) => Promise<void>,
+  recordArenaGroup?: (group: ArenaProcessGroup) => Promise<void>,
 ): Promise<ToolResultAck> {
   const tool = tools.get(payload.name)
   if (!tool) {
@@ -859,7 +917,7 @@ async function runOne(
     }
   }
   try {
-    const content = await tool.run(payload.input, {
+    const invoke = () => tool.run(payload.input, {
       ...(shellApprovalVerified ? { shellApprovalVerified: true } : {}),
       ...(typeof payload.desktopComputerUseEnabled === 'boolean' ? { desktopComputerUseEnabled: payload.desktopComputerUseEnabled } : {}),
       ...(typeof payload.desktopPreviewEnabled === 'boolean' ? { desktopPreviewEnabled: payload.desktopPreviewEnabled } : {}),
@@ -874,6 +932,8 @@ async function runOne(
       ...(networkPolicy ? { networkPolicy } : {}),
       ...(emitNetworkAudit ? { emitNetworkAudit } : {}),
     })
+    const content = payload.name.startsWith('arena_git_') && recordArenaGroup
+      ? await arenaGroupRecorder.run(recordArenaGroup, invoke) : await invoke()
     if (OVERFLOW_EXEMPT_TOOLS.has(payload.name) || payload.name.startsWith('__')) {
       return { callId: payload.callId, ok: true, content }
     }

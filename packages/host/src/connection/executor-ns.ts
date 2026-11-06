@@ -41,15 +41,16 @@ export function authorizeExecutorShellCall(
   record: import('../store/session.js').SessionRecord | undefined,
   workspaceId: string,
   request: ShellAuthorizationRequest,
+  arenaParentAuthorized = false,
 ): boolean {
   return record?.sessionId === request.sessionId
     && record.workspaceId === workspaceId
     && analyzeShellCommand(request.command).risk === 'high_risk'
-    && guardShellToolDispatch(record, {
+    && (arenaParentAuthorized || guardShellToolDispatch(record, {
       callId: request.callId,
       name: request.name,
       input: { command: request.command },
-    }) === null
+    }) === null)
 }
 
 export type ExecutorNs = Namespace<
@@ -339,7 +340,10 @@ export function configureExecutorNamespace(
       try {
         const record = deps.store.get(request.sessionId)
           ?? await deps.store.load(request.sessionId, { recoverDangling: false })
-        ack({ authorized: authorizeExecutorShellCall(record, announcement.workspaceId, request) })
+        ack({ authorized: authorizeExecutorShellCall(record, announcement.workspaceId, request,
+          request.name === 'bash'
+          && deps.executors.authorizeArenaShell(request.sessionId, request.callId, request.command,
+            announcement.workspaceId)) })
       } catch {
         ack({ authorized: false })
       }

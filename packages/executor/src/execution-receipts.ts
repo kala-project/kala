@@ -2,12 +2,15 @@ import { createHash } from 'node:crypto'
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { ExecutionCancelAck, ExecutionCancelRequest, ExecutionReceiptQuery, ExecutionReceiptQueryResult, ToolCallMessage, ToolResultAck } from '@agent-kernel/shared'
+import type { ArenaProcessGroup } from './tools/arena-process-groups.js'
 
 const MAX_RECEIPTS = 500
 const RECEIPT_TTL_MS = 24 * 60 * 60_000
+const isArenaReceiptKey = (key: string) =>
+  /^arena-(probe|status|diff|init|apply|cleanup)-[A-Z0-9]+$/u.test(key.slice(key.lastIndexOf(':') + 1))
 
-type CompletedReceipt = { completedAt: number; result: ToolResultAck; requestDigest?: string; ownerGeneration?: string; cancelRequestedAt?: number; stopCommandId?: string }
-type StartedReceipt = { startedAt: number; callId: string; requestDigest?: string; ownerGeneration?: string; cancelRequestedAt?: number; stopCommandId?: string }
+type CompletedReceipt = { completedAt: number; result: ToolResultAck; requestDigest?: string; ownerGeneration?: string; processGroups?: ArenaProcessGroup[]; executorProcess?: ArenaProcessGroup; neverAdmitted?: true; cancelRequestedAt?: number; stopCommandId?: string }
+type StartedReceipt = { startedAt: number; callId: string; requestDigest?: string; ownerGeneration?: string; processGroups?: ArenaProcessGroup[]; executorProcess?: ArenaProcessGroup; cancelRequestedAt?: number; stopCommandId?: string }
 type Receipt = CompletedReceipt | StartedReceipt
 type CommitWaiter = { generation: number; resolve(): void; reject(error: unknown): void }
 
@@ -49,12 +52,32 @@ export function unknownExecutionResult(callId: string): ToolResultAck {
 function validReceipt(value: unknown): value is Receipt {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const receipt = value as Record<string, unknown>
+  if (receipt.executorProcess !== undefined && (!receipt.executorProcess || typeof receipt.executorProcess !== 'object'
+    || !Number.isSafeInteger((receipt.executorProcess as ArenaProcessGroup).pgid)
+    || (receipt.executorProcess as ArenaProcessGroup).pgid <= 0
+    || !/^\d+$/u.test((receipt.executorProcess as ArenaProcessGroup).leaderStartTicks)
+    || !/^[a-f0-9-]{36}$/u.test((receipt.executorProcess as ArenaProcessGroup).bootId)
+    || !/^pid:\[\d+\]$/u.test((receipt.executorProcess as ArenaProcessGroup).pidNamespace))) return false
+  if (receipt.processGroups !== undefined && (!Array.isArray(receipt.processGroups)
+    || receipt.processGroups.length > 256 || !receipt.processGroups.every((group: unknown) =>
+      !!group && typeof group === 'object'
+      && Number.isSafeInteger((group as ArenaProcessGroup).pgid) && (group as ArenaProcessGroup).pgid > 0
+      && typeof (group as ArenaProcessGroup).leaderStartTicks === 'string'
+      && /^\d+$/u.test((group as ArenaProcessGroup).leaderStartTicks)
+      && typeof (group as ArenaProcessGroup).bootId === 'string'
+      && /^[a-f0-9-]{36}$/u.test((group as ArenaProcessGroup).bootId)
+      && typeof (group as ArenaProcessGroup).pidNamespace === 'string'
+      && /^pid:\[\d+\]$/u.test((group as ArenaProcessGroup).pidNamespace)))) return false
   if (receipt.requestDigest !== undefined && (typeof receipt.requestDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(receipt.requestDigest))) return false
   if (receipt.ownerGeneration !== undefined && (typeof receipt.ownerGeneration !== 'string' || !/^[1-9]\d*$/u.test(receipt.ownerGeneration))) return false
   if (receipt.cancelRequestedAt !== undefined && (typeof receipt.cancelRequestedAt !== 'number' || !Number.isFinite(receipt.cancelRequestedAt)
     || typeof receipt.stopCommandId !== 'string' || !receipt.stopCommandId)) return false
   if ('result' in receipt) {
     const result = receipt.result as Partial<ToolResultAck> | null
+    if (receipt.neverAdmitted !== undefined && (receipt.neverAdmitted !== true
+      || receipt.executorProcess !== undefined || receipt.processGroups !== undefined
+      || !receipt.requestDigest || !receipt.ownerGeneration
+      || result?.ok !== false || result.failure?.code !== 'arena_not_admitted')) return false
     return typeof receipt.completedAt === 'number' && Number.isFinite(receipt.completedAt)
       && !!result && typeof result.callId === 'string' && typeof result.ok === 'boolean' && typeof result.content === 'string'
   }
@@ -172,15 +195,65 @@ export class ExecutionReceiptStore {
     return receipt && ('result' in receipt ? receipt.result : unknownExecutionResult(receipt.callId))
   }
 
-  begin(key: string, callId: string, requestDigest?: string, ownerGeneration?: string): Promise<void> {
+  inspectArena(key: string): {
+    state: 'absent' | 'started' | 'completed' | 'denied'; ownerGeneration?: string; requestDigest?: string; result?: ToolResultAck
+    processGroups?: ArenaProcessGroup[]; executorProcess?: ArenaProcessGroup
+  } {
+    this.prune()
+    const receipt = this.receipts.get(key)
+    if (!receipt) return { state: 'absent' }
+    if (this.committingCompletions.has(key)) return {
+      state: 'started',
+      ...(receipt.ownerGeneration ? { ownerGeneration: receipt.ownerGeneration } : {}),
+      ...(receipt.requestDigest ? { requestDigest: receipt.requestDigest } : {}),
+      ...(receipt.processGroups ? { processGroups: receipt.processGroups } : {}),
+      ...(receipt.executorProcess ? { executorProcess: receipt.executorProcess } : {}),
+    }
+    return {
+      state: 'result' in receipt ? (receipt.neverAdmitted ? 'denied' : 'completed') : 'started',
+      ...(receipt.ownerGeneration ? { ownerGeneration: receipt.ownerGeneration } : {}),
+      ...(receipt.requestDigest ? { requestDigest: receipt.requestDigest } : {}),
+      ...(receipt.processGroups ? { processGroups: receipt.processGroups } : {}),
+      ...(receipt.executorProcess ? { executorProcess: receipt.executorProcess } : {}),
+      ...('result' in receipt ? { result: receipt.result } : {}),
+    }
+  }
+
+  /** Durable negative admission, only while this identity has never acquired a started intent. */
+  async denyArena(key: string, callId: string, requestDigest: string, ownerGeneration: string): Promise<ToolResultAck> {
+    if (!isArenaReceiptKey(key) || !/^[1-9]\d*$/u.test(ownerGeneration) || !/^[a-f0-9]{64}$/u.test(requestDigest)) {
+      throw new Error('invalid Arena negative admission identity')
+    }
+    const previous = this.receipts.get(key)
+    if (previous) return this.get(key, requestDigest, callId) ?? unknownExecutionResult(callId)
+    const result: ToolResultAck = {
+      callId, ok: false, content: 'ERROR: EACCES: independent Arena keeper is unavailable; no action admitted',
+      failure: { code: 'arena_not_admitted', category: 'precondition', outcome: 'blocked', retryable: false, responsibility: 'workspace' },
+    }
+    const receipt: CompletedReceipt = {
+      completedAt: Date.now(), result, requestDigest, ownerGeneration, neverAdmitted: true,
+    }
+    this.receipts.set(key, receipt)
+    try { await this.commit() } catch (error) {
+      if (this.receipts.get(key) === receipt) this.receipts.delete(key)
+      throw error
+    }
+    return result
+  }
+
+  begin(key: string, callId: string, requestDigest?: string, ownerGeneration?: string,
+    executorProcess?: ArenaProcessGroup): Promise<void> {
     if (ownerGeneration !== undefined && (typeof ownerGeneration !== 'string' || !/^[1-9]\d*$/u.test(ownerGeneration))) {
       return Promise.reject(new Error('invalid execution owner generation'))
     }
     this.prune()
     if (this.receipts.has(key)) return Promise.reject(new Error('execution identity already recorded'))
-    const unresolved = [...this.receipts].filter(([id, receipt]) => !('result' in receipt) || this.committingCompletions.has(id)).length
+    const unresolved = [...this.receipts].filter(([id, receipt]) =>
+      !('result' in receipt) || this.committingCompletions.has(id) || isArenaReceiptKey(id)).length
     if (unresolved >= MAX_RECEIPTS) return Promise.reject(new Error('unresolved execution journal is full; reconciliation is required'))
-    const receipt = { startedAt: Date.now(), callId, ...(requestDigest ? { requestDigest } : {}), ...(ownerGeneration !== undefined ? { ownerGeneration } : {}) }
+    const receipt = { startedAt: Date.now(), callId, ...(requestDigest ? { requestDigest } : {}),
+      ...(ownerGeneration !== undefined ? { ownerGeneration } : {}),
+      ...(executorProcess ? { executorProcess } : {}) }
     this.receipts.set(key, receipt)
     this.prune()
     return this.commit().catch((error: unknown) => {
@@ -191,11 +264,24 @@ export class ExecutionReceiptStore {
     })
   }
 
+  async recordProcessGroup(key: string, group: ArenaProcessGroup): Promise<void> {
+    const previous = this.receipts.get(key)
+    if (!previous || 'result' in previous || (previous.processGroups?.length ?? 0) >= 256) {
+      throw new Error('Arena process journal missing or full; Git was not started')
+    }
+    const updated = { ...previous, processGroups: [...previous.processGroups ?? [], group] }
+    this.receipts.set(key, updated)
+    try { await this.commit() } catch (error) {
+      if (this.receipts.get(key) === updated) this.receipts.set(key, previous)
+      throw error
+    }
+  }
+
   set(callId: string, result: ToolResultAck): Promise<void> {
     // Refresh insertion order so capacity pruning retains recently repeated IDs.
     const previous = this.receipts.get(callId)
     if (previous && !('result' in previous)) this.committingCompletions.add(callId)
-    const receipt = { completedAt: Date.now(), result, ...(previous?.requestDigest ? { requestDigest: previous.requestDigest } : {}), ...(previous?.ownerGeneration !== undefined ? { ownerGeneration: previous.ownerGeneration } : {}), ...(previous?.cancelRequestedAt ? { cancelRequestedAt: previous.cancelRequestedAt, stopCommandId: previous.stopCommandId } : {}) }
+    const receipt = { completedAt: Date.now(), result, ...(previous?.requestDigest ? { requestDigest: previous.requestDigest } : {}), ...(previous?.ownerGeneration !== undefined ? { ownerGeneration: previous.ownerGeneration } : {}), ...(previous?.processGroups ? { processGroups: previous.processGroups } : {}), ...(previous?.executorProcess ? { executorProcess: previous.executorProcess } : {}), ...(previous?.cancelRequestedAt ? { cancelRequestedAt: previous.cancelRequestedAt, stopCommandId: previous.stopCommandId } : {}) }
     this.receipts.delete(callId)
     this.receipts.set(callId, receipt)
     this.prune()
@@ -305,10 +391,12 @@ export class ExecutionReceiptStore {
   private prune(): void {
     const cutoff = Date.now() - RECEIPT_TTL_MS
     for (const [id, receipt] of this.receipts) {
-      if ('result' in receipt && !this.committingCompletions.has(id) && receipt.completedAt < cutoff) this.receipts.delete(id)
+      if ('result' in receipt && !isArenaReceiptKey(id) && !this.committingCompletions.has(id)
+        && receipt.completedAt < cutoff) this.receipts.delete(id)
     }
     while (this.receipts.size > MAX_RECEIPTS) {
-      const oldest = [...this.receipts].find(([id, receipt]) => 'result' in receipt && !this.committingCompletions.has(id))?.[0]
+      const oldest = [...this.receipts].find(([id, receipt]) => 'result' in receipt
+        && !isArenaReceiptKey(id) && !this.committingCompletions.has(id))?.[0]
       if (oldest === undefined) break
       this.receipts.delete(oldest)
     }

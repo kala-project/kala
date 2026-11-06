@@ -108,6 +108,7 @@ export const McpToolDescriptorSchema = z.object({
 }).strict() satisfies z.ZodType<McpToolDescriptor>
 
 export const ExecutorAnnounceSchema = z.object({
+  arenaKeeperVersion: z.literal(1).optional(),
   computerUsePolicyVersion: z.literal(1).optional(),
   computerUseFeaturePolicyVersion: z.literal(1).optional(),
   appDebugVersion: z.literal(1).optional(),

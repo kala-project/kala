@@ -152,6 +152,12 @@ export type HostServerOptions = {
   messageQueueAuthority?: MessageQueueAuthority
   /** Optional SQL-checked Session owner gate before external model and tool effects. */
   assertSessionEffectOwner?: (sessionId: string) => Promise<void | { ownerGeneration: string }>
+  requireArenaEffectBarrier?: boolean
+  registerArenaEffect?: HostLoopDeps['registerArenaEffect']
+  prepareArenaInitEffect?: HostLoopDeps['prepareArenaInitEffect']
+  releaseNeverDispatchedArenaEffect?: HostLoopDeps['releaseNeverDispatchedArenaEffect']
+  beginArenaDispatch?: (sessionId: string, generation: string, callId: string, requestDigest: string) => Promise<void>
+  claimArenaRepository?: HostLoopDeps['claimArenaRepository']
   /** Capture a healthy local Session owner activation; no SQL/acquisition in the returned predicate. */
   captureSessionEffectOwner?: HostLoopDeps['captureSessionEffectOwner']
   chooseChildReplicaId?: HostLoopDeps['chooseChildReplicaId']
@@ -649,11 +655,27 @@ export async function startHostServer(
   // the same state.
   const lastSessionStatus = new Map<string, string>()
 
+  const arenaAdmissions = new Set<string>()
+  const arenaAdmissionKey = (sessionId: string, callId: string) => `${sessionId}\0${callId}`
   let authorizeExecutorSocket: Parameters<typeof createExecutorRegistry>[5] = async () => false
   const executors = createExecutorRegistry(
     io,
     {
       workspaceIdFor: (sid) => store.get(sid)?.workspaceId,
+      approvedArenaShellParent: (sid, callId) => {
+        if (options.requireArenaEffectBarrier) return false
+        const record = store.get(sid)
+        return Boolean(record && !record.parentSessionId && !(record.delegationDepth ?? 0)
+          && record.state.pendingCalls.some((call) => call.callId === callId
+            && call.name === 'worktree_arena' && call.status === 'dispatched'
+            && call.explicitlyApproved === true))
+      },
+      approvedArenaReadParent: (sid, callId, action, effectCallId, parentAction) => Boolean(options.requireArenaEffectBarrier
+        && arenaAdmissions.has(arenaAdmissionKey(sid, effectCallId))
+        && effectCallId.startsWith(`arena-${action}-`)
+        && store.get(sid)?.state.pendingCalls.some((call) =>
+          call.callId === callId && call.name === 'worktree_arena' && call.status === 'dispatched'
+          && call.input.action === (action === 'probe' ? parentAction : action))),
       ...(options.desktopFeaturePolicy ? { desktopFeaturePolicy: (sid: string) => {
         const record = store.get(sid)
         if (!record) throw new SessionNotFoundError(sid)
@@ -667,6 +689,7 @@ export async function startHostServer(
         },
       } : {}),
       ...(options.assertSessionEffectOwner ? { assertSessionEffectOwner: options.assertSessionEffectOwner } : {}),
+      ...(options.beginArenaDispatch ? { beginArenaDispatch: options.beginArenaDispatch } : {}),
       mcpSchemaHashFor: (sid, name) => store.get(sid)?.config.tools.find((tool) => tool.name === name && tool.name.includes('__') && !tool.name.startsWith('__') && tool.schemaHash && tool.version === tool.schemaHash)?.schemaHash,
     },
     options.toolTimeoutMs ?? DEFAULT_TOOL_ACK_TIMEOUT_MS,
@@ -2222,6 +2245,39 @@ export async function startHostServer(
 
   const extensions = createBuiltinExtensionRegistry(options.extensions)
   const loopDeps: HostLoopDeps = {
+    ...(options.requireArenaEffectBarrier ? { requireArenaEffectBarrier: true } : {}),
+    ...(options.registerArenaEffect ? { registerArenaEffect: async (
+      sessionId: string, ownerGeneration: string, callId: string, workspaceId: string,
+      repositoryIdentity?: string, arenaId?: string,
+    ) => {
+      const complete = await options.registerArenaEffect!(sessionId, ownerGeneration, callId, workspaceId, repositoryIdentity, arenaId)
+      const key = arenaAdmissionKey(sessionId, callId)
+      arenaAdmissions.add(key)
+      return async (releaseArenaId?: string) => {
+        await complete(releaseArenaId)
+        arenaAdmissions.delete(key)
+      }
+    } } : {}),
+    ...(options.prepareArenaInitEffect ? { prepareArenaInitEffect: async (
+      sessionId: string, generation: string, callId: string, workspaceId: string,
+      repositoryIdentity: string, arenaId: string,
+    ) => {
+      const complete = await options.prepareArenaInitEffect!(sessionId, generation, callId, workspaceId,
+        repositoryIdentity, arenaId)
+      const key = arenaAdmissionKey(sessionId, callId)
+      arenaAdmissions.add(key)
+      return async () => {
+        await complete()
+        arenaAdmissions.delete(key)
+      }
+    } } : {}),
+    ...(options.releaseNeverDispatchedArenaEffect ? { releaseNeverDispatchedArenaEffect: async (
+      sessionId: string, generation: string, callId: string, workspaceId: string,
+    ) => {
+      await options.releaseNeverDispatchedArenaEffect!(sessionId, generation, callId, workspaceId)
+      arenaAdmissions.delete(arenaAdmissionKey(sessionId, callId))
+    } } : {}),
+    ...(options.claimArenaRepository ? { claimArenaRepository: options.claimArenaRepository } : {}),
     onDrain: () => appDebug?.revoke('Runtime entered drain. Debug forwarding stopped before checkpoint waits; releasing drain requires an explicit new Start and never replays requests.'),
     ...(options.captureSessionEffectOwner ? { captureSessionEffectOwner: options.captureSessionEffectOwner } : {}),
     store,

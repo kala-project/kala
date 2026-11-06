@@ -904,6 +904,8 @@ export type ExecutorMcpConfigStatusAck = {
 }
 
 export type ExecutorAnnounce = {
+  /** Named Arena Git actions recheck an independent Linux keeper before admission. */
+  arenaKeeperVersion?: 1
   computerUsePolicyVersion?: 1
   computerUseFeaturePolicyVersion?: 1
   appDebugVersion?: 1
@@ -2323,6 +2325,10 @@ export type ExecutorClientToServerEvents = {
  * subscribed by any executor; they were pure type noise. Gone.
  */
 export type ExecutorServerToClientEvents = {
+  'executor:arena_receipt_inspect': (
+    payload: { sessionId: string; callId: string },
+    ack: (result: { state: 'absent' | 'started' | 'completed' | 'denied' | 'unavailable'; ownerGeneration?: string; requestDigest?: string; result?: ToolResultAck; processGroups?: Array<{ pgid: number; leaderStartTicks: string; bootId: string; pidNamespace: string }> }) => void,
+  ) => void
   'executor:app_debug_request': (payload: AppDebugExecutorRequest, ack: (result: AppDebugReply) => void) => void
   'executor:health_ping': (sentAt: number, ack: (executorAt: number) => void) => void
   'executor:mcp_configure': (payload: ExecutorMcpConfigureRequest, ack: (result: ExecutorMcpConfigureAck) => void) => void

@@ -8,6 +8,8 @@ export type ExecutorRuntimeConfig = {
   name?: string
   profile?: string
   sandboxRoots: string[]
+  /** Opt-in external Linux keeper, started outside the Executor service. */
+  arenaKeeperIdentityFile?: string
   credentialFile: string
   installationId?: string
   workspaceId?: string
@@ -39,6 +41,8 @@ export function readExecutorRuntimeConfig(path: string): ExecutorRuntimeConfig {
   const value = JSON.parse(raw) as Partial<ExecutorRuntimeConfig>
   if (value.version !== 1 || typeof value.host !== 'string' || !/^https?:\/\//u.test(value.host) ||
       typeof value.credentialFile !== 'string' || !Array.isArray(value.sandboxRoots) ||
+      (value.arenaKeeperIdentityFile !== undefined
+        && (typeof value.arenaKeeperIdentityFile !== 'string' || !value.arenaKeeperIdentityFile.startsWith('/'))) ||
       value.sandboxRoots.some((root) => typeof root !== 'string' || !root) ||
       (value.workspaceId !== undefined && (typeof value.workspaceId !== 'string' || !/^[0-9A-HJKMNP-TV-Z]{26}$/u.test(value.workspaceId))) ||
       (value.routeHint !== undefined && (typeof value.routeHint !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(value.routeHint)))) throw new Error('Invalid Executor config')

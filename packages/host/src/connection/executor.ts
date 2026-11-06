@@ -15,6 +15,7 @@
  * executor as a legacy fallback.
  */
 
+import { createHash } from 'node:crypto'
 import type { Server, Socket } from 'socket.io'
 import { createTerminalRequestManager, TERMINAL_CREATE_ACK_TIMEOUT_MS, APP_DEBUG_ACK_MS, appDebugFailure, appDebugWait } from '@agent-kernel/shared'
 import type { AppDebugTarget } from './app-debug.js'
@@ -109,9 +110,12 @@ export type ExecutorChangeListener = (change: ServerExecutorChangedPayload) => v
  */
 export type WorkspaceResolver = {
   workspaceIdFor(sessionId: string): string | undefined
+  approvedArenaReadParent?(sessionId: string, parentCallId: string, action: 'probe' | 'status' | 'diff' | 'init' | 'apply' | 'cleanup', effectCallId: string, parentAction?: string): boolean
+  approvedArenaShellParent?(sessionId: string, parentCallId: string): boolean
   desktopManualAuthorizationRequired?(sessionId: string): boolean
   desktopFeaturePolicy?(sessionId: string): { computerUseEnabled: boolean; desktopPreviewEnabled: boolean }
   assertSessionEffectOwner?(sessionId: string): Promise<void | { ownerGeneration: string }>
+  beginArenaDispatch?(sessionId: string, generation: string, callId: string, requestDigest: string): Promise<void>
   /** Session-snapshotted MCP input schema; never substitute a new same-name tool. */
   mcpSchemaHashFor?(sessionId: string, toolName: string): string | undefined
 }
@@ -147,6 +151,12 @@ export type ExecutorLookup = {
 type ExecutorInvalidationReason = 'credential_revoked' | 'identity_authority_unavailable'
 
 export type ExecutorRegistry = ToolDispatcher & ExecutorLookup & {
+  authorizeArenaShell(sessionId: string, callId: string, command: string, workspaceId: string): boolean
+  inspectArenaReceipt(sessionId: string, callId: string): Promise<{
+    state: 'absent' | 'started' | 'completed' | 'denied' | 'unavailable'
+    ownerGeneration?: string; requestDigest?: string; result?: ToolResultAck
+    processGroups?: Array<{ pgid: number; leaderStartTicks: string; bootId: string; pidNamespace: string }>
+  }>
   appDebugTarget(workspaceId: string): AppDebugTarget | undefined
   attach(
     socket: Socket<
@@ -207,6 +217,7 @@ export function createExecutorRegistry(
     pending: Map<string, Pending>
   }
   const byExecutor = new Map<string, Bind>()
+  const arenaShellAdmissions = new Map<string, { parentCallId: string; command: string; workspaceId: string }>()
   const terminalCreates = new WeakMap<Bind, ReturnType<typeof createTerminalRequestManager>>()
   const terminalQueues = new WeakMap<Bind, Promise<void>>()
   const socketToExecutor = new Map<string, string>()
@@ -381,6 +392,7 @@ export function createExecutorRegistry(
             callId: p.callId,
             name: p.name,
             input: p.input,
+            ...(p.name.startsWith('arena_git_') ? { origin: 'host' as const } : {}),
             ...(p.cwd !== undefined ? { cwd: p.cwd } : {}),
             ackTimeoutMs,
             ...(ownerGeneration !== undefined ? { ownerGeneration } : {}),
@@ -570,6 +582,35 @@ export function createExecutorRegistry(
   }
 
   return {
+    authorizeArenaShell(sessionId, callId, command, workspaceId) {
+      const admission = arenaShellAdmissions.get(JSON.stringify([sessionId, callId]))
+      return Boolean(admission && admission.command === command && admission.workspaceId === workspaceId
+        && resolver.approvedArenaShellParent?.(sessionId, admission.parentCallId))
+    },
+    async callArenaShell(sessionId, parentCallId, eff) {
+      if (eff.name !== 'bash' || !/^arena-[0-9A-HJKMNP-TV-Z]{26}$/u.test(eff.callId)
+        || typeof eff.input?.command !== 'string'
+        || !resolver.approvedArenaShellParent?.(sessionId, parentCallId)) {
+        return { ok: false, content: 'Arena Bash requires an explicitly approved parent call' }
+      }
+      const workspaceId = resolver.workspaceIdFor(sessionId)
+      if (!workspaceId) return { ok: false, content: 'Arena Bash workspace unavailable' }
+      const key = JSON.stringify([sessionId, eff.callId])
+      if (arenaShellAdmissions.has(key)) return { ok: false, content: 'Arena Bash call identity already active' }
+      arenaShellAdmissions.set(key, { parentCallId, command: eff.input.command, workspaceId })
+      try { return await this.callTool(sessionId, eff) }
+      finally { arenaShellAdmissions.delete(key) }
+    },
+    async inspectArenaReceipt(sessionId, callId) {
+      if (!/^arena-(probe|init|apply|cleanup|status|diff)-[A-Z0-9]+$/u.test(callId)) return { state: 'unavailable' }
+      const selected = pickBindFor(sessionId)
+      if (!selected.ok || !await authorizeCurrent(selected.bind)) return { state: 'unavailable' }
+      try {
+        return await selected.bind.socket.timeout(5_000).emitWithAck('executor:arena_receipt_inspect', { sessionId, callId })
+      } catch {
+        return { state: 'unavailable' }
+      }
+    },
     async cancelExecution(request) {
       const unavailable: ExecutionCancelAck = { status: 'unavailable' }
       if (!request || !request.sessionId || !request.callId || !request.stopCommandId
@@ -850,12 +891,27 @@ export function createExecutorRegistry(
       }
     },
     async callTool(sessionId, eff: CallToolEffect, turnId?: string) {
+      const arenaAction = ['probe', 'status', 'diff', 'init', 'apply', 'cleanup'].find((action) => eff.name === `arena_git_${action}`) as 'probe' | 'status' | 'diff' | 'init' | 'apply' | 'cleanup' | undefined
+      const preDispatchDenied = (content: string) => ({
+        ok: false, content,
+        failure: { code: 'arena_pre_dispatch_rejected', category: 'precondition' as const,
+          outcome: 'blocked' as const, retryable: false, responsibility: 'system' as const },
+      })
+      if (arenaAction && (typeof eff.input.parentCallId !== 'string'
+        || !resolver.approvedArenaReadParent?.(sessionId, eff.input.parentCallId, arenaAction, eff.callId,
+          typeof eff.input.parentAction === 'string' ? eff.input.parentAction : undefined))) {
+        return preDispatchDenied(`${eff.name} requires an approved worktree_arena ${arenaAction} parent call`)
+      }
       const picked = pickBindFor(sessionId)
-      if (!picked.ok) return { ok: false, content: picked.reason, failure: { code: 'workspace_offline', category: 'precondition', outcome: 'blocked', retryable: true, responsibility: 'workspace' } }
+      if (!picked.ok) return arenaAction ? preDispatchDenied(picked.reason)
+        : { ok: false, content: picked.reason, failure: { code: 'workspace_offline', category: 'precondition', outcome: 'blocked', retryable: true, responsibility: 'workspace' } }
       const bind = picked.bind
+      if (arenaAction && bind.announcement.arenaKeeperVersion !== 1) {
+        return preDispatchDenied('Named Arena Git requires an updated Executor with an independent PID-namespace keeper')
+      }
       const authorization = authorizeCurrent(bind)
       const authorized = typeof authorization === 'boolean' ? authorization : await authorization
-      if (!authorized) return { ok: false, content: 'executor unavailable' }
+      if (!authorized) return arenaAction ? preDispatchDenied('executor unavailable') : { ok: false, content: 'executor unavailable' }
       if (isUnavailableMcpTool(bind.announcement, eff.name, knownMcpToolNames, resolver.mcpSchemaHashFor?.(sessionId, eff.name))) {
         return {
           ok: false,
@@ -865,7 +921,7 @@ export function createExecutorRegistry(
       }
       const ackTimeoutMs = ackTimeoutMsFor(eff.name, eff.input, toolAckTimeoutMs)
       const owner = resolver.assertSessionEffectOwner ? await resolver.assertSessionEffectOwner(sessionId) : undefined
-      if (!isCurrent(bind)) return { ok: false, content: 'executor unavailable before dispatch' }
+      if (!isCurrent(bind)) return arenaAction ? preDispatchDenied('executor unavailable before dispatch') : { ok: false, content: 'executor unavailable before dispatch' }
       const desktopManualAuthorizationRequired = eff.name === 'computer_use'
         ? resolver.desktopManualAuthorizationRequired?.(sessionId) ?? true : undefined
       const features = eff.name === 'computer_use' ? resolver.desktopFeaturePolicy?.(sessionId) : undefined
@@ -882,6 +938,18 @@ export function createExecutorRegistry(
           ok: false, content: 'Update this Executor in place to use desktop operations without extra Computer-panel authorization. Keep its existing workspace and credentials.',
           failure: { code: 'executor_update_required', category: 'precondition', outcome: 'blocked', retryable: true, responsibility: 'workspace' },
         }
+      }
+      if (arenaAction && resolver.beginArenaDispatch) {
+        if (!owner || eff.input.ownerGeneration !== owner.ownerGeneration) {
+          return preDispatchDenied('Arena request owner generation changed before dispatch')
+        }
+        const request = [sessionId, eff.callId, eff.name, eff.input, eff.cwd ?? null, 'host']
+        const canonical = JSON.stringify(request, (_key, value: unknown) =>
+          value && typeof value === 'object' && !Array.isArray(value)
+            ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
+            : value)
+        await resolver.beginArenaDispatch(sessionId, owner.ownerGeneration, eff.callId,
+          createHash('sha256').update(canonical).digest('hex'))
       }
       const key = JSON.stringify([sessionId, eff.callId])
       audit?.log({ action: 'tool.dispatch', actor: { kind: 'system' }, target: { sessionId, workspaceId: bind.announcement.workspaceId, callId: eff.callId, toolName: eff.name }, outcome: 'ok', metadata: { cwd: eff.cwd } })
@@ -916,6 +984,7 @@ export function createExecutorRegistry(
             callId: eff.callId,
             name: eff.name,
             input: eff.input,
+            ...(arenaAction ? { origin: 'host' as const } : {}),
             ...(eff.cwd !== undefined ? { cwd: eff.cwd } : {}),
             ackTimeoutMs,
             ...(turnId ? { turnId } : {}),

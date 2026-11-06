@@ -22,6 +22,8 @@ import {
   createExecutorRegistry,
   type WorkspaceResolver,
 } from './executor.js'
+import { authorizeExecutorShellCall } from './executor-ns.js'
+import { executionRequestDigest } from '../../../executor/src/execution-receipts.js'
 
 type EmittedCall = {
   event:
@@ -121,6 +123,55 @@ function callEffect(
 }
 
 describe('ExecutorRegistry', () => {
+  it('does not send a named Arena effect to an old Executor without keeper enforcement', async () => {
+    const reg = createExecutorRegistry(fakeIo() as never, {
+      ...makeResolver({ x: 'ws-default' }),
+      approvedArenaReadParent: () => true,
+    })
+    const old = makeFakeSocket('old-arena-executor')
+    reg.attach(old as never, announceOf('old-arena-executor'))
+    await expect(reg.callTool('x', callEffect('arena-init-123', 'arena_git_init', undefined,
+      { parentCallId: 'approved', ownerGeneration: '1' }))).resolves.toMatchObject({
+      ok: false, content: expect.stringContaining('independent PID-namespace keeper'),
+    })
+    expect(old.emitted).toHaveLength(0)
+  })
+
+  it('binds synthetic Arena shell authorization to the approved parent, exact command and workspace until receipt', async () => {
+    let approved = false
+    const reg = createExecutorRegistry(fakeIo() as never, {
+      ...makeResolver({ x: 'ws-default' }),
+      approvedArenaShellParent: (sid, parent) => approved && sid === 'x' && parent === 'parent',
+    })
+    const socket = makeFakeSocket('arena-shell')
+    reg.attach(socket as never, announceOf('arena-shell'))
+    const command = 'git reset --hard HEAD'
+    const callId = 'arena-01J00000000000000000000000'
+    const effect = callEffect(callId, 'bash', undefined, { command })
+    await expect(reg.callArenaShell('x', 'parent', effect)).resolves.toMatchObject({ ok: false })
+    await expect(reg.callArenaShell('x', 'other', effect)).resolves.toMatchObject({ ok: false })
+    expect(socket.emitted).toHaveLength(0)
+    approved = true
+    const running = reg.callArenaShell('x', 'parent', effect)
+    await vi.waitFor(() => expect(socket.emitted).toHaveLength(1))
+    const record = { sessionId: 'x', workspaceId: 'ws-default', state: { pendingCalls: [] } } as never
+    const authorization = (candidateCommand: string, candidateCallId = callId, workspace = 'ws-default') =>
+      authorizeExecutorShellCall(record, workspace, {
+        sessionId: 'x', callId: candidateCallId, name: 'bash', command: candidateCommand,
+      }, reg.authorizeArenaShell('x', candidateCallId, candidateCommand, workspace))
+    expect(authorization(command)).toBe(true)
+    expect(authorization(command, 'arena-01J00000000000000000000000001')).toBe(false)
+    expect(authorization('git reset --hard HEAD~1')).toBe(false)
+    expect(authorization(command, callId, 'other-workspace')).toBe(false)
+    expect(authorization('rm -rf /')).toBe(false)
+    approved = false
+    expect(authorization(command)).toBe(false)
+    socket.emitted[0]!.ack!({ callId, ok: true, content: 'done' })
+    await expect(running).resolves.toMatchObject({ ok: true })
+    approved = true
+    expect(authorization(command)).toBe(false)
+  })
+
   it('routes Stop to the authenticated child workspace, and never accepts a disconnected or fenced cancellation ACK', async () => {
     let owner = '5'
     const registry = createExecutorRegistry(fakeIo() as never, {
@@ -300,6 +351,82 @@ describe('ExecutorRegistry', () => {
     await expect(reg.callTool('x', callEffect('must-not-dispatch'))).rejects.toThrow('owner generation fenced')
     expect(replacement.emitted).toHaveLength(0)
     expect(assertSessionEffectOwner).toHaveBeenCalledTimes(3)
+  })
+
+  it('only emits named Arena actions with an approved parent and matching owner generation', async () => {
+    const reg = createExecutorRegistry(fakeIo() as never, {
+      ...makeResolver({ x: 'ws-default' }),
+      assertSessionEffectOwner: async () => ({ ownerGeneration: '9' }),
+      approvedArenaReadParent: (_sessionId, parentCallId, action, effectCallId) =>
+        parentCallId === 'approved' && effectCallId.startsWith(`arena-${action}-`),
+    }, 5_000)
+    const socket = makeFakeSocket('arena-status')
+    reg.attach(socket as never, { ...announceOf('arena-executor'), arenaKeeperVersion: 1 })
+    const effect = { kind: 'call_tool' as const, callId: 'arena-status-123',
+      name: 'arena_git_status', input: { parentCallId: 'approved', ownerGeneration: '9' } }
+    await expect(reg.callTool('x', { ...effect, input: { ...effect.input, parentCallId: 'denied' } }))
+      .resolves.toMatchObject({ ok: false })
+    expect(socket.emitted).toHaveLength(0)
+    const running = reg.callTool('x', effect)
+    await vi.waitFor(() => expect(socket.emitted).toHaveLength(1))
+    expect(socket.emitted[0]!.payload).toMatchObject({
+      origin: 'host', ownerGeneration: '9', input: { parentCallId: 'approved', ownerGeneration: '9' },
+    })
+
+    socket.emitted[0]!.ack!({ callId: effect.callId, ok: true, content: '{}' })
+    await expect(running).resolves.toMatchObject({ ok: true })
+    const diff = { ...effect, name: 'arena_git_diff', callId: 'arena-diff-123' }
+    const diffRunning = reg.callTool('x', diff)
+    await vi.waitFor(() => expect(socket.emitted).toHaveLength(2))
+    expect(socket.emitted[1]!.payload).toMatchObject({ name: 'arena_git_diff', origin: 'host', ownerGeneration: '9' })
+    socket.emitted[1]!.ack!({ callId: diff.callId, ok: true, content: '{}' })
+    await expect(diffRunning).resolves.toMatchObject({ ok: true })
+    for (const action of ['init', 'apply', 'cleanup']) {
+      const mutation = { ...effect, name: `arena_git_${action}`, callId: `arena-${action}-123` }
+      await expect(reg.callTool('x', { ...mutation, callId: 'arena-status-123' }))
+        .resolves.toMatchObject({ ok: false })
+      const runningMutation = reg.callTool('x', mutation)
+      await vi.waitFor(() => expect(socket.emitted).toHaveLength(action === 'init' ? 3 : action === 'apply' ? 4 : 5))
+      const emitted = socket.emitted.at(-1)!
+      expect(emitted.payload).toMatchObject({ name: mutation.name, origin: 'host', ownerGeneration: '9' })
+      emitted.ack!({ callId: mutation.callId, ok: true, content: '{}' })
+      await expect(runningMutation).resolves.toMatchObject({ ok: true })
+    }
+  })
+
+  it('commits a fenced Arena dispatch intent before the first remote frame, never on a pre-dispatch refusal', async () => {
+    let fence = false
+    const beginArenaDispatch = vi.fn(async (_session: string, generation: string) => {
+      expect(generation).toBe('9')
+      if (fence) throw new Error('PG owner fenced before dispatch')
+    })
+    const registry = createExecutorRegistry(fakeIo() as never, {
+      ...makeResolver({ x: 'ws-default' }),
+      assertSessionEffectOwner: async () => ({ ownerGeneration: '9' }),
+      approvedArenaReadParent: (_session, parent) => parent === 'approved',
+      beginArenaDispatch,
+    }, 5_000)
+    const socket = makeFakeSocket('arena-dispatch-intent')
+    registry.attach(socket as never, announceOf('arena-no-keeper'))
+    const effect = { kind: 'call_tool' as const, callId: 'arena-probe-PREPARED',
+      name: 'arena_git_probe', input: { parentCallId: 'approved', ownerGeneration: '9' } }
+    await expect(registry.callTool('x', effect)).resolves.toMatchObject({
+      ok: false, failure: { code: 'arena_pre_dispatch_rejected' },
+    })
+    expect(beginArenaDispatch).not.toHaveBeenCalled()
+    expect(socket.emitted).toHaveLength(0)
+    registry.attach(socket as never, { ...announceOf('arena-no-keeper'), arenaKeeperVersion: 1 })
+    fence = true
+    await expect(registry.callTool('x', effect)).rejects.toThrow('PG owner fenced')
+    expect(socket.emitted).toHaveLength(0)
+    fence = false
+    const running = registry.callTool('x', effect)
+    await vi.waitFor(() => expect(socket.emitted).toHaveLength(1))
+    expect(beginArenaDispatch).toHaveBeenCalledWith('x', '9', effect.callId, executionRequestDigest({
+      sessionId: 'x', callId: effect.callId, name: effect.name, input: effect.input, origin: 'host',
+    }))
+    socket.emitted[0]!.ack!({ callId: effect.callId, ok: true, content: '{}' })
+    await expect(running).resolves.toMatchObject({ ok: true })
   })
 
   it('measures Host to Executor latency and reports an offline workspace', async () => {

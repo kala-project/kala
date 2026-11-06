@@ -1,0 +1,18 @@
+[Unit]
+Description=Independent Kala Arena PID-namespace keeper (external Executor host only)
+After=network-online.target
+
+[Service]
+Type=simple
+# Replace both placeholders; use the same OS identity and PID namespace as the external Executor.
+User=<executor-service-user>
+RuntimeDirectory=kala-arena-keeper
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/flock --no-fork --nonblock /run/kala-arena-keeper/keeper.lock <installed-kala-executor-executable> arena-keeper /run/kala-arena-keeper/identity.json
+Restart=always
+RestartSec=2s
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

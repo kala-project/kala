@@ -60,6 +60,7 @@ import { homedir, hostname, tmpdir } from 'node:os'
 import { ulid } from 'ulid'
 import { parseMcpServerDeclaration, parseMcpServers, type McpServerConfig } from '../src/mcp-config.js'
 import { serveDesktopCompanion } from '../src/computer-use/companion.js'
+import { runArenaKeeper } from '../src/arena-keeper.js'
 
 const logger = createRuntimeLogger('kala-executor')
 
@@ -69,6 +70,7 @@ type Args = {
   host?: string
   name?: string
   sandboxRoots: string[]
+  arenaKeeperIdentityFile?: string
   token?: string
   invite?: string
   id?: string
@@ -127,6 +129,7 @@ function parseArgs(argv: readonly string[]): Args {
       case '--host':
       case '--name':
       case '--sandbox-root':
+      case '--arena-keeper-file':
       case '--token':
       case '--invite':
       case '--id':
@@ -138,6 +141,7 @@ function parseArgs(argv: readonly string[]): Args {
         if (key === '--host') out.host = value
         else if (key === '--name') out.name = value
         else if (key === '--sandbox-root') out.sandboxRoots.push(value)
+        else if (key === '--arena-keeper-file') out.arenaKeeperIdentityFile = value
         else if (key === '--token') out.token = value
         else if (key === '--invite') out.invite = value
         else if (key === '--id') out.id = value
@@ -174,6 +178,8 @@ Options:
   --host <url>               Host URL to connect to. Defaults to HOST_URL.
   --name <workspace>         Workspace display name. Defaults to WORKSPACE_NAME or hostname.
   --sandbox-root <path>      Allowed filesystem root. Repeatable. Defaults to SANDBOX_ROOTS.
+  --arena-keeper-file <path> Opt-in, independently operated Linux keeper identity file.
+  arena-keeper <path>        Run an independent Linux keeper; service manager must restart it.
   --token <token>            Long-term executor token. Defaults to EXECUTOR_TOKEN.
   --invite <token>           One-time invite token. Defaults to EXECUTOR_INVITE.
   --id <id>                  Executor id. Defaults to EXECUTOR_ID or generated id.
@@ -476,6 +482,11 @@ async function runServiceCommand(command: Command): Promise<{ code: number; stdo
 }
 
 async function main(argv = process.argv.slice(2)): Promise<void> {
+  if (argv[0] === 'arena-keeper') {
+    if (argv.length !== 2) throw new Error('Usage: kala-executor arena-keeper <absolute-owner-only-identity-file>')
+    await runArenaKeeper(argv[1]!)
+    return
+  }
   if (argv[0] === 'desktop') {
     if (argv[1] !== 'serve') throw new Error('Usage: kala-executor desktop serve [--config <private-connection-file>]')
     let configPath = join(homedir(), '.kala', 'desktop-bridge', 'connection.json')
@@ -664,6 +675,8 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
     workspaceId,
     workspaceName,
     ...(sandboxRoots.length > 0 ? { sandboxRoots } : {}),
+    ...((args.arenaKeeperIdentityFile ?? managed?.arenaKeeperIdentityFile)
+      ? { arenaKeeperIdentityFile: args.arenaKeeperIdentityFile ?? managed?.arenaKeeperIdentityFile } : {}),
     executorId: effectiveExecutorId,
     ...(managed?.installationId ? { installId: managed.installationId } : {}),
     ...(mcpServers.length > 0 ? { mcpServers } : {}),

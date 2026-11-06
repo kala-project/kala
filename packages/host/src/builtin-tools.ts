@@ -354,6 +354,45 @@ const agentToolset: ToolsetPlugin = {
         },
         required: ['prompt'],
       }),
+      tool('worktree_arena', 'host', 'write', true, 'worktree_arena', {
+        purpose: 'Provision, inspect, diff, apply, and clean up isolated Git worktrees (.kala-arena/<arenaId>/<candidateId>) for parallel competing sub-agent implementations.',
+        whenToUse: ['Initialize isolated worktrees before delegating competing implementations or refactors to parallel sub-agents.', 'Compare candidate diffs side by side, apply the winning candidate to the primary workspace, and clean up worktrees.'],
+        constraints: ['Instruct each candidate sub-agent to read/edit files and run shell commands only inside its assigned worktreePath.', 'Always clean up arena worktrees when finished (action=cleanup or apply with cleanup_after=true).'],
+      }, {
+        type: 'object',
+        required: ['action'],
+        properties: {
+          action: { type: 'string', enum: ['init', 'status', 'diff', 'apply', 'cleanup'] },
+          candidates: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 6,
+            description: 'Required for action=init. Candidate IDs or objects { id, label?, description? }.',
+            items: {
+              anyOf: [
+                { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,48}$' },
+                {
+                  type: 'object',
+                  required: ['id'],
+                  additionalProperties: false,
+                  properties: {
+                    id: { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,48}$' },
+                    label: { type: 'string', minLength: 1, maxLength: 120 },
+                    description: { type: 'string', minLength: 1, maxLength: 500 },
+                  },
+                },
+              ],
+            },
+          },
+          base_ref: { type: 'string', description: 'Optional Git ref to branch from for action=init (default HEAD).' },
+          arena_id: { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,48}$', description: 'Optional arena identifier for action=init.' },
+          candidate_id: { type: 'string', pattern: '^[a-zA-Z0-9_-]{1,48}$', description: 'Required for action=apply; optional filter for action=diff or action=cleanup.' },
+          strategy: { type: 'string', enum: ['merge', 'patch'], description: 'Apply strategy for action=apply (default merge).' },
+          cleanup_after: { type: 'boolean', description: 'Clean up all arena worktrees after action=apply succeeds.' },
+          stat_only: { type: 'boolean', description: 'Return only diff stats for action=diff.' },
+          max_chars: { type: 'integer', minimum: 500, maximum: 64000, description: 'Maximum unified diff characters per candidate for action=diff.' },
+        },
+      }),
       tool('read_agent', 'host', 'read', false, 'read_agent', {
         purpose: 'Read or await a child sub-agent status, turn progress, and final output by agent_id.',
         whenToUse: ['Check progress or await completion (`wait: true`) of a sub-agent started with `mode: "background"` or resumed via `write_agent`.'],

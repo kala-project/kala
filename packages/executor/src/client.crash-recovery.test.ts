@@ -2,7 +2,6 @@ import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process'
 import { createServer, type Server as HttpServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { once } from 'node:events'
@@ -108,7 +107,7 @@ describe('executor process crash recovery', () => {
   })
 
   it.skipIf(process.platform === 'win32')('does not repeat an unresolved shell effect after SIGKILL and still replays completed calls', async () => {
-    testRoot = await mkdtemp(join(tmpdir(), 'kala-executor-crash-'))
+    testRoot = await mkdtemp(join(process.cwd(), 'kala-executor-crash-'))
     const markerPath = join(testRoot, 'effects.log')
     const gatePath = join(testRoot, 'release-first-shell')
     const shellPidPath = join(testRoot, 'first-shell.pid')
@@ -117,14 +116,15 @@ describe('executor process crash recovery', () => {
     http = createServer()
     io = new Server(http, { transports: ['websocket'] })
     const announcedSockets: ExecutorSocket[] = []
+    let approvedParent: { sessionId: string; callId: string; command: string;
+      name: 'shell'; explicitlyApproved: true } | undefined
     const socketWaiters: Array<(socket: ExecutorSocket) => void> = []
-    const approvedShells = new Map<string, string>()
     const authorizedCalls: string[] = []
     io.of('/executor').on('connection', (socket) => {
       socket.on('executor:shell_authorize', (request, ack) => {
-        const authorized = request.sessionId === 'session-crash-regression'
-          && request.name === 'shell'
-          && approvedShells.get(request.callId) === request.command
+        const authorized = Boolean(approvedParent && approvedParent.sessionId === request.sessionId
+          && approvedParent.callId === request.callId && approvedParent.name === request.name
+          && approvedParent.command === request.command && approvedParent.explicitlyApproved)
         if (authorized) authorizedCalls.push(request.callId)
         ack({ authorized })
       })
@@ -193,7 +193,11 @@ describe('executor process crash recovery', () => {
         timeout_ms: 15_000,
       },
     }
-    approvedShells.set(unresolvedCall.callId, unresolvedCall.input.command as string)
+    const denied = await dispatch(firstSocket, unresolvedCall)
+    expect(denied).toMatchObject({ ok: false, content: expect.stringContaining('no verified, matching user approval') })
+    expect(await readIfPresent(markerPath)).toBe('')
+    approvedParent = { sessionId: unresolvedCall.sessionId, callId: unresolvedCall.callId,
+      name: 'shell', command: String(unresolvedCall.input.command), explicitlyApproved: true }
     firstSocket.emit('tool:call', unresolvedCall, () => undefined)
     await waitFor(async () => lines(await readIfPresent(markerPath)).includes('BEGIN'), 'first shell never reached its side effect')
     expect(authorizedCalls).toEqual([unresolvedCall.callId])

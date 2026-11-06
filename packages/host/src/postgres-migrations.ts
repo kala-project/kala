@@ -223,6 +223,605 @@ const migrations: readonly PostgresMigration[] = [
           OR completed_at IS NULL OR completion_sequence IS NOT NULL)`,
     ],
   },
+  {
+    version: 19,
+    name: 'active_workspace_effect_barrier',
+    statements: (schema) => [
+      `CREATE TABLE IF NOT EXISTS ${schema}.tenant_runtime_active_workspace_effects (
+        organization_id text NOT NULL,
+        unit_id text NOT NULL,
+        resource_type text NOT NULL CHECK (resource_type = 'session'),
+        resource_id text NOT NULL,
+        effect_id text NOT NULL,
+        owner_token text NOT NULL,
+        generation bigint NOT NULL CHECK (generation > 0),
+        created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        PRIMARY KEY (organization_id, unit_id, resource_type, resource_id, effect_id),
+        FOREIGN KEY (organization_id, unit_id, resource_type, resource_id)
+          REFERENCES ${schema}.tenant_runtime_resource_ownerships (organization_id, unit_id, resource_type, resource_id)
+          ON DELETE RESTRICT
+      )`,
+    ],
+  },
+  {
+    version: 20,
+    name: 'exclusive_workspace_effect_admission',
+    statements: (schema) => [
+      `ALTER TABLE ${schema}.tenant_runtime_active_workspace_effects
+        ADD COLUMN workspace_id text`,
+      `CREATE UNIQUE INDEX tenant_runtime_active_workspace_effects_workspace_uidx
+        ON ${schema}.tenant_runtime_active_workspace_effects (workspace_id)
+        WHERE workspace_id IS NOT NULL`,
+    ],
+  },
+  {
+    version: 21,
+    name: 'arena_canonical_repository_claim',
+    statements: (schema) => [
+      `CREATE TABLE ${schema}.tenant_runtime_arena_repository_claims (
+        repository_identity text PRIMARY KEY,
+        organization_id text NOT NULL,
+        unit_id text NOT NULL,
+        resource_type text NOT NULL DEFAULT 'session' CHECK (resource_type = 'session'),
+        resource_id text NOT NULL,
+        arena_id text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        FOREIGN KEY (organization_id, unit_id, resource_type, resource_id)
+          REFERENCES ${schema}.tenant_runtime_resource_ownerships (organization_id, unit_id, resource_type, resource_id)
+          ON DELETE RESTRICT
+      )`,
+      `ALTER TABLE ${schema}.tenant_runtime_active_workspace_effects
+        ADD COLUMN repository_identity text`,
+      `CREATE UNIQUE INDEX tenant_runtime_active_workspace_effects_repo_uidx
+        ON ${schema}.tenant_runtime_active_workspace_effects (repository_identity)
+        WHERE repository_identity IS NOT NULL`,
+    ],
+  },
+  {
+    version: 22,
+    name: 'audited_arena_effect_reconciliation',
+    statements: (schema) => [
+      `CREATE TABLE ${schema}.tenant_runtime_arena_reconciliations (
+        organization_id text NOT NULL,
+        unit_id text NOT NULL,
+        resource_id text NOT NULL,
+        effect_id text NOT NULL,
+        generation bigint NOT NULL,
+        repository_identity text,
+        operator_id text NOT NULL,
+        incident_id text NOT NULL,
+        evidence jsonb NOT NULL,
+        reconciled_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        PRIMARY KEY (organization_id, unit_id, resource_id, effect_id)
+      )`,
+    ],
+  },
+  {
+    version: 23,
+    name: 'operator_only_arena_effect_reconciliation',
+    statements: (schema) => [
+      `CREATE FUNCTION ${schema}.kala_reconcile_arena_effect(
+        p_org text, p_unit text, p_session text, p_effect text, p_generation bigint,
+        p_workspace text, p_identity text, p_operator text, p_incident text,
+        p_evidence jsonb, p_release_arena text, p_arena_state jsonb)
+        RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $arena$
+        DECLARE owner_row record; effect_row record; latest_state jsonb;
+        BEGIN
+          IF p_operator IS DISTINCT FROM session_user OR p_operator = ''
+            OR p_org = '' OR p_unit = '' OR p_session = '' OR p_effect = ''
+            OR p_workspace = '' OR p_identity = '' OR p_incident = ''
+            OR p_generation < 1 OR p_evidence IS NULL OR p_arena_state IS NULL
+            OR jsonb_typeof(p_evidence) <> 'object'
+            OR length(p_evidence::text) > 32000
+            OR (p_release_arena IS NOT NULL AND (p_release_arena = ''
+              OR p_evidence->>'action' <> 'cleanup')) THEN
+            RAISE EXCEPTION 'invalid Arena operator reconciliation' USING ERRCODE = 'P0001';
+          END IF;
+          SELECT owner_token, generation, expires_at INTO owner_row FROM ${schema}.tenant_runtime_resource_ownerships
+            WHERE organization_id = p_org AND unit_id = p_unit
+              AND resource_type = 'session' AND resource_id = p_session FOR UPDATE;
+          SELECT owner_token, generation, workspace_id, repository_identity INTO effect_row
+            FROM ${schema}.tenant_runtime_active_workspace_effects
+            WHERE organization_id = p_org AND unit_id = p_unit AND resource_type = 'session'
+              AND resource_id = p_session AND effect_id = p_effect FOR UPDATE;
+          IF NOT FOUND OR owner_row.expires_at > clock_timestamp()
+            OR owner_row.owner_token IS DISTINCT FROM effect_row.owner_token
+            OR owner_row.generation IS DISTINCT FROM p_generation
+            OR effect_row.generation IS DISTINCT FROM p_generation
+            OR effect_row.workspace_id IS DISTINCT FROM p_workspace
+            OR effect_row.repository_identity IS DISTINCT FROM p_identity THEN
+            RAISE EXCEPTION 'Arena effect ownership changed' USING ERRCODE = 'P0001';
+          END IF;
+          PERFORM 1 FROM ${schema}.tenant_session_latest_projection
+            WHERE tenant_id = p_org AND session_id = p_session AND document IS NOT NULL
+              AND NOT document ? '__kalaSessionDeletion' FOR SHARE;
+          IF NOT FOUND THEN RAISE EXCEPTION 'Arena Session is not live' USING ERRCODE = 'P0001'; END IF;
+          SELECT events.payload #> '{entry,payload,arena}' INTO latest_state
+            FROM ${schema}.tenant_runtime_hot_events AS events
+            WHERE events.tenant_id = p_org AND events.scope_type = 'session' AND events.scope_id = p_session
+              AND events.payload #>> '{entry,kind}' = 'runtime_metadata'
+              AND events.payload #>> '{entry,action}' = 'worktree_arena.state'
+            ORDER BY events.sequence DESC LIMIT 1;
+          IF latest_state IS DISTINCT FROM p_arena_state THEN
+            RAISE EXCEPTION 'Arena state changed after verification' USING ERRCODE = 'P0001';
+          END IF;
+          IF p_release_arena IS NOT NULL THEN
+            DELETE FROM ${schema}.tenant_runtime_arena_repository_claims
+              WHERE repository_identity = p_identity AND organization_id = p_org
+                AND unit_id = p_unit AND resource_id = p_session AND arena_id = p_release_arena;
+            IF NOT FOUND THEN RAISE EXCEPTION 'Arena claim changed' USING ERRCODE = 'P0001'; END IF;
+          END IF;
+          INSERT INTO ${schema}.tenant_runtime_arena_reconciliations
+            (organization_id, unit_id, resource_id, effect_id, generation, repository_identity,
+             operator_id, incident_id, evidence)
+            VALUES (p_org, p_unit, p_session, p_effect, p_generation, p_identity,
+              p_operator, p_incident, p_evidence);
+          DELETE FROM ${schema}.tenant_runtime_active_workspace_effects
+            WHERE organization_id = p_org AND unit_id = p_unit AND resource_type = 'session'
+              AND resource_id = p_session AND effect_id = p_effect AND owner_token = effect_row.owner_token
+              AND generation = p_generation AND workspace_id = p_workspace
+              AND repository_identity = p_identity;
+          IF NOT FOUND THEN RAISE EXCEPTION 'Arena effect changed' USING ERRCODE = 'P0001'; END IF;
+        END
+        $arena$`,
+      `REVOKE ALL ON FUNCTION ${schema}.kala_reconcile_arena_effect(
+        text, text, text, text, bigint, text, text, text, text, jsonb, text, jsonb) FROM PUBLIC`,
+      `CREATE FUNCTION ${schema}.kala_arena_operator_state(p_org text, p_session text)
+        RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $arena$
+          SELECT events.payload #> '{entry,payload,arena}'
+          FROM ${schema}.tenant_runtime_hot_events AS events
+          WHERE events.tenant_id = p_org AND events.scope_type = 'session' AND events.scope_id = p_session
+            AND events.payload #>> '{entry,kind}' = 'runtime_metadata'
+            AND events.payload #>> '{entry,action}' = 'worktree_arena.state'
+            AND EXISTS (SELECT 1 FROM ${schema}.tenant_session_latest_projection AS projection
+              WHERE projection.tenant_id = p_org AND projection.session_id = p_session
+                AND projection.document IS NOT NULL
+                AND NOT projection.document ? '__kalaSessionDeletion')
+          ORDER BY events.sequence DESC LIMIT 1
+        $arena$`,
+      `REVOKE ALL ON FUNCTION ${schema}.kala_arena_operator_state(text, text) FROM PUBLIC`,
+      `CREATE TABLE ${schema}.tenant_runtime_arena_state_repairs (
+        organization_id text NOT NULL,
+        unit_id text NOT NULL,
+        resource_id text NOT NULL,
+        effect_id text NOT NULL,
+        generation bigint NOT NULL,
+        operator_id text NOT NULL,
+        incident_id text NOT NULL,
+        old_state jsonb NOT NULL,
+        new_state jsonb NOT NULL,
+        evidence jsonb NOT NULL,
+        repaired_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        PRIMARY KEY (organization_id, unit_id, resource_id, effect_id)
+      )`,
+      `CREATE FUNCTION ${schema}.kala_arena_repair_init(
+        p_org text, p_unit text, p_session text, p_effect text, p_generation bigint,
+        p_workspace text, p_identity text, p_operator text, p_incident text,
+        p_old jsonb, p_new jsonb, p_evidence jsonb)
+        RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $arena$
+        DECLARE owner_row record; effect_row record; lease_row record; projection_row record;
+          current_state jsonb; old_candidate jsonb; new_candidate jsonb; next_sequence bigint; index_number integer;
+        BEGIN
+          IF p_operator IS DISTINCT FROM session_user OR p_operator = '' OR p_incident = ''
+            OR p_org = '' OR p_unit = '' OR p_session = '' OR p_workspace = '' OR p_identity = ''
+            OR p_effect !~ '^arena-init-[A-Z0-9]+$' OR p_generation < 1
+            OR p_old->>'status' IS DISTINCT FROM 'initializing'
+            OR p_new->>'status' IS DISTINCT FROM 'active'
+            OR p_old->>'arenaId' IS DISTINCT FROM p_new->>'arenaId'
+            OR p_old->>'baseRef' IS DISTINCT FROM p_new->>'baseRef'
+            OR p_new->>'repositoryIdentity' IS DISTINCT FROM p_identity
+            OR p_new->>'baseSha' !~ '^[a-f0-9]{40,64}$'
+            OR p_new->>'repoRoot' IS NULL
+            OR jsonb_typeof(p_old->'candidates') IS DISTINCT FROM 'array'
+            OR jsonb_typeof(p_new->'candidates') IS DISTINCT FROM 'array'
+            OR jsonb_array_length(p_old->'candidates') NOT BETWEEN 1 AND 6
+            OR jsonb_array_length(p_old->'candidates') <> jsonb_array_length(p_new->'candidates')
+            OR p_evidence IS NULL OR length(p_evidence::text) > 32000
+            OR length(p_new::text) > 32000 THEN
+            RAISE EXCEPTION 'invalid Arena init repair' USING ERRCODE = 'P0001';
+          END IF;
+          FOR index_number IN 0..jsonb_array_length(p_old->'candidates') - 1 LOOP
+            old_candidate := p_old->'candidates'->index_number;
+            new_candidate := p_new->'candidates'->index_number;
+            IF old_candidate->>'status' IS DISTINCT FROM 'pending'
+              OR new_candidate->>'status' IS DISTINCT FROM 'active'
+              OR old_candidate->>'id' !~ '^[A-Za-z0-9_-]{1,48}$'
+              OR old_candidate->>'branch' IS DISTINCT FROM
+                ('kala-arena/' || (p_old->>'arenaId') || '/' || (old_candidate->>'id'))
+              OR new_candidate - 'status' - 'worktreePath' IS DISTINCT FROM
+                old_candidate - 'status' - 'worktreePath'
+              OR new_candidate->>'worktreePath' IS DISTINCT FROM
+                (p_new->>'repoRoot') || '/.kala-arena/' || (p_new->>'arenaId') || '/' || (new_candidate->>'id') THEN
+              RAISE EXCEPTION 'Arena candidate repair changed identity' USING ERRCODE = 'P0001';
+            END IF;
+          END LOOP;
+          SELECT owner_token, generation, expires_at INTO owner_row FROM ${schema}.tenant_runtime_resource_ownerships
+            WHERE organization_id = p_org AND unit_id = p_unit
+              AND resource_type = 'session' AND resource_id = p_session FOR UPDATE;
+          SELECT owner_token, generation, workspace_id, repository_identity INTO effect_row
+            FROM ${schema}.tenant_runtime_active_workspace_effects
+            WHERE organization_id = p_org AND unit_id = p_unit AND resource_type = 'session'
+              AND resource_id = p_session AND effect_id = p_effect FOR UPDATE;
+          IF NOT FOUND OR owner_row.expires_at > clock_timestamp()
+            OR owner_row.owner_token IS DISTINCT FROM effect_row.owner_token
+            OR owner_row.generation IS DISTINCT FROM p_generation
+            OR effect_row.generation IS DISTINCT FROM p_generation
+            OR effect_row.workspace_id IS DISTINCT FROM p_workspace
+            OR effect_row.repository_identity IS DISTINCT FROM p_identity THEN
+            RAISE EXCEPTION 'Arena init repair ownership changed' USING ERRCODE = 'P0001';
+          END IF;
+          SELECT last_sequence, generation INTO lease_row FROM ${schema}.tenant_runtime_hot_leases
+            WHERE tenant_id = p_org AND scope_type = 'session' AND scope_id = p_session FOR UPDATE;
+          SELECT version, document INTO projection_row FROM ${schema}.tenant_session_latest_projection
+            WHERE tenant_id = p_org AND session_id = p_session FOR UPDATE;
+          IF NOT FOUND OR projection_row.document IS NULL
+            OR projection_row.document ? '__kalaSessionDeletion'
+            OR projection_row.version IS DISTINCT FROM lease_row.last_sequence THEN
+            RAISE EXCEPTION 'Arena Session projection is not current' USING ERRCODE = 'P0001';
+          END IF;
+          SELECT events.payload #> '{entry,payload,arena}' INTO current_state
+            FROM ${schema}.tenant_runtime_hot_events AS events
+            WHERE events.tenant_id = p_org AND events.scope_type = 'session' AND events.scope_id = p_session
+              AND events.payload #>> '{entry,kind}' = 'runtime_metadata'
+              AND events.payload #>> '{entry,action}' = 'worktree_arena.state'
+            ORDER BY events.sequence DESC LIMIT 1;
+          IF current_state IS DISTINCT FROM p_old THEN
+            RAISE EXCEPTION 'Arena state changed after verification' USING ERRCODE = 'P0001';
+          END IF;
+          next_sequence := lease_row.last_sequence + 1;
+          INSERT INTO ${schema}.tenant_runtime_hot_events
+            (tenant_id, scope_type, scope_id, sequence, generation, idempotency_key, event_type, payload)
+            VALUES (p_org, 'session', p_session, next_sequence, lease_row.generation,
+              'arena.operator.init.repair:' || p_effect, 'runtime.metadata.worktree_arena.state',
+              jsonb_build_object('schemaVersion', 3, 'baseVersion', lease_row.last_sequence::text,
+                'delta', '[]'::jsonb, 'entry', jsonb_build_object(
+                  'kind', 'runtime_metadata', 'ts', to_char(clock_timestamp() AT TIME ZONE 'UTC',
+                    'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'sessionId', p_session,
+                  'action', 'worktree_arena.state', 'payload', jsonb_build_object('arena', p_new))));
+          UPDATE ${schema}.tenant_session_latest_projection
+            SET version = next_sequence, updated_at = clock_timestamp()
+            WHERE tenant_id = p_org AND session_id = p_session;
+          UPDATE ${schema}.tenant_runtime_hot_leases
+            SET last_sequence = next_sequence, updated_at = clock_timestamp()
+            WHERE tenant_id = p_org AND scope_type = 'session' AND scope_id = p_session;
+          INSERT INTO ${schema}.tenant_runtime_arena_state_repairs
+            (organization_id, unit_id, resource_id, effect_id, generation,
+              operator_id, incident_id, old_state, new_state, evidence)
+            VALUES (p_org, p_unit, p_session, p_effect, p_generation,
+              p_operator, p_incident, p_old, p_new, p_evidence);
+        END
+        $arena$`,
+      `REVOKE ALL ON FUNCTION ${schema}.kala_arena_repair_init(
+        text, text, text, text, bigint, text, text, text, text, jsonb, jsonb, jsonb) FROM PUBLIC`,
+    ],
+  },
+  {
+    version: 24,
+    name: 'tenant_scoped_arena_incident_operator',
+    statements: (schema) => {
+      const previous = migrations.find((migration) => migration.version === 23)!.statements(schema)
+      const scoped = previous.filter((statement) => statement.startsWith('CREATE FUNCTION'))
+        .map((statement) => {
+          if (statement.includes('kala_arena_operator_state(')) {
+            return statement.replace('WHERE events.tenant_id = p_org', () => `WHERE session_user = 'arena_operator_' || replace(p_org, '-', '')
+            AND p_org ~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+            AND events.tenant_id = p_org`).replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION')
+          }
+          const anchor = 'IF p_operator IS DISTINCT FROM session_user OR p_operator = '
+          if (!statement.includes(anchor)) throw new Error('Arena operator function guard changed')
+          return statement.replace(anchor, () => `IF p_operator IS DISTINCT FROM session_user
+            OR session_user IS DISTINCT FROM 'arena_operator_' || replace(p_org, '-', '')
+            OR p_org !~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+            OR p_operator = `).replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION')
+        })
+      if (scoped.length !== 3) throw new Error('Expected three Arena operator functions')
+      return [
+        ...scoped,
+        `CREATE FUNCTION ${schema}.kala_arena_operator_effects(
+          p_org text, p_unit text, p_session text, p_limit integer)
+          RETURNS TABLE(effect_id text, generation bigint, workspace_id text,
+            repository_identity text, created_at timestamptz)
+          LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $arena$
+          BEGIN
+            IF session_user IS DISTINCT FROM 'arena_operator_' || replace(p_org, '-', '')
+              OR p_org !~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+              OR p_limit NOT BETWEEN 1 AND 100 THEN
+              RAISE EXCEPTION 'Arena operator tenant mismatch' USING ERRCODE = 'P0001';
+            END IF;
+            RETURN QUERY SELECT effects.effect_id, effects.generation,
+              effects.workspace_id, effects.repository_identity, effects.created_at
+              FROM ${schema}.tenant_runtime_active_workspace_effects AS effects
+              WHERE effects.organization_id = p_org AND effects.unit_id = p_unit
+                AND effects.resource_type = 'session' AND effects.resource_id = p_session
+              ORDER BY effects.created_at, effects.effect_id LIMIT p_limit;
+          END
+          $arena$`,
+        `REVOKE ALL ON FUNCTION ${schema}.kala_arena_operator_effects(text,text,text,integer) FROM PUBLIC`,
+        // Remove the Arena v23 column grant from any previously provisioned operator, without
+        // changing unrelated Runtime DML grants. Its functions are now tenant-checked.
+        `DO $arena$ DECLARE role_name text; BEGIN
+          FOR role_name IN
+            SELECT DISTINCT roles.rolname FROM pg_catalog.pg_proc AS proc
+            CROSS JOIN LATERAL pg_catalog.aclexplode(proc.proacl) AS acl
+            JOIN pg_catalog.pg_roles AS roles ON roles.oid = acl.grantee
+            WHERE proc.oid = '${schema}.kala_arena_operator_state(text,text)'::regprocedure
+              AND acl.privilege_type = 'EXECUTE'
+          LOOP
+            EXECUTE 'REVOKE SELECT (organization_id, unit_id, resource_type, resource_id,
+              effect_id, generation, workspace_id, repository_identity, created_at)
+              ON ${schema}.tenant_runtime_active_workspace_effects FROM ' ||
+              pg_catalog.quote_ident(role_name);
+          END LOOP;
+        END $arena$`,
+      ]
+    },
+  },
+  {
+    version: 25,
+    name: 'durable_arena_dispatch_intent',
+    statements: (schema) => [
+      `ALTER TABLE ${schema}.tenant_runtime_active_workspace_effects
+        ADD COLUMN dispatch_started boolean NOT NULL DEFAULT true`,
+      `CREATE TABLE ${schema}.tenant_runtime_arena_non_admissions (
+        organization_id text NOT NULL, unit_id text NOT NULL, resource_id text NOT NULL,
+        effect_id text NOT NULL, generation bigint NOT NULL, workspace_id text NOT NULL,
+        reason text NOT NULL, recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        PRIMARY KEY (organization_id, unit_id, resource_id, effect_id)
+      )`,
+    ],
+  },
+  {
+    version: 26,
+    name: 'scoped_offline_arena_effect_reconciliation',
+    statements: (schema) => [
+      `ALTER TABLE ${schema}.tenant_runtime_active_workspace_effects
+        ADD COLUMN request_digest text CHECK (request_digest ~ '^[a-f0-9]{64}$')`,
+      `CREATE FUNCTION ${schema}.kala_arena_operator_dispatch(
+        p_org text, p_unit text, p_session text, p_effect text)
+        RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER
+        SET search_path = pg_catalog, pg_temp AS $arena$
+        DECLARE record_row record;
+        BEGIN
+          IF session_user IS DISTINCT FROM 'arena_operator_' || replace(p_org, '-', '')
+            OR p_org !~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' THEN
+            RAISE EXCEPTION 'Arena operator tenant mismatch' USING ERRCODE = 'P0001';
+          END IF;
+          SELECT dispatch_started, request_digest INTO record_row FROM ${schema}.tenant_runtime_active_workspace_effects
+            WHERE organization_id = p_org AND unit_id = p_unit AND resource_type = 'session'
+              AND resource_id = p_session AND effect_id = p_effect;
+          IF NOT FOUND THEN RETURN NULL; END IF;
+          RETURN jsonb_build_object('started', record_row.dispatch_started, 'digest', record_row.request_digest);
+        END
+        $arena$`,
+      `REVOKE ALL ON FUNCTION ${schema}.kala_arena_operator_dispatch(text,text,text,text) FROM PUBLIC`,
+      `CREATE FUNCTION ${schema}.kala_reconcile_arena_offline(
+        p_org text, p_unit text, p_session text, p_effect text, p_generation bigint,
+        p_workspace text, p_operator text, p_incident text, p_evidence jsonb,
+        p_arena_state jsonb, p_mode text)
+        RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $arena$
+        DECLARE owner_row record; effect_row record; latest_state jsonb;
+        BEGIN
+          IF session_user IS DISTINCT FROM 'arena_operator_' || replace(p_org, '-', '')
+            OR p_org !~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+            OR p_operator IS DISTINCT FROM session_user OR p_incident IS NULL OR p_incident = ''
+            OR p_session IS NULL OR p_session = '' OR p_workspace IS NULL OR p_workspace = ''
+            OR p_generation < 1 OR COALESCE(p_effect, '') !~ '^arena-(probe|init|apply|cleanup|status|diff)-[A-Z0-9]+$'
+            OR jsonb_typeof(p_evidence) IS DISTINCT FROM 'object'
+            OR length(p_evidence::text) > 32000 OR COALESCE(p_mode, '') NOT IN ('prepared', 'probe')
+            OR (p_mode = 'prepared' AND (p_evidence->>'dispatchStarted' IS DISTINCT FROM 'false'
+              OR p_evidence->>'action' IS DISTINCT FROM 'prepared'))
+            OR (p_mode = 'probe' AND (COALESCE(p_effect, '') !~ '^arena-probe-[A-Z0-9]+$'
+              OR p_evidence->>'receiptState' IS DISTINCT FROM 'completed'
+              OR p_evidence->>'receiptGeneration' IS DISTINCT FROM p_generation::text
+              OR p_evidence->>'finalEffectStopped' IS DISTINCT FROM 'true'
+              OR p_evidence->>'executorStopped' IS DISTINCT FROM 'true'
+              OR p_evidence->>'gitGroupsStopped' IS DISTINCT FROM 'true'
+              OR COALESCE(p_evidence->>'requestDigest', '') !~ '^[a-f0-9]{64}$'
+              OR COALESCE(p_evidence->>'journalSha256', '') !~ '^[a-f0-9]{64}$')) THEN
+            RAISE EXCEPTION 'invalid offline Arena reconciliation' USING ERRCODE = 'P0001';
+          END IF;
+          SELECT owner_token, generation, expires_at INTO owner_row
+            FROM ${schema}.tenant_runtime_resource_ownerships
+            WHERE organization_id = p_org AND unit_id = p_unit
+              AND resource_type = 'session' AND resource_id = p_session FOR UPDATE;
+          SELECT owner_token, generation, workspace_id, repository_identity, dispatch_started, request_digest
+            INTO effect_row FROM ${schema}.tenant_runtime_active_workspace_effects
+            WHERE organization_id = p_org AND unit_id = p_unit AND resource_type = 'session'
+              AND resource_id = p_session AND effect_id = p_effect FOR UPDATE;
+          IF NOT FOUND OR owner_row.generation IS NULL OR owner_row.expires_at > clock_timestamp()
+            OR owner_row.owner_token IS DISTINCT FROM effect_row.owner_token
+            OR owner_row.generation IS DISTINCT FROM p_generation
+            OR effect_row.generation IS DISTINCT FROM p_generation
+            OR effect_row.workspace_id IS DISTINCT FROM p_workspace
+            OR effect_row.dispatch_started IS DISTINCT FROM (p_mode = 'probe')
+            OR (p_mode = 'probe' AND (effect_row.repository_identity IS NOT NULL
+              OR effect_row.request_digest IS DISTINCT FROM p_evidence->>'requestDigest')) THEN
+            RAISE EXCEPTION 'Arena effect ownership or dispatch changed' USING ERRCODE = 'P0001';
+          END IF;
+          PERFORM 1 FROM ${schema}.tenant_session_latest_projection
+            WHERE tenant_id = p_org AND session_id = p_session AND document IS NOT NULL
+              AND NOT document ? '__kalaSessionDeletion' FOR SHARE;
+          IF NOT FOUND THEN RAISE EXCEPTION 'Arena Session is not live' USING ERRCODE = 'P0001'; END IF;
+          SELECT events.payload #> '{entry,payload,arena}' INTO latest_state
+            FROM ${schema}.tenant_runtime_hot_events AS events
+            WHERE events.tenant_id = p_org AND events.scope_type = 'session' AND events.scope_id = p_session
+              AND events.payload #>> '{entry,kind}' = 'runtime_metadata'
+              AND events.payload #>> '{entry,action}' = 'worktree_arena.state'
+            ORDER BY events.sequence DESC LIMIT 1;
+          IF latest_state IS DISTINCT FROM p_arena_state THEN
+            RAISE EXCEPTION 'Arena state changed after verification' USING ERRCODE = 'P0001';
+          END IF;
+          INSERT INTO ${schema}.tenant_runtime_arena_reconciliations
+            (organization_id, unit_id, resource_id, effect_id, generation, repository_identity,
+              operator_id, incident_id, evidence)
+            VALUES (p_org, p_unit, p_session, p_effect, p_generation,
+              effect_row.repository_identity, p_operator, p_incident, p_evidence);
+          DELETE FROM ${schema}.tenant_runtime_active_workspace_effects
+            WHERE organization_id = p_org AND unit_id = p_unit AND resource_type = 'session'
+              AND resource_id = p_session AND effect_id = p_effect AND owner_token = effect_row.owner_token
+              AND generation = p_generation AND workspace_id = p_workspace
+              AND dispatch_started = (p_mode = 'probe');
+          IF NOT FOUND THEN RAISE EXCEPTION 'Arena effect changed' USING ERRCODE = 'P0001'; END IF;
+        END
+        $arena$`,
+      `REVOKE ALL ON FUNCTION ${schema}.kala_reconcile_arena_offline(
+        text,text,text,text,bigint,text,text,text,jsonb,jsonb,text) FROM PUBLIC`,
+    ],
+  },
+  {
+    version: 27,
+    name: 'atomic_arena_init_cleanup_and_legacy_operator_repair',
+    statements: (schema) => {
+      const offline = migrations.find((migration) => migration.version === 26)!.statements(schema)
+        .find((statement) => statement.startsWith(`CREATE FUNCTION ${schema}.kala_reconcile_arena_offline(`))
+      const scoped = migrations.find((migration) => migration.version === 24)!.statements(schema)
+        .find((statement) => statement.startsWith(`CREATE OR REPLACE FUNCTION ${schema}.kala_reconcile_arena_effect(`))
+      if (!offline || !scoped) throw new Error('Missing scoped Arena operator migration')
+      return [
+        offline.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION').replace(
+          `OR effect_row.dispatch_started IS DISTINCT FROM (p_mode = 'probe')`,
+          () => `OR effect_row.dispatch_started IS DISTINCT FROM (p_mode = 'probe')
+            OR (p_mode = 'prepared' AND p_effect ~ '^arena-init-[A-Z0-9]+$'
+              AND effect_row.repository_identity IS NOT NULL)`),
+        scoped.replace(`IF NOT FOUND THEN RAISE EXCEPTION 'Arena claim changed' USING ERRCODE = 'P0001'; END IF;`,
+          `IF NOT FOUND THEN
+              IF p_evidence->>'claimMissing' IS DISTINCT FROM 'true'
+                OR EXISTS (SELECT 1 FROM ${schema}.tenant_runtime_arena_repository_claims
+                  WHERE repository_identity = p_identity) THEN
+                RAISE EXCEPTION 'Arena claim changed' USING ERRCODE = 'P0001';
+              END IF;
+            ELSIF p_evidence->>'claimMissing' = 'true' THEN
+              RAISE EXCEPTION 'Arena claim evidence changed' USING ERRCODE = 'P0001';
+            END IF;`),
+        `CREATE FUNCTION ${schema}.kala_arena_operator_claim(
+          p_org text, p_unit text, p_session text, p_identity text)
+          RETURNS text LANGUAGE plpgsql STABLE SECURITY DEFINER
+          SET search_path = pg_catalog, pg_temp AS $arena$
+          DECLARE found_arena text;
+          BEGIN
+            IF session_user IS DISTINCT FROM 'arena_operator_' || replace(p_org, '-', '')
+              OR p_org !~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' THEN
+              RAISE EXCEPTION 'Arena operator tenant mismatch' USING ERRCODE = 'P0001';
+            END IF;
+            SELECT arena_id INTO found_arena FROM ${schema}.tenant_runtime_arena_repository_claims
+              WHERE repository_identity = p_identity AND organization_id = p_org
+                AND unit_id = p_unit AND resource_id = p_session;
+            RETURN found_arena;
+          END
+          $arena$`,
+        `REVOKE ALL ON FUNCTION ${schema}.kala_arena_operator_claim(text,text,text,text) FROM PUBLIC`,
+        `CREATE FUNCTION ${schema}.kala_reconcile_arena_prepared_init(
+          p_org text, p_unit text, p_session text, p_effect text, p_generation bigint,
+          p_workspace text, p_operator text, p_incident text, p_evidence jsonb, p_arena_state jsonb)
+          RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $arena$
+          DECLARE owner_row record; effect_row record; claim_row record; lease_row record;
+            projection_row record; current_state jsonb; prior_state jsonb; next_sequence bigint;
+          BEGIN
+            IF session_user IS DISTINCT FROM 'arena_operator_' || replace(p_org, '-', '')
+              OR p_org !~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+              OR p_operator IS DISTINCT FROM session_user OR p_incident IS NULL OR p_incident = ''
+              OR COALESCE(p_effect, '') !~ '^arena-init-[A-Z0-9]+$'
+              OR p_workspace IS NULL OR p_workspace = '' OR p_generation < 1
+              OR jsonb_typeof(p_evidence) IS DISTINCT FROM 'object'
+              OR length(p_evidence::text) > 32000
+              OR p_evidence->>'dispatchStarted' IS DISTINCT FROM 'false'
+              OR p_evidence->>'action' IS DISTINCT FROM 'prepared' THEN
+              RAISE EXCEPTION 'invalid prepared init reconciliation' USING ERRCODE = 'P0001';
+            END IF;
+            SELECT owner_token, generation, expires_at INTO owner_row
+              FROM ${schema}.tenant_runtime_resource_ownerships
+              WHERE organization_id = p_org AND unit_id = p_unit
+                AND resource_type = 'session' AND resource_id = p_session FOR UPDATE;
+            SELECT owner_token, generation, workspace_id, repository_identity, dispatch_started
+              INTO effect_row FROM ${schema}.tenant_runtime_active_workspace_effects
+              WHERE organization_id = p_org AND unit_id = p_unit AND resource_type = 'session'
+                AND resource_id = p_session AND effect_id = p_effect FOR UPDATE;
+            IF NOT FOUND OR owner_row.generation IS NULL OR owner_row.expires_at > clock_timestamp()
+              OR owner_row.owner_token IS DISTINCT FROM effect_row.owner_token
+              OR owner_row.generation IS DISTINCT FROM p_generation
+              OR effect_row.generation IS DISTINCT FROM p_generation
+              OR effect_row.workspace_id IS DISTINCT FROM p_workspace
+              OR effect_row.repository_identity IS NULL OR effect_row.dispatch_started IS DISTINCT FROM false THEN
+              RAISE EXCEPTION 'prepared init ownership or dispatch changed' USING ERRCODE = 'P0001';
+            END IF;
+            SELECT arena_id INTO claim_row FROM ${schema}.tenant_runtime_arena_repository_claims
+              WHERE repository_identity = effect_row.repository_identity AND organization_id = p_org
+                AND unit_id = p_unit AND resource_id = p_session FOR UPDATE;
+            IF NOT FOUND THEN RAISE EXCEPTION 'prepared init claim missing' USING ERRCODE = 'P0001'; END IF;
+            SELECT last_sequence, generation INTO lease_row FROM ${schema}.tenant_runtime_hot_leases
+              WHERE tenant_id = p_org AND scope_type = 'session' AND scope_id = p_session FOR UPDATE;
+            SELECT version, document INTO projection_row FROM ${schema}.tenant_session_latest_projection
+              WHERE tenant_id = p_org AND session_id = p_session FOR UPDATE;
+            IF NOT FOUND OR projection_row.document IS NULL OR projection_row.document ? '__kalaSessionDeletion'
+              OR projection_row.version IS DISTINCT FROM lease_row.last_sequence THEN
+              RAISE EXCEPTION 'prepared init Session projection changed' USING ERRCODE = 'P0001';
+            END IF;
+            SELECT events.payload #> '{entry,payload,arena}' INTO current_state
+              FROM ${schema}.tenant_runtime_hot_events AS events
+              WHERE events.tenant_id = p_org AND events.scope_type = 'session' AND events.scope_id = p_session
+                AND events.payload #>> '{entry,kind}' = 'runtime_metadata'
+                AND events.payload #>> '{entry,action}' = 'worktree_arena.state'
+              ORDER BY events.sequence DESC LIMIT 1;
+            IF current_state = 'null'::jsonb THEN current_state := NULL; END IF;
+            IF current_state IS DISTINCT FROM p_arena_state
+              OR (current_state IS NOT NULL AND (current_state->>'status' IS NULL
+                OR current_state->>'status' NOT IN ('cleaned', 'initializing')))
+              OR (current_state->>'status' = 'initializing'
+                AND current_state->>'arenaId' IS DISTINCT FROM claim_row.arena_id) THEN
+              RAISE EXCEPTION 'prepared init Arena state changed' USING ERRCODE = 'P0001';
+            END IF;
+            IF current_state->>'status' = 'initializing' THEN
+              SELECT events.payload #> '{entry,payload,arena}' INTO prior_state
+                FROM ${schema}.tenant_runtime_hot_events AS events
+                WHERE events.tenant_id = p_org AND events.scope_type = 'session' AND events.scope_id = p_session
+                  AND events.payload #>> '{entry,kind}' = 'runtime_metadata'
+                  AND events.payload #>> '{entry,action}' = 'worktree_arena.state'
+                ORDER BY events.sequence DESC OFFSET 1 LIMIT 1;
+              IF prior_state = 'null'::jsonb THEN prior_state := NULL; END IF;
+              IF prior_state IS NOT NULL AND prior_state->>'status' IS DISTINCT FROM 'cleaned' THEN
+                RAISE EXCEPTION 'prepared init prior Arena state cannot be restored' USING ERRCODE = 'P0001';
+              END IF;
+              next_sequence := lease_row.last_sequence + 1;
+              INSERT INTO ${schema}.tenant_runtime_hot_events
+                (tenant_id, scope_type, scope_id, sequence, generation, idempotency_key, event_type, payload)
+                VALUES (p_org, 'session', p_session, next_sequence, lease_row.generation,
+                  'arena.operator.init.not_dispatched:' || p_effect, 'runtime.metadata.worktree_arena.state',
+                  jsonb_build_object('schemaVersion', 3, 'baseVersion', lease_row.last_sequence::text,
+                    'delta', '[]'::jsonb, 'entry', jsonb_build_object(
+                      'kind', 'runtime_metadata', 'ts', to_char(clock_timestamp() AT TIME ZONE 'UTC',
+                        'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), 'sessionId', p_session,
+                      'action', 'worktree_arena.state', 'payload',
+                      jsonb_build_object('arena', prior_state))));
+              UPDATE ${schema}.tenant_session_latest_projection
+                SET version = next_sequence, updated_at = clock_timestamp()
+                WHERE tenant_id = p_org AND session_id = p_session;
+              UPDATE ${schema}.tenant_runtime_hot_leases
+                SET last_sequence = next_sequence, updated_at = clock_timestamp()
+                WHERE tenant_id = p_org AND scope_type = 'session' AND scope_id = p_session;
+            END IF;
+            DELETE FROM ${schema}.tenant_runtime_arena_repository_claims
+              WHERE repository_identity = effect_row.repository_identity AND organization_id = p_org
+                AND unit_id = p_unit AND resource_id = p_session AND arena_id = claim_row.arena_id;
+            IF NOT FOUND THEN RAISE EXCEPTION 'prepared init claim changed' USING ERRCODE = 'P0001'; END IF;
+            INSERT INTO ${schema}.tenant_runtime_arena_reconciliations
+              (organization_id, unit_id, resource_id, effect_id, generation, repository_identity,
+                operator_id, incident_id, evidence)
+              VALUES (p_org, p_unit, p_session, p_effect, p_generation,
+                effect_row.repository_identity, p_operator, p_incident,
+                p_evidence || jsonb_build_object('claimReleased', claim_row.arena_id,
+                  'priorArenaRestored', COALESCE(current_state->>'status' = 'initializing', false)));
+            DELETE FROM ${schema}.tenant_runtime_active_workspace_effects
+              WHERE organization_id = p_org AND unit_id = p_unit AND resource_type = 'session'
+                AND resource_id = p_session AND effect_id = p_effect AND owner_token = effect_row.owner_token
+                AND generation = p_generation AND workspace_id = p_workspace AND dispatch_started = false;
+            IF NOT FOUND THEN RAISE EXCEPTION 'prepared init effect changed' USING ERRCODE = 'P0001'; END IF;
+          END
+          $arena$`,
+        `REVOKE ALL ON FUNCTION ${schema}.kala_reconcile_arena_prepared_init(
+          text,text,text,text,bigint,text,text,text,jsonb,jsonb) FROM PUBLIC`,
+      ]
+    },
+  },
 ]
 
 export const LATEST_POSTGRES_SCHEMA_VERSION = migrations.at(-1)?.version ?? 0
@@ -272,6 +871,75 @@ export async function grantPostgresRuntimeDml(options: {
   } finally {
     await pool.end()
   }
+}
+
+/** An existing individual LOGIN receives only read access and the exact audited reconciliation routine. */
+export async function grantPostgresArenaOperator(options: {
+  connectionString: string; operatorRole: string; organizationId: string; schema?: string; ssl?: unknown
+}): Promise<void> {
+  const roleName = validateIdentifier(options.operatorRole, 'operatorRole')
+  if (!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(options.organizationId)
+    || roleName !== `arena_operator_${options.organizationId.replaceAll('-', '')}`) {
+    throw new TypeError('Arena operator LOGIN must identify its exact organization')
+  }
+  if (roleName.length > 63) throw new TypeError('operatorRole exceeds PostgreSQL identifier length')
+  const schemaName = validateIdentifier(options.schema ?? 'public', 'schema')
+  const schema = quoteIdentifier(schemaName)
+  const role = quoteIdentifier(roleName)
+  const pool = new Pool({ connectionString: options.connectionString,
+    application_name: 'kala-postgres-arena-operator-grants', max: 1, connectionTimeoutMillis: 5_000,
+    ...(options.ssl !== undefined ? { ssl: options.ssl } : {}) })
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await assertPostgresSchemaCurrent(client, { schema: schemaName })
+    const guarded = [...new Set([...postgresRuntimeTables(), 'tenant_runtime_arena_reconciliations',
+      'tenant_runtime_arena_state_repairs', POSTGRES_MIGRATION_TABLE])]
+      .map((table) => `${schema}.${quoteIdentifier(table)}`)
+    const rights = await client.query<{ login: boolean; elevated: boolean; inherits: boolean;
+      ddl: boolean; owns: boolean; dml: boolean; excessive_read: boolean }>(`SELECT
+      COALESCE((SELECT rolcanlogin FROM pg_roles WHERE rolname = $1), false) AS login,
+      COALESCE((SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls
+        FROM pg_roles WHERE rolname = $1), true) AS elevated,
+      EXISTS (SELECT 1 FROM pg_auth_members WHERE member = (SELECT oid FROM pg_roles WHERE rolname = $1)) AS inherits,
+      has_schema_privilege($1, $2, 'CREATE') OR has_database_privilege($1, current_database(), 'CREATE') AS ddl,
+      EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $2 AND pg_has_role($1, pg_get_userbyid(nspowner), 'MEMBER'))
+        OR EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = $2 AND pg_has_role($1, pg_get_userbyid(c.relowner), 'MEMBER')) AS owns,
+      EXISTS (SELECT 1 FROM unnest($3::text[]) AS t(name)
+        WHERE has_table_privilege($1, t.name, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')) AS dml,
+      EXISTS (SELECT 1 FROM unnest($3::text[]) AS t(name)
+        WHERE has_table_privilege($1, t.name, 'SELECT')) AS excessive_read`,
+    [roleName, schemaName, guarded])
+    const actual = rights.rows[0]
+    if (!actual?.login || actual.elevated || actual.inherits || actual.ddl || actual.owns
+      || actual.dml || actual.excessive_read) {
+      throw new Error('Arena operator must be a dedicated unprivileged LOGIN without inherited roles, DDL, table DML or unrelated Runtime reads')
+    }
+    await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${role}`)
+    await client.query(`REVOKE SELECT (organization_id, unit_id, resource_type, resource_id,
+      effect_id, generation, workspace_id, repository_identity, created_at)
+      ON ${schema}.tenant_runtime_active_workspace_effects FROM ${role}`)
+    await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.kala_reconcile_arena_effect(
+      text, text, text, text, bigint, text, text, text, text, jsonb, text, jsonb) TO ${role}`)
+    await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.kala_arena_operator_state(text, text) TO ${role}`)
+    await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.kala_arena_repair_init(
+      text, text, text, text, bigint, text, text, text, text, jsonb, jsonb, jsonb) TO ${role}`)
+    await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.kala_arena_operator_effects(
+      text, text, text, integer) TO ${role}`)
+    await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.kala_arena_operator_dispatch(
+      text, text, text, text) TO ${role}`)
+    await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.kala_reconcile_arena_offline(
+      text, text, text, text, bigint, text, text, text, jsonb, jsonb, text) TO ${role}`)
+    await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.kala_reconcile_arena_prepared_init(
+      text, text, text, text, bigint, text, text, text, jsonb, jsonb) TO ${role}`)
+    await client.query(`GRANT EXECUTE ON FUNCTION ${schema}.kala_arena_operator_claim(
+      text, text, text, text) TO ${role}`)
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined)
+    throw error
+  } finally { client.release(); await pool.end() }
 }
 
 /** Operator-only: grant SELECT on only the Runtime tables queried by Gateway routing. */
@@ -384,8 +1052,11 @@ export async function grantPostgresRuntimePrivileges(
     }
     await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${role}`)
     await client.query(`GRANT SELECT ON TABLE ${schema}.${quoteIdentifier(POSTGRES_MIGRATION_TABLE)} TO ${role}`)
+    await client.query(`REVOKE UPDATE, DELETE ON TABLE ${schema}.tenant_runtime_arena_non_admissions FROM ${role}`)
     for (const table of postgresRuntimeTables()) {
-      const privileges = table === RUNTIME_UNIT_PROTOCOL_GATE_TABLE ? 'SELECT' : 'SELECT, INSERT, UPDATE, DELETE'
+      const privileges = table === RUNTIME_UNIT_PROTOCOL_GATE_TABLE ? 'SELECT'
+        : table === 'tenant_runtime_arena_reconciliations' || table === 'tenant_runtime_arena_non_admissions' ? 'SELECT, INSERT'
+          : 'SELECT, INSERT, UPDATE, DELETE'
       await client.query(`GRANT ${privileges} ON TABLE ${schema}.${quoteIdentifier(table)} TO ${role}`)
     }
     await grantInstallationClaimReadIfPresent(client, role, roleName)
@@ -420,6 +1091,7 @@ async function grantInstallationClaimReadIfPresent(client: PostgresMigrationClie
 
 function postgresRuntimeTables(): string[] {
   const tables = new Set<string>()
+  tables.add('tenant_runtime_arena_non_admissions')
   const schema = '"__kala_schema__"'
   for (const migration of migrations) {
     for (const statement of migration.statements(schema)) {
@@ -457,9 +1129,14 @@ export async function checkPostgresSchemaVersion(options: {
 /** Operator-only runner. It serializes all migrators for the database and applies each version atomically. */
 export async function runPostgresMigrations(
   pool: PostgresMigrationPool,
-  options: { schema?: string } = {},
+  options: { schema?: string; throughVersion?: number } = {},
 ): Promise<PostgresMigrationResult> {
   validateMigrationSequence(migrations)
+  if (options.throughVersion !== undefined
+    && (!Number.isInteger(options.throughVersion) || options.throughVersion < 1
+      || options.throughVersion > LATEST_POSTGRES_SCHEMA_VERSION)) {
+    throw new TypeError('Invalid explicit migration target')
+  }
   const schemaName = validateIdentifier(options.schema ?? 'public', 'schema')
   const schema = quoteIdentifier(schemaName)
   const table = `${schema}.${quoteIdentifier(POSTGRES_MIGRATION_TABLE)}`
@@ -482,6 +1159,7 @@ export async function runPostgresMigrations(
 
     for (const migration of migrations) {
       if (migration.version <= previousVersion) continue
+      if (options.throughVersion !== undefined && migration.version > options.throughVersion) break
       await client.query('BEGIN')
       try {
         for (const statement of migration.statements(schema)) await client.query(statement)
@@ -498,7 +1176,7 @@ export async function runPostgresMigrations(
       }
     }
 
-    return { previousVersion, currentVersion: LATEST_POSTGRES_SCHEMA_VERSION, appliedVersions }
+    return { previousVersion, currentVersion: options.throughVersion ?? LATEST_POSTGRES_SCHEMA_VERSION, appliedVersions }
   } finally {
     if (locked) {
       await client.query('SELECT pg_advisory_unlock($1, $2)', [LOCK_NAMESPACE, LOCK_SCHEMA_MIGRATIONS]).catch(() => undefined)
@@ -557,7 +1235,10 @@ function verifyAppliedMigrations(applied: readonly AppliedMigrationRow[]): void 
       throw new Error(`PostgreSQL migration history is not strictly ascending at version ${row.version}`)
     }
     if (row.name !== expected.name || row.checksum !== migrationChecksum(expected)) {
-      throw new Error(`PostgreSQL migration ${row.version} does not match this release`)
+      throw new Error(`PostgreSQL migration ${row.version} does not match this release${
+        row.version >= 12 && row.version <= 18
+          ? ' (possible private Arena / Board migration identity conflict; back up and review an offline compatibility plan; never renumber applied history)'
+          : ''}`)
     }
   }
 }

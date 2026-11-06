@@ -282,7 +282,7 @@ async function main(): Promise<void> {
       }
       const persistentStorage = experimentalStorage && experimentalStateMasterKey && organizationId && placementLease
         ? await createExperimentalUnitStorage(experimentalStorage, organizationId, id, experimentalStateMasterKey,
-            placementLease, maxArtifactBytes, telemetry, nativeFsLimits, sessionOwnership)
+            placementLease, maxArtifactBytes, telemetry, nativeFsLimits, sessionOwnership, replicaStore)
         : undefined
       const agentSettings = persistentStorage?.agentSettings
       const modelSettings = product === 'dedicated' && persistentStorage && organizationId && runtimeCatalog
@@ -395,6 +395,13 @@ async function main(): Promise<void> {
         artifactRootDir: persistentStorage ? false : join(unitRoot, 'artifacts'),
         ...(persistentStorage ? {
           sessionAuthority: persistentStorage.sessionAuthority,
+          ...(sessionOwnership ? { requireArenaEffectBarrier: true } : {}),
+          ...(persistentStorage.registerArenaEffect ? { registerArenaEffect: persistentStorage.registerArenaEffect } : {}),
+          ...(persistentStorage.releaseNeverDispatchedArenaEffect ? {
+            releaseNeverDispatchedArenaEffect: persistentStorage.releaseNeverDispatchedArenaEffect,
+            beginArenaDispatch: persistentStorage.beginArenaDispatch,
+          } : {}),
+          ...(persistentStorage.claimArenaRepository ? { claimArenaRepository: persistentStorage.claimArenaRepository } : {}),
           ...(persistentStorage.assertSessionEffectOwner ? {
             assertSessionEffectOwner: persistentStorage.assertSessionEffectOwner,
             captureSessionEffectOwner: persistentStorage.captureSessionEffectOwner,
@@ -611,6 +618,7 @@ async function createExperimentalUnitStorage(
   telemetry: OnlineTelemetry | undefined,
   nativeFsLimits: Readonly<NativeFsLimits>,
   sessionOwnership?: RuntimeSessionOwnership,
+  replicaStore?: ReturnType<typeof createPostgresRuntimeResourceOwnershipStore>,
 ) {
   const hotState = createPostgresHotStateStore({
     connectionString: config.connectionString,
@@ -720,6 +728,55 @@ async function createExperimentalUnitStorage(
       }),
       ...(sessionOwnership ? {
         captureSessionEffectOwner: (sessionId: string) => sessionOwnership.captureEffectFence(sessionId),
+        claimArenaRepository: async (sessionId: string, generation: string, repositoryIdentity: string, arenaId: string) => {
+          const owner = await sessionOwnership.ensure(sessionId)
+          if (String(owner.generation) !== generation || !replicaStore) throw new Error('Arena owner generation changed')
+          await replicaStore.claimArenaRepository(owner, repositoryIdentity, arenaId)
+        },
+        prepareArenaInitEffect: async (
+          sessionId: string, generation: string, callId: string, workspaceId: string,
+          repositoryIdentity: string, arenaId: string,
+        ) => {
+          if (!/^arena-init-[A-Z0-9]+$/u.test(callId)) throw new Error('Unsupported Arena init effect')
+          const owner = await sessionOwnership.ensure(sessionId)
+          if (String(owner.generation) !== generation || !replicaStore) throw new Error('Arena init owner changed')
+          await replicaStore.prepareArenaInitEffect(owner, callId, workspaceId, repositoryIdentity, arenaId)
+          return async () => await replicaStore.completeWorkspaceEffect(owner, callId)
+        },
+        registerArenaEffect: async (
+          sessionId: string, generation: string, callId: string, workspaceId: string,
+          repositoryIdentity?: string, arenaId?: string,
+        ) => {
+          if (!/^arena-(probe|status|diff|init|apply|cleanup)-[A-Z0-9]+$/u.test(callId)) throw new Error('unsupported Arena effect')
+          if (!workspaceId || workspaceId.trim() !== workspaceId) throw new Error('Arena workspace identity is required')
+          if (!callId.startsWith('arena-probe-') && (!repositoryIdentity || !arenaId)) {
+            throw new Error('Arena mutation or read requires a claimed canonical repository')
+          }
+          const owner = await sessionOwnership.ensure(sessionId)
+          if (String(owner.generation) !== generation) throw new Error('Arena owner generation changed')
+          if (!replicaStore) throw new Error('Arena effect store unavailable')
+          await replicaStore.registerWorkspaceEffect(owner, callId, workspaceId, repositoryIdentity, arenaId, true)
+          return async (releaseArenaId?: string) => {
+            if (releaseArenaId) {
+              if (!repositoryIdentity || releaseArenaId !== arenaId) throw new Error('Arena cleanup repository identity mismatch')
+              await replicaStore.completeArenaCleanupEffect(owner, callId, repositoryIdentity, releaseArenaId)
+            } else {
+              await replicaStore.completeWorkspaceEffect(owner, callId)
+            }
+          }
+        },
+        beginArenaDispatch: async (sessionId: string, generation: string, callId: string, requestDigest: string) => {
+          const owner = await sessionOwnership.ensure(sessionId)
+          if (String(owner.generation) !== generation || !replicaStore) throw new Error('Arena dispatch owner changed')
+          await replicaStore.beginWorkspaceEffectDispatch(owner, callId, requestDigest)
+        },
+        releaseNeverDispatchedArenaEffect: async (
+          sessionId: string, generation: string, callId: string, workspaceId: string,
+        ) => {
+          const owner = await sessionOwnership.ensure(sessionId)
+          if (String(owner.generation) !== generation || !replicaStore) throw new Error('Arena refusal owner changed')
+          await replicaStore.completeNeverDispatchedWorkspaceEffect(owner, callId, workspaceId, 'host_pre_dispatch_rejection')
+        },
         chooseChildReplicaId: (childSessionId: string) => sessionOwnership.chooseChildReplicaId(childSessionId),
         handoffChildOwner: (childSessionId: string, replicaId: string) => sessionOwnership.handoffChild(childSessionId, replicaId),
         assertSessionEffectOwner: async (sessionId: string) => {
