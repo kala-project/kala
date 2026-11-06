@@ -398,6 +398,8 @@ async function main(): Promise<void> {
           ...(persistentStorage.assertSessionEffectOwner ? {
             assertSessionEffectOwner: persistentStorage.assertSessionEffectOwner,
             captureSessionEffectOwner: persistentStorage.captureSessionEffectOwner,
+            chooseChildReplicaId: persistentStorage.chooseChildReplicaId,
+            handoffChildOwner: persistentStorage.handoffChildOwner,
           } : {}),
           objectStorage: persistentStorage.objectStorage,
           memoStore: persistentStorage.memoStore,
@@ -703,6 +705,8 @@ async function createExperimentalUnitStorage(
         .finally(() => { sweeping = false })
     }, 60_000)
     orphanSweepTimer.unref()
+    const activeReplicaId = sessionOwnership?.membership.activeLease(unitId, organizationId)?.replicaId
+    if (sessionOwnership && !activeReplicaId) throw new Error('Child routing requires a live local replica membership')
     return {
       sessionAuthority: new PostgresSessionAuthority(hotState, organizationId, {
         schemaManagement: config.schemaManagement,
@@ -711,10 +715,13 @@ async function createExperimentalUnitStorage(
           unitId,
           resourceOwnerForSession: (sessionId: string) => sessionOwnership.activeLease(sessionId),
           prepareSessionOwner: async (sessionId: string) => { await sessionOwnership.ensure(sessionId) },
+          localReplicaId: activeReplicaId,
         } : {}),
       }),
       ...(sessionOwnership ? {
         captureSessionEffectOwner: (sessionId: string) => sessionOwnership.captureEffectFence(sessionId),
+        chooseChildReplicaId: (childSessionId: string) => sessionOwnership.chooseChildReplicaId(childSessionId),
+        handoffChildOwner: (childSessionId: string, replicaId: string) => sessionOwnership.handoffChild(childSessionId, replicaId),
         assertSessionEffectOwner: async (sessionId: string) => {
           const owner = await sessionOwnership.ensure(sessionId)
           await hotState.database.transaction(async (transaction) => {

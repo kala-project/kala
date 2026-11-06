@@ -7,6 +7,7 @@
 import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import { open, readFile, rm } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 
 import type {
   AgentConfig,
@@ -40,6 +41,7 @@ import {
   appendMetadataEntry,
   appendRuntimeMetadataEntry,
   appendSnapshotEntry,
+  countChildModelTurnEnds,
   findLatestEventEntry,
   findLatestRuntimeMetadata,
   findPersistedToolResult,
@@ -60,6 +62,8 @@ import { writeJsonFile } from '../tenant-runtime/atomic-json-file.js'
 import type { PersistedSessionDocument, SessionAuthority } from './session-authority.js'
 import type { NativePosixFileSystem } from './native-posix-fs.js'
 import type { SessionFsProvider } from '@github/copilot-sdk'
+import { emptyAgentBoard, type AgentBoardState, type AgentBoardTransaction } from './agent-board-state.js'
+import type { ChildCommandInbox } from './child-command-state.js'
 
 export type SessionRecord = {
   readonly sessionId: string
@@ -79,6 +83,10 @@ export type SessionRecord = {
   readonly parentCallId?: string
   readonly agentType?: string
   readonly subAgentStartedAt?: string
+  readonly subAgentTimeoutMs?: number
+  readonly subAgentMaxTurns?: number
+  /** Initial child placement preference; only a live target membership restricts claims. */
+  readonly preferredChildReplicaId?: string
   readonly workspaceId?: string
   readonly workspaceName?: string
   readonly organizationId?: string
@@ -378,6 +386,9 @@ export type CreateSessionParams = {
   parentCallId?: string
   agentType?: string
   subAgentStartedAt?: string
+  subAgentTimeoutMs?: number
+  subAgentMaxTurns?: number
+  preferredChildReplicaId?: string
   initialState?: AgentState
   sessionId?: string
   workspaceId?: string
@@ -461,12 +472,71 @@ export class SessionStore {
   private readonly storageCleanupLeases = new Set<string>()
   private readonly pendingStorageMutations = new Map<string, Set<Promise<void>>>()
   private readonly authorityReady: Promise<void> | undefined
+  private localAgentBoardDatabase?: DatabaseSync
   private deletionRecoveryCursor = ''
   private deletionRecoveryInFlight: Promise<void> | undefined
 
   constructor(private readonly sessionsDir: string, private readonly options: SessionStoreOptions = {}) {
     if (options.authority) this.authorityReady = options.authority.initialize()
     else mkdirSync(this.sessionsDir, { recursive: true })
+  }
+
+  /** PostgreSQL Sessions can be served by other Runtime replicas even without a local owner fence. */
+  usesSharedSessionAuthority(): boolean {
+    return Boolean(this.options.authority && 'messageQueue' in this.options.authority)
+  }
+
+  get childCommandInbox(): ChildCommandInbox | undefined {
+    return this.options.authority?.childCommandInbox
+  }
+
+  readonly agentBoardTransaction: AgentBoardTransaction = async (sessionId, operation) => {
+    if (this.options.authority) {
+      await this.authorityReady
+      if (!this.options.authority.agentBoardTransaction) throw new Error('Session authority does not support durable agent boards')
+      return this.options.authority.agentBoardTransaction(sessionId, operation)
+    }
+    let id = sessionId
+    let actor: SessionRecord | undefined
+    const visited = new Set<string>()
+    for (;;) {
+      if (visited.has(id) || visited.size >= 32) throw new Error('Invalid cyclic or excessively deep Session tree')
+      visited.add(id)
+      const rec = this.get(id) ?? await this.load(id, { recoverDangling: false })
+      if (!actor) actor = rec
+      if (!rec.parentSessionId) break
+      id = rec.parentSessionId
+    }
+    const db = this.localAgentBoardDatabase ??= this.openLocalAgentBoard()
+    db.exec('BEGIN IMMEDIATE')
+    try {
+      db.prepare('INSERT OR IGNORE INTO agent_boards (root_session_id, state) VALUES (?, ?)')
+        .run(id, JSON.stringify(emptyAgentBoard()))
+      const row = db.prepare('SELECT state FROM agent_boards WHERE root_session_id = ?')
+        .get(id) as { state: string }
+      const board = JSON.parse(row.state) as AgentBoardState
+      const revision = board.revision
+      const result = operation(id, board, actor!)
+      if (revision !== board.revision) {
+        db.prepare('UPDATE agent_boards SET state = ? WHERE root_session_id = ?').run(JSON.stringify(board), id)
+      }
+      db.exec('COMMIT')
+      return result
+    } catch (error) {
+      db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  private openLocalAgentBoard(): DatabaseSync {
+    const db = new DatabaseSync(join(this.sessionsDir, '.agent-board.sqlite'))
+    db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; CREATE TABLE IF NOT EXISTS agent_boards (root_session_id TEXT PRIMARY KEY, state TEXT NOT NULL)')
+    return db
+  }
+
+  async clearAgentBoard(rootSessionId: string): Promise<void> {
+    if (this.options.authority) return
+    this.localAgentBoardDatabase?.prepare('DELETE FROM agent_boards WHERE root_session_id = ?').run(rootSessionId)
   }
 
   /** Finish authority initialization and one bounded deletion recovery pass. */
@@ -704,6 +774,28 @@ export class SessionStore {
     return (await readSessionLog(record.logPath)).events
   }
 
+  /** Count durable model-turn terminals, never assistant transcript fragments. */
+  async countCompletedChildModelTurns(sessionId: string, commandId: string): Promise<number> {
+    const record = this.get(sessionId) ?? await this.load(sessionId, { recoverDangling: false })
+    if (record.agentRuntime === 'kernel') {
+      const entries = await this.readEventEntries(sessionId)
+      const start = entries.find((entry) => entry.event.kind === 'user_message'
+        && entry.event.operationId === commandId)?.seq
+      if (start === undefined) return 0
+      const next = entries.find((entry) => entry.seq > start && entry.event.kind === 'user_message')?.seq
+      return entries.filter((entry) => entry.seq > start && (next === undefined || entry.seq < next)
+        && entry.event.kind === 'llm_response').length
+    }
+    if (record.agentRuntime !== 'copilot') return 0
+    if (this.options.authority && !this.options.authority.readChildTurnEnds) {
+      throw new Error('Session authority does not support durable Copilot turn accounting')
+    }
+    if (!this.options.authority) return countChildModelTurnEnds(record.logPath, commandId)
+    const entries = await this.options.authority.readChildTurnEnds!(sessionId, commandId)
+    return new Set(entries.map((entry) => entry.payload.turnId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0)).size
+  }
+
   get usesPostgresAuthority(): boolean { return this.options.authority !== undefined }
 
   /** Full event history and Host metadata from the selected durable authority. */
@@ -730,6 +822,32 @@ export class SessionStore {
       )) return false
     }
     return false
+  }
+
+  async findPersistedCopilotToolResult(sessionId: string, callId: string): Promise<boolean> {
+    if (!callId) return false
+    if (!this.options.authority) {
+      const record = this.get(sessionId) ?? await this.load(sessionId, { recoverDangling: false })
+      return findPersistedToolResult(record.logPath, callId, 'copilot')
+    }
+    await this.authorityReady
+    if (this.options.authority.hasCommittedCopilotToolResult) {
+      return this.options.authority.hasCommittedCopilotToolResult(sessionId, callId)
+    }
+    const history = await this.options.authority.readHistory(sessionId)
+    for (let index = history.runtimeMetadata.length - 1; index >= 0; index--) {
+      const entry = history.runtimeMetadata[index]!
+      if (entry.payload.callId !== callId) continue
+      if (entry.action === 'copilot.tool_result') return true
+      if (entry.action === 'copilot.tool_call') return false
+    }
+    return false
+  }
+
+  async findCopilotToolRequest(sessionId: string, callId: string): Promise<{ ownerGeneration: string; requestDigest: string } | undefined> {
+    if (!this.options.authority?.findCopilotToolRequest) return undefined
+    await this.authorityReady
+    return this.options.authority.findCopilotToolRequest(sessionId, callId)
   }
 
   assertStorageWritable(sessionId: string): void {
@@ -800,6 +918,21 @@ export class SessionStore {
     }
   }
 
+  async createChildWithCommand(
+    params: CreateSessionParams & { sessionId: string; parentSessionId: string },
+    commandId: string,
+    message: string,
+    maxConcurrentChildren: number,
+  ): Promise<SessionRecord> {
+    if (!this.options.authority?.createChildWithCommand) throw new Error('Atomic shared child creation is unavailable')
+    const releaseMutation = this.beginStorageMutation([params.sessionId, params.parentSessionId])
+    try {
+      return await this.createRecord(params, params.sessionId, undefined, { commandId, message, maxConcurrentChildren })
+    } finally {
+      releaseMutation()
+    }
+  }
+
   /** Create a child from the durable initial state and exact event prefix of its parent. */
   async fork(params: ForkSessionParams): Promise<SessionRecord> {
     const sessionId = params.sessionId ?? ulid()
@@ -852,6 +985,7 @@ export class SessionStore {
     params: CreateSessionParams,
     sessionId: string,
     authorityFenceSessionId?: string,
+    childCommand?: { commandId: string; message: string; maxConcurrentChildren: number },
   ): Promise<SessionRecord> {
     const initialState =
       params.initialState ??
@@ -875,11 +1009,15 @@ export class SessionStore {
       await this.authorityReady
       const createdAt = new Date().toISOString()
       const candidate = recordForCreate(params, sessionId, logPath, createdAt, stateWithApproval)
-      const persisted = await this.options.authority.create(
-        persistSessionRecord(candidate),
-        'session.create',
-        authorityFenceSessionId ? { fenceSessionId: authorityFenceSessionId } : {},
-      )
+      const persisted = childCommand
+        ? await this.options.authority.createChildWithCommand!(
+          persistSessionRecord(candidate), childCommand.commandId, childCommand.message, childCommand.maxConcurrentChildren,
+        )
+        : await this.options.authority.create(
+          persistSessionRecord(candidate),
+          'session.create',
+          authorityFenceSessionId ? { fenceSessionId: authorityFenceSessionId } : {},
+        )
       const record = restoreSessionRecord(persisted, logPath, params.memoryPolicy)
       const ownerKey = this.options.authority.currentOwnerCacheKey?.(sessionId)
       if (ownerKey !== undefined) this.recordOwnerCacheKeys.set(sessionId, ownerKey)
@@ -1851,6 +1989,7 @@ export class SessionStore {
       return
     }
     const paths = this.findLogsBySessionId(sessionId)
+    await this.clearAgentBoard(sessionId)
     const artifactSlugs = new Set(paths.map((path) => basename(path, '.jsonl')))
     const logArtifactRoot = join(this.sessionsDir, 'artifacts')
     if (existsSync(logArtifactRoot)) {
@@ -2714,6 +2853,9 @@ function recordForCreate(
     ...(params.parentCallId !== undefined ? { parentCallId: params.parentCallId } : {}),
     ...(params.agentType !== undefined ? { agentType: params.agentType } : {}),
     ...(params.subAgentStartedAt !== undefined ? { subAgentStartedAt: params.subAgentStartedAt } : {}),
+    ...(params.subAgentTimeoutMs !== undefined ? { subAgentTimeoutMs: params.subAgentTimeoutMs } : {}),
+    ...(params.subAgentMaxTurns !== undefined ? { subAgentMaxTurns: params.subAgentMaxTurns } : {}),
+    ...(params.preferredChildReplicaId !== undefined ? { preferredChildReplicaId: params.preferredChildReplicaId } : {}),
     ...(params.workspaceId !== undefined ? { workspaceId: params.workspaceId } : {}),
     ...(params.workspaceName !== undefined ? { workspaceName: params.workspaceName } : {}),
     ...(params.organizationId !== undefined ? { organizationId: params.organizationId } : {}),

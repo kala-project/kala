@@ -19,8 +19,10 @@ import process from 'node:process'
 import type {
   BuildMetadata,
   ExecutorAnnounce,
+  ExecutionCancelRequest,
   ExecutorClientToServerEvents,
   ExecutorServerToClientEvents,
+  ExecutionReceiptQuery,
   ToolCallMessage,
   ToolCancelMessage,
   ToolResultAck,
@@ -440,6 +442,27 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
     // recoverable — let socket.io keep retrying.
   })
 
+  socket.on('tool:receipt_query', async (payload: ExecutionReceiptQuery, ack) => {
+    try {
+      await receiptStoreReady
+      if (!receiptStore) {
+        ack({ status: 'unavailable' })
+        return
+      }
+      const result = await receiptStore.query(payload)
+      if (result.status === 'absent_with_valid_journal' && payload?.sessionId && payload?.callId) {
+        const key = receiptKey(payload.sessionId, payload.callId)
+        if (inFlight.has(key)) {
+          ack(requestDigests.get(key) !== payload.requestDigest ? { status: 'conflict' } : { status: 'started_unknown' })
+          return
+        }
+      }
+      ack(result)
+    } catch {
+      ack({ status: 'unavailable' })
+    }
+  })
+
   socket.on('tool:call', async (payload: ToolCallMessage, ack) => {
     const internal = payload.name.startsWith('__')
     // Internal control-plane reads must never depend on a writable workspace
@@ -558,6 +581,27 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
     const ctrl = inFlight.get(receiptKey(payload.sessionId, payload.callId))
     logger.info({ sessionId: payload.sessionId, callId: payload.callId, found: Boolean(ctrl) }, 'tool cancellation requested')
     if (ctrl) ctrl.abort()
+  })
+
+  socket.on('tool:cancel_ack', async (payload: ExecutionCancelRequest, ack) => {
+    try {
+      await receiptStoreReady
+      if (!receiptStore || !payload?.sessionId || !payload?.callId) {
+        ack({ status: 'unavailable' })
+        return
+      }
+      const key = receiptKey(payload.sessionId, payload.callId)
+      const result = await receiptStore.requestCancellation(payload)
+      if (result.status === 'cancel_requested') {
+        const ctrl = inFlight.get(key)
+        if (!ctrl || requestDigests.get(key) !== payload.requestDigest) {
+          ack({ status: 'started_unknown' })
+          return
+        }
+        ctrl.abort()
+      }
+      ack(result)
+    } catch { ack({ status: 'unavailable' }) }
   })
 
   socket.on('executor:health_ping', (_sentAt, ack) => ack(Date.now()))

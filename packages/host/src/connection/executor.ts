@@ -56,6 +56,10 @@ import type {
   ExecutorMcpConfigureAck,
   ExecutorMcpConfigureRequest,
   ExecutorServerToClientEvents,
+  ExecutionCancelAck,
+  ExecutionCancelRequest,
+  ExecutionReceiptQuery,
+  ExecutionReceiptQueryResult,
   FileListResult,
   OverflowContentsResult,
   ServerExecutorChangedPayload,
@@ -116,6 +120,8 @@ type PublishLocalImageRequest = { requestId: string; path: string; cwd?: string 
 type PublishLocalImageResponse = { requestId: string; path: string; base64?: string; mediaType?: string; size?: number; error?: string }
 
 export type ExecutorLookup = {
+  queryExecutionReceipt(query: ExecutionReceiptQuery): Promise<ExecutionReceiptQueryResult>
+  cancelExecution(request: ExecutionCancelRequest): Promise<ExecutionCancelAck>
   updateDesktopFeaturePolicy?(sessionId: string): Promise<void>
   computerRequest(payload: ComputerRequest, owner: string): Promise<ComputerResponse>
   executorForSession(sessionId: string): AttachedExecutor | undefined
@@ -438,8 +444,8 @@ export function createExecutorRegistry(
     path: string | undefined,
     error: string,
   ): DirListResult {
-    return {
-      requestId,
+      return {
+        requestId,
       workspaceId,
       path: path ?? '',
       roots: [],
@@ -564,6 +570,90 @@ export function createExecutorRegistry(
   }
 
   return {
+    async cancelExecution(request) {
+      const unavailable: ExecutionCancelAck = { status: 'unavailable' }
+      if (!request || !request.sessionId || !request.callId || !request.stopCommandId
+        || !/^[1-9]\d*$/u.test(request.ownerGeneration)
+        || !/^[a-f0-9]{64}$/u.test(request.requestDigest)
+        || !resolver.assertSessionEffectOwner) return unavailable
+      const workspaceId = resolver.workspaceIdFor(request.sessionId)
+      if (!workspaceId) return unavailable
+      const bind = findBindByWorkspace(workspaceId)
+      if (!bind) return unavailable
+      try {
+        const owner = await resolver.assertSessionEffectOwner(request.sessionId)
+        if (!owner?.ownerGeneration || !await authorizeCurrent(bind)
+          || resolver.workspaceIdFor(request.sessionId) !== workspaceId) return unavailable
+        const result = await new Promise<ExecutionCancelAck>((resolve) => {
+          let settled = false
+          const settle = (value: ExecutionCancelAck) => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            resolve(value)
+          }
+          const timer = setTimeout(() => settle(unavailable), Math.min(toolAckTimeoutMs, 5_000))
+          bind.socket.emit('tool:cancel_ack', request, (response) => {
+            if (!response || !['cancel_requested', 'completed', 'started_unknown', 'absent_with_valid_journal', 'conflict', 'unavailable'].includes(response.status)
+              || (response.status === 'completed' && (!response.result || response.result.callId !== request.callId
+                || typeof response.result.ok !== 'boolean' || typeof response.result.content !== 'string'))) {
+              settle(unavailable)
+              return
+            }
+            settle(response)
+          })
+        })
+        if (!await authorizeCurrent(bind) || resolver.workspaceIdFor(request.sessionId) !== workspaceId
+          || (await resolver.assertSessionEffectOwner(request.sessionId))?.ownerGeneration !== owner.ownerGeneration) return unavailable
+        return result
+      } catch { return unavailable }
+    },
+    async queryExecutionReceipt(query) {
+      const unavailable: ExecutionReceiptQueryResult = { status: 'unavailable' }
+      if (!query || typeof query.sessionId !== 'string' || !query.sessionId
+        || typeof query.callId !== 'string' || !query.callId
+        || typeof query.ownerGeneration !== 'string' || !/^[1-9]\d*$/u.test(query.ownerGeneration)
+        || typeof query.requestDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(query.requestDigest)
+        || !resolver.assertSessionEffectOwner) return unavailable
+      // Unlike legacy dispatch, reconciliation cannot fall back to an arbitrary Executor.
+      const workspaceId = resolver.workspaceIdFor(query.sessionId)
+      if (!workspaceId) return unavailable
+      const bind = findBindByWorkspace(workspaceId)
+      if (!bind) return unavailable
+      try {
+        const owner = await resolver.assertSessionEffectOwner(query.sessionId)
+        if (!owner || !owner.ownerGeneration || !await authorizeCurrent(bind)
+          || resolver.workspaceIdFor(query.sessionId) !== workspaceId) return unavailable
+        const result = await new Promise<ExecutionReceiptQueryResult>((resolve) => {
+          let settled = false
+          const settle = (value: ExecutionReceiptQueryResult) => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            resolve(value)
+          }
+          const timer = setTimeout(() => settle(unavailable), Math.min(toolAckTimeoutMs, 5_000))
+          bind.socket.emit('tool:receipt_query', query, (response) => {
+            if (!response || !['completed', 'started_unknown', 'absent_with_valid_journal', 'conflict', 'unavailable'].includes(response.status)) {
+              settle(unavailable)
+              return
+            }
+            if (response.status === 'completed'
+              && (!response.result || response.result.callId !== query.callId
+                || typeof response.result.ok !== 'boolean' || typeof response.result.content !== 'string')) {
+              settle(unavailable)
+              return
+            }
+            settle(response)
+          })
+        })
+        if (!await authorizeCurrent(bind) || resolver.workspaceIdFor(query.sessionId) !== workspaceId
+          || (await resolver.assertSessionEffectOwner(query.sessionId))?.ownerGeneration !== owner.ownerGeneration) return unavailable
+        return result
+      } catch {
+        return unavailable
+      }
+    },
     hasTrustedManagedExecutor(workspaceId, installId) {
       return findManagedBind(workspaceId, installId) !== undefined
     },

@@ -3,6 +3,7 @@ import type { ToolSchema } from '@agent-kernel/kernel'
 import { describe, expect, it, vi } from 'vitest'
 
 import { KernelAgentRuntime } from './agent-runtime/kernel-runtime.js'
+import { CopilotAgentRuntime } from './agent-runtime/copilot-runtime.js'
 import { activeToolsFor, runToolCatalogTool } from './extensions/tool-catalog.js'
 import { latestTodoGraphForSession } from './extensions/todo-graph.js'
 import type { LoopHandle } from './loop-types.js'
@@ -97,6 +98,36 @@ describe('authoritative live paths', () => {
 
     await expect(runtime.toolResultPersisted(record(), 'call-1')).resolves.toBe(true)
     expect(findPersistedKernelToolResult).toHaveBeenCalledWith('pg-session', 'call-1')
+  })
+
+  it('checks Copilot results from the authoritative ledger instead of a nonexistent JSONL', async () => {
+    const hasCommittedCopilotToolResult = vi.fn(async () => true)
+    const fakeStore = {
+      options: { authority: { hasCommittedCopilotToolResult } },
+      authorityReady: Promise.resolve(),
+    }
+    const findPersistedCopilotToolResult = (sessionId: string, callId: string) =>
+      SessionStore.prototype.findPersistedCopilotToolResult.call(fakeStore, sessionId, callId)
+    const runtime = { context: { store: { findPersistedCopilotToolResult } } } as unknown as CopilotAgentRuntime
+    await expect(CopilotAgentRuntime.prototype.toolResultPersisted.call(runtime, record(), 'call-1'))
+      .resolves.toBe(true)
+    expect(hasCommittedCopilotToolResult).toHaveBeenCalledWith('pg-session', 'call-1')
+  })
+
+  it('uses the SQLite authority history when no PostgreSQL receipt query exists', async () => {
+    const runtimeMetadata = [
+      { action: 'copilot.tool_call', payload: { callId: 'call-1' } },
+      { action: 'copilot.tool_result', payload: { callId: 'call-1' } },
+    ] as RuntimeMetadataEntry[]
+    const fakeStore = {
+      options: { authority: { readHistory: async () => ({ runtimeMetadata }) } },
+      authorityReady: Promise.resolve(),
+    }
+    const lookup = (callId: string) => SessionStore.prototype.findPersistedCopilotToolResult.call(fakeStore, 'pg-session', callId)
+    await expect(lookup('call-1')).resolves.toBe(true)
+    runtimeMetadata.push({ action: 'copilot.tool_call', payload: { callId: 'call-1' } } as RuntimeMetadataEntry)
+    await expect(lookup('call-1')).resolves.toBe(false)
+    await expect(lookup('unknown')).resolves.toBe(false)
   })
 
   it('fails closed when a newer kernel invocation supersedes an older matching result', async () => {

@@ -1,5 +1,6 @@
 import { runWebSearch } from '../web-search/index.js'
-import { interruptSubAgentsForParent, runAgentTool } from './agent-tool.js'
+import { clearAgentBoardForRoot, runAgentBoardTool } from './agent-board.js'
+import { interruptSubAgentsForParent, runAgentTool, runReadAgentTool, runWriteAgentTool } from './agent-tool.js'
 import { runCompact } from './compaction.js'
 import { preemptivelyPruneToolResults } from '../context/preemptive-pruning.js'
 import { selectHooks, type HookPayload } from './hooks.js'
@@ -18,6 +19,9 @@ export const BUILTIN_HOST_TOOL_HANDLERS = [
   'ask_user_choice',
   'websearch',
   'agent',
+  'read_agent',
+  'write_agent',
+  'agent_board',
   'todo_graph',
   'scheduled_task',
   'tool_search',
@@ -68,6 +72,15 @@ export function createBuiltinExtensionRegistry(additional: readonly HostExtensio
         },
         async agent({ deps, sessionId, effect, aborts, loop, runtimeController }) {
           return await runAgentTool(deps, sessionId, effect, aborts, loop, runtimeController)
+        },
+        async read_agent({ deps, sessionId, effect }) {
+          return await runReadAgentTool(deps, sessionId, effect)
+        },
+        async write_agent({ deps, sessionId, effect, aborts, loop, runtimeController }) {
+          return await runWriteAgentTool(deps, sessionId, effect, aborts, loop, runtimeController)
+        },
+        async agent_board(context) {
+          return await runAgentBoardTool(context)
         },
         async todo_graph({ deps, sessionId, effect }) {
           return await runTodoGraphTool(deps, sessionId, effect)
@@ -169,10 +182,15 @@ export function createBuiltinExtensionRegistry(additional: readonly HostExtensio
     },
     {
       id: 'kala.subagents',
-      version: '2026-09-29',
+      version: '2026-10-31',
       lifecycle: {
         async onCancel({ deps, aborts, sessionId }) {
           await interruptSubAgentsForParent(deps, aborts, sessionId)
+        },
+        onSessionDeleted({ record }) {
+          if (!record.parentSessionId) {
+            clearAgentBoardForRoot(record.sessionId)
+          }
         },
       },
     },

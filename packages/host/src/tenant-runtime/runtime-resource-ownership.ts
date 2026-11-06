@@ -6,10 +6,13 @@ import {
   type RuntimeResourceOwnership,
   type RuntimeResourceScope,
   type RuntimeUnitReplicaMembership,
+  type RuntimeUnitLiveReplica,
+  type RuntimeUnitReplicaScope,
 } from './postgres-runtime-resource-ownership.js'
 import { parseTenantRuntimeUnitId } from './unit.js'
 
 export interface RuntimeResourceOwnershipStore {
+  lookupLiveReplicas?(scope: RuntimeUnitReplicaScope): Promise<readonly RuntimeUnitLiveReplica[]>
   acquireResourceOwner(
     scope: RuntimeResourceScope,
     replica: RuntimeUnitReplicaMembership,

@@ -234,6 +234,57 @@ describe('Copilot runtime custom tools', () => {
     await runtime.close()
   })
 
+  it('counts unique persisted SDK model-turn endings for the named child command, not assistant messages', async () => {
+    const runtime = new CopilotAgentRuntime({
+      store, tools: { async callTool() { return { ok: true, content: 'unused' } }, cancelPending() {} },
+      broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError() {} },
+    }, { enabled: true, sessionsDir: dir })
+    const record = await store.create({ sessionId: 'counted-child', agentRuntime: 'copilot', config: createConfig({ tools: [] }) })
+    let resolveResponse!: (value: unknown) => void
+    sdk.responses.push(new Promise((resolve) => { resolveResponse = resolve }))
+    await runtime.start()
+    await runtime.send(record, { text: 'one prompt', operationId: 'initial-command' })
+    await vi.waitFor(() => expect(sdk.sentMessages).toHaveLength(1))
+    for (const listener of [...sdk.listeners]) {
+      listener({ type: 'assistant.turn_end', id: 'terminal-a', parentId: null,
+        timestamp: new Date().toISOString(), data: { turnId: 'sdk-turn-a' } })
+      listener({ type: 'assistant.turn_end', id: 'terminal-a', parentId: null,
+        timestamp: new Date().toISOString(), data: { turnId: 'sdk-turn-a' } })
+      listener({ type: 'assistant.turn_end', id: 'terminal-b', parentId: null,
+        timestamp: new Date().toISOString(), data: { turnId: 'sdk-turn-b' } })
+    }
+    resolveResponse({ type: 'assistant.message', id: 'answer', data: { content: 'done' } })
+    await vi.waitFor(() => expect(record.state.status).toBe('done'))
+    expect(await store.countCompletedChildModelTurns(record.sessionId, 'initial-command')).toBe(2)
+    await expect(store.countCompletedChildModelTurns(record.sessionId, 'different-command'))
+      .rejects.toThrow('no durable user marker')
+    await runtime.close()
+  })
+
+  it('only acknowledges a child Stop from the process holding its SDK handle', async () => {
+    const context = {
+      store, tools: { async callTool() { return { ok: true, content: 'unused' } }, cancelPending() {} },
+      broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError() {} },
+    }
+    const original = new CopilotAgentRuntime(context, { enabled: true, sessionsDir: dir })
+    const successor = new CopilotAgentRuntime(context, { enabled: true, sessionsDir: dir })
+    const record = await store.create({ sessionId: 'stopped-child', agentRuntime: 'copilot', config: createConfig({ tools: [] }) })
+    await original.start()
+    await original.send(record, { text: 'first child message', operationId: 'durable-child-command' })
+    await vi.waitFor(() => expect(sdk.sentMessages).toContainEqual(expect.objectContaining({
+      prompt: 'first child message',
+    })))
+    expect(await findSessionOperation(record.logPath, 'durable-child-command')).toMatchObject({
+      kind: 'runtime_metadata', action: 'copilot.user_message',
+    })
+    expect(await successor.cancelForChildStop(record)).toBe(false)
+    expect(sdk.abort).not.toHaveBeenCalled()
+    expect(record.state.status).toBe('thinking')
+    expect(await original.cancelForChildStop(record)).toBe(true)
+    expect(sdk.abort).toHaveBeenCalledOnce()
+    await original.close()
+  })
+
   it('does not report a started turn when its durable projection fails', async () => {
     const onTurn = vi.fn()
     const runtime = new CopilotAgentRuntime({
@@ -1907,6 +1958,7 @@ describe('Copilot runtime custom tools', () => {
         }],
       }),
     })
+
     runtime = new CopilotAgentRuntime({
       store,
       tools: { callTool, cancelPending() {} },
@@ -1941,6 +1993,48 @@ describe('Copilot runtime custom tools', () => {
       content: 'approved result',
     }])
     expect(callTool).toHaveBeenCalledOnce()
+    await runtime.close()
+  })
+
+  it('does not dispatch a tool when Stop arrives during the durable tool-call projection', async () => {
+    const callTool = vi.fn(async () => ({ ok: true, content: 'must not run' }))
+    const record = await store.create({
+      sessionId: 'copilot-stop-during-tool-projection',
+      agentRuntime: 'copilot',
+      config: createConfig({
+        tools: [{
+          name: 'inspect',
+          description: 'Inspect something',
+          inputSchema: { type: 'object' },
+          requiresApproval: false,
+          executionKind: 'host',
+          executionHandler: 'inspect',
+        }],
+      }),
+    })
+    let runtime!: CopilotAgentRuntime
+    let cancelPromise: Promise<void> | undefined
+    runtime = new CopilotAgentRuntime({
+      store,
+      tools: { callTool, cancelPending() {} },
+      broadcast: {
+        onState(_record, state) {
+          if (cancelPromise || state.status !== 'executing_tools' || !state.pendingCalls.length) return
+          cancelPromise = runtime.cancel(record)
+        },
+        onTokenDelta() {},
+        onApprovalRequired() {},
+        onError() {},
+      },
+    }, { enabled: true, sessionsDir: dir })
+    await runtime.start()
+    await runtime.send(record, { text: 'Inspect.' })
+    const tool = sdk.configs.at(-1)?.tools.find((candidate) => candidate.name === 'inspect')
+    await expect(tool?.handler({}, { toolCallId: 'call-stop-race' })).resolves.toMatchObject({
+      error: expect.stringContaining('cancelled'),
+    })
+    await cancelPromise
+    expect(callTool).not.toHaveBeenCalled()
     await runtime.close()
   })
 

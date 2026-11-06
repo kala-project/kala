@@ -60,6 +60,29 @@ export class RuntimeSessionOwnership {
     }
   }
 
+  async chooseChildReplicaId(childSessionId: string): Promise<string | undefined> {
+    const member = this.membership.activeLease(this.#unitId, this.organizationId)
+    if (!member || this.#closed) throw new RuntimeResourceOwnershipFencedError()
+    const replicas = await this.manager.store.lookupLiveReplicas?.({
+      organizationId: this.organizationId, unitId: this.#unitId,
+    })
+    const remote = replicas?.filter((replica) => replica.replicaId !== member.replicaId
+      && replica.expiresAt.getTime() > Date.now() + 1_000)
+    if (!remote?.length) return undefined
+    return remote[childSessionId.charCodeAt(childSessionId.length - 1) % remote.length]!.replicaId
+  }
+
+  /** Release only the newly created child lease; never release its parent's independent owner. */
+  async handoffChild(sessionId: string, targetReplicaId: string): Promise<void> {
+    const member = this.membership.activeLease(this.#unitId, this.organizationId)
+    if (!member || member.replicaId === targetReplicaId || this.#closed) throw new RuntimeResourceOwnershipFencedError()
+    const handle = this.#handles.get(sessionId)
+    if (!handle) return
+    if (!handle.activeLease()) throw new RuntimeResourceOwnershipFencedError()
+    this.#handles.delete(sessionId)
+    await handle.release()
+  }
+
   async close(): Promise<void> {
     if (this.#closing) return await this.#closing
     this.#closed = true

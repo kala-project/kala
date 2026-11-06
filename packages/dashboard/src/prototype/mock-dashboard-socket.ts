@@ -13,6 +13,10 @@ type Handler = (...args: unknown[]) => void
 
 const now = Date.parse('2026-10-02T08:00:00.000Z')
 const iso = (offsetMinutes: number): string => new Date(now + offsetMinutes * 60_000).toISOString()
+const boardAcceptance = sessionStorage.getItem('ak-board-acceptance') === '1'
+let boardCommandState: 'queued' | 'processing' | 'unknown' = 'queued'
+let boardPendingCount = 1
+const boardStops: Array<{ operationId: string; parentSessionId: string; parentCallId: string; childSessionId: string }> = []
 
 type PrototypeSessionSummary = SessionSummary & { costUsd?: number | null }
 
@@ -22,6 +26,7 @@ type PrototypeClientPayload = {
   generation: number
   sessionId: string
   operation: string
+  operationId?: string
   targetId: string
   planId: string
   preferences: NonNullable<SessionSummary['preferences']>
@@ -35,6 +40,8 @@ type PrototypeClientPayload = {
   values?: string[]
   customText?: string
   parentSessionId?: string
+  parentCallId?: string
+  childSessionId?: string
 }
 
 // Fictional directory density for responsive Explorer screenshots. Keep the
@@ -1196,6 +1203,8 @@ class PrototypeDashboardSocket {
     if (event === 'sub_agent:list') {
       const parentSessionId = payload.parentSessionId ?? payload.sessionId
       ack?.({
+        requestId: payload.requestId,
+        parentSessionId,
         sessionId: parentSessionId,
         children: parentSessionId === 'prototype-subagents' ? [{
           parentSessionId,
@@ -1204,8 +1213,19 @@ class PrototypeDashboardSocket {
           agentType: 'Explore',
           status: 'running',
           startedAt: iso(-3),
+          ...(boardAcceptance ? { commandState: boardCommandState, pendingCommandCount: boardPendingCount } : {}),
         }] : [],
       })
+      return this
+    }
+    if (event === 'client:interrupt_sub_agent' && boardAcceptance) {
+      boardStops.push({
+        operationId: String(payload.operationId ?? ''),
+        parentSessionId: payload.parentSessionId ?? '',
+        parentCallId: String(payload.parentCallId ?? ''),
+        childSessionId: String(payload.childSessionId ?? ''),
+      })
+      boardCommandState = 'unknown'
       return this
     }
     if (event === 'agent_types:list') {
@@ -1253,5 +1273,14 @@ class PrototypeDashboardSocket {
 }
 
 export function createPrototypeDashboardSocket(): unknown {
+  if (boardAcceptance) Object.assign(window, {
+    __kalaBoardAcceptance: {
+      setState(state: 'queued' | 'processing' | 'unknown', pendingCount: number) {
+        boardCommandState = state
+        boardPendingCount = pendingCount
+      },
+      stops: () => [...boardStops],
+    },
+  })
   return new PrototypeDashboardSocket()
 }

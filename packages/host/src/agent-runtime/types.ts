@@ -52,6 +52,8 @@ export interface AgentRuntime {
   toolResultPersisted(record: SessionRecord, callId: string): Promise<boolean>
   send(record: SessionRecord, input: AgentRuntimeSendInput): Promise<void>
   cancel(record: SessionRecord): Promise<void>
+  /** A local SDK/model abort acknowledgement is not proof of Executor rollback. */
+  cancelForChildStop?(record: SessionRecord): Promise<boolean>
   approve(record: SessionRecord, callId: string): Promise<void>
   reject(record: SessionRecord, callId: string, reason?: string): Promise<void>
   setApprovalMode(record: SessionRecord, mode: ApprovalMode): Promise<void>

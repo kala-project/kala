@@ -17,12 +17,15 @@ function fixture() {
   })
   const renewResourceOwner = vi.fn(async (owner: RuntimeResourceOwnership) => ({ ...owner, expiresAt: new Date(Date.now() + 15_000) }))
   const releaseResourceOwner = vi.fn(async (_owner: RuntimeResourceOwnership) => undefined)
-  const store: RuntimeResourceOwnershipStore = { acquireResourceOwner, renewResourceOwner, releaseResourceOwner }
+  const lookupLiveReplicas = vi.fn(async () => [
+    member, { ...member, replicaId: 'replica-b', origin: 'https://other.test' },
+  ])
+  const store: RuntimeResourceOwnershipStore = { acquireResourceOwner, renewResourceOwner, releaseResourceOwner, lookupLiveReplicas }
   const lost = vi.fn(async () => undefined)
   const ownership = new RuntimeSessionOwnership('org-a', 'unit-a', {
     activeLease: (_unitId, organizationId) => organizationId === live?.organizationId ? live : undefined,
   }, new RuntimeResourceOwnershipManager(store), lost)
-  return { member, ownership, lost, acquireResourceOwner, renewResourceOwner, releaseResourceOwner,
+  return { member, ownership, lost, acquireResourceOwner, renewResourceOwner, releaseResourceOwner, lookupLiveReplicas,
     setMember: (next: RuntimeUnitReplicaMembership | undefined) => { live = next },
   }
 }
@@ -30,6 +33,20 @@ function fixture() {
 afterEach(() => { vi.useRealTimers() })
 
 describe('RuntimeSessionOwnership', () => {
+  it('chooses a live remote replica and releases only the new child owner, not its parent', async () => {
+    const { ownership, releaseResourceOwner, lookupLiveReplicas } = fixture()
+    await ownership.ensure('parent')
+    await ownership.ensure('child')
+    expect(await ownership.chooseChildReplicaId('child')).toBe('replica-b')
+    expect(lookupLiveReplicas).toHaveBeenCalledWith({ organizationId: 'org-a', unitId: 'unit-a' })
+    await ownership.handoffChild('child', 'replica-b')
+    expect(ownership.activeLease('child')).toBeUndefined()
+    expect(ownership.activeLease('parent')).toBeDefined()
+    expect(releaseResourceOwner).toHaveBeenCalledTimes(1)
+    await ownership.close()
+    expect(releaseResourceOwner).toHaveBeenCalledTimes(2)
+  })
+
   it('immediately withdraws Session access and closes its Unit after owner renewal fails', async () => {
     vi.useFakeTimers()
     const { ownership, lost, renewResourceOwner, acquireResourceOwner } = fixture()

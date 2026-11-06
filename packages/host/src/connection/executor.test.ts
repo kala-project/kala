@@ -26,6 +26,8 @@ import {
 type EmittedCall = {
   event:
     | 'tool:call'
+    | 'tool:receipt_query'
+    | 'tool:cancel_ack'
     | 'tool:cancel'
     | 'session:error'
     | 'executor:host_reject'
@@ -119,6 +121,78 @@ function callEffect(
 }
 
 describe('ExecutorRegistry', () => {
+  it('routes Stop to the authenticated child workspace, and never accepts a disconnected or fenced cancellation ACK', async () => {
+    let owner = '5'
+    const registry = createExecutorRegistry(fakeIo() as never, {
+      ...makeResolver({ child: 'ws-child' }),
+      assertSessionEffectOwner: async () => ({ ownerGeneration: owner }),
+    }, 40, undefined, 5_000, async () => true)
+    const wrongWorkspace = makeFakeSocket('other')
+    const child = makeFakeSocket('child')
+    registry.attach(wrongWorkspace as never, announceOf('other', 'ws-other'))
+    registry.attach(child as never, announceOf('child', 'ws-child'))
+    const request = { sessionId: 'child', callId: 'call', ownerGeneration: '4', requestDigest: 'a'.repeat(64), stopCommandId: 'stop' }
+    const stopping = registry.cancelExecution(request)
+    await vi.waitFor(() => expect(child.emitted.some((e) => e.event === 'tool:cancel_ack')).toBe(true))
+    expect(wrongWorkspace.emitted.some((e) => e.event === 'tool:cancel_ack')).toBe(false)
+    owner = '6'
+    child.emitted.find((e) => e.event === 'tool:cancel_ack')!.ack?.({ status: 'cancel_requested' } as never)
+    expect(await stopping).toEqual({ status: 'unavailable' })
+    const lost = registry.cancelExecution(request)
+    await vi.waitFor(() => expect(child.emitted.filter((e) => e.event === 'tool:cancel_ack')).toHaveLength(2))
+    child.connected = false
+    child.emitted.filter((e) => e.event === 'tool:cancel_ack')[1]!.ack?.({ status: 'completed', result: { callId: 'call', ok: true, content: 'stale' } } as never)
+    expect(await lost).toEqual({ status: 'unavailable' })
+    expect(await registry.cancelExecution({ ...request, sessionId: 'not-bound' })).toEqual({ status: 'unavailable' })
+  })
+
+  it('routes read-only receipt queries only to the authenticated session workspace and checks owner fencing across the ack', async () => {
+    let generation = '6'
+    let authorized = true
+    const resolver = {
+      ...makeResolver({ child: 'ws-child' }),
+      assertSessionEffectOwner: vi.fn(async () => ({ ownerGeneration: generation })),
+    }
+    const registry = createExecutorRegistry(fakeIo() as never, resolver, 50, undefined, 5_000, async () => authorized)
+    const other = makeFakeSocket('other')
+    const child = makeFakeSocket('child')
+    registry.attach(other as never, announceOf('other', 'ws-other'))
+    registry.attach(child as never, announceOf('child', 'ws-child'))
+    const query = { sessionId: 'child', callId: 'call', ownerGeneration: '5', requestDigest: 'a'.repeat(64) }
+    const pending = registry.queryExecutionReceipt(query)
+    await vi.waitFor(() => expect(child.emitted.some((e) => e.event === 'tool:receipt_query')).toBe(true))
+    expect(other.emitted.some((e) => e.event === 'tool:receipt_query' || e.event === 'tool:call')).toBe(false)
+    expect(child.emitted.some((e) => e.event === 'tool:call')).toBe(false)
+    child.emitted.find((e) => e.event === 'tool:receipt_query')!.ack?.({ status: 'completed', result: { callId: 'call', ok: true, content: 'done' } } as never)
+    expect(await pending).toEqual({ status: 'completed', result: { callId: 'call', ok: true, content: 'done' } })
+    const changed = registry.queryExecutionReceipt(query)
+    await vi.waitFor(() => expect(child.emitted.filter((e) => e.event === 'tool:receipt_query')).toHaveLength(2))
+    generation = '7'
+    child.emitted.filter((e) => e.event === 'tool:receipt_query')[1]!.ack?.({ status: 'completed', result: { callId: 'call', ok: true, content: 'done' } } as never)
+    expect(await changed).toEqual({ status: 'unavailable' })
+    authorized = false
+    expect(await registry.queryExecutionReceipt(query)).toEqual({ status: 'unavailable' })
+    expect(child.emitted.filter((e) => e.event === 'tool:receipt_query')).toHaveLength(2)
+    expect(await registry.queryExecutionReceipt({ ...query, sessionId: 'unbound' })).toEqual({ status: 'unavailable' })
+    expect(await registry.queryExecutionReceipt({ ...query, requestDigest: 'invalid' })).toEqual({ status: 'unavailable' })
+  })
+
+  it('fails closed on malformed receipt acknowledgements and disconnected executors', async () => {
+    const registry = createExecutorRegistry(fakeIo() as never, {
+      ...makeResolver({ child: 'ws-child' }),
+      assertSessionEffectOwner: async () => ({ ownerGeneration: '3' }),
+    }, 50)
+    const socket = makeFakeSocket('child')
+    registry.attach(socket as never, announceOf('child', 'ws-child'))
+    const query = { sessionId: 'child', callId: 'call', ownerGeneration: '2', requestDigest: 'a'.repeat(64) }
+    const pending = registry.queryExecutionReceipt(query)
+    await vi.waitFor(() => expect(socket.emitted.some((e) => e.event === 'tool:receipt_query')).toBe(true))
+    socket.emitted.find((e) => e.event === 'tool:receipt_query')!.ack?.({ status: 'completed', result: { callId: 'wrong', ok: true, content: 'not ours' } } as never)
+    expect(await pending).toEqual({ status: 'unavailable' })
+    socket.connected = false
+    expect(await registry.queryExecutionReceipt(query)).toEqual({ status: 'unavailable' })
+  })
+
   it('blocks dedicated desktop calls and preview while leaving shell dispatch available', async () => {
     const reg = createExecutorRegistry(fakeIo() as never, { ...makeResolver({ old: 'ws-default' }),
       desktopFeaturePolicy: () => ({ computerUseEnabled: false, desktopPreviewEnabled: false }) })

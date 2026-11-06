@@ -116,6 +116,7 @@ import { attachMcpSettingsRoutes } from './http/mcp-settings-routes.js'
 import { AgentRuntimeRegistry } from './agent-runtime/types.js'
 import { KernelAgentRuntime } from './agent-runtime/kernel-runtime.js'
 import { CopilotAgentRuntime } from './agent-runtime/copilot-runtime.js'
+import { startChildCommandWorker } from './store/child-command-worker.js'
 import { createRuntimeToolDispatcher } from './agent-runtime/tool-dispatcher.js'
 import { AskUserChoiceBroker } from './ask-user-choice.js'
 import { attachPublicAccessGate } from './http/public-access-gate.js'
@@ -153,6 +154,8 @@ export type HostServerOptions = {
   assertSessionEffectOwner?: (sessionId: string) => Promise<void | { ownerGeneration: string }>
   /** Capture a healthy local Session owner activation; no SQL/acquisition in the returned predicate. */
   captureSessionEffectOwner?: HostLoopDeps['captureSessionEffectOwner']
+  chooseChildReplicaId?: HostLoopDeps['chooseChildReplicaId']
+  handoffChildOwner?: HostLoopDeps['handoffChildOwner']
   /** Workspace alias authority. Omit to retain workspace-aliases.json. */
   workspaceAliasStore?: WorkspaceAliasStorage
   /** Executor installation authority. Omit to retain executor-installations.json. */
@@ -410,6 +413,7 @@ export async function startHostServer(
   let deletionRecoveryTimer: ReturnType<typeof setInterval> | undefined
   let authorizationRetryTimer: ReturnType<typeof setInterval> | undefined
   let deletionRecoveryPass: Promise<void> | undefined
+  let stopChildCommandWorker: (() => Promise<void>) | undefined
   const closeServer = async (): Promise<void> => {
     if (closed) return
     closed = true
@@ -423,6 +427,7 @@ export async function startHostServer(
     if (deletionRecoveryTimer) clearInterval(deletionRecoveryTimer)
     if (authorizationRetryTimer) clearInterval(authorizationRetryTimer)
     if (deletionRecoveryPass) await deletionRecoveryPass
+    await stopChildCommandWorker?.()
     detachPublicAccessGate?.()
     for (const batch of tokenDeltaBatches.values()) clearTimeout(batch.timer)
     tokenDeltaBatches.clear()
@@ -2223,8 +2228,11 @@ export async function startHostServer(
     llm: options.llm,
     ...(options.llmQuota !== undefined ? { llmQuota: options.llmQuota } : {}),
     ...(options.modelPolicy !== undefined ? { modelPolicy: options.modelPolicy } : {}),
+    normalizeAgentModel: normalizeModelRef,
     tools: executors,
     ...(options.assertSessionEffectOwner ? { assertSessionEffectOwner: options.assertSessionEffectOwner } : {}),
+    ...(options.chooseChildReplicaId ? { chooseChildReplicaId: options.chooseChildReplicaId } : {}),
+    ...(options.handoffChildOwner ? { handoffChildOwner: options.handoffChildOwner } : {}),
     broadcast,
     models: {
       get: effectiveModelForSession,
@@ -2366,6 +2374,20 @@ export async function startHostServer(
   })
   await copilotRuntime.start()
   agentRuntimes.register(copilotRuntime)
+  if (store.childCommandInbox && options.assertSessionEffectOwner) {
+    stopChildCommandWorker = startChildCommandWorker({
+      inbox: store.childCommandInbox,
+      store,
+      runtimes: agentRuntimes,
+      executors,
+      assertOwner: options.assertSessionEffectOwner,
+      onChildFinished: (payload) => broadcast.onSubAgentFinished?.(payload),
+      listLocalParentRooms: () => [...io.of('/dashboard').adapter.rooms.keys()]
+        .filter((room) => room.startsWith('session:'))
+        .map((room) => room.slice('session:'.length)),
+      ...(options.modelPolicy ? { modelPolicy: options.modelPolicy } : {}),
+    })
+  }
   dagOrchestrator = new DagOrchestrator(dagStore, loopDeps, loop, runtimeController)
   for (const sessionId of await dagStore.activeParentSessionIds()) dagOrchestrator.schedule(sessionId)
   const loadApiRecord = async (sessionId: string): Promise<SessionRecord | undefined> => {

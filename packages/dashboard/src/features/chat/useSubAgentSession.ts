@@ -27,9 +27,11 @@ import type {
   SessionReadyEvent,
   StateChangedEvent,
   SubAgentListResult,
+  SubAgentSummary,
 } from '@agent-kernel/shared'
 
 import { dashboardConnectionManager, SessionInspectionContext, useSession, type DashboardSocket } from '../../session.js'
+import { subscribeSubAgentList } from './subAgentListPoller.js'
 
 export type SubAgentLifecycle =
   | { status: 'idle' }
@@ -63,6 +65,8 @@ export type SubAgentLifecycle =
 
 export type SubAgentView = {
   lifecycle: SubAgentLifecycle
+  commandState?: SubAgentSummary['commandState']
+  pendingCommandCount: number
   messages: readonly Message[]
   transcriptError?: string
   agentType?: string
@@ -118,56 +122,66 @@ export function useSubAgentSession({
   const [intention, setIntention] = useState<string | undefined>(initialIntention)
   const [prompt, setPrompt] = useState<string | undefined>(undefined)
   const [model, setModel] = useState<string | undefined>(undefined)
+  const [commandState, setCommandState] = useState<SubAgentSummary['commandState']>()
+  const [pendingCommandCount, setPendingCommandCount] = useState(0)
 
   const childIdRef = useRef<string | null>(initialChildSessionId ?? null)
+  const commandStateRef = useRef<SubAgentSummary['commandState']>()
 
   // Recover lifecycle after a dashboard refresh. Live start/finish pushes are
   // ephemeral; the durable relation is the child session header returned by
   // `sub_agent:list`.
   useEffect(() => {
-    if (!socket || childIdRef.current) return
+    if (!socket) return
     let cancelled = false
-    socket.emit(
-      'sub_agent:list',
-      { requestId: `sub-agent-${parentSessionId}-${parentCallId}`, parentSessionId },
-      (result: SubAgentListResult) => {
-        if (cancelled || result.error) return
-        const child = result.children.find((entry) => entry.parentCallId === parentCallId)
-        if (!child) return
-        childIdRef.current = child.childSessionId
-        if (child.agentType) setAgentType(child.agentType)
-        setLifecycle(() => {
-          if (child.status === 'failed' || child.status === 'cancelled') {
-            return {
-              status: child.status,
-              childSessionId: child.childSessionId,
-              error: child.error ?? 'sub-agent ended before this dashboard connected',
-              turns: child.turns ?? 0,
-              durationMs: child.durationMs ?? 0,
-              finishedAt: child.finishedAt ?? '',
-              ...(child.startedAt ? { startedAt: child.startedAt } : {}),
-            }
-          }
-          if (child.status === 'completed') {
-            return {
-              status: 'completed',
-              childSessionId: child.childSessionId,
-              turns: child.turns ?? 0,
-              durationMs: child.durationMs ?? 0,
-              finishedAt: child.finishedAt ?? '',
-              ...(child.startedAt ? { startedAt: child.startedAt } : {}),
-            }
-          }
+    const unsubscribe = subscribeSubAgentList(socket, parentSessionId, (result: SubAgentListResult) => {
+      if (cancelled) return
+      if (result.error) {
+        if (childIdRef.current) {
+          commandStateRef.current = 'unknown'
+          setCommandState('unknown')
+        }
+        return
+      }
+      const child = result.children.find((entry) => entry.parentCallId === parentCallId)
+      if (!child) return
+      childIdRef.current = child.childSessionId
+      commandStateRef.current = child.commandState
+      setCommandState(child.commandState)
+      setPendingCommandCount(child.pendingCommandCount ?? 0)
+      if (child.agentType) setAgentType(child.agentType)
+      setLifecycle(() => {
+        if (child.status === 'failed' || child.status === 'cancelled') {
           return {
-            status: 'running',
+            status: child.status,
             childSessionId: child.childSessionId,
-            startedAt: child.startedAt ?? '',
+            error: child.error ?? 'sub-agent ended before this dashboard connected',
+            turns: child.turns ?? 0,
+            durationMs: child.durationMs ?? 0,
+            finishedAt: child.finishedAt ?? '',
+            ...(child.startedAt ? { startedAt: child.startedAt } : {}),
           }
-        })
-      },
-    )
+        }
+        if (child.status === 'completed') {
+          return {
+            status: 'completed',
+            childSessionId: child.childSessionId,
+            turns: child.turns ?? 0,
+            durationMs: child.durationMs ?? 0,
+            finishedAt: child.finishedAt ?? '',
+            ...(child.startedAt ? { startedAt: child.startedAt } : {}),
+          }
+        }
+        return {
+          status: 'running',
+          childSessionId: child.childSessionId,
+          startedAt: child.startedAt ?? '',
+        }
+      })
+    })
     return () => {
       cancelled = true
+      unsubscribe()
     }
   }, [socket, parentSessionId, parentCallId])
 
@@ -191,6 +205,7 @@ export function useSubAgentSession({
     const onFinished = (payload: ServerSubAgentFinishedEvent): void => {
       if (payload.parentSessionId !== parentSessionId) return
       if (payload.parentCallId !== parentCallId) return
+      if (commandStateRef.current) return
       setLifecycle((prev) => {
         const startedAt = prev.status === 'running' ? prev.startedAt : undefined
         if (
@@ -281,6 +296,8 @@ export function useSubAgentSession({
 
   return {
     lifecycle,
+    commandState,
+    pendingCommandCount,
     messages: independentlyRouted ? child.state?.messages ?? [] : messages,
     ...(independentlyRouted && child.lastError ? { transcriptError: child.lastError.message } : {}),
     ...(agentType !== undefined ? { agentType } : {}),

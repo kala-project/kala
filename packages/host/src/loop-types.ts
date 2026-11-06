@@ -203,6 +203,10 @@ export type HostLoopDeps = {
   onDrain?: () => void
   llmQuota?: LlmQuotaEnforcer
   modelPolicy?: TenantModelPolicyEnforcer
+  /** Resolve an advertised model to its unambiguous canonical ref before persisting a shared child. */
+  normalizeAgentModel?: (model: string) => string | undefined
+  chooseChildReplicaId?: (childSessionId: string) => Promise<string | undefined>
+  handoffChildOwner?: (childSessionId: string, targetReplicaId: string) => Promise<void>
   broadcast: LoopBroadcast
   models?: ModelResolver
   hooks?: readonly HookConfig[]

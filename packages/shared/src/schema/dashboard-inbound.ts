@@ -163,6 +163,7 @@ export const ClientCancelStreamSchema = z.object({
 }) satisfies z.ZodType<ClientCancelStream>
 
 export const ClientInterruptSubAgentSchema = z.object({
+  operationId: OperationIdSchema,
   parentSessionId: SessionIdSchema,
   parentCallId: WireIdSchema,
   childSessionId: SessionIdSchema.optional(),

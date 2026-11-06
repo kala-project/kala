@@ -114,6 +114,115 @@ const migrations: readonly PostgresMigration[] = [
     name: 'exclusive_native_filesystem_admission',
     statements: nativeFsAdmissionSchemaStatements,
   },
+  {
+    version: 12,
+    name: 'session_tree_agent_boards',
+    statements: (schema) => [
+      `CREATE TABLE IF NOT EXISTS ${schema}.tenant_session_agent_boards (
+        tenant_id text NOT NULL,
+        root_session_id text NOT NULL,
+        state jsonb NOT NULL,
+        PRIMARY KEY (tenant_id, root_session_id)
+      )`,
+    ],
+  },
+  {
+    version: 13,
+    name: 'fenced_child_command_inbox',
+    statements: (schema) => [
+      `CREATE TABLE IF NOT EXISTS ${schema}.tenant_session_child_commands (
+        tenant_id text NOT NULL,
+        parent_session_id text NOT NULL,
+        child_session_id text NOT NULL,
+        command_id text NOT NULL,
+        ordinal bigint NOT NULL CHECK (ordinal > 0),
+        kind text NOT NULL CHECK (kind IN ('message', 'stop')),
+        message text,
+        status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'claimed', 'completed')),
+        owner_generation bigint,
+        owner_token text,
+        outcome jsonb,
+        created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+        PRIMARY KEY (tenant_id, child_session_id, command_id),
+        UNIQUE (tenant_id, child_session_id, ordinal),
+        CHECK ((kind = 'message' AND message IS NOT NULL) OR (kind = 'stop' AND message IS NULL)),
+        CHECK ((status = 'claimed' AND owner_generation IS NOT NULL AND owner_token IS NOT NULL)
+          OR (status <> 'claimed' AND owner_generation IS NULL AND owner_token IS NULL)),
+        CHECK ((status = 'completed') = (outcome IS NOT NULL))
+      )`,
+      `CREATE INDEX IF NOT EXISTS tenant_session_child_commands_pending_idx
+        ON ${schema}.tenant_session_child_commands (tenant_id, child_session_id, ordinal)
+        WHERE status <> 'completed'`,
+    ],
+  },
+  {
+    version: 14,
+    name: 'child_command_dispatch_fence',
+    statements: (schema) => [
+      `ALTER TABLE ${schema}.tenant_session_child_commands
+        ADD COLUMN dispatched_at timestamptz`,
+    ],
+  },
+  {
+    version: 15,
+    name: 'child_command_dispatch_owner_provenance',
+    statements: (schema) => [
+      `ALTER TABLE ${schema}.tenant_session_child_commands
+        ADD COLUMN dispatched_owner_generation bigint`,
+    ],
+  },
+  {
+    version: 16,
+    name: 'child_command_completion_outbox',
+    statements: (schema) => [
+      `ALTER TABLE ${schema}.tenant_session_child_commands
+        ADD COLUMN completed_at timestamptz,
+        ADD COLUMN completion_notified_at timestamptz`,
+      `CREATE INDEX tenant_session_child_commands_completion_idx
+        ON ${schema}.tenant_session_child_commands (tenant_id, parent_session_id, child_session_id)
+        WHERE kind = 'message' AND status = 'completed' AND completion_notified_at IS NULL`,
+      `CREATE INDEX tenant_session_child_commands_fanout_idx
+        ON ${schema}.tenant_session_child_commands (tenant_id, parent_session_id, completed_at, child_session_id)
+        WHERE kind = 'message' AND status = 'completed' AND completed_at IS NOT NULL
+          AND outcome->>'ok' = 'true'`,
+    ],
+  },
+  {
+    version: 17,
+    name: 'child_command_budgets',
+    statements: (schema) => [
+      `ALTER TABLE ${schema}.tenant_session_child_commands
+        ADD COLUMN timeout_ms integer CHECK (timeout_ms > 0),
+        ADD COLUMN max_turns integer CHECK (max_turns > 0)`,
+    ],
+  },
+  {
+    version: 18,
+    name: 'commit_ordered_child_completion_fanout',
+    statements: (schema) => [
+      `ALTER TABLE ${schema}.tenant_session_child_commands
+        ADD COLUMN completion_sequence bigint CHECK (completion_sequence > 0)`,
+      `WITH ranked AS (
+        SELECT tenant_id, child_session_id, command_id,
+          row_number() OVER (PARTITION BY tenant_id, parent_session_id
+            ORDER BY completed_at, child_session_id)::bigint AS sequence
+        FROM ${schema}.tenant_session_child_commands
+        WHERE kind = 'message' AND status = 'completed' AND completed_at IS NOT NULL
+          AND outcome->>'ok' = 'true'
+      )
+      UPDATE ${schema}.tenant_session_child_commands AS commands SET completion_sequence = ranked.sequence
+      FROM ranked WHERE commands.tenant_id = ranked.tenant_id
+        AND commands.child_session_id = ranked.child_session_id AND commands.command_id = ranked.command_id`,
+      `CREATE UNIQUE INDEX tenant_session_child_commands_sequence_idx
+        ON ${schema}.tenant_session_child_commands (tenant_id, parent_session_id, completion_sequence)
+        WHERE completion_sequence IS NOT NULL`,
+      `DROP INDEX IF EXISTS ${schema}.tenant_session_child_commands_fanout_idx`,
+      `ALTER TABLE ${schema}.tenant_session_child_commands
+        ADD CONSTRAINT tenant_session_child_commands_sequence_required
+        CHECK (kind <> 'message' OR status <> 'completed' OR outcome->>'ok' <> 'true'
+          OR completed_at IS NULL OR completion_sequence IS NOT NULL)`,
+    ],
+  },
 ]
 
 export const LATEST_POSTGRES_SCHEMA_VERSION = migrations.at(-1)?.version ?? 0

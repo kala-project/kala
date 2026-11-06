@@ -329,29 +329,77 @@ const planningToolset: ToolsetPlugin = {
 
 const agentToolset: ToolsetPlugin = {
   id: 'subagents',
-  version: '2026-09-28',
+  version: '2026-10-31',
   label: 'Sub-agents',
   provideTools() {
-    return [tool('agent', 'host', 'agent', false, 'agent', {
-      purpose: 'Spawn a sub-agent to handle a focused sub-task.',
-      whenToUse: ['Delegate bounded research, implementation, testing, or review only when independent or parallel work clearly offsets startup and repeated exploration.', 'For complex work, explicitly set max_turns and timeout_ms in the tool call instead of relying on the role default.'],
-      constraints: ['Use intention only for the concise single-line header summary.', 'Make prompt self-contained because the child does not inherit the parent transcript.', 'Format multi-part prompts as readable Markdown with short sections, blank lines, and bullet points.', 'Include only the context needed for the delegated task and state the expected output explicitly.', 'Use the implementation role when the child must edit files; research and review remain read-only.', 'Do small lookups, single-file edits, and narrow tests yourself; do not delegate solely to reduce context pressure.', 'Hand off verified facts, relevant files, remaining questions, edit scope, verification, and expected output rather than asking the child to rediscover them.', 'Set larger max_turns/timeout_ms for large codebase work, long tests, or multi-step implementation so the child is not cancelled prematurely.'],
-    }, {
-      type: 'object',
-      properties: {
-        prompt: { type: 'string', minLength: 1, description: 'The complete, self-contained task sent verbatim to the child as its first user message. Include the objective, verified facts and relevant files, remaining questions, edit scope, verification, constraints, and expected result. When the task contains multiple requirements, format it as readable Markdown with short sections, blank lines, and bullet points. Do not compress a multi-part task into one dense paragraph.' },
-        model: { type: 'string' },
-        tools: { type: 'array', items: { type: 'string' } },
-        role: { type: 'string', enum: ['research', 'implementation', 'test', 'review'], description: 'Optional capability role. implementation includes controlled file mutation and shell tools; research/review are read-only and test runs verification without source edits. The role also selects default turns and deadlines: research 180 turns/4h, implementation 240 turns/6h, test 200 turns/5h, review 120 turns/3h.' },
-        agent_type: { type: 'string', description: 'Optional child type shown in the Session graph. When role is omitted, research, implementation, test, or review also selects the matching least-privilege role.' },
-        intention: { type: 'string', minLength: 12, maxLength: 240, description: 'A concise, single-line, user-facing summary shown in the sub-agent header. State the concrete objective without commands, paths, implementation details, Markdown, or line breaks. Do not copy the full prompt. When omitted, objective or the required _intent is used.' },
-        objective: { type: 'string', description: 'Backward-compatible user-facing delegation objective. Prefer intention for new calls.' },
-        max_turns: { type: 'integer', minimum: 1, maximum: 480, description: 'Optional per-call turn budget. Use higher values for complex tasks. Role caps: review 240, research 360, test 400, implementation 480.' },
-        timeout_ms: { type: 'integer', minimum: 1, maximum: 43_200_000, description: 'Optional per-call absolute deadline in milliseconds. Use higher values for long-running work. Role caps: review 21600000, research 28800000, test 36000000, implementation 43200000.' },
-        expected_output: { type: 'string', description: 'Observability metadata describing what the child must return. It does not alter the child instructions; include any requirement the child must follow directly in prompt.' },
-      },
-      required: ['prompt'],
-    })]
+    return [
+      tool('agent', 'host', 'agent', false, 'agent', {
+        purpose: 'Spawn a sub-agent to handle a focused sub-task (synchronously or in background).',
+        whenToUse: ['Delegate bounded research, implementation, testing, or review only when independent or parallel work clearly offsets startup and repeated exploration.', 'Use mode="background" when you want to continue independent work in parallel or coordinate multiple sub-agents via read_agent, next-turn write_agent, and agent_board.', 'For complex work, explicitly set max_turns and timeout_ms in the tool call instead of relying on the role default.'],
+        constraints: ['Use intention only for the concise single-line header summary.', 'Make prompt self-contained because the child does not inherit the parent transcript.', 'Format multi-part prompts as readable Markdown with short sections, blank lines, and bullet points.', 'Include only the context needed for the delegated task and state the expected output explicitly.', 'Use the implementation role when the child must edit files; research and review remain read-only.', 'Do small lookups, single-file edits, and narrow tests yourself; do not delegate solely to reduce context pressure.', 'Hand off verified facts, relevant files, remaining questions, edit scope, verification, and expected output rather than asking the child to rediscover them.', 'Set larger max_turns/timeout_ms for large codebase work, long tests, or multi-step implementation so the child is not cancelled prematurely.'],
+      }, {
+        type: 'object',
+        properties: {
+          prompt: { type: 'string', minLength: 1, description: 'The complete, self-contained task sent verbatim to the child as its first user message. Include the objective, verified facts and relevant files, remaining questions, edit scope, verification, constraints, and expected result. When the task contains multiple requirements, format it as readable Markdown with short sections, blank lines, and bullet points. Do not compress a multi-part task into one dense paragraph.' },
+          mode: { type: 'string', enum: ['sync', 'background'], default: 'sync', description: 'Execution mode: sync waits up to 30 seconds for a durable terminal result and may return running; background durably accepts the child command and returns its session_id for read_agent / write_agent.' },
+          model: { type: 'string' },
+          tools: { type: 'array', items: { type: 'string' } },
+          role: { type: 'string', enum: ['research', 'implementation', 'test', 'review'], description: 'Optional capability role. implementation includes controlled file mutation and shell tools; research/review are read-only and test runs verification without source edits. The role also selects default turns and deadlines: research 180 turns/4h, implementation 240 turns/6h, test 200 turns/5h, review 120 turns/3h.' },
+          agent_type: { type: 'string', description: 'Optional child type shown in the Session graph. When role is omitted, research, implementation, test, or review also selects the matching least-privilege role.' },
+          intention: { type: 'string', minLength: 12, maxLength: 240, description: 'A concise, single-line, user-facing summary shown in the sub-agent header. State the concrete objective without commands, paths, implementation details, Markdown, or line breaks. Do not copy the full prompt. When omitted, objective or the required _intent is used.' },
+          objective: { type: 'string', description: 'Backward-compatible user-facing delegation objective. Prefer intention for new calls.' },
+          max_turns: { type: 'integer', minimum: 1, maximum: 480, description: 'Optional per-call turn budget. Use higher values for complex tasks. Role caps: review 240, research 360, test 400, implementation 480.' },
+          timeout_ms: { type: 'integer', minimum: 1, maximum: 43_200_000, description: 'Optional per-call absolute deadline in milliseconds. Use higher values for long-running work. Role caps: review 21600000, research 28800000, test 36000000, implementation 43200000.' },
+          expected_output: { type: 'string', description: 'Observability metadata describing what the child must return. It does not alter the child instructions; include any requirement the child must follow directly in prompt.' },
+        },
+        required: ['prompt'],
+      }),
+      tool('read_agent', 'host', 'read', false, 'read_agent', {
+        purpose: 'Read or await a child sub-agent status, turn progress, and final output by agent_id.',
+        whenToUse: ['Check progress or await completion (`wait: true`) of a sub-agent started with `mode: "background"` or resumed via `write_agent`.'],
+        constraints: ['Pass the exact `session_id` returned in the `<sub_agent>` envelope as `agent_id`.', 'Prefer `wait: true` with a bounded `timeout_ms` over tight polling loops.'],
+      }, {
+        type: 'object',
+        required: ['agent_id'],
+        properties: {
+          agent_id: { type: 'string', minLength: 1, description: 'Child sub-agent session_id.' },
+          wait: { type: 'boolean', description: 'When true, wait up to timeout_ms for the sub-agent to finish its active run.' },
+          timeout_ms: { type: 'integer', minimum: 10, maximum: 600_000, default: 30_000, description: 'Maximum wait time in milliseconds when wait is true.' },
+        },
+      }),
+      tool('write_agent', 'host', 'agent', false, 'write_agent', {
+        purpose: 'Queue an ordered next-turn message for a running child, or resume a completed/idle child in place while reusing its warm conversation history.',
+        whenToUse: ['Follow up with an existing child sub-agent on the same task without re-exploring the repo.', 'Queue newly discovered constraints for after the running child turn has a durable terminal receipt.'],
+        constraints: ['No mid-turn injection: a running child processes the message only on the next turn. UNKNOWN effects block later messages. Use only for same-task follow-ups; spawn a fresh `agent` for unrelated tasks.'],
+      }, {
+        type: 'object',
+        required: ['agent_id', 'message'],
+        properties: {
+          agent_id: { type: 'string', minLength: 1, description: 'Child sub-agent session_id to steer or resume.' },
+          message: { type: 'string', minLength: 1, description: 'Instruction queued for the child sub-agent’s next turn; never injected mid-turn.' },
+          mode: { type: 'string', enum: ['sync', 'background'], default: 'sync', description: 'sync waits for a bounded interval and may return running/UNKNOWN; background confirms durable admission, not execution.' },
+          intention: { type: 'string', minLength: 12, maxLength: 240, description: 'Optional updated single-line intention summary.' },
+        },
+      }),
+      tool('agent_board', 'host', 'read', false, 'agent_board', {
+        purpose: 'Shared message board and advisory file-claim registry scoped to the current root Session tree (parent and all sibling/child sub-agents).',
+        whenToUse: ['Publish discovered facts, root causes, API contracts, or test results for sibling and parent agents.', 'Read findings posted by other sub-agents or claim files (`claim_file` / `release_file`) before editing in parallel.'],
+        constraints: ['Keep posted content concise and structured.', 'Check `claim_file` before modifying shared files when multiple implementation sub-agents run concurrently.'],
+      }, {
+        type: 'object',
+        required: ['operation'],
+        properties: {
+          operation: { type: 'string', enum: ['post', 'read', 'list', 'claim_file', 'release_file', 'clear'] },
+          topic: { type: 'string', minLength: 1, maxLength: 120, description: 'Topic key for post or read.' },
+          content: { type: 'string', minLength: 1, maxLength: 32768, description: 'Content payload for post.' },
+          tags: { type: 'array', maxItems: 10, items: { type: 'string' }, description: 'Optional topic tags for post.' },
+          tag: { type: 'string', description: 'Optional tag filter for read or list.' },
+          expected_revision: { type: 'integer', minimum: 0, description: 'Optional optimistic concurrency revision check for post.' },
+          path: { type: 'string', description: 'File path for claim_file or release_file.' },
+          note: { type: 'string', maxLength: 240, description: 'Optional note explaining the file claim.' },
+        },
+      }),
+    ]
   },
 }
 

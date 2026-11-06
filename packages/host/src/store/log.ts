@@ -681,6 +681,47 @@ export async function findLatestRuntimeMetadata(
   }
 }
 
+/** Bounded reverse scan back to the named command's persisted user-message marker. */
+export async function countChildModelTurnEnds(path: string, commandId: string): Promise<number> {
+  if (!commandId) throw new TypeError('Child command ID is required')
+  const handle = await open(path, 'r')
+  const needle = Buffer.from(JSON.stringify(commandId))
+  const turnIds = new Set<string>()
+  const chunkSize = 4 * 1024 * 1024
+  let carry = Buffer.alloc(0)
+  try {
+    const stat = await handle.stat()
+    let end = stat.size
+    const minimumOffset = Math.max(0, stat.size - 64 * 1024 * 1024)
+    while (end > minimumOffset) {
+      const start = Math.max(minimumOffset, end - chunkSize)
+      const chunk = Buffer.allocUnsafe(end - start)
+      await handle.read(chunk, 0, chunk.length, start)
+      const data = carry.length ? Buffer.concat([chunk, carry]) : chunk
+      let match = data.lastIndexOf(needle)
+      while (match >= 0 && match < chunk.length) {
+        const line = await readLineContaining(handle, start + match, stat.size, 2 * 1024 * 1024)
+        if (line.startsWith('{"kind":"runtime_metadata"')) {
+          const entry = JSON.parse(line) as LogEntry
+          if (entry.kind === 'runtime_metadata') {
+            if (entry.action === 'copilot.user_message' && entry.payload.operationId === commandId) return turnIds.size
+            if (entry.action === 'copilot.assistant_turn_end' && entry.payload.childCommandId === commandId
+              && typeof entry.payload.turnId === 'string' && entry.payload.turnId.length > 0) {
+              turnIds.add(entry.payload.turnId)
+            }
+          }
+        }
+        match = data.lastIndexOf(needle, match - 1)
+      }
+      carry = chunk.subarray(0, Math.min(needle.length - 1, chunk.length))
+      end = start
+    }
+    throw new Error('Child command turn history exceeds bounded scan or has no durable user marker')
+  } finally {
+    await handle.close()
+  }
+}
+
 export async function readRecentSessionMetadata(
   path: string,
   options: { maxScanBytes?: number } = {},

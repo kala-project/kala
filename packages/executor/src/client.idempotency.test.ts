@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createExecutorSharedExecution, startExecutor } from './client.js'
+import { executionRequestDigest } from './execution-receipts.js'
 import type { Tool } from './tools/registry.js'
 
 type Handler = (...args: unknown[]) => void
@@ -60,6 +61,64 @@ function makeMockSocket() {
 }
 
 describe('executor idempotency', () => {
+  it('only aborts the matching live runner after the Stop intent is durable', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kala-stop-wire-'))
+    const sharedExecution = createExecutorSharedExecution(join(dir, 'receipts.json'))
+    const socket = makeMockSocket()
+    const runs = vi.fn(async (_input: Record<string, unknown>, context: { signal: AbortSignal }) =>
+      await new Promise<string>((resolve) => context.signal.addEventListener('abort', () => resolve('aborted with possible prior effects'), { once: true })))
+    const handle = startExecutor({
+      host: 'http://localhost', workspaceId: 'ws-stop', executorId: 'executor-stop',
+      tools: [{ name: 'effect', run: runs } satisfies Tool], sharedExecution, ioFactory: (() => socket) as never,
+    })
+    const call = { sessionId: 'child', callId: 'call', name: 'effect', input: {}, ownerGeneration: '2' }
+    const result = vi.fn()
+    socket.__trigger('tool:call', call, result)
+    await vi.waitFor(() => expect(runs).toHaveBeenCalledTimes(1))
+    const request = { sessionId: call.sessionId, callId: call.callId, ownerGeneration: '2',
+      requestDigest: executionRequestDigest(call), stopCommandId: 'stop-1' }
+    const wrong = vi.fn()
+    socket.__trigger('tool:cancel_ack', { ...request, ownerGeneration: '3' }, wrong)
+    await vi.waitFor(() => expect(wrong).toHaveBeenCalledWith({ status: 'conflict' }))
+    expect(result).not.toHaveBeenCalled()
+    const ack = vi.fn()
+    socket.__trigger('tool:cancel_ack', request, ack)
+    await vi.waitFor(() => expect(ack).toHaveBeenCalledWith({ status: 'cancel_requested' }))
+    await vi.waitFor(() => expect(result).toHaveBeenCalled())
+    expect(result.mock.calls[0]![0]).toMatchObject({ ok: true, content: 'aborted with possible prior effects' })
+    const recovered = vi.fn()
+    socket.__trigger('tool:receipt_query', request, recovered)
+    await vi.waitFor(() => expect(recovered).toHaveBeenCalledWith({
+      status: 'completed', result: expect.objectContaining({ callId: 'call', ok: true }),
+    }))
+    await handle.close()
+  })
+
+  it('serves receipt queries from durable evidence without calling the tool', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kala-receipt-query-wire-'))
+    const sharedExecution = createExecutorSharedExecution(join(dir, 'receipts.json'))
+    const socket = makeMockSocket()
+    const runs = vi.fn(async () => 'effect')
+    const handle = startExecutor({
+      host: 'http://localhost', workspaceId: 'ws-query', executorId: 'executor-query',
+      tools: [{ name: 'effect', run: runs } satisfies Tool], sharedExecution, ioFactory: (() => socket) as never,
+    })
+    const query = { sessionId: 'session', callId: 'call', ownerGeneration: '2', requestDigest: 'a'.repeat(64) }
+    const missing = vi.fn()
+    socket.__trigger('tool:receipt_query', query, missing)
+    await vi.waitFor(() => expect(missing).toHaveBeenCalledWith({ status: 'unavailable' }))
+    await sharedExecution.receiptStore!.begin('session:call', 'call', query.requestDigest, query.ownerGeneration)
+    const started = vi.fn()
+    socket.__trigger('tool:receipt_query', query, started)
+    await vi.waitFor(() => expect(started).toHaveBeenCalledWith({ status: 'started_unknown' }))
+    await sharedExecution.receiptStore!.set('session:call', { callId: 'call', ok: true, content: 'persisted' })
+    const completed = vi.fn()
+    socket.__trigger('tool:receipt_query', query, completed)
+    await vi.waitFor(() => expect(completed).toHaveBeenCalledWith({ status: 'completed', result: { callId: 'call', ok: true, content: 'persisted' } }))
+    expect(runs).not.toHaveBeenCalled()
+    await handle.close()
+  })
+
   it('fails closed on high-risk shell calls without a Host approval and admits verified calls', async () => {
     const runs = vi.fn(async (_input: Record<string, unknown>, _ctx: Parameters<Tool['run']>[1]) => 'executed')
     const socket = makeMockSocket()

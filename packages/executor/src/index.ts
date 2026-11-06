@@ -17,6 +17,7 @@ export {
 } from './tools/index.js'
 export type { Tool, ToolContext, ToolRunner } from './tools/index.js'
 export { startExecutor } from './client.js'
+export { executionRequestDigest } from './execution-receipts.js'
 export type { ExecutorOptions, ExecutorHandle } from './client.js'
 export { parseMcpServerConfig, parseMcpServerDeclaration, parseMcpServers } from './mcp-config.js'
 export type { McpServerConfig } from './mcp-config.js'

@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite'
 import type { EventEntry, RuntimeMetadataEntry } from '@agent-kernel/shared'
 
 import type { ParsedHistory, SessionOperationMatch } from './log.js'
+import { emptyAgentBoard, type AgentBoardState } from './agent-board-state.js'
 import { createNativeSessionFsProvider, nativeFsPlan, nativeFsSchemaStatements, validateNativeFsLimits, type NativeFsLimits, type NativeFsTables } from './native-session-fs.js'
 import {
   SessionDeletingError,
@@ -84,6 +85,10 @@ export class SqliteSessionAuthority implements SessionAuthority {
         );
         CREATE INDEX IF NOT EXISTS portable_session_events_session_sequence_idx
           ON portable_session_events(session_id, sequence);
+        CREATE TABLE IF NOT EXISTS portable_agent_boards (
+          root_session_id TEXT PRIMARY KEY,
+          state TEXT NOT NULL
+        );
       `)
       for (const statement of nativeFsSchemaStatements(NATIVE_FS_TABLES)) database.exec(statement)
       this.#database = database
@@ -134,6 +139,46 @@ export class SqliteSessionAuthority implements SessionAuthority {
   async load(sessionId: string): Promise<PersistedSessionDocument | undefined> {
     const document = this.#loadIncludingDeleting(sessionId)
     return document && !sessionDeletion(document) ? document : undefined
+  }
+
+  async agentBoardTransaction<T>(
+    sessionId: string,
+    operation: (rootSessionId: string, board: AgentBoardState, actor: { sessionId: string; parentSessionId?: unknown; agentType?: unknown }) => T,
+  ): Promise<T> {
+    validateSessionId(sessionId)
+    const database = this.#db()
+    database.exec('BEGIN IMMEDIATE')
+    try {
+      const visited = new Set<string>()
+      let id = sessionId
+      let actor: PersistedSessionDocument | undefined
+      for (;;) {
+        if (visited.has(id) || visited.size >= 32) throw new Error('Invalid cyclic or excessively deep Session tree')
+        visited.add(id)
+        const document = this.#loadIncludingDeleting(id)
+        if (!document || sessionDeletion(document)) throw new SessionDeletingError(id)
+        if (!actor) actor = document
+        if (typeof document.parentSessionId !== 'string' || !document.parentSessionId) break
+        validateSessionId(document.parentSessionId)
+        id = document.parentSessionId
+      }
+      database.prepare('INSERT OR IGNORE INTO portable_agent_boards (root_session_id, state) VALUES (?, ?)')
+        .run(id, JSON.stringify(emptyAgentBoard()))
+      const row = database.prepare('SELECT state FROM portable_agent_boards WHERE root_session_id = ?')
+        .get(id) as { state: string }
+      const board = JSON.parse(row.state) as AgentBoardState
+      const revision = board.revision
+      const result = operation(id, board, actor!)
+      if (revision !== board.revision) {
+        database.prepare('UPDATE portable_agent_boards SET state = ? WHERE root_session_id = ?')
+          .run(JSON.stringify(board), id)
+      }
+      database.exec('COMMIT')
+      return result
+    } catch (error) {
+      database.exec('ROLLBACK')
+      throw error
+    }
   }
 
   async mutate(sessionId: string, mutation: SessionAuthorityMutation): Promise<PersistedSessionDocument | undefined> {
@@ -196,6 +241,9 @@ export class SqliteSessionAuthority implements SessionAuthority {
         throw new SessionDeletingError(sessionId)
       }
       const next = mutation.apply(current)
+      if (mutation.eventType === 'session.deleted' && next === undefined) {
+        database.prepare('DELETE FROM portable_agent_boards WHERE root_session_id = ?').run(sessionId)
+      }
       if (next && next.sessionId !== sessionId) {
         throw new Error(`Session authority mutation changed identity from ${sessionId} to ${next.sessionId}`)
       }

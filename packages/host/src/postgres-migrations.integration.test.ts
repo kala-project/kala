@@ -58,18 +58,18 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
   it('migrates from zero idempotently, then supports core DML while rejecting Runtime DDL', async () => {
     await expect(migratePostgres({ connectionString: adminUrl })).resolves.toMatchObject({
       previousVersion: 0,
-      currentVersion: 11,
-      appliedVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+      currentVersion: 18,
+      appliedVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
     })
     await expect(migratePostgres({ connectionString: adminUrl })).resolves.toMatchObject({
-      previousVersion: 11,
-      currentVersion: 11,
+      previousVersion: 18,
+      currentVersion: 18,
       appliedVersions: [],
     })
 
     const admin = new Pool({ connectionString: adminUrl })
     const tables = await admin.query("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")
-    expect(tables.rows.map((row) => row.tablename)).toHaveLength(31)
+    expect(tables.rows.map((row) => row.tablename)).toHaveLength(33)
     expect(tables.rows.map((row) => row.tablename)).toEqual(expect.arrayContaining([
       'tenant_object_capacity_accounts',
       'tenant_object_capacity_allocations',
@@ -84,6 +84,8 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
       'tenant_session_native_posix_blocks',
       'tenant_session_native_fs_admission',
       'tenant_agent_prompt_settings',
+      'tenant_session_agent_boards',
+      'tenant_session_child_commands',
     ]))
     await admin.query(`CREATE ROLE kala_runtime LOGIN PASSWORD '${runtimePassword.replaceAll("'", "''")}'`)
     await admin.query(`CREATE ROLE kala_gateway_reader LOGIN PASSWORD '${readerPassword.replaceAll("'", "''")}'`)
@@ -111,13 +113,17 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
     }
     await expect(reader.query('SELECT * FROM tenant_session_native_fs_chunks')).rejects.toMatchObject({ code: '42501' })
     await expect(reader.query('SELECT * FROM tenant_agent_prompt_settings')).rejects.toMatchObject({ code: '42501' })
+    await expect(reader.query('SELECT * FROM tenant_session_agent_boards')).rejects.toMatchObject({ code: '42501' })
+    await expect(reader.query('SELECT * FROM tenant_session_child_commands')).rejects.toMatchObject({ code: '42501' })
     await expect(reader.query('SELECT * FROM private_control_marker')).rejects.toMatchObject({ code: '42501' })
     await expect(reader.query('SELECT * FROM kala_schema_migrations')).rejects.toMatchObject({ code: '42501' })
     await expect(reader.query('CREATE TABLE gateway_must_not_create_tables (id integer)')).rejects.toMatchObject({ code: '42501' })
     await reader.end()
 
     const runtime = new Pool({ connectionString: runtimeUrl })
-    await expect(assertPostgresSchemaCurrent(runtime)).resolves.toBe(11)
+    await expect(assertPostgresSchemaCurrent(runtime)).resolves.toBe(18)
+    await expect(runtime.query('SELECT * FROM tenant_session_agent_boards')).resolves.toMatchObject({ rowCount: 0 })
+    await expect(runtime.query('SELECT * FROM tenant_session_child_commands')).resolves.toMatchObject({ rowCount: 0 })
     await expect(runtime.query('SELECT * FROM tenant_runtime_unit_protocol_gates')).resolves.toMatchObject({ rowCount: 0 })
     await expect(runtime.query(`INSERT INTO tenant_runtime_unit_protocol_gates
       (organization_id, unit_id, feature_version, barrier_generation) VALUES ('org', 'unit', 1, 1)`))
@@ -166,6 +172,43 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
     await expect(prompts.save({ ...updated, slots: [] })).rejects.toThrow('invalid agent prompt settings')
     await hotState.database.query("UPDATE tenant_agent_prompt_settings SET settings = '{}'::jsonb WHERE tenant_id = $1", ['org_prompt_a'])
     await expect(prompts.load()).rejects.toThrow('Invalid persisted organization agent prompt settings')
+  }, 120_000)
+
+  it('backfills commit-order fanout cursors for existing completed children during v17 upgrade', async () => {
+    const schema = `fanout_upgrade_${randomUUID().replaceAll('-', '')}`
+    const admin = new Pool({ connectionString: adminUrl })
+    try {
+      await admin.query(`CREATE SCHEMA "${schema}"`)
+      await admin.query(`CREATE TABLE "${schema}".kala_schema_migrations
+        (version integer PRIMARY KEY, name text NOT NULL, checksum text NOT NULL)`)
+      await admin.query(`INSERT INTO "${schema}".kala_schema_migrations
+        SELECT version, name, checksum FROM public.kala_schema_migrations WHERE version <= 17`)
+      await admin.query(`CREATE TABLE "${schema}".tenant_session_child_commands AS
+        SELECT * FROM public.tenant_session_child_commands WHERE false`)
+      await admin.query(`ALTER TABLE "${schema}".tenant_session_child_commands DROP COLUMN completion_sequence`)
+      await admin.query(`INSERT INTO "${schema}".tenant_session_child_commands
+        (tenant_id,parent_session_id,child_session_id,command_id,ordinal,kind,message,status,outcome,completed_at)
+        VALUES ('tenant','parent','child-b','call-b',1,'message','B','completed',
+          '{"ok":true,"content":"done"}','2026-01-02T00:00:00Z'),
+          ('tenant','parent','child-a','call-a',1,'message','A','completed',
+          '{"ok":true,"content":"done"}','2026-01-01T00:00:00Z')`)
+      await expect(migratePostgres({ connectionString: adminUrl, schema })).resolves.toMatchObject({
+        previousVersion: 17, currentVersion: 18, appliedVersions: [18],
+      })
+      const rows = await admin.query(`SELECT child_session_id,completion_sequence::text
+        FROM "${schema}".tenant_session_child_commands ORDER BY completion_sequence`)
+      expect(rows.rows).toEqual([
+        { child_session_id: 'child-a', completion_sequence: '1' },
+        { child_session_id: 'child-b', completion_sequence: '2' },
+      ])
+      await expect(admin.query(`INSERT INTO "${schema}".tenant_session_child_commands
+        (tenant_id,parent_session_id,child_session_id,command_id,ordinal,kind,message,status,outcome,completed_at)
+        VALUES ('tenant','parent','old-writer','call-old',1,'message','old','completed',
+          '{"ok":true,"content":"done"}',clock_timestamp())`)).rejects.toMatchObject({ code: '23514' })
+    } finally {
+      await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
+      await admin.end()
+    }
   }, 120_000)
 
   it('refuses v3 to v4 when two Units already own the same resource, without deleting either row', async () => {

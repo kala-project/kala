@@ -52,6 +52,11 @@ export class KernelAgentRuntime implements AgentRuntime {
     await this.loop.dispatch(record.sessionId, { kind: 'cancel' })
   }
 
+  async cancelForChildStop(record: SessionRecord): Promise<boolean> {
+    await this.cancel(record)
+    return true
+  }
+
   async approve(record: SessionRecord, callId: string): Promise<void> {
     await this.dispatch(record, { kind: 'user_approve', callId })
   }

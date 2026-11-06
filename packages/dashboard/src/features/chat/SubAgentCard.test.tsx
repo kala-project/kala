@@ -367,6 +367,7 @@ describe('SubAgentCard', () => {
     fireEvent.click(screen.getByTestId('sub-agent-interrupt-c1'))
 
     expect(socket.emit).toHaveBeenCalledWith('client:interrupt_sub_agent', {
+      operationId: expect.any(String),
       parentSessionId: 'parent-1',
       parentCallId: 'c1',
       childSessionId: 'child-1',
@@ -468,6 +469,44 @@ describe('SubAgentCard', () => {
     await waitFor(() => expect(screen.getByText(/child is still working/)).toBeTruthy())
     expect(screen.getByTestId('sub-agent-transcript-frame-c-live').getAttribute('data-layout')).toBe('content')
     expect(screen.getByTestId('nested-transcript').getAttribute('data-virtualized')).toBe('false')
+  })
+
+  it('distinguishes queued next-turn steering, processing, and unconfirmed UNKNOWN from completion', () => {
+    const socket = makeControlledSocket()
+    render(<SubAgentCard parentSessionId="parent-1" socket={socket.socket}
+      group={makeGroup([makeCall('initial', { prompt: 'work' })])} approvalByCallId={new Map()} />)
+    const listCall = socket.emit.mock.calls.find(([event]) => event === 'sub_agent:list')
+    const acknowledge = listCall?.[2] as ((result: unknown) => void) | undefined
+    expect(acknowledge).toBeTypeOf('function')
+    const report = (commandState?: 'queued' | 'processing' | 'unknown', status: 'running' | 'completed' = 'running') => {
+      act(() => acknowledge!({
+        requestId: 'recover', parentSessionId: 'parent-1', children: [{
+          childSessionId: 'child-1', parentCallId: 'initial', status,
+          startedAt: new Date().toISOString(),
+          ...(commandState ? { commandState, pendingCommandCount: 1 } : {}),
+        }],
+      }))
+    }
+    report('queued')
+    expect(screen.getByTestId('sub-agent-command-state-initial').textContent).toContain('Queued for next turn')
+    expect(screen.getByTestId('sub-agent-row-initial').getAttribute('data-sub-agent-status')).toBe('running')
+    report('processing')
+    expect(screen.getByTestId('sub-agent-command-state-initial').textContent).toContain('Processing next turn')
+    expect(screen.getByTestId('sub-agent-command-state-initial').textContent).toContain('1 pending')
+    act(() => acknowledge!({ requestId: 'recover', parentSessionId: 'parent-1', children: [],
+      error: 'PostgreSQL owner lookup unavailable' }))
+    expect(screen.getByTestId('sub-agent-command-state-initial').textContent).toContain('UNKNOWN')
+    report('unknown')
+    expect(screen.getByTestId('sub-agent-command-state-initial').textContent).toContain('UNKNOWN')
+    expect(screen.getByTestId('sub-agent-row-initial').getAttribute('data-sub-agent-status')).toBe('running')
+    act(() => socket.emitFinished({
+      parentSessionId: 'parent-1', parentCallId: 'initial', childSessionId: 'child-1',
+      status: 'completed', turns: 1, durationMs: 100, finishedAt: new Date().toISOString(),
+    }))
+    expect(screen.getByTestId('sub-agent-row-initial').getAttribute('data-sub-agent-status')).toBe('running')
+    report(undefined, 'completed')
+    expect(screen.queryByTestId('sub-agent-command-state-initial')).toBeNull()
+    expect(screen.getByTestId('sub-agent-row-initial').getAttribute('data-sub-agent-status')).toBe('completed')
   })
 
   it('recovers a cancelled child with its durable reason and metrics', async () => {

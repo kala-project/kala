@@ -39,6 +39,8 @@ import {
 import { nativePosixSchemaStatements, PostgresNativePosixFileSystem, type NativePosixFileSystem } from './native-posix-fs.js'
 import { assertNativeFsAdmission, lockNativeFsAdmission, nativeFsAdmissionSchemaStatements } from './native-fs-admission.js'
 import { decodePostgresJson, stringifyPostgresJson } from '../tenant-runtime/postgres-json.js'
+import { emptyAgentBoard, type AgentBoardState } from './agent-board-state.js'
+import type { ChildCommand, ChildCommandInbox, ChildCommandKind, ChildCompletionNotice } from './child-command-state.js'
 
 export { SessionDeletingError } from './session-authority.js'
 export type { PersistedSessionDocument, SessionAuthorityMutation } from './session-authority.js'
@@ -98,10 +100,13 @@ type EventRow = Record<string, unknown> & {
  * projection and for exact idempotency checks. Schema-version 2 and unversioned
  * full-document events remain replayable for existing installations.
  */
-export class PostgresSessionAuthority implements SessionAuthority {
+export class PostgresSessionAuthority implements SessionAuthority, ChildCommandInbox {
+  readonly childCommandInbox: ChildCommandInbox = this
   readonly #ownerIdPrefix: string
   readonly #eventsTable: string
   readonly #projectionTable: string
+  readonly #agentBoardTable: string
+  readonly #childCommandTable: string
   readonly #nativeFsTables: NativeFsTables
   readonly #nativeFsLimits: Readonly<NativeFsLimits>
   readonly #schemaName: string
@@ -110,6 +115,7 @@ export class PostgresSessionAuthority implements SessionAuthority {
   readonly #resourceOwnerForSession?: (sessionId: string) => RuntimeResourceOwnership | undefined
   readonly #prepareSessionOwner?: (sessionId: string) => Promise<void>
   readonly #ownerUnitId?: TenantRuntimeUnitId
+  readonly #localReplicaId?: string
   readonly messageQueue: PostgresMessageQueueStore
   readonly currentOwnerCacheKey?: (sessionId: string) => string | undefined
 
@@ -129,6 +135,8 @@ export class PostgresSessionAuthority implements SessionAuthority {
       resourceOwnerForSession?: (sessionId: string) => RuntimeResourceOwnership | undefined
       /** Optional trusted lease acquisition before reads and mutations; the SQL transaction still fences it. */
       prepareSessionOwner?: (sessionId: string) => Promise<void>
+      /** Server-derived live membership identity; never a client-provided selector. */
+      localReplicaId?: string
     } = {},
   ) {
     if (!tenantId) throw new TypeError('tenantId must be a non-empty string')
@@ -140,6 +148,8 @@ export class PostgresSessionAuthority implements SessionAuthority {
     this.#nativeFsLimits = validateNativeFsLimits(options.nativeFsLimits ?? {})
     this.#eventsTable = `${schema}.tenant_runtime_hot_events`
     this.#projectionTable = `${schema}.tenant_session_latest_projection`
+    this.#agentBoardTable = `${schema}.tenant_session_agent_boards`
+    this.#childCommandTable = `${schema}.tenant_session_child_commands`
     this.#nativeFsTables = {
       usage: `${schema}."tenant_session_native_fs_usage"`,
       nodes: `${schema}."tenant_session_native_fs_nodes"`,
@@ -158,6 +168,7 @@ export class PostgresSessionAuthority implements SessionAuthority {
     this.#resourceOwnerForSession = options.resourceOwnerForSession
     this.#prepareSessionOwner = options.prepareSessionOwner
     this.#ownerUnitId = options.unitId ? parseTenantRuntimeUnitId(options.unitId) : undefined
+    this.#localReplicaId = options.localReplicaId
     if (this.#resourceOwnerForSession) {
       this.currentOwnerCacheKey = (sessionId) => {
         try { return this.#currentOwner(sessionId)?.ownerToken } catch (error) {
@@ -204,6 +215,81 @@ export class PostgresSessionAuthority implements SessionAuthority {
       updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
       PRIMARY KEY (tenant_id, session_id)
     )`)
+    await this.hotState.database.query(`CREATE TABLE IF NOT EXISTS ${this.#agentBoardTable} (
+      tenant_id text NOT NULL,
+      root_session_id text NOT NULL,
+      state jsonb NOT NULL,
+      PRIMARY KEY (tenant_id, root_session_id)
+    )`)
+    await this.hotState.database.query(`CREATE TABLE IF NOT EXISTS ${this.#childCommandTable} (
+      tenant_id text NOT NULL,
+      parent_session_id text NOT NULL,
+      child_session_id text NOT NULL,
+      command_id text NOT NULL,
+      ordinal bigint NOT NULL CHECK (ordinal > 0),
+      kind text NOT NULL CHECK (kind IN ('message', 'stop')),
+      message text,
+      status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'claimed', 'completed')),
+      owner_generation bigint,
+      owner_token text,
+      dispatched_at timestamptz,
+      dispatched_owner_generation bigint,
+      outcome jsonb,
+      completed_at timestamptz,
+      completion_sequence bigint CHECK (completion_sequence > 0),
+      completion_notified_at timestamptz,
+      timeout_ms integer CHECK (timeout_ms > 0),
+      max_turns integer CHECK (max_turns > 0),
+      created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+      PRIMARY KEY (tenant_id, child_session_id, command_id),
+      UNIQUE (tenant_id, child_session_id, ordinal),
+      CHECK ((kind = 'message' AND message IS NOT NULL) OR (kind = 'stop' AND message IS NULL)),
+      CHECK ((status = 'claimed' AND owner_generation IS NOT NULL AND owner_token IS NOT NULL)
+        OR (status <> 'claimed' AND owner_generation IS NULL AND owner_token IS NULL)),
+      CHECK ((status = 'completed') = (outcome IS NOT NULL))
+    )`)
+    await this.hotState.database.query(`CREATE INDEX IF NOT EXISTS tenant_session_child_commands_pending_idx
+      ON ${this.#childCommandTable} (tenant_id, child_session_id, ordinal)
+      WHERE status <> 'completed'`)
+    await this.hotState.database.query(`CREATE INDEX IF NOT EXISTS tenant_session_child_commands_completion_idx
+      ON ${this.#childCommandTable} (tenant_id, parent_session_id, child_session_id)
+      WHERE kind = 'message' AND status = 'completed' AND completion_notified_at IS NULL`)
+    await this.hotState.database.query(`ALTER TABLE ${this.#childCommandTable}
+      ADD COLUMN IF NOT EXISTS completion_sequence bigint CHECK (completion_sequence > 0)`)
+    await this.hotState.database.query(`CREATE INDEX IF NOT EXISTS tenant_session_child_commands_unsequenced_idx
+      ON ${this.#childCommandTable} (tenant_id, parent_session_id)
+      WHERE completion_sequence IS NULL AND kind = 'message' AND status = 'completed'
+        AND completed_at IS NOT NULL AND outcome->>'ok' = 'true'`)
+    await this.hotState.database.transaction(async (transaction) => {
+      await transaction.query(`LOCK TABLE ${this.#childCommandTable} IN SHARE ROW EXCLUSIVE MODE`)
+      const { rows } = await transaction.query<{ needs_backfill: boolean }>(`SELECT EXISTS(
+        SELECT 1 FROM ${this.#childCommandTable}
+        WHERE completion_sequence IS NULL AND kind = 'message' AND status = 'completed'
+          AND completed_at IS NOT NULL AND outcome->>'ok' = 'true'
+      ) AS needs_backfill`)
+      if (!rows[0]?.needs_backfill) return
+      await transaction.query(`WITH existing AS (
+          SELECT tenant_id, parent_session_id, max(completion_sequence) AS last_sequence
+          FROM ${this.#childCommandTable} GROUP BY tenant_id, parent_session_id
+        ), ranked AS (
+          SELECT commands.tenant_id, commands.child_session_id, commands.command_id,
+            COALESCE(existing.last_sequence, 0)
+              + row_number() OVER (PARTITION BY commands.tenant_id, commands.parent_session_id
+                ORDER BY commands.completed_at, commands.child_session_id) AS sequence
+          FROM ${this.#childCommandTable} AS commands
+          LEFT JOIN existing USING (tenant_id, parent_session_id)
+          WHERE commands.completion_sequence IS NULL
+            AND commands.kind = 'message' AND commands.status = 'completed'
+            AND commands.completed_at IS NOT NULL AND commands.outcome->>'ok' = 'true'
+        )
+        UPDATE ${this.#childCommandTable} AS commands SET completion_sequence = ranked.sequence
+        FROM ranked WHERE commands.tenant_id = ranked.tenant_id
+          AND commands.child_session_id = ranked.child_session_id AND commands.command_id = ranked.command_id`)
+    })
+    await this.hotState.database.query(`CREATE UNIQUE INDEX IF NOT EXISTS tenant_session_child_commands_sequence_idx
+      ON ${this.#childCommandTable} (tenant_id, parent_session_id, completion_sequence)
+      WHERE completion_sequence IS NOT NULL`)
+    await this.hotState.database.query(`DROP INDEX IF EXISTS ${quoteIdentifier(this.#schemaName)}.tenant_session_child_commands_fanout_idx`)
     for (const statement of nativeFsSchemaStatements(this.#nativeFsTables, true)) {
       await this.hotState.database.query(statement)
     }
@@ -219,6 +305,531 @@ export class PostgresSessionAuthority implements SessionAuthority {
     const document = await this.#loadIncludingDeleting(sessionId)
     return document && !sessionDeletion(document) ? document : undefined
   }
+
+  async agentBoardTransaction<T>(
+    sessionId: string,
+    operation: (rootSessionId: string, board: AgentBoardState, actor: { sessionId: string; parentSessionId?: unknown; agentType?: unknown }) => T,
+  ): Promise<T> {
+    validateSessionId(sessionId)
+    await this.#prepareSessionOwner?.(sessionId)
+    const owner = this.#currentOwner(sessionId)
+    return await this.hotState.database.transaction(async transaction => {
+      if (owner) await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(sessionId), owner)
+      const visited = new Set<string>()
+      let id = sessionId
+      let actor: PersistedSessionDocument | undefined
+      for (;;) {
+        if (visited.has(id) || visited.size >= 32) throw new Error('Invalid cyclic or excessively deep Session tree')
+        visited.add(id)
+        const selected = await transaction.query<{ document: PersistedSessionDocument | null }>(`SELECT document
+          FROM ${this.#projectionTable} WHERE tenant_id = $1 AND session_id = $2 FOR SHARE`, [this.tenantId, id])
+        const document = decodePostgresJson(selected.rows[0]?.document)
+        if (!document || sessionDeletion(document)) throw new SessionDeletingError(id)
+        if (!actor) actor = document
+        if (typeof document.parentSessionId !== 'string' || !document.parentSessionId) break
+        validateSessionId(document.parentSessionId)
+        id = document.parentSessionId
+      }
+      await transaction.query(`INSERT INTO ${this.#agentBoardTable} (tenant_id, root_session_id, state)
+        VALUES ($1, $2, $3::jsonb) ON CONFLICT DO NOTHING`, [this.tenantId, id, JSON.stringify(emptyAgentBoard())])
+      const boardRow = await transaction.query<{ state: AgentBoardState }>(`SELECT state
+        FROM ${this.#agentBoardTable} WHERE tenant_id = $1 AND root_session_id = $2 FOR UPDATE`, [this.tenantId, id])
+      const board = decodePostgresJson(boardRow.rows[0]?.state) as AgentBoardState
+      const revision = board.revision
+      const result = operation(id, board, actor!)
+      if (board.revision !== revision) {
+        await transaction.query(`UPDATE ${this.#agentBoardTable} SET state = $3::jsonb
+          WHERE tenant_id = $1 AND root_session_id = $2`, [this.tenantId, id, JSON.stringify(board)])
+      }
+      return result
+    })
+  }
+
+      async pendingChildSessionIds(limit = 128, afterSessionId = ''): Promise<readonly string[]> {
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 128) throw new TypeError('Invalid child command scan limit')
+        if (!this.#localReplicaId || !this.#ownerUnitId) {
+          const result = await this.hotState.database.query<{ child_session_id: string }>(
+            `SELECT child_session_id FROM ${this.#childCommandTable}
+              WHERE tenant_id = $1 AND status <> 'completed' AND child_session_id > $3
+              GROUP BY child_session_id ORDER BY child_session_id LIMIT $2`,
+            [this.tenantId, limit, afterSessionId],
+          )
+          return result.rows.map((row) => row.child_session_id)
+        }
+        const result = await this.hotState.database.query<{ child_session_id: string }>(
+          `SELECT commands.child_session_id FROM ${this.#childCommandTable} AS commands
+            JOIN ${this.#projectionTable} AS child
+              ON child.tenant_id = commands.tenant_id AND child.session_id = commands.child_session_id
+            WHERE commands.tenant_id = $1 AND commands.status <> 'completed' AND commands.child_session_id > $3
+              AND (child.document->>'preferredChildReplicaId' IS NULL
+                OR child.document->>'preferredChildReplicaId' = $4
+                OR NOT EXISTS (SELECT 1 FROM ${quoteIdentifier(this.#schemaName)}.tenant_runtime_unit_replica_memberships AS member
+                  WHERE member.organization_id = $1 AND member.unit_id = $5
+                    AND member.replica_id = child.document->>'preferredChildReplicaId'
+                    AND member.expires_at > clock_timestamp()))
+            GROUP BY commands.child_session_id ORDER BY commands.child_session_id LIMIT $2`,
+          [this.tenantId, limit, afterSessionId, this.#localReplicaId ?? null, this.#ownerUnitId ?? null],
+        )
+        return result.rows.map((row) => row.child_session_id)
+      }
+
+      async hasStopBarrier(childSessionId: string): Promise<boolean> {
+        validateSessionId(childSessionId)
+        const owner = this.#currentOwner(childSessionId)
+        if (!owner) throw new RuntimeResourceOwnershipFencedError()
+        return this.hotState.database.transaction(async (transaction) => {
+          await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(childSessionId), owner)
+          const result = await transaction.query<{ stopped: boolean }>(
+            `SELECT EXISTS(SELECT 1 FROM ${this.#childCommandTable}
+              WHERE tenant_id = $1 AND child_session_id = $2 AND kind = 'stop') AS stopped`,
+            [this.tenantId, childSessionId],
+          )
+          return result.rows[0]?.stopped === true
+        })
+      }
+
+      async hasUnconfirmedMessageBeforeStop(childSessionId: string, stopCommandId: string): Promise<boolean> {
+        validateSessionId(childSessionId)
+        const owner = this.#currentOwner(childSessionId)
+        if (!owner) throw new RuntimeResourceOwnershipFencedError()
+        return this.hotState.database.transaction(async (transaction) => {
+          await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(childSessionId), owner)
+          const result = await transaction.query<{ unconfirmed: boolean }>(
+            `SELECT EXISTS(SELECT 1 FROM ${this.#childCommandTable} AS message
+              JOIN ${this.#childCommandTable} AS stop ON stop.tenant_id = message.tenant_id
+                AND stop.child_session_id = message.child_session_id
+              WHERE message.tenant_id = $1 AND message.child_session_id = $2
+                AND stop.command_id = $3 AND stop.kind = 'stop'
+                AND message.kind = 'message' AND message.status <> 'completed'
+                AND message.dispatched_at IS NOT NULL AND message.ordinal < stop.ordinal) AS unconfirmed`,
+            [this.tenantId, childSessionId, stopCommandId],
+          )
+          return result.rows[0]?.unconfirmed === true
+        })
+      }
+
+      async enqueueTimedOutChildStop(childSessionId: string, stopCommandId: string, messageCommandId?: string): Promise<ChildCommand | undefined> {
+        validateSessionId(childSessionId)
+        if (!stopCommandId || stopCommandId.length > 128) throw new TypeError('Invalid timeout Stop identity')
+        await this.#prepareSessionOwner?.(childSessionId)
+        const owner = this.#currentOwner(childSessionId)
+        if (!owner) throw new RuntimeResourceOwnershipFencedError()
+        return this.hotState.database.transaction(async (transaction) => {
+          await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(childSessionId), owner)
+          const child = await this.#assertLiveSession(transaction, childSessionId, true)
+          if (typeof child.parentSessionId !== 'string' || typeof child.parentCallId !== 'string') {
+            throw new Error('Timeout Stop requires a persisted child parent and call identity')
+          }
+          const target = await transaction.query<{ command_id: string; status: string }>(
+            `SELECT command_id, status FROM ${this.#childCommandTable}
+              WHERE tenant_id = $1 AND child_session_id = $2 AND kind = 'message'
+                AND command_id = $3 LIMIT 1`,
+            [this.tenantId, childSessionId, messageCommandId ?? child.parentCallId],
+          )
+          if (!target.rows.length) throw new Error('Timeout Stop requires a durable child message command')
+          if (target.rows[0]?.status === 'completed') return undefined
+          const previous = await transaction.query<ChildCommandRow>(
+            `SELECT * FROM ${this.#childCommandTable}
+              WHERE tenant_id = $1 AND child_session_id = $2 AND command_id = $3`,
+            [this.tenantId, childSessionId, stopCommandId],
+          )
+          if (previous.rows[0]) {
+            if (previous.rows[0].kind !== 'stop') throw new Error('Timeout Stop identity conflicts with a message')
+            return childCommandFromRow(previous.rows[0])
+          }
+          const inserted = await transaction.query<ChildCommandRow>(`INSERT INTO ${this.#childCommandTable}
+            (tenant_id, parent_session_id, child_session_id, command_id, ordinal, kind)
+            VALUES ($1, $2, $3, $4,
+              (SELECT COALESCE(MAX(ordinal), 0) + 1 FROM ${this.#childCommandTable}
+                WHERE tenant_id = $1 AND child_session_id = $3), 'stop')
+            RETURNING *`, [this.tenantId, child.parentSessionId, childSessionId, stopCommandId])
+          return childCommandFromRow(inserted.rows[0]!)
+        })
+      }
+
+      async enqueueChildCommand(
+        parentSessionId: string,
+        childSessionId: string,
+        commandId: string,
+        kind: ChildCommandKind,
+        message?: string,
+        maxConcurrentChildren?: number,
+        budget?: { timeoutMs?: number; maxTurns?: number },
+      ): Promise<ChildCommand> {
+        validateChildCommandInput(parentSessionId, childSessionId, commandId, kind, message)
+        if (budget && (budget.timeoutMs !== undefined && (!Number.isSafeInteger(budget.timeoutMs) || budget.timeoutMs <= 0)
+          || budget.maxTurns !== undefined && (!Number.isSafeInteger(budget.maxTurns) || budget.maxTurns <= 0))) {
+          throw new TypeError('Invalid child command budget')
+        }
+        if (kind === 'message' && (!Number.isInteger(maxConcurrentChildren)
+          || maxConcurrentChildren! < 0 || maxConcurrentChildren! > 128)) {
+          throw new TypeError('Message commands require a maxConcurrentChildren limit from the parent policy')
+        }
+        if (!this.#resourceOwnerForSession) throw new Error('Child command inbox requires fenced Session ownership')
+        await this.#prepareSessionOwner?.(parentSessionId)
+        const owner = this.#currentOwner(parentSessionId)!
+        return this.hotState.database.transaction(async (transaction) => {
+          await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(parentSessionId), owner)
+          const parent = await this.#assertLiveSession(transaction, parentSessionId, true)
+          const child = await this.#assertLiveSession(transaction, childSessionId, true)
+          if (child.parentSessionId !== parentSessionId) throw new Error('Session is not a child of this parent')
+          const previous = (await transaction.query<ChildCommandRow>(`SELECT * FROM ${this.#childCommandTable}
+            WHERE tenant_id = $1 AND child_session_id = $2 AND command_id = $3`,
+          [this.tenantId, childSessionId, commandId])).rows[0]
+          if (previous) {
+            if (previous.parent_session_id !== parentSessionId || previous.kind !== kind || previous.message !== (message ?? null)
+              || previous.timeout_ms !== (budget?.timeoutMs ?? null) || previous.max_turns !== (budget?.maxTurns ?? null)) {
+              throw new Error('Child command idempotency key conflicts with a different command')
+            }
+            return childCommandFromRow(previous)
+          }
+          if (kind === 'message') {
+            const barrier = await transaction.query<{ stopped: boolean }>(
+              `SELECT EXISTS(SELECT 1 FROM ${this.#childCommandTable}
+                WHERE tenant_id = $1 AND child_session_id = $2 AND kind = 'stop') AS stopped`,
+              [this.tenantId, childSessionId])
+            if (barrier.rows[0]?.stopped) throw new Error('Stop barrier prevents later child messages')
+            const configuredLimit = (parent.config as { maxAgentFanOut?: unknown } | undefined)?.maxAgentFanOut
+            const policyLimit = Number.isSafeInteger(configuredLimit) && (configuredLimit as number) >= 0
+              ? configuredLimit as number : 8
+            const limit = Math.min(maxConcurrentChildren!, policyLimit)
+            const admission = await transaction.query<{ active: number; already_active: boolean }>(`SELECT
+              COUNT(DISTINCT child_session_id)::integer AS active,
+              COALESCE(BOOL_OR(child_session_id = $3), false) AS already_active
+              FROM ${this.#childCommandTable}
+              WHERE tenant_id = $1 AND parent_session_id = $2 AND kind = 'message' AND status <> 'completed'`,
+            [this.tenantId, parentSessionId, childSessionId])
+            const { active, already_active } = admission.rows[0]!
+            if (!already_active && active >= limit) {
+              throw new Error(`agent fan-out exceeded: ${active} active children >= max ${limit}`)
+            }
+          }
+          const inserted = await transaction.query<ChildCommandRow>(`INSERT INTO ${this.#childCommandTable}
+            (tenant_id, parent_session_id, child_session_id, command_id, ordinal, kind, message, timeout_ms, max_turns)
+            VALUES ($1, $2, $3, $4,
+              (SELECT COALESCE(MAX(ordinal), 0) + 1 FROM ${this.#childCommandTable}
+                WHERE tenant_id = $1 AND child_session_id = $3), $5, $6, $7, $8)
+            ON CONFLICT (tenant_id, child_session_id, command_id) DO NOTHING
+            RETURNING *`, [this.tenantId, parentSessionId, childSessionId, commandId, kind, message ?? null,
+            budget?.timeoutMs ?? null, budget?.maxTurns ?? null])
+          const row = inserted.rows[0] ?? (await transaction.query<ChildCommandRow>(`SELECT * FROM ${this.#childCommandTable}
+            WHERE tenant_id = $1 AND child_session_id = $2 AND command_id = $3`, [this.tenantId, childSessionId, commandId])).rows[0]
+          if (!row || row.parent_session_id !== parentSessionId || row.kind !== kind || row.message !== (message ?? null)
+            || row.timeout_ms !== (budget?.timeoutMs ?? null) || row.max_turns !== (budget?.maxTurns ?? null)) {
+            throw new Error('Child command idempotency key conflicts with a different command')
+          }
+          return childCommandFromRow(row)
+        })
+      }
+
+      async claimChildCommand(childSessionId: string): Promise<ChildCommand | undefined> {
+        validateSessionId(childSessionId)
+        if (!this.#resourceOwnerForSession) throw new Error('Child command inbox requires fenced Session ownership')
+        if (!await this.#targetPermitsLocal(childSessionId)) return undefined
+        await this.#prepareSessionOwner?.(childSessionId)
+        const owner = this.#currentOwner(childSessionId)!
+        return this.hotState.database.transaction(async (transaction) => {
+          await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(childSessionId), owner)
+          await this.#assertLiveSession(transaction, childSessionId)
+          const row = (await transaction.query<ChildCommandRow>(`SELECT * FROM ${this.#childCommandTable}
+            WHERE tenant_id = $1 AND child_session_id = $2 AND status <> 'completed'
+            ORDER BY ordinal LIMIT 1 FOR UPDATE`, [this.tenantId, childSessionId])).rows[0]
+          if (!row) return undefined
+          // Stop needs its own acknowledged, out-of-band cancellation worker.
+          // Never dispatch it as a user message or skip over it.
+          if (row.kind === 'stop') return undefined
+          if (row.status === 'claimed' && row.owner_generation === owner.generation.toString()
+            && row.owner_token === owner.ownerToken) return undefined
+          const claimed = await transaction.query<ChildCommandRow>(`UPDATE ${this.#childCommandTable}
+            SET status = 'claimed', owner_generation = $4, owner_token = $5
+            WHERE tenant_id = $1 AND child_session_id = $2 AND command_id = $3 RETURNING *`,
+          [this.tenantId, childSessionId, row.command_id, owner.generation.toString(), owner.ownerToken])
+          return {
+            ...childCommandFromRow(claimed.rows[0]!),
+            ...(row.status === 'claimed' ? { reclaimed: true } : {}),
+          }
+        })
+      }
+
+      async readActiveChildMessage(childSessionId: string): Promise<ChildCommand | undefined> {
+        validateSessionId(childSessionId)
+        await this.#prepareSessionOwner?.(childSessionId)
+        const owner = this.#currentOwner(childSessionId)
+        if (!owner) throw new RuntimeResourceOwnershipFencedError()
+        return this.hotState.database.transaction(async (transaction) => {
+          await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(childSessionId), owner)
+          const row = (await transaction.query<ChildCommandRow>(`SELECT * FROM ${this.#childCommandTable}
+            WHERE tenant_id = $1 AND child_session_id = $2 AND kind = 'message' AND status <> 'completed'
+            ORDER BY ordinal LIMIT 1`, [this.tenantId, childSessionId])).rows[0]
+          return row ? childCommandFromRow(row) : undefined
+        })
+      }
+
+      async claimChildStop(childSessionId: string): Promise<ChildCommand | undefined> {
+        validateSessionId(childSessionId)
+        if (!this.#resourceOwnerForSession) throw new Error('Child command inbox requires fenced Session ownership')
+        if (!await this.#targetPermitsLocal(childSessionId)) return undefined
+        await this.#prepareSessionOwner?.(childSessionId)
+        const owner = this.#currentOwner(childSessionId)!
+        return this.hotState.database.transaction(async (transaction) => {
+          await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(childSessionId), owner)
+          await this.#assertLiveSession(transaction, childSessionId)
+          const row = (await transaction.query<ChildCommandRow>(`SELECT * FROM ${this.#childCommandTable}
+            WHERE tenant_id = $1 AND child_session_id = $2 AND kind = 'stop' AND status <> 'completed'
+            ORDER BY ordinal LIMIT 1 FOR UPDATE`, [this.tenantId, childSessionId])).rows[0]
+          if (!row) return undefined
+          if (row.status === 'claimed' && row.owner_generation === owner.generation.toString()
+            && row.owner_token === owner.ownerToken) return undefined
+          const claimed = await transaction.query<ChildCommandRow>(`UPDATE ${this.#childCommandTable}
+            SET status = 'claimed', owner_generation = $4, owner_token = $5
+            WHERE tenant_id = $1 AND child_session_id = $2 AND command_id = $3 RETURNING *`,
+          [this.tenantId, childSessionId, row.command_id, owner.generation.toString(), owner.ownerToken])
+          return childCommandFromRow(claimed.rows[0]!)
+        })
+      }
+
+      async markChildCommandDispatched(childSessionId: string, commandId: string, onlyIfUndispatched = false): Promise<ChildCommand> {
+        validateSessionId(childSessionId)
+        if (!commandId) throw new TypeError('Invalid child command identity')
+        if (!this.#resourceOwnerForSession) throw new Error('Child command inbox requires fenced Session ownership')
+        await this.#prepareSessionOwner?.(childSessionId)
+        const owner = this.#currentOwner(childSessionId)!
+        return this.hotState.database.transaction(async (transaction) => {
+          await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(childSessionId), owner)
+          await this.#assertLiveSession(transaction, childSessionId)
+          const row = (await transaction.query<ChildCommandRow>(`SELECT * FROM ${this.#childCommandTable}
+            WHERE tenant_id = $1 AND child_session_id = $2 AND command_id = $3 FOR UPDATE`,
+          [this.tenantId, childSessionId, commandId])).rows[0]
+          if (!row || row.status !== 'claimed' || row.owner_generation !== owner.generation.toString()
+            || row.owner_token !== owner.ownerToken) throw new RuntimeResourceOwnershipFencedError()
+          if (row.dispatched_at !== null) {
+            if (onlyIfUndispatched) throw new Error('Child command dispatch was already recorded; reconcile without replay')
+            return childCommandFromRow(row)
+          }
+          if (row.kind === 'message') {
+            const stopped = await transaction.query<{ stopped: boolean }>(
+              `SELECT EXISTS(SELECT 1 FROM ${this.#childCommandTable}
+                WHERE tenant_id = $1 AND child_session_id = $2 AND kind = 'stop') AS stopped`,
+              [this.tenantId, childSessionId])
+            if (stopped.rows[0]?.stopped) throw new Error('Stop barrier installed before runtime dispatch')
+          }
+          const dispatched = await transaction.query<ChildCommandRow>(`UPDATE ${this.#childCommandTable}
+            SET dispatched_at = clock_timestamp(), dispatched_owner_generation = $4
+            WHERE tenant_id = $1 AND child_session_id = $2 AND command_id = $3 RETURNING *`,
+          [this.tenantId, childSessionId, commandId, owner.generation.toString()])
+          return childCommandFromRow(dispatched.rows[0]!)
+        })
+      }
+
+      async completeChildCommand(
+        childSessionId: string,
+        commandId: string,
+        outcome: { ok: boolean; content: string },
+      ): Promise<ChildCommand> {
+        validateSessionId(childSessionId)
+        if (!commandId || typeof outcome?.ok !== 'boolean' || typeof outcome.content !== 'string') {
+          throw new TypeError('Invalid child command outcome')
+        }
+        if (!this.#resourceOwnerForSession) throw new Error('Child command inbox requires fenced Session ownership')
+        await this.#prepareSessionOwner?.(childSessionId)
+        const owner = this.#currentOwner(childSessionId)!
+        return this.hotState.database.transaction(async (transaction) => {
+          await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(childSessionId), owner)
+          const reference = (await transaction.query<Pick<ChildCommandRow, 'parent_session_id' | 'kind'>>(
+            `SELECT parent_session_id, kind FROM ${this.#childCommandTable}
+              WHERE tenant_id = $1 AND child_session_id = $2 AND command_id = $3`,
+            [this.tenantId, childSessionId, commandId],
+          )).rows[0]
+          if (!reference) throw new Error('Child command not found')
+          // Enqueue locks the parent before the child. Take the same order
+          // before locking this command row, including when a prior attempt
+          // committed but its acknowledgement was lost.
+          if (reference.kind === 'message' && outcome.ok) {
+            await this.#assertLiveSession(transaction, reference.parent_session_id, true)
+          }
+          const child = await this.#assertLiveSession(transaction, childSessionId)
+          const row = (await transaction.query<ChildCommandRow>(`SELECT * FROM ${this.#childCommandTable}
+            WHERE tenant_id = $1 AND child_session_id = $2 AND command_id = $3 FOR UPDATE`,
+          [this.tenantId, childSessionId, commandId])).rows[0]
+          if (!row) throw new Error('Child command not found')
+          if (row.parent_session_id !== reference.parent_session_id || row.kind !== reference.kind
+            || child.parentSessionId !== row.parent_session_id) throw new Error('Child command parent mismatch')
+          if (row.status === 'completed') {
+            const previous = decodePostgresJson(row.outcome)
+            if (JSON.stringify(previous) !== JSON.stringify(outcome)) throw new Error('Child command outcome conflict')
+            return childCommandFromRow(row)
+          }
+          if (row.status !== 'claimed' || row.owner_generation !== owner.generation.toString()
+            || row.owner_token !== owner.ownerToken) throw new RuntimeResourceOwnershipFencedError()
+          let sequence: string | null = null
+          if (row.kind === 'message' && outcome.ok) {
+            const next = await transaction.query<{ sequence: string }>(`SELECT
+              (COALESCE(MAX(completion_sequence), 0) + 1)::bigint::text AS sequence
+              FROM ${this.#childCommandTable} WHERE tenant_id = $1 AND parent_session_id = $2
+                AND completion_sequence IS NOT NULL`,
+            [this.tenantId, row.parent_session_id])
+            sequence = next.rows[0]!.sequence
+          }
+          const completed = await transaction.query<ChildCommandRow>(`UPDATE ${this.#childCommandTable}
+            SET status = 'completed', owner_generation = NULL, owner_token = NULL, outcome = $4::jsonb,
+              completed_at = date_trunc('milliseconds', clock_timestamp()), completion_sequence = $5::bigint
+            WHERE tenant_id = $1 AND child_session_id = $2 AND command_id = $3 RETURNING *`,
+          [this.tenantId, childSessionId, commandId, JSON.stringify(outcome), sequence])
+          return childCommandFromRow(completed.rows[0]!)
+        })
+      }
+
+      async readChildCommands(parentSessionId: string, childSessionId: string): Promise<readonly ChildCommand[]> {
+        validateSessionId(parentSessionId)
+        validateSessionId(childSessionId)
+        if (!this.#resourceOwnerForSession) throw new Error('Child command inbox requires fenced Session ownership')
+        await this.#prepareSessionOwner?.(parentSessionId)
+        const owner = this.#currentOwner(parentSessionId)!
+        return this.hotState.database.transaction(async (transaction) => {
+          await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(parentSessionId), owner)
+          await this.#assertLiveChild(transaction, parentSessionId, childSessionId)
+          const rows = await transaction.query<ChildCommandRow>(`SELECT * FROM ${this.#childCommandTable}
+            WHERE tenant_id = $1 AND parent_session_id = $2 AND child_session_id = $3
+            ORDER BY ordinal`, [this.tenantId, parentSessionId, childSessionId])
+          return rows.rows.map(childCommandFromRow)
+        })
+      }
+
+      async readChildCommandsForDashboard(parentSessionId: string, childSessionId?: string): Promise<readonly ChildCommand[]> {
+        validateSessionId(parentSessionId)
+        if (childSessionId !== undefined) validateSessionId(childSessionId)
+        const result = await this.hotState.database.query<ChildCommandRow & { live_owner: boolean }>(`SELECT commands.*,
+          EXISTS(SELECT 1 FROM ${quoteIdentifier(this.#schemaName)}.tenant_runtime_resource_ownerships AS ownership
+            JOIN ${quoteIdentifier(this.#schemaName)}.tenant_runtime_unit_replica_memberships AS member
+              ON member.organization_id = ownership.organization_id AND member.unit_id = ownership.unit_id
+              AND member.replica_id = ownership.replica_id
+              AND member.generation = ownership.membership_generation
+              AND member.membership_token = ownership.membership_token
+            WHERE ownership.organization_id = $1 AND ownership.resource_type = 'session'
+              AND ownership.resource_id = commands.child_session_id
+              AND ownership.generation = commands.owner_generation
+              AND ownership.owner_token = commands.owner_token
+              AND ownership.expires_at > clock_timestamp() AND member.expires_at > clock_timestamp()) AS live_owner
+          FROM ${this.#childCommandTable} AS commands
+          JOIN ${this.#projectionTable} AS child
+            ON child.tenant_id = commands.tenant_id AND child.session_id = commands.child_session_id
+          JOIN ${this.#projectionTable} AS parent
+            ON parent.tenant_id = commands.tenant_id AND parent.session_id = commands.parent_session_id
+          WHERE commands.tenant_id = $1 AND commands.parent_session_id = $2
+            AND ($3::text IS NULL OR commands.child_session_id = $3)
+            AND ($3::text IS NOT NULL OR commands.status <> 'completed' OR commands.kind = 'stop')
+            AND child.document->>'parentSessionId' = $2
+          ORDER BY commands.child_session_id, commands.ordinal`, [this.tenantId, parentSessionId, childSessionId ?? null])
+        return result.rows.map((row) => {
+          const command = childCommandFromRow(row)
+          return row.live_owner ? command : { ...command, ownerGeneration: undefined }
+        })
+      }
+
+      async pendingFinishedParentSessionIds(limit = 128, afterSessionId = ''): Promise<readonly string[]> {
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 128) throw new TypeError('Invalid completion scan limit')
+        const result = await this.hotState.database.query<{ parent_session_id: string }>(`SELECT DISTINCT commands.parent_session_id
+          FROM ${this.#childCommandTable} AS commands
+          JOIN ${this.#projectionTable} AS child
+            ON child.tenant_id = commands.tenant_id AND child.session_id = commands.child_session_id
+          WHERE commands.tenant_id = $1 AND commands.parent_session_id > $2
+            AND commands.kind = 'message' AND commands.status = 'completed'
+            AND commands.outcome->>'ok' = 'true'
+            AND commands.completed_at IS NOT NULL AND commands.completion_notified_at IS NULL
+            AND child.document->>'parentSessionId' = commands.parent_session_id
+            AND child.document->>'parentCallId' = commands.command_id
+          ORDER BY commands.parent_session_id LIMIT $3`,
+        [this.tenantId, afterSessionId, limit])
+        return result.rows.map((row) => row.parent_session_id)
+      }
+
+      async readPendingChildCompletions(parentSessionId: string, limit = 128): Promise<readonly ChildCompletionNotice[]> {
+        validateSessionId(parentSessionId)
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 128) throw new TypeError('Invalid completion read limit')
+        if (!this.#resourceOwnerForSession) throw new Error('Child completion delivery requires fenced parent ownership')
+        await this.#prepareSessionOwner?.(parentSessionId)
+        const owner = this.#currentOwner(parentSessionId)!
+        return this.hotState.database.transaction(async (transaction) => {
+          await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(parentSessionId), owner)
+          await this.#assertLiveSession(transaction, parentSessionId)
+          const result = await transaction.query<ChildCommandRow>(`SELECT commands.* FROM ${this.#childCommandTable} AS commands
+            JOIN ${this.#projectionTable} AS child
+              ON child.tenant_id = commands.tenant_id AND child.session_id = commands.child_session_id
+            WHERE commands.tenant_id = $1 AND commands.parent_session_id = $2
+              AND commands.kind = 'message' AND commands.status = 'completed'
+              AND commands.outcome->>'ok' = 'true'
+              AND commands.completed_at IS NOT NULL AND commands.completion_notified_at IS NULL
+              AND child.document->>'parentSessionId' = $2
+              AND child.document->>'parentCallId' = commands.command_id
+            ORDER BY commands.child_session_id LIMIT $3`, [this.tenantId, parentSessionId, limit])
+          return result.rows.map(childCompletionNoticeFromRow)
+        })
+      }
+
+      async readFinishedChildCompletions(
+        parentSessionId: string,
+        since?: { sequence: string },
+        limit = 128,
+      ): Promise<readonly ChildCompletionNotice[]> {
+        validateSessionId(parentSessionId)
+        if (since && !/^[1-9]\d*$/u.test(since.sequence)) throw new TypeError('Invalid completion sequence')
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 128) throw new TypeError('Invalid completion scan limit')
+        const result = await this.hotState.database.query<ChildCommandRow>(`SELECT commands.* FROM ${this.#childCommandTable} AS commands
+          JOIN ${this.#projectionTable} AS child
+            ON child.tenant_id = commands.tenant_id AND child.session_id = commands.child_session_id
+          JOIN ${this.#projectionTable} AS parent
+            ON parent.tenant_id = commands.tenant_id AND parent.session_id = commands.parent_session_id
+          WHERE commands.tenant_id = $1 AND commands.parent_session_id = $2
+            AND commands.kind = 'message' AND commands.status = 'completed'
+            AND commands.outcome->>'ok' = 'true' AND commands.completed_at IS NOT NULL
+            AND commands.completion_sequence IS NOT NULL
+            AND child.document->>'parentSessionId' = $2
+            AND child.document->>'parentCallId' = commands.command_id
+            AND ($3::bigint IS NULL OR commands.completion_sequence > $3::bigint)
+          ORDER BY commands.completion_sequence LIMIT $4`,
+        [this.tenantId, parentSessionId, since?.sequence ?? null, limit])
+        return result.rows.map(childCompletionNoticeFromRow)
+      }
+
+      async acknowledgeChildCompletion(parentSessionId: string, childSessionId: string, commandId: string): Promise<void> {
+        validateSessionId(parentSessionId)
+        validateSessionId(childSessionId)
+        if (!commandId) throw new TypeError('Completion command ID is required')
+        if (!this.#resourceOwnerForSession) throw new Error('Child completion delivery requires fenced parent ownership')
+        await this.#prepareSessionOwner?.(parentSessionId)
+        const owner = this.#currentOwner(parentSessionId)!
+        await this.hotState.database.transaction(async (transaction) => {
+          await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(parentSessionId), owner)
+          const result = await transaction.query(`UPDATE ${this.#childCommandTable} AS commands
+            SET completion_notified_at = clock_timestamp()
+            FROM ${this.#projectionTable} AS child
+            WHERE commands.tenant_id = $1 AND commands.parent_session_id = $2
+              AND commands.child_session_id = $3 AND commands.command_id = $4
+              AND commands.kind = 'message' AND commands.status = 'completed'
+              AND commands.outcome->>'ok' = 'true' AND commands.completed_at IS NOT NULL
+              AND commands.completion_notified_at IS NULL
+              AND child.tenant_id = commands.tenant_id AND child.session_id = commands.child_session_id
+              AND child.document->>'parentSessionId' = $2
+              AND child.document->>'parentCallId' = $4`,
+          [this.tenantId, parentSessionId, childSessionId, commandId])
+          if (result.rowCount !== 1) throw new RuntimeResourceOwnershipFencedError()
+        })
+      }
+
+      async #assertLiveSession(transaction: HotStateSqlExecutor, sessionId: string, forUpdate = false): Promise<PersistedSessionDocument> {
+        const selected = await transaction.query<{ document: PersistedSessionDocument | null }>(`SELECT document
+          FROM ${this.#projectionTable} WHERE tenant_id = $1 AND session_id = $2 ${forUpdate ? 'FOR UPDATE' : 'FOR SHARE'}`,
+        [this.tenantId, sessionId])
+        const document = decodePostgresJson(selected.rows[0]?.document)
+        if (!document || sessionDeletion(document)) throw new SessionDeletingError(sessionId)
+        return document
+      }
+
+      async #assertLiveChild(transaction: HotStateSqlExecutor, parentSessionId: string, childSessionId: string, forUpdate = false): Promise<void> {
+        await this.#assertLiveSession(transaction, parentSessionId)
+        const child = await this.#assertLiveSession(transaction, childSessionId, forUpdate)
+        if (child.parentSessionId !== parentSessionId) throw new Error('Session is not a child of this parent')
+      }
 
   nativeSessionFs(sessionId: string): SessionFsProvider {
     validateSessionId(sessionId)
@@ -366,7 +977,9 @@ export class PostgresSessionAuthority implements SessionAuthority {
     })
   }
 
-  async mutate(sessionId: string, mutation: SessionAuthorityMutation): Promise<PersistedSessionDocument | undefined> {
+  async mutate(sessionId: string, mutation: SessionAuthorityMutation & {
+    onCommit?: (transaction: HotStateSqlExecutor) => Promise<void>
+  }): Promise<PersistedSessionDocument | undefined> {
     validateSessionId(sessionId)
     if (!mutation.mutationId) throw new TypeError('mutationId must be a non-empty string')
     if (!mutation.eventType) throw new TypeError('eventType must be a non-empty string')
@@ -461,7 +1074,12 @@ export class PostgresSessionAuthority implements SessionAuthority {
             this.tenantId, sessionId, event.sequence, stringifyPostgresJson(next ?? null), expectedVersion,
           ])
           if (updated.rowCount !== 1) throw new ProjectionConflictError()
+          await mutation.onCommit?.(transaction)
           if (mutation.eventType === 'session.deleted' && next === undefined) {
+            await transaction.query(`DELETE FROM ${this.#childCommandTable}
+              WHERE tenant_id = $1 AND (parent_session_id = $2 OR child_session_id = $2)`, [this.tenantId, sessionId])
+            await transaction.query(`DELETE FROM ${this.#agentBoardTable}
+              WHERE tenant_id = $1 AND root_session_id = $2`, [this.tenantId, sessionId])
             await transaction.query(`DELETE FROM ${this.#nativeFsTables.usage}
               WHERE tenant_id = $1 AND session_id = $2`, [this.tenantId, sessionId])
             await transaction.query(`DELETE FROM ${quoteIdentifier(this.#schemaName)}.tenant_session_native_posix_usage
@@ -498,6 +1116,94 @@ export class PostgresSessionAuthority implements SessionAuthority {
     })
     if (!result) throw new Error(`Session creation did not produce a document: ${document.sessionId}`)
     return result
+  }
+
+  async createChildWithCommand(
+    document: PersistedSessionDocument,
+    commandId: string,
+    message: string,
+    maxConcurrentChildren: number,
+  ): Promise<PersistedSessionDocument> {
+    const parentSessionId = document.parentSessionId
+    const childSessionId = document.sessionId
+    if (typeof parentSessionId !== 'string' || typeof document.parentCallId !== 'string'
+      || document.parentCallId !== commandId || !Number.isInteger(maxConcurrentChildren)
+      || maxConcurrentChildren < 0 || maxConcurrentChildren > 128) {
+      throw new TypeError('Invalid shared child creation')
+    }
+    validateChildCommandInput(parentSessionId, childSessionId, commandId, 'message', message)
+    if (!this.#resourceOwnerForSession) throw new Error('Shared child creation requires independent fenced Session ownership')
+    const result = await this.mutate(childSessionId, {
+      mutationId: 'session.create',
+      eventType: 'session.created',
+      fenceSessionId: parentSessionId,
+      apply(current) {
+        if (current) {
+          if (stableJson(current) === stableJson(document)) return current
+          throw new Error(`Session already exists: ${childSessionId}`)
+        }
+        return document
+      },
+      onCommit: async (transaction) => {
+        const parent = await this.#assertLiveSession(transaction, parentSessionId, true)
+        const policyLimit = (parent.config as { maxAgentFanOut?: unknown } | undefined)?.maxAgentFanOut
+        const parentLimit = Number.isSafeInteger(policyLimit) && (policyLimit as number) >= 0
+          ? policyLimit as number : 8
+        const limit = Math.min(maxConcurrentChildren, parentLimit)
+        const duplicate = await transaction.query<{ session_id: string }>(
+          `SELECT session_id FROM ${this.#projectionTable}
+            WHERE tenant_id = $1 AND session_id <> $2
+              AND document->>'parentSessionId' = $3 AND document->>'parentCallId' = $4
+            LIMIT 1`,
+          [this.tenantId, childSessionId, parentSessionId, commandId],
+        )
+        if (duplicate.rows.length) throw new Error('Child call already has a Session; reconcile it instead of creating another')
+        const active = await transaction.query<{ count: number }>(
+          `SELECT COUNT(DISTINCT child_session_id)::integer AS count FROM (
+            SELECT session_id AS child_session_id FROM ${this.#projectionTable}
+              WHERE tenant_id = $1 AND document->>'parentSessionId' = $2
+                AND document->'state'->>'status' NOT IN ('done', 'error')
+            UNION ALL
+            SELECT child_session_id FROM ${this.#childCommandTable}
+              WHERE tenant_id = $1 AND parent_session_id = $2 AND kind = 'message' AND status <> 'completed'
+          ) AS active_children`,
+          [this.tenantId, parentSessionId],
+        )
+        if (active.rows[0]!.count > limit) {
+          throw new Error(`agent fan-out exceeded: ${active.rows[0]!.count - 1} active children >= max ${limit}`)
+        }
+        await transaction.query(`INSERT INTO ${this.#childCommandTable}
+          (tenant_id, parent_session_id, child_session_id, command_id, ordinal, kind, message, timeout_ms, max_turns)
+          VALUES ($1, $2, $3, $4, 1, 'message', $5, $6, $7)`,
+        [this.tenantId, parentSessionId, childSessionId, commandId, message,
+          typeof document.subAgentTimeoutMs === 'number' ? document.subAgentTimeoutMs : null,
+          typeof document.subAgentMaxTurns === 'number' ? document.subAgentMaxTurns : null])
+      },
+    })
+    if (!result) throw new Error(`Shared child creation did not produce a document: ${childSessionId}`)
+    const command = (await this.readChildCommands(parentSessionId, childSessionId))
+      .find((item) => item.commandId === commandId && item.kind === 'message')
+    if (!command || command.message !== message) {
+      throw new IdempotencyConflictError(commandId)
+    }
+    return result
+  }
+
+  async #targetPermitsLocal(childSessionId: string): Promise<boolean> {
+    if (!this.#localReplicaId || !this.#ownerUnitId) return true
+    const result = await this.hotState.database.query<{ permitted: boolean }>(
+      `SELECT NOT EXISTS(
+        SELECT 1 FROM ${this.#projectionTable} AS child
+        JOIN ${quoteIdentifier(this.#schemaName)}.tenant_runtime_unit_replica_memberships AS member
+          ON member.organization_id = child.tenant_id AND member.unit_id = $3
+          AND member.replica_id = child.document->>'preferredChildReplicaId'
+          AND member.expires_at > clock_timestamp()
+        WHERE child.tenant_id = $1 AND child.session_id = $2
+          AND member.replica_id <> $4
+      ) AS permitted`,
+      [this.tenantId, childSessionId, this.#ownerUnitId, this.#localReplicaId],
+    )
+    return result.rows[0]?.permitted === true
   }
 
   async requestDeletion(sessionId: string, mutationId = `session.delete-requested:${randomUUID()}`): Promise<boolean> {
@@ -601,6 +1307,45 @@ export class PostgresSessionAuthority implements SessionAuthority {
     return undefined
   }
 
+  async hasCommittedCopilotToolResult(sessionId: string, callId: string): Promise<boolean> {
+    validateSessionId(sessionId)
+    if (!callId) return false
+    await this.#prepareSessionOwner?.(sessionId)
+    const owner = this.#currentOwner(sessionId)
+    return this.hotState.database.transaction(async (transaction) => {
+      if (owner) await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(sessionId), owner)
+      const result = await transaction.query<{ action: string }>(`SELECT payload #>> '{entry,action}' AS action
+        FROM ${this.#eventsTable}
+        WHERE tenant_id = $1 AND scope_type = 'session' AND scope_id = $2
+          AND payload #>> '{entry,kind}' = 'runtime_metadata'
+          AND payload #>> '{entry,payload,callId}' = $3
+          AND payload #>> '{entry,action}' IN ('copilot.tool_call', 'copilot.tool_result')
+        ORDER BY sequence DESC LIMIT 1`, [this.tenantId, sessionId, callId])
+      return result.rows[0]?.action === 'copilot.tool_result'
+    })
+  }
+
+  async findCopilotToolRequest(sessionId: string, callId: string): Promise<{ ownerGeneration: string; requestDigest: string } | undefined> {
+    validateSessionId(sessionId)
+    if (!callId) return undefined
+    await this.#prepareSessionOwner?.(sessionId)
+    const owner = this.#currentOwner(sessionId)
+    return this.hotState.database.transaction(async (transaction) => {
+      if (owner) await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(sessionId), owner)
+      const result = await transaction.query<{ payload: { entry: RuntimeMetadataEntry } }>(`SELECT payload
+        FROM ${this.#eventsTable}
+        WHERE tenant_id = $1 AND scope_type = 'session' AND scope_id = $2
+          AND payload #>> '{entry,kind}' = 'runtime_metadata'
+          AND payload #>> '{entry,action}' = 'copilot.tool_call'
+          AND payload #>> '{entry,payload,callId}' = $3
+        ORDER BY sequence DESC LIMIT 1`, [this.tenantId, sessionId, callId])
+      const payload = decodePostgresJson(result.rows[0]?.payload)?.entry?.payload
+      return typeof payload?.ownerGeneration === 'string' && /^[1-9]\d*$/u.test(payload.ownerGeneration)
+        && typeof payload.requestDigest === 'string' && /^[a-f0-9]{64}$/u.test(payload.requestDigest)
+        ? { ownerGeneration: payload.ownerGeneration, requestDigest: payload.requestDigest } : undefined
+    })
+  }
+
   async findLatestRuntimeMetadata(sessionId: string, action: string): Promise<RuntimeMetadataEntry | undefined> {
     validateSessionId(sessionId)
     if (!action) throw new TypeError('runtime metadata action is required')
@@ -611,6 +1356,18 @@ export class PostgresSessionAuthority implements SessionAuthority {
         AND payload #>> '{entry,action}' = $3
       ORDER BY sequence DESC LIMIT 1`, [this.tenantId, sessionId, action])
     return decodePostgresJson(result.rows[0]?.payload)?.entry
+  }
+
+  async readChildTurnEnds(sessionId: string, commandId: string): Promise<readonly RuntimeMetadataEntry[]> {
+    validateSessionId(sessionId)
+    const result = await this.hotState.database.query<{ payload: { entry: RuntimeMetadataEntry } }>(`SELECT payload
+      FROM ${this.#eventsTable}
+      WHERE tenant_id = $1 AND scope_type = 'session' AND scope_id = $2
+        AND payload #>> '{entry,kind}' = 'runtime_metadata'
+        AND payload #>> '{entry,action}' = 'copilot.assistant_turn_end'
+        AND payload #>> '{entry,payload,childCommandId}' = $3
+      ORDER BY sequence ASC`, [this.tenantId, sessionId, commandId])
+    return result.rows.map(({ payload }) => decodePostgresJson(payload).entry)
   }
 
   async readEventEntries(sessionId: string): Promise<readonly EventEntry[]> {
@@ -816,6 +1573,65 @@ function sessionDeletion(document: PersistedSessionDocument): SessionDeletionTom
 
 function validateSessionId(sessionId: string): void {
   if (!sessionId) throw new TypeError('sessionId must be a non-empty string')
+}
+
+type ChildCommandRow = Record<string, unknown> & {
+  command_id: string
+  parent_session_id: string
+  child_session_id: string
+  kind: ChildCommandKind
+  message: string | null
+  status: ChildCommand['status']
+  owner_generation: string | null
+  owner_token: string | null
+  dispatched_at: Date | null
+  dispatched_owner_generation: string | null
+  outcome: ChildCommand['outcome'] | null
+  completed_at: Date | null
+  completion_sequence: string | null
+  timeout_ms: number | null
+  max_turns: number | null
+}
+
+function childCompletionNoticeFromRow(row: ChildCommandRow): ChildCompletionNotice {
+  if (!row.completed_at || !row.completion_sequence) throw new Error('Child completion lacks durable fanout sequence')
+  return { ...childCommandFromRow(row), completedAt: row.completed_at.toISOString(), sequence: row.completion_sequence }
+}
+
+function childCommandFromRow(row: ChildCommandRow): ChildCommand {
+  return {
+    commandId: row.command_id,
+    parentSessionId: row.parent_session_id,
+    childSessionId: row.child_session_id,
+    kind: row.kind,
+    ...(row.message !== null ? { message: row.message } : {}),
+    status: row.status,
+    ...(row.owner_generation !== null ? { ownerGeneration: row.owner_generation } : {}),
+    ...(row.dispatched_at !== null ? { dispatchedAt: row.dispatched_at.toISOString() } : {}),
+    ...(row.dispatched_owner_generation !== null ? { dispatchedOwnerGeneration: row.dispatched_owner_generation } : {}),
+    ...(row.outcome !== null ? { outcome: decodePostgresJson(row.outcome) } : {}),
+    ...(row.completed_at !== null ? { completedAt: row.completed_at.toISOString() } : {}),
+    ...(row.timeout_ms !== null ? { timeoutMs: row.timeout_ms } : {}),
+    ...(row.max_turns !== null ? { maxTurns: row.max_turns } : {}),
+  }
+}
+
+function validateChildCommandInput(
+  parentSessionId: string,
+  childSessionId: string,
+  commandId: string,
+  kind: ChildCommandKind,
+  message?: string,
+): void {
+  validateSessionId(parentSessionId)
+  validateSessionId(childSessionId)
+  if (parentSessionId === childSessionId || !commandId || commandId.length > 128) {
+    throw new TypeError('Invalid child command identity')
+  }
+  if (kind !== 'message' && kind !== 'stop') throw new TypeError('Invalid child command kind')
+  if (kind === 'message'
+    ? typeof message !== 'string' || !message.trim() || Buffer.byteLength(message, 'utf8') > 32_768
+    : message !== undefined) throw new TypeError('Invalid child command message')
 }
 
 function hasNonemptyLegacyNativeFs(value: unknown): boolean {

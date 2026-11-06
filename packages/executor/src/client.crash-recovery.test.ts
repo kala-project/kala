@@ -14,6 +14,9 @@ type ExecutorSocket = {
   readonly id: string
   readonly connected: boolean
   on(event: 'executor:announce', handler: (announcement: unknown) => void): void
+  on(event: 'executor:shell_authorize', handler: (request: {
+    sessionId: string; callId: string; name: string; command: string
+  }, ack: (result: { authorized: boolean }) => void) => void): void
   emit(event: 'tool:call', payload: ToolCallMessage, ack: (result: ToolResultAck) => void): boolean
 }
 
@@ -115,7 +118,16 @@ describe('executor process crash recovery', () => {
     io = new Server(http, { transports: ['websocket'] })
     const announcedSockets: ExecutorSocket[] = []
     const socketWaiters: Array<(socket: ExecutorSocket) => void> = []
+    const approvedShells = new Map<string, string>()
+    const authorizedCalls: string[] = []
     io.of('/executor').on('connection', (socket) => {
+      socket.on('executor:shell_authorize', (request, ack) => {
+        const authorized = request.sessionId === 'session-crash-regression'
+          && request.name === 'shell'
+          && approvedShells.get(request.callId) === request.command
+        if (authorized) authorizedCalls.push(request.callId)
+        ack({ authorized })
+      })
       socket.on('executor:announce', () => {
         const waiter = socketWaiters.shift()
         if (waiter) waiter(socket)
@@ -181,8 +193,10 @@ describe('executor process crash recovery', () => {
         timeout_ms: 15_000,
       },
     }
+    approvedShells.set(unresolvedCall.callId, unresolvedCall.input.command as string)
     firstSocket.emit('tool:call', unresolvedCall, () => undefined)
     await waitFor(async () => lines(await readIfPresent(markerPath)).includes('BEGIN'), 'first shell never reached its side effect')
+    expect(authorizedCalls).toEqual([unresolvedCall.callId])
     const knownShellPid = Number.parseInt((await readFile(shellPidPath, 'utf8')).trim(), 10)
     expect(knownShellPid).toBeGreaterThan(0)
     orphanedShells.add(knownShellPid)

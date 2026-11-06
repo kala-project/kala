@@ -63,6 +63,128 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     return { store: new SessionStore(root, { authority, deleteRegisteredArtifacts }), root, authority }
   }
 
+  it('replays a completion whose timestamp precedes a later child that committed first', async () => {
+    const first = makeAuthority('late-completion-a', 'completion-race')
+    const second = makeAuthority('late-completion-b', 'completion-race')
+    await first.initialize()
+    await second.initialize()
+    await first.create({ sessionId: 'race-parent', state: { cursor: 0 } })
+    for (const id of ['race-child-a', 'race-child-b']) {
+      await first.create({
+        sessionId: id, parentSessionId: 'race-parent', parentCallId: `call-${id}`,
+        state: { cursor: 0 },
+      })
+    }
+    let prepared!: () => void
+    let commit!: () => void
+    const aPrepared = new Promise<void>((resolve) => { prepared = resolve })
+    const allowACommit = new Promise<void>((resolve) => { commit = resolve })
+    const insert = async (transaction: { query: (sql: string, values?: readonly unknown[]) => Promise<unknown> },
+      child: string, completedAt: Date): Promise<void> => {
+      await transaction.query(`SELECT 1 FROM tenant_session_latest_projection
+        WHERE tenant_id='completion-race' AND session_id='race-parent' FOR UPDATE`)
+      await transaction.query(`INSERT INTO tenant_session_child_commands
+        (tenant_id,parent_session_id,child_session_id,command_id,ordinal,kind,message,status,outcome,completed_at,completion_sequence)
+        SELECT 'completion-race','race-parent',$1,'call-'||$1,1,'message','prompt','completed',
+          '{"ok":true,"content":"done"}'::jsonb,$2,
+          COALESCE(MAX(completion_sequence),0)+1
+        FROM tenant_session_child_commands WHERE tenant_id='completion-race' AND parent_session_id='race-parent'`,
+      [child, completedAt])
+    }
+    const transactionA = first.hotState.database.transaction(async (transaction) => {
+      const { rows } = await transaction.query<{ completed_at: Date }>(
+        'SELECT date_trunc(\'milliseconds\',clock_timestamp()) AS completed_at')
+      prepared()
+      await allowACommit
+      await insert(transaction, 'race-child-a', rows[0]!.completed_at)
+    })
+    try {
+      await aPrepared
+      await new Promise<void>((resolve) => setTimeout(resolve, 5))
+      await second.hotState.database.transaction(async (transaction) => {
+        await insert(transaction, 'race-child-b', new Date())
+      })
+      const firstPage = await second.childCommandInbox.readFinishedChildCompletions('race-parent')
+      expect(firstPage.map(({ childSessionId, sequence }) => [childSessionId, sequence]))
+        .toEqual([['race-child-b', '1']])
+      commit()
+      await transactionA
+      const latePage = await second.childCommandInbox.readFinishedChildCompletions('race-parent', {
+        sequence: firstPage[0]!.sequence,
+      })
+      expect(latePage.map(({ childSessionId, sequence }) => [childSessionId, sequence]))
+        .toEqual([['race-child-a', '2']])
+      expect(Date.parse(latePage[0]!.completedAt)).toBeLessThan(Date.parse(firstPage[0]!.completedAt))
+      await second.hotState.database.query(`INSERT INTO tenant_session_latest_projection
+        (tenant_id,session_id,version,document)
+        SELECT 'completion-race','long-child-'||n,1,
+          jsonb_build_object('parentSessionId','race-parent','parentCallId','call-long-child-'||n)
+        FROM generate_series(3,1100) AS n`)
+      await second.hotState.database.query(`INSERT INTO tenant_session_child_commands
+        (tenant_id,parent_session_id,child_session_id,command_id,ordinal,kind,message,status,outcome,completed_at,completion_sequence)
+        SELECT 'completion-race','race-parent','long-child-'||n,'call-long-child-'||n,1,
+          'message','prompt','completed','{"ok":true,"content":"done"}'::jsonb,clock_timestamp(),n
+        FROM generate_series(3,1100) AS n`)
+      let cursor: { sequence: string } | undefined
+      const seen = new Set<string>()
+      for (let pageNumber = 0; pageNumber < 20; pageNumber++) {
+        const page = await second.childCommandInbox.readFinishedChildCompletions('race-parent', cursor, 64)
+        if (!page.length) break
+        for (const notice of page) {
+          expect(seen.has(notice.childSessionId)).toBe(false)
+          seen.add(notice.childSessionId)
+        }
+        cursor = { sequence: page.at(-1)!.sequence }
+      }
+      expect(seen.size).toBe(1_100)
+      expect(await second.childCommandInbox.readFinishedChildCompletions('race-parent', cursor, 64)).toEqual([])
+    } finally {
+      commit()
+      await transactionA
+    }
+  })
+
+  it('serializes competing board claims and topic CAS across PostgreSQL clients and survives restart', async () => {
+    const first = makeAuthority('board-first', 'board-tree')
+    const second = makeAuthority('board-second', 'board-tree')
+    await first.initialize()
+    await second.initialize()
+    await first.create({ sessionId: 'board-parent', state: { cursor: 0 } })
+    for (const id of ['board-child-a', 'board-child-b']) {
+      await first.create({ sessionId: id, parentSessionId: 'board-parent', state: { cursor: 0 } })
+    }
+    const claim = (authority: PostgresSessionAuthority, id: string) =>
+      authority.agentBoardTransaction(id, (_root, board) => {
+        if (board.fileClaims['src/owned.ts']) return false
+        board.fileClaims['src/owned.ts'] = { path: 'src/owned.ts', holderSessionId: id, claimedAt: new Date().toISOString() }
+        board.revision += 1
+        return true
+      })
+    const [claimedA, claimedB] = await Promise.all([
+      claim(first, 'board-child-a'), claim(second, 'board-child-b'),
+    ])
+    expect([claimedA, claimedB].sort()).toEqual([false, true])
+    const post = (authority: PostgresSessionAuthority, id: string) =>
+      authority.agentBoardTransaction(id, (_root, board) => {
+        if (board.entries.contract) return false
+        board.entries.contract = { topic: 'contract', content: id, tags: [], authorSessionId: id,
+          revision: 1, updatedAt: new Date().toISOString() }
+        board.revision += 1
+        return true
+      })
+    expect((await Promise.all([post(first, 'board-child-a'), post(second, 'board-child-b')])).sort())
+      .toEqual([false, true])
+    const restarted = makeAuthority('board-restart', 'board-tree')
+    const result = await restarted.agentBoardTransaction('board-parent', (_root, board) => ({
+      claims: Object.values(board.fileClaims), topics: Object.values(board.entries),
+    }))
+    expect(result.claims).toHaveLength(1)
+    expect(result.topics).toHaveLength(1)
+    await first.requestDeletion('board-parent')
+    await expect(second.agentBoardTransaction('board-child-b', () => undefined))
+      .rejects.toBeInstanceOf(SessionDeletingError)
+  })
+
   it('batches summary projections, scopes selected IDs, and repairs only missing projections', async () => {
     const authority = makeAuthority('batch-reader', 'batch-reader-tenant')
     const other = makeAuthority('batch-other', 'batch-other-tenant')

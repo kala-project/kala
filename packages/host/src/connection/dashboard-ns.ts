@@ -123,9 +123,10 @@ import { ulid } from 'ulid'
 import type { HostLoopDeps, LoopHandle } from '../loop.js'
 import { createBuiltinExtensionRegistry } from '../extensions/builtin-registry.js'
 import type { ConsolidationOutcome } from '../extensions/memory-consolidation.js'
-import { activeSubAgentFor, interruptSubAgentAfterRuntimeCancel, markSubAgentInterrupted } from '../extensions/agent-tool.js'
+import { activeSubAgentFor, activeSubAgentForChild, completedSubAgentOutcomeForChild, interruptSubAgentAfterRuntimeCancel, interruptSubAgentsForParent, markSubAgentInterrupted } from '../extensions/agent-tool.js'
 import { resetCompactRuntime } from '../extensions/compaction.js'
 import { SessionStore, type SessionRecord } from '../store/session.js'
+import type { ChildCommand } from '../store/child-command-state.js'
 import { createExecutorRegistry } from './executor.js'
 import { dirname, resolve as resolvePath, sep } from 'node:path'
 import { readFile } from 'node:fs/promises'
@@ -322,42 +323,99 @@ export function recoverSubAgentOutcome(
     for (let contentIndex = message.content.length - 1; contentIndex >= 0; contentIndex -= 1) {
       const content = message.content[contentIndex]
       if (content?.type !== 'tool_result' || content.callId !== parentCallId) continue
-      const header = /^<sub_agent\b([\s\S]*?)>/.exec(content.content.trimStart())
-      if (!header) return undefined
-      const attrs = Object.fromEntries(
-        [...(header[1] ?? '').matchAll(/(\w+)="([^"]*)"/g)]
-          .map((match) => [match[1]!, match[2]!]),
-      )
-      const rawStatus = attrs.status
-      if (
-        rawStatus !== 'completed'
-        && rawStatus !== 'failed'
-        && rawStatus !== 'cancelled'
-        && rawStatus !== 'timed_out_with_partial_result'
-      ) return undefined
-      const status: SubAgentSummary['status'] =
-        rawStatus === 'timed_out_with_partial_result' ? 'failed' : rawStatus
-      const errorMatch = /<(?:error|warning)>([\s\S]*?)<\/(?:error|warning)>/.exec(content.content)
-      const error = errorMatch?.[1]
-        ?.replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&quot;/g, '"')
-        .replace(/&amp;/g, '&')
-        .trim()
-      return {
-        status,
-        turns: nonNegativeNumber(attrs.turns),
-        durationMs: nonNegativeNumber(attrs.duration_ms),
-        ...(error ? { error } : {}),
-      }
+      return parseSubAgentOutcome(content.content)
     }
   }
   return undefined
 }
 
+function parseSubAgentOutcome(
+  content: string,
+): { status: SubAgentSummary['status']; turns: number; durationMs: number; error?: string } | undefined {
+  const header = /^<sub_agent\b([\s\S]*?)>/.exec(content.trimStart())
+  if (!header) return undefined
+  const attrs = Object.fromEntries(
+    [...(header[1] ?? '').matchAll(/(\w+)="([^"]*)"/g)]
+      .map((match) => [match[1]!, match[2]!]),
+  )
+  const rawStatus = attrs.status
+  if (
+    rawStatus !== 'completed'
+    && rawStatus !== 'failed'
+    && rawStatus !== 'cancelled'
+    && rawStatus !== 'timed_out_with_partial_result'
+  ) return undefined
+  const status: SubAgentSummary['status'] =
+    rawStatus === 'timed_out_with_partial_result' ? 'failed' : rawStatus
+  const errorMatch = /<(?:error|warning)>([\s\S]*?)<\/(?:error|warning)>/.exec(content)
+  const error = errorMatch?.[1]
+    ?.replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
+    .trim()
+  return {
+    status,
+    turns: nonNegativeNumber(attrs.turns),
+    durationMs: nonNegativeNumber(attrs.duration_ms),
+    ...(error ? { error } : {}),
+  }
+}
+
 function nonNegativeNumber(value: string | undefined): number {
   const parsed = Number(value)
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
+}
+
+export async function enqueueOutstandingSharedChildStops(
+  deps: DashboardDeps,
+  parentSessionId: string,
+  operationId?: string,
+): Promise<unknown | undefined> {
+  const inbox = deps.loopDeps.store.childCommandInbox
+  if (!inbox) return undefined
+  let firstError: unknown
+  try {
+    for (const listed of await deps.store.listChildren(parentSessionId)) {
+      try {
+        const child = await deps.store.load(listed.sessionId, { recoverDangling: false })
+        if (child.parentSessionId !== parentSessionId) continue
+        const commands = await inbox.readChildCommands(parentSessionId, child.sessionId)
+        if (commands.some((command) => command.kind === 'stop')
+          || !commands.some((command) => command.kind === 'message' && command.status !== 'completed')) continue
+        const stopId = `parent-cancel-${createHash('sha256')
+          .update(`${operationId ?? ''}\0${parentSessionId}\0${child.sessionId}`)
+          .digest('hex').slice(0, 32)}`
+        await inbox.enqueueChildCommand(parentSessionId, child.sessionId, stopId, 'stop')
+      } catch (error) {
+        firstError ??= error
+      }
+    }
+  } catch (error) {
+    firstError ??= error
+  }
+  return firstError
+}
+
+export function childCommandDashboardState(
+  commands: readonly import('../store/child-command-state.js').ChildCommand[],
+  sessionStatus: AgentState['status'],
+): { commandState: SubAgentSummary['commandState']; pendingCommandCount: number } {
+  const outstanding = commands.find((command) => command.kind === 'message' && command.status !== 'completed')
+  const stopped = commands.some((command) => command.kind === 'stop')
+  const uncertainStop = commands.some((command) => command.kind === 'stop'
+    && (!command.outcome || !command.outcome.ok))
+  return {
+    commandState: outstanding
+      ? stopped ? 'unknown' : !outstanding.dispatchedAt
+        ? outstanding.status === 'pending' ? 'queued' : 'unknown'
+        : outstanding.ownerGeneration !== undefined
+          && outstanding.ownerGeneration === outstanding.dispatchedOwnerGeneration
+          && ['thinking', 'executing_tools'].includes(sessionStatus) ? 'processing' : 'unknown'
+      : uncertainStop ? 'unknown' : undefined,
+    pendingCommandCount: commands.filter((command) => command.kind === 'message'
+      && command.status === 'pending').length,
+  }
 }
 
 export function configureDashboardNamespace(
@@ -1305,6 +1363,8 @@ export function configureDashboardNamespace(
         await deps.loopDeps.tools.cancelPending(p.sessionId)
         const record = await loadRecordForDashboard(deps, p.sessionId)
         if (!record) throw new Error('unknown session')
+        const childStopError = await enqueueOutstandingSharedChildStops(deps, p.sessionId, p.operationId)
+        await interruptSubAgentsForParent(deps.loopDeps, new Map(), p.sessionId, 'parent session cancelled', deps.loop)
         await deps.agentRuntimes.require(record.agentRuntime).cancel(record)
         if (record.goal) {
           await deps.store.updateGoal(p.sessionId, (goal, latest) =>
@@ -1312,6 +1372,7 @@ export function configureDashboardNamespace(
               ? { ...goal, lastTerminalCursor: latest.state.cursor } : undefined)
           await publishGoal(p.sessionId)
         }
+        if (childStopError) throw new Error(`UNKNOWN: parent cancelled but durable child Stop was not confirmed: ${String(childStopError)}`)
       })
       ack?.(result)
       if (!result.ok) deps.broadcastError(p.sessionId, 'host', result.error)
@@ -1383,8 +1444,32 @@ export function configureDashboardNamespace(
       const p = vparse(schema.ClientInterruptSubAgentSchema, raw, 'client:interrupt_sub_agent')
       if (!p) return
       try {
-        const active = activeSubAgentFor(p.parentSessionId, p.parentCallId)
-        if (!active) throw new Error('sub-agent is not running')
+        if (deps.loopDeps.store.childCommandInbox && deps.loopDeps.assertSessionEffectOwner) {
+          if (multiplexed ? !subscribedSessions.has(p.parentSessionId) : p.parentSessionId !== sessionId) {
+            throw new Error('Stop requires a subscription to the parent Session')
+          }
+          if (!p.childSessionId) throw new Error('Stop requires the persisted child Session ID')
+          const parent = await loadRecordForDashboard(deps, p.parentSessionId)
+          const child = await loadRecordForDashboard(deps, p.childSessionId)
+          if (!parent || !child || child.parentSessionId !== parent.sessionId
+            || child.parentCallId !== p.parentCallId
+            || validateIngressSessionAccess(socket, parent) || validateIngressSessionAccess(socket, child)) {
+            throw new Error('Stop target is not an authorized child of this parent')
+          }
+          await deps.loopDeps.store.childCommandInbox.enqueueChildCommand(
+            parent.sessionId, child.sessionId, p.operationId ?? ulid(), 'stop')
+          // A queued Stop is not a cancellation acknowledgement; read_agent
+          // exposes the eventual confirmed/UNKNOWN worker outcome.
+          return
+        }
+        const active = p.childSessionId
+          ? activeSubAgentForChild(p.parentSessionId, p.childSessionId)
+          : activeSubAgentFor(p.parentSessionId, p.parentCallId)
+        if (!active || active.store !== deps.loopDeps.store) throw new Error('sub-agent is not running under this parent on this Runtime')
+        if (p.parentCallId !== active.parentCallId) {
+          const persistedChild = await loadRecordForDashboard(deps, active.childSessionId)
+          if (persistedChild?.parentCallId !== p.parentCallId) throw new Error('sub-agent parent call mismatch')
+        }
         if (p.childSessionId && active.childSessionId !== p.childSessionId) {
           throw new Error('sub-agent child session mismatch')
         }
@@ -1392,7 +1477,7 @@ export function configureDashboardNamespace(
         if (!child) throw new Error('unknown sub-agent session')
         // A late or repeated click after the child reached a terminal state is a
         // no-op; do not rewrite a naturally completed wrapper as cancelled.
-        if (child.state.status === 'done' || child.state.status === 'error') return
+        if ((child.state.status === 'done' || child.state.status === 'error') && !active) return
         const runtime = deps.agentRuntimes.require(child.agentRuntime)
         // Kernel cancellation must mark first: its serialized dispatch can wait
         // for the agent tool wrapper to settle. External runtimes abort their
@@ -1401,13 +1486,13 @@ export function configureDashboardNamespace(
         const result = child.agentRuntime === 'kernel'
           ? await (async () => {
               await deps.loopDeps.assertSessionEffectOwner?.(child.sessionId)
-              const interrupted = markSubAgentInterrupted(p.parentSessionId, p.parentCallId, p.childSessionId)
+              const interrupted = markSubAgentInterrupted(p.parentSessionId, active.parentCallId, p.childSessionId)
               if (interrupted.ok) await runtime.cancel(child)
               return interrupted
             })()
           : await interruptSubAgentAfterRuntimeCancel(
               p.parentSessionId,
-              p.parentCallId,
+              active.parentCallId,
               p.childSessionId,
               async () => {
                 await deps.loopDeps.assertSessionEffectOwner?.(child.sessionId)
@@ -1909,49 +1994,71 @@ export function configureDashboardNamespace(
     socket.on('sub_agent:list', async (raw: ClientListSubAgents, ack) => {
       const p = vparse(schema.ClientListSubAgentsSchema, raw, 'sub_agent:list')
       if (!p) return
-      const children: SubAgentSummary[] = []
-      const parent = deps.store.get(p.parentSessionId)
-      for (const rec of await deps.store.listChildren(p.parentSessionId)) {
-        const outcome = rec.parentCallId && parent
-          ? recoverSubAgentOutcome(parent.state, rec.parentCallId)
-          : undefined
-        const active = rec.parentCallId
-          ? activeSubAgentFor(p.parentSessionId, rec.parentCallId)
-          : null
-        const status: SubAgentSummary['status'] =
-          outcome?.status ??
-          (active?.cancelled
-            ? 'cancelled'
-            : rec.state.status === 'done'
-            ? 'completed'
-            : rec.state.status === 'error'
-              ? 'failed'
-              : 'running')
-        const startedAt = rec.subAgentStartedAt
-        const finishedAt = status !== 'running' ? rec.lastEventAt : undefined
-        const durationMs = outcome?.durationMs ??
-          (startedAt && finishedAt
-            ? Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt))
+      try {
+        const parent = await deps.store.load(p.parentSessionId, { recoverDangling: false })
+        const accessError = validateIngressSessionAccess(socket, parent)
+        if (accessError) throw new Error(accessError)
+        const commandsByChild = new Map<string, ChildCommand[]>()
+        if (deps.store.childCommandInbox) {
+          for (const command of await deps.store.childCommandInbox.readChildCommandsForDashboard(p.parentSessionId)) {
+            const commands = commandsByChild.get(command.childSessionId) ?? []
+            commands.push(command)
+            commandsByChild.set(command.childSessionId, commands)
+          }
+        }
+        const children: SubAgentSummary[] = []
+        for (const listed of await deps.store.listChildren(p.parentSessionId)) {
+          const rec = await deps.store.load(listed.sessionId, { recoverDangling: false })
+          if (validateIngressSessionAccess(socket, rec)) continue
+          const { commandState, pendingCommandCount } = childCommandDashboardState(
+            commandsByChild.get(rec.sessionId) ?? [], rec.state.status)
+          const latestOutcome = completedSubAgentOutcomeForChild(p.parentSessionId, rec.sessionId)
+          const outcome = (latestOutcome ? parseSubAgentOutcome(latestOutcome) : undefined) ?? (rec.parentCallId && parent
+            ? recoverSubAgentOutcome(parent.state, rec.parentCallId)
             : undefined)
-        children.push({
-          childSessionId: rec.sessionId,
-          ...(rec.parentCallId !== undefined ? { parentCallId: rec.parentCallId } : {}),
-          ...(rec.agentType !== undefined ? { agentType: rec.agentType } : {}),
-          status,
-          ...(startedAt !== undefined ? { startedAt } : {}),
-          ...(finishedAt !== undefined ? { finishedAt } : {}),
-          ...(outcome?.turns !== undefined ? { turns: outcome.turns } : {}),
-          ...(durationMs !== undefined && Number.isFinite(durationMs) ? { durationMs } : {}),
-          ...(outcome?.error
-            ? { error: outcome.error }
-            : status === 'failed' && rec.state.error
-              ? { error: rec.state.error }
-              : active?.cancelled && active.cancelReason
-                ? { error: active.cancelReason }
-                : {}),
-        })
+          const active = activeSubAgentForChild(p.parentSessionId, rec.sessionId)
+          const status: SubAgentSummary['status'] =
+            (commandState ? 'running' : active?.cancelled
+              ? 'cancelled'
+              : active
+                ? 'running'
+              : outcome?.status ??
+                (rec.state.status === 'done'
+                  ? 'completed'
+                  : rec.state.status === 'error'
+                    ? 'failed'
+                    : 'running'))
+          const startedAt = rec.subAgentStartedAt
+          const finishedAt = status !== 'running' ? rec.lastEventAt : undefined
+          const durationMs = (active ? Date.now() - active.startedAt.getTime() : outcome?.durationMs) ??
+            (startedAt && finishedAt
+              ? Math.max(0, Date.parse(finishedAt) - Date.parse(startedAt))
+              : undefined)
+          children.push({
+            childSessionId: rec.sessionId,
+            ...(rec.parentCallId !== undefined ? { parentCallId: rec.parentCallId } : {}),
+            ...(rec.agentType !== undefined ? { agentType: rec.agentType } : {}),
+            status,
+            ...(commandState ? { commandState } : {}),
+            ...(pendingCommandCount ? { pendingCommandCount } : {}),
+            ...(startedAt !== undefined ? { startedAt } : {}),
+            ...(finishedAt !== undefined ? { finishedAt } : {}),
+            ...(active ? { turns: rec.state.messages.filter((message) => message.role === 'assistant').length } : outcome?.turns !== undefined ? { turns: outcome.turns } : {}),
+            ...(durationMs !== undefined && Number.isFinite(durationMs) ? { durationMs } : {}),
+            ...(!active && outcome?.error
+              ? { error: outcome.error }
+              : status === 'failed' && rec.state.error
+                ? { error: rec.state.error }
+                : active?.cancelled && active.cancelReason
+                  ? { error: active.cancelReason }
+                  : {}),
+          })
+        }
+        ack({ requestId: p.requestId, parentSessionId: p.parentSessionId, children })
+      } catch (error) {
+        ack({ requestId: p.requestId, parentSessionId: p.parentSessionId, children: [],
+          error: error instanceof Error ? error.message : String(error) })
       }
-      ack({ requestId: p.requestId, parentSessionId: p.parentSessionId, children })
     })
     socket.on('agent_types:list', (raw: ClientListAgentTypes, ack) => {
       const p = vparse(schema.ClientListAgentTypesSchema, raw, 'agent_types:list')

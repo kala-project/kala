@@ -307,6 +307,18 @@ const SubAgentRow = memo(function SubAgentRow({
             startedAtMs={status === 'running' ? startedAtMs : null}
             title={t('chat.subAgent.duration')}
           />
+          {view.commandState ? (
+            <span className="flex-none text-caption text-muted-foreground" data-testid={`sub-agent-command-state-${call.callId}`}>
+              {view.commandState === 'queued'
+                ? t('chat.subAgent.queuedNextTurn', { count: view.pendingCommandCount })
+                : view.commandState === 'processing'
+                  ? <>{t('chat.subAgent.processingNextTurn')}
+                    {view.pendingCommandCount > 0
+                      ? ` · ${t('chat.subAgent.queuedNextTurn', { count: view.pendingCommandCount })}`
+                      : null}</>
+                  : t('chat.subAgent.unknownNextTurn')}
+            </span>
+          ) : null}
           {open ? (
             <ChevronDown className="h-3.5 w-3.5 flex-none text-muted-foreground" aria-hidden="true" />
           ) : (
@@ -334,6 +346,7 @@ const SubAgentRow = memo(function SubAgentRow({
             onClick={(event) => {
               event.stopPropagation()
               socket.emit('client:interrupt_sub_agent', {
+                operationId: crypto.randomUUID(),
                 parentSessionId,
                 parentCallId: call.callId,
                 childSessionId: runningChildSessionId,

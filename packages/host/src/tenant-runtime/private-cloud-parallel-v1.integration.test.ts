@@ -1,7 +1,6 @@
 import { execFile } from 'node:child_process'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import { chmod, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { chmod, mkdir, rm, stat, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -50,6 +49,7 @@ integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptanc
   let principalId = `prn_${id}`
   const sessionX = `session-x-${id}`
   const sessionY = `session-y-${id}`
+  const sessionBoard = `session-board-${id}`
   const workspaceId = '01ARZ3NDEKTSV4RRFFQ69G5FAV'
   const marker = `parallel-executor-marker-${id}`
   const executorInvite = `ak_invite_${randomBytes(24).toString('base64url')}`
@@ -76,7 +76,8 @@ integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptanc
 
     setupStarted = true
     try {
-      testKeyDirectory = await mkdtemp(join(tmpdir(), 'kala-parallel-v1-state-key-'))
+      testKeyDirectory = join(repository, '.receipt-test-tmp', project)
+      await mkdir(testKeyDirectory, { recursive: true, mode: 0o700 })
       testKeyPath = join(testKeyDirectory, 'master-key')
       await writeFile(testKeyPath, randomBytes(32), { flag: 'wx', mode: 0o600 })
       await chmod(testKeyPath, 0o600)
@@ -160,6 +161,10 @@ integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptanc
     for (const name of containers) {
       await docker('rm', '--force', name).catch((error) => failures.push(`container ${name}: ${errorMessage(error)}`))
     }
+    const listed = await docker('ps', '-a', '--filter', `label=dev.kala.test.project=${project}`, '--format', '{{.Names}}')
+    for (const name of listed.stdout.trim().split('\n').filter((name) => name.startsWith(`${project}-`))) {
+      await docker('rm', '--force', name).catch((error) => failures.push(`transient container ${name}: ${errorMessage(error)}`))
+    }
     await docker('volume', 'rm', '--force', workspaceVolume).catch((error) => failures.push(`volume ${workspaceVolume}: ${errorMessage(error)}`))
     await docker('network', 'rm', network).catch((error) => failures.push(`network ${network}: ${errorMessage(error)}`))
     for (const name of containers) {
@@ -167,6 +172,8 @@ integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptanc
     }
     if (await dockerResourceExists('network', network)) failures.push(`network still exists: ${network}`)
     if (await dockerResourceExists('volume', workspaceVolume)) failures.push(`volume still exists: ${workspaceVolume}`)
+    const remaining = await docker('ps', '-a', '--filter', `label=dev.kala.test.project=${project}`, '--format', '{{.Names}}')
+    if (remaining.stdout.trim()) failures.push(`labelled containers still exist: ${remaining.stdout.trim()}`)
     if (testKeyDirectory) {
       await rm(testKeyDirectory, { recursive: true, force: true }).catch((error) => failures.push(`test key directory: ${errorMessage(error)}`))
       if (testKeyPath) {
@@ -258,6 +265,102 @@ integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptanc
       throw error
     }
   }, 120_000)
+
+  it('routes durable next-turn child work, completion and Stop across both live Runtime owners', async () => {
+    try {
+      await provision(runtimeA, 'provision-unit')
+      await provision(runtimeB, 'provision-unit')
+      await eventually(async () => expect(await liveReplicaOrigins()).toHaveLength(2), 10_000)
+      if (!await dockerResourceExists('container', executor)) await startExternalExecutor()
+      await runBrowserJourney('board-create')
+      expect(await runBrowserJourney('board-start')).toMatchObject({ accepted: true })
+      let childId = ''
+      let parentCallId = ''
+      await eventually(async () => {
+        const children = await boardChildren()
+        const child = children.find((item) => item.parentSessionId === sessionBoard)
+        expect(child?.parentCallId).toBeTruthy()
+        childId = child!.sessionId
+        parentCallId = child!.parentCallId
+        const parentOwner = await sessionOwner(sessionBoard)
+        const childOwner = await sessionOwner(childId)
+        expect(childOwner?.origin).toBeTruthy()
+        expect(childOwner?.origin).not.toBe(parentOwner?.origin)
+        const commands = await boardCommands(childId)
+        expect(commands.find((item) => item.commandId === parentCallId)).toMatchObject({
+          kind: 'message', status: 'claimed', dispatchedAt: expect.any(String),
+        })
+      }, 30_000)
+      const ownerBefore = await sessionOwner(childId)
+      expect(await boardSummary(childId)).toMatchObject({ status: 'running', commandState: 'processing' })
+      expect(await runBrowserJourney('board-follow', childId)).toMatchObject({ accepted: true })
+      await eventually(async () => {
+        const commands = await boardCommands(childId)
+        expect(commands.filter((item) => item.kind === 'message')).toHaveLength(2)
+        expect(commands[1]).toMatchObject({ status: 'pending', dispatchedAt: null })
+        expect(await boardSummary(childId)).toMatchObject({
+          status: 'running', commandState: 'processing', pendingCommandCount: 1,
+        })
+      }, 15_000)
+      const finished = await runBrowserJourney('board-finished', childId)
+      expect(finished).toMatchObject({ childSessionId: childId, status: 'completed', parentCallId })
+      await eventually(async () => {
+        const commands = await boardCommands(childId)
+        expect(commands.filter((item) => item.kind === 'message')).toHaveLength(2)
+        expect(commands.filter((item) => item.kind === 'message' && item.status === 'completed')).toHaveLength(2)
+        const receipts = await executionReceipts()
+        expect(Object.entries(receipts).filter(([key, receipt]) => key.startsWith(`${childId}:`)
+          && receipt.result.ok && receipt.result.content.includes(marker))).toHaveLength(2)
+        expect(await sessionOwner(childId)).toEqual(ownerBefore)
+      }, 30_000)
+      expect(await runBrowserJourney('board-stop', childId, parentCallId)).toMatchObject({ accepted: true })
+      await eventually(async () => {
+        const stop = (await boardCommands(childId)).find((item) => item.kind === 'stop')
+        expect(stop).toMatchObject({ status: 'completed', outcome: { ok: true } })
+      }, 15_000)
+
+      expect(await runBrowserJourney('board-start-takeover')).toMatchObject({ accepted: true })
+      let abandonedId = ''
+      let abandonedCallId = ''
+      await eventually(async () => {
+        const child = (await boardChildren()).find((item) => item.sessionId !== childId)
+        expect(child?.parentCallId).toBeTruthy()
+        abandonedId = child!.sessionId
+        abandonedCallId = child!.parentCallId
+        expect((await boardCommands(abandonedId))[0]).toMatchObject({
+          status: 'claimed', dispatchedAt: expect.any(String),
+        })
+      }, 30_000)
+      const abandonedOwner = await sessionOwner(abandonedId)
+      const parentOwner = await sessionOwner(sessionBoard)
+      expect(abandonedOwner?.origin).not.toBe(parentOwner?.origin)
+      const failedRuntime = abandonedOwner?.origin === `http://${runtimeA}:13002` ? runtimeA : runtimeB
+      await docker('kill', '--signal', 'KILL', failedRuntime)
+      killedOwnerName = failedRuntime
+      survivingOwnerName = failedRuntime === runtimeA ? runtimeB : runtimeA
+      await eventually(async () => {
+        const owner = await sessionOwner(abandonedId)
+        expect(owner?.generation).toBeGreaterThan(abandonedOwner!.generation)
+        expect(owner?.origin).toBe(`http://${survivingOwnerName}:13002`)
+      }, 30_000)
+      expect(await runBrowserJourney('board-stop', abandonedId, abandonedCallId))
+        .toMatchObject({ accepted: true })
+      await eventually(async () => {
+        const commands = await boardCommands(abandonedId)
+        expect(commands.find((item) => item.kind === 'stop')).toMatchObject({
+          status: 'completed', outcome: { ok: false, content: expect.stringContaining('UNKNOWN') },
+        })
+        expect(commands[0]).toMatchObject({ status: 'claimed' })
+        expect(await boardSummary(abandonedId)).toMatchObject({ commandState: 'unknown' })
+      }, 30_000)
+      await releaseBoardModel('takeover')
+    } catch (error) {
+      await releaseBoardModel('marker').catch(() => undefined)
+      await releaseBoardModel('takeover').catch(() => undefined)
+      await dumpLogs('Board end-to-end failure')
+      throw error
+    }
+  }, 150_000)
 
   ;(process.env.KALA_RUN_REAL_BROWSER_INTEGRATION === '1' ? it : it.skip)('routes both Sessions and replays tool history in real headless Chromium', async () => {
     const client = `${project}-chromium`
@@ -644,7 +747,7 @@ integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptanc
       '--network', network,
       '--read-only',
       '--tmpfs', '/state:rw,nosuid,size=16m',
-      '--tmpfs', '/tmp:rw,noexec,nosuid,size=32m',
+      '--env', 'TMPDIR=/state',
       '--mount', `type=bind,source=${repository},target=/app,readonly`,
       ...(dedicated ? ['--mount', `type=bind,source=${testKeyDirectory},target=/run/kala-test,readonly`] : []),
       '--workdir', '/app/packages/runtime-ingress-gateway',
@@ -700,7 +803,7 @@ integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptanc
       '--network', network,
       '--read-only',
       '--tmpfs', '/state:rw,noexec,nosuid,nodev,size=128m',
-      '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m',
+      '--env', 'TMPDIR=/state',
       '--mount', `type=bind,source=${repository},target=/app,readonly`,
       '--mount', `type=bind,source=${testKeyPath},target=/run/kala-test-state-master-key,readonly`,
       ...(dedicated ? ['--mount', `type=bind,source=${testKeyDirectory}/installation-id,target=/run/kala-test-installation-id,readonly`] : []),
@@ -784,6 +887,40 @@ integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptanc
     } catch {
       return {}
     }
+  }
+
+  async function boardChildren(): Promise<Array<{ sessionId: string; parentSessionId: string; parentCallId: string }>> {
+    const { stdout } = await docker('exec', postgres, 'psql', '-U', 'postgres', '-d', database, '-A', '-t', '-c',
+      `SELECT session_id,document->>'parentSessionId',document->>'parentCallId'
+       FROM tenant_session_latest_projection WHERE tenant_id='${organizationId}'
+         AND document->>'parentSessionId'='${sessionBoard}' ORDER BY session_id`)
+    return stdout.trim().split('\n').filter(Boolean).map((line) => {
+      const [sessionId = '', parentSessionId = '', parentCallId = ''] = line.split('|')
+      return { sessionId, parentSessionId, parentCallId }
+    })
+  }
+
+  async function boardCommands(childSessionId: string): Promise<Array<{
+    commandId: string; kind: string; status: string; dispatchedAt: string | null;
+    outcome: { ok: boolean; content: string } | null
+  }>> {
+    if (!/^[\w-]+$/u.test(childSessionId)) throw new Error('Invalid test child ID')
+    const { stdout } = await docker('exec', postgres, 'psql', '-U', 'postgres', '-d', database, '-A', '-t', '-c',
+      `SELECT json_build_object('commandId',command_id,'kind',kind,'status',status,
+        'dispatchedAt',dispatched_at,'outcome',outcome)::text
+       FROM tenant_session_child_commands WHERE tenant_id='${organizationId}'
+         AND child_session_id='${childSessionId}' ORDER BY ordinal`)
+    return stdout.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
+  }
+
+  async function boardSummary(childSessionId: string): Promise<Record<string, unknown>> {
+    return await runBrowserJourney('board-list', childSessionId) as Record<string, unknown>
+  }
+
+  async function releaseBoardModel(target: 'marker' | 'takeover' = 'marker'): Promise<void> {
+    if (!await dockerResourceExists('container', model)) return
+    await docker('exec', model, 'node', '--input-type=module', '--eval',
+      `await fetch('http://127.0.0.1:8081/board/release?target=${target}',{method:'POST'})`)
   }
 
   async function sessionProjections(): Promise<Map<string, string>> {
@@ -886,7 +1023,9 @@ integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptanc
     return counts
   }
 
-  async function runBrowserJourney(action: 'initial' | 'tools' | 'history' | 'recover' | 'recover-y' | 'exports' | 'verify-exports' | 'benchmark' | 'grow-history'): Promise<unknown> {
+  async function runBrowserJourney(action: 'initial' | 'tools' | 'history' | 'recover' | 'recover-y' | 'exports' | 'verify-exports' | 'benchmark' | 'grow-history'
+    | 'board-create' | 'board-start' | 'board-follow' | 'board-list' | 'board-finished' | 'board-stop' | 'board-start-takeover',
+  childSessionId?: string, parentCallId?: string): Promise<unknown> {
     const client = `${project}-browser-${action}`
     const args = ['run', '--rm', '--name', client,
       '--label', `dev.kala.test.project=${project}`,
@@ -897,6 +1036,10 @@ integrationDescribe(`${acceptanceProduct} parallel-v1 real two-Runtime acceptanc
       '--env', `TEST_BROWSER_TOKEN=${browserToken}`,
       '--env', `TEST_SESSION_X=${sessionX}`,
       '--env', `TEST_SESSION_Y=${sessionY}`,
+      '--env', `TEST_SESSION_BOARD=${sessionBoard}`,
+      '--env', `TEST_MODEL_CONTAINER=${model}`,
+      ...(childSessionId ? ['--env', `TEST_CHILD_ID=${childSessionId}`] : []),
+      ...(parentCallId ? ['--env', `TEST_PARENT_CALL_ID=${parentCallId}`] : []),
       '--env', `TEST_WORKSPACE_ID=${workspaceId}`,
       '--env', `TEST_ACTION=${action}`,
       '--env', `TEST_ARTIFACT_PROOFS=${JSON.stringify(exportedArtifacts)}`,
@@ -952,7 +1095,21 @@ function assertCompletedReceipt(receipts: ExecutionReceipts, sessionId: string, 
 
 const fakeOpenAiServer = String.raw`
 import http from 'node:http'
+const held = { marker: [], takeover: [] }
+const released = { marker: false, takeover: false }
+const stream = (response, chunks) => {
+  response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'close' })
+  for (const chunk of chunks) response.write('data: ' + JSON.stringify(chunk) + '\n\n')
+  response.end('data: [DONE]\n\n')
+}
 const server = http.createServer((request, response) => {
+  if (request.method === 'POST' && request.url?.startsWith('/board/release?target=')) {
+    const target = new URL(request.url, 'http://localhost').searchParams.get('target')
+    if (target !== 'marker' && target !== 'takeover') { response.writeHead(400); response.end(); return }
+    released[target] = true
+    for (const pending of held[target].splice(0)) pending()
+    response.writeHead(204); response.end(); return
+  }
   if (request.method !== 'POST' || request.url !== '/v1/chat/completions') {
     response.writeHead(404); response.end(); return
   }
@@ -964,7 +1121,7 @@ const server = http.createServer((request, response) => {
     try { body = JSON.parse(raw) } catch { response.writeHead(400); response.end(); return }
     const tools = Array.isArray(body.tools) ? body.tools.map((tool) => tool?.function?.name) : []
     console.log('fake_openai_request ' + JSON.stringify({ stream: body.stream, tools, roles: Array.isArray(body.messages) ? body.messages.map((message) => message?.role) : [] }))
-    if (body.stream !== true || !tools.includes('read_file')) {
+    if (body.stream !== true || !tools.some((tool) => ['read_file', 'agent', 'write_agent'].includes(tool))) {
       response.writeHead(422, { 'content-type': 'application/json' })
       response.end(JSON.stringify({ error: 'streaming read_file tool required' }))
       return
@@ -973,6 +1130,38 @@ const server = http.createServer((request, response) => {
     const lastUser = messages.findLastIndex((message) => message?.role === 'user')
     const hasToolResult = messages.slice(lastUser + 1).some((message) => message?.role === 'tool')
     const transcript = JSON.stringify(messages)
+    const userText = JSON.stringify(messages[lastUser]?.content ?? '')
+    const boardParentStart = userText.includes('BOARD-START')
+    const boardParentFollow = userText.includes('BOARD-FOLLOW:')
+    const boardInitial = userText.includes('board child marker')
+    const boardTakeover = userText.includes('board child takeover')
+    const boardFollow = userText.includes('next-turn marker')
+    if (boardParentStart || boardParentFollow || boardInitial || boardTakeover || boardFollow) {
+      const requestId = 'board_' + messages.filter((message) => message?.role === 'user').length
+      let next
+      if (hasToolResult) next = [
+        { id: requestId, choices: [{ index: 0, delta: { content: 'board turn done' }, finish_reason: 'stop' }] },
+      ]
+      else {
+        const name = boardParentStart ? 'agent' : boardParentFollow ? 'write_agent' : 'read_file'
+        const childId = userText.match(/BOARD-FOLLOW:([A-Za-z0-9_-]+)/)?.[1]
+        const args = name === 'agent'
+          ? { prompt: boardTakeover || userText.includes('TAKEOVER') ? 'board child takeover' : 'board child marker',
+              mode: 'background', role: 'research', max_turns: 10, timeout_ms: 120000 }
+          : name === 'write_agent'
+            ? { agent_id: childId, message: 'next-turn marker', mode: 'background' }
+            : { path: '/workspace/marker.txt' }
+        next = [{ id: requestId, choices: [{ index: 0, delta: { role: 'assistant',
+          tool_calls: [{ index: 0, id: 'call_' + requestId, type: 'function',
+            function: { name, arguments: JSON.stringify(args) } }] }, finish_reason: 'tool_calls' }] }]
+      }
+      next.push({ id: requestId, choices: [], usage: { prompt_tokens: 2, completion_tokens: 1 } })
+      const send = () => stream(response, next)
+      const gate = boardInitial ? 'marker' : boardTakeover ? 'takeover' : null
+      if (hasToolResult && gate && !released[gate]) held[gate].push(send)
+      else send()
+      return
+    }
     const suffix = transcript.includes('marker read X') ? 'x' : transcript.includes('marker read Y') ? 'y' : 'unknown'
     const userCount = messages.filter((message) => message?.role === 'user').length
     const callId = 'call_' + suffix + (userCount > 1 ? '_' + userCount : '')
@@ -985,9 +1174,7 @@ const server = http.createServer((request, response) => {
           { id: 'tool_' + suffix, choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: callId, type: 'function', function: { name: 'read_file', arguments: '{"path":"/workspace/marker.txt"}' } }] }, finish_reason: 'tool_calls' }] },
           { id: 'tool_' + suffix, choices: [], usage: { prompt_tokens: 1, completion_tokens: 1 } },
         ]
-    response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'close' })
-    for (const chunk of chunks) response.write('data: ' + JSON.stringify(chunk) + '\n\n')
-    response.end('data: [DONE]\n\n')
+    stream(response, chunks)
   })
 })
 server.listen(8081, '0.0.0.0', () => console.log('fake_openai_ready'))
@@ -1178,6 +1365,61 @@ async function historyThroughOwnerTicket(sessionId, callId) {
   }
 }
 
+async function boardMessage(text, operation) {
+  const sessionId = process.env.TEST_SESSION_BOARD
+  const socket = await openOwnerTicket(sessionId)
+  try {
+    const result = await socket.timeout(20000).emitWithAck('client:user_message', {
+      sessionId, operationId: operation + '-' + crypto.randomUUID(), intent: 'text', mode: 'queue', text,
+    })
+    if (!result?.ok) throw new Error('Board user message rejected: ' + JSON.stringify(result))
+    return { accepted: true }
+  } finally { socket.close() }
+}
+
+async function boardList(childSessionId) {
+  const parentSessionId = process.env.TEST_SESSION_BOARD
+  const socket = await openOwnerTicket(parentSessionId)
+  try {
+    const result = await socket.timeout(10000).emitWithAck('sub_agent:list', {
+      requestId: crypto.randomUUID(), parentSessionId,
+    })
+    if (result?.error) throw new Error('Board list failed: ' + result.error)
+    const child = result?.children?.find((item) => item.childSessionId === childSessionId)
+    if (!child) throw new Error('Board child not visible: ' + childSessionId)
+    return child
+  } finally { socket.close() }
+}
+
+async function boardStop() {
+  const socket = await openOwnerTicket(process.env.TEST_SESSION_BOARD)
+  try {
+    socket.emit('client:interrupt_sub_agent', {
+      operationId: 'gateway-stop-' + crypto.randomUUID(),
+      parentSessionId: process.env.TEST_SESSION_BOARD,
+      parentCallId: process.env.TEST_PARENT_CALL_ID,
+      childSessionId: process.env.TEST_CHILD_ID,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    return { accepted: true }
+  } finally { socket.close() }
+}
+
+async function waitForBoardFinished() {
+  const socket = await openOwnerTicket(process.env.TEST_SESSION_BOARD)
+  try {
+    const finished = new Promise((resolve) => {
+      socket.on('server:control_update', (payload) => {
+        if (payload.kind === 'sub_agent_finished' && payload.childSessionId === process.env.TEST_CHILD_ID) resolve(payload)
+      })
+    })
+    const release = await fetch('http://' + process.env.TEST_MODEL_CONTAINER + ':8081/board/release?target=marker',
+      { method: 'POST' })
+    if (!release.ok) throw new Error('Board model gate did not release: ' + release.status)
+    return await Promise.race([finished, timeout('Cross-replica completion notification missing', 30000)])
+  } finally { socket.close() }
+}
+
 if (process.env.TEST_ACTION === 'initial') {
   const sessionX = process.env.TEST_SESSION_X
   const sessionY = process.env.TEST_SESSION_Y
@@ -1198,6 +1440,20 @@ if (process.env.TEST_ACTION === 'initial') {
     historyThroughOwnerTicket(process.env.TEST_SESSION_Y, 'call_y'),
   ])
   console.log(JSON.stringify({ x, y }))
+} else if (process.env.TEST_ACTION === 'board-create') {
+  await createThroughFreshControl(process.env.TEST_SESSION_BOARD, 'board')
+  console.log(JSON.stringify({ accepted: true }))
+} else if (process.env.TEST_ACTION === 'board-start' || process.env.TEST_ACTION === 'board-start-takeover') {
+  console.log(JSON.stringify(await boardMessage(
+    process.env.TEST_ACTION === 'board-start' ? 'BOARD-START' : 'BOARD-START-TAKEOVER', 'gateway-board-start')))
+} else if (process.env.TEST_ACTION === 'board-follow') {
+  console.log(JSON.stringify(await boardMessage('BOARD-FOLLOW:' + process.env.TEST_CHILD_ID, 'gateway-board-follow')))
+} else if (process.env.TEST_ACTION === 'board-list') {
+  console.log(JSON.stringify(await boardList(process.env.TEST_CHILD_ID)))
+} else if (process.env.TEST_ACTION === 'board-finished') {
+  console.log(JSON.stringify(await waitForBoardFinished()))
+} else if (process.env.TEST_ACTION === 'board-stop') {
+  console.log(JSON.stringify(await boardStop()))
 } else if (process.env.TEST_ACTION === 'benchmark') {
   const sockets = await Promise.all([openOwnerTicket(process.env.TEST_SESSION_X), openOwnerTicket(process.env.TEST_SESSION_Y)])
   const latencies = []

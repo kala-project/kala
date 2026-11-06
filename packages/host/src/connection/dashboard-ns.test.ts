@@ -2,10 +2,95 @@ import { describe, expect, it, vi } from 'vitest'
 import { COPILOT_AGENT_RUNTIME_CAPABILITIES, KERNEL_AGENT_RUNTIME_CAPABILITIES, type ClientUserMessage, type RuntimeMetadataEntry } from '@agent-kernel/shared'
 import { createConfig, createInitialState } from '@agent-kernel/kernel'
 
-import { buildCompactionMetadataIndex, consumeCompactionMetadata, deriveSessionConfig, handleUserMessage, loadDashboardSession, loadRecordForCleanup, recoverSubAgentOutcome, sessionTreeTokenUsage, type DashboardDeps } from './dashboard-ns.js'
+import { buildCompactionMetadataIndex, childCommandDashboardState, consumeCompactionMetadata, deriveSessionConfig, enqueueOutstandingSharedChildStops, handleUserMessage, loadDashboardSession, loadRecordForCleanup, recoverSubAgentOutcome, sessionTreeTokenUsage, type DashboardDeps } from './dashboard-ns.js'
 import { terminalOwnerSessionId, terminalSessionRoom } from './rooms.js'
 import type { SessionStore } from '../store/session.js'
 import type { SessionRecord } from '../store/session.js'
+import type { ChildCommand } from '../store/child-command-state.js'
+
+describe('shared child command dashboard state', () => {
+  const message: ChildCommand = {
+    parentSessionId: 'parent', childSessionId: 'child', commandId: 'message',
+    kind: 'message', message: 'follow up', status: 'pending',
+  }
+  it('distinguishes next-turn queued from a live dispatched turn and an owner-lost UNKNOWN', () => {
+    expect(childCommandDashboardState([message], 'thinking')).toEqual({
+      commandState: 'queued', pendingCommandCount: 1,
+    })
+    expect(childCommandDashboardState([{ ...message, status: 'claimed', ownerGeneration: '2' }], 'idle'))
+      .toEqual({ commandState: 'unknown', pendingCommandCount: 0 })
+    const dispatched: ChildCommand = { ...message, status: 'claimed', dispatchedAt: new Date().toISOString(),
+      dispatchedOwnerGeneration: '2', ownerGeneration: '2' }
+    expect(childCommandDashboardState([dispatched], 'thinking').commandState).toBe('processing')
+    expect(childCommandDashboardState([{ ...dispatched, ownerGeneration: undefined }], 'thinking').commandState).toBe('unknown')
+    expect(childCommandDashboardState([dispatched], 'done').commandState).toBe('unknown')
+    expect(childCommandDashboardState([{ ...dispatched, ownerGeneration: '3' }, message], 'thinking'))
+      .toEqual({ commandState: 'unknown', pendingCommandCount: 1 })
+  })
+
+  it('keeps unconfirmed Stop UNKNOWN even after its message completed', () => {
+    expect(childCommandDashboardState([{ ...message, status: 'completed' }, {
+      ...message, commandId: 'stop', kind: 'stop', message: undefined, status: 'claimed',
+    }], 'done').commandState).toBe('unknown')
+    expect(childCommandDashboardState([message, {
+      ...message, commandId: 'stop', kind: 'stop', message: undefined, status: 'completed',
+      outcome: { ok: true, content: 'cancelled' },
+    }], 'idle')).toEqual({ commandState: 'unknown', pendingCommandCount: 1 })
+    expect(childCommandDashboardState([
+      { ...message, status: 'completed' },
+      { ...message, commandId: 'stop-1', kind: 'stop', message: undefined, status: 'completed',
+        outcome: { ok: true, content: 'stopped' } },
+      { ...message, commandId: 'stop-2', kind: 'stop', message: undefined, status: 'claimed' },
+    ], 'done').commandState).toBe('unknown')
+  })
+})
+
+describe('parent cancellation of shared children', () => {
+  it('enqueues a fenced durable Stop for each outstanding child, never a completed child or a duplicate Stop', async () => {
+    const enqueueChildCommand = vi.fn(async () => undefined)
+    const deps = {
+      store: {
+        listChildren: async () => ['queued', 'running', 'completed', 'stopped'].map((sessionId) => ({ sessionId })),
+        load: async (sessionId: string) => ({ sessionId, parentSessionId: 'parent' }),
+      },
+      loopDeps: { store: { childCommandInbox: {
+        readChildCommands: async (_parent: string, child: string) => child === 'completed'
+          ? [{ kind: 'message', status: 'completed' }]
+          : child === 'stopped'
+            ? [{ kind: 'message', status: 'claimed' }, { kind: 'stop', status: 'pending' }]
+            : [{ kind: 'message', status: child === 'queued' ? 'pending' : 'claimed' }],
+        enqueueChildCommand,
+      } } },
+    } as unknown as DashboardDeps
+    await expect(enqueueOutstandingSharedChildStops(deps, 'parent', 'cancel-1')).resolves.toBeUndefined()
+    expect(enqueueChildCommand).toHaveBeenCalledTimes(2)
+    expect(enqueueChildCommand.mock.calls.map((call) => call[1])).toEqual(['queued', 'running'])
+    expect(enqueueChildCommand.mock.calls.every((call) => call[3] === 'stop')).toBe(true)
+    const firstId = enqueueChildCommand.mock.calls[0]?.[2]
+    enqueueChildCommand.mockClear()
+    await enqueueOutstandingSharedChildStops(deps, 'parent', 'cancel-1')
+    expect(enqueueChildCommand.mock.calls[0]?.[2]).toBe(firstId)
+  })
+
+  it('reports UNKNOWN when one child Stop cannot be admitted but still attempts its siblings', async () => {
+    const enqueueChildCommand = vi.fn(async (_parent: string, child: string) => {
+      if (child === 'first') throw new Error('owner lost')
+    })
+    const deps = {
+      store: {
+        listChildren: async () => [{ sessionId: 'first' }, { sessionId: 'second' }],
+        load: async (sessionId: string) => ({ sessionId, parentSessionId: 'parent' }),
+      },
+      loopDeps: { store: { childCommandInbox: {
+        readChildCommands: async () => [{ kind: 'message', status: 'claimed' }],
+        enqueueChildCommand,
+      } } },
+    } as unknown as DashboardDeps
+    await expect(enqueueOutstandingSharedChildStops(deps, 'parent', 'cancel-2'))
+      .resolves.toMatchObject({ message: 'owner lost' })
+    expect(enqueueChildCommand).toHaveBeenCalledTimes(2)
+  })
+})
 
 describe('session tree token usage', () => {
   const record = (

@@ -634,6 +634,7 @@ export type ClientCancelStream = {
 }
 
 export type ClientInterruptSubAgent = {
+  operationId?: string
   parentSessionId: string
   parentCallId: string
   childSessionId?: string
@@ -1413,6 +1414,9 @@ export type SubAgentSummary = {
   parentCallId?: string
   agentType?: string
   status: 'running' | 'completed' | 'failed' | 'cancelled'
+  /** Latest durable child command's state; UNKNOWN must never be shown as completed. */
+  commandState?: 'queued' | 'processing' | 'unknown'
+  pendingCommandCount?: number
   /** ISO 8601. Optional because pre-lifecycle-events records don't carry it. */
   startedAt?: string
   finishedAt?: string
@@ -1513,6 +1517,24 @@ export type ToolResultAck = {
   failure?: import('@agent-kernel/kernel').ToolFailure
   durationMs?: number
 }
+
+/** Read-only lookup of a prior tool execution; never authorizes a new call. */
+export type ExecutionReceiptQuery = {
+  sessionId: string
+  callId: string
+  ownerGeneration: string
+  requestDigest: string
+}
+
+export type ExecutionReceiptQueryResult =
+  | { status: 'completed'; result: ToolResultAck }
+  | { status: 'started_unknown' | 'absent_with_valid_journal' | 'conflict' | 'unavailable' }
+
+/** Owner-fenced cancellation signal; acknowledgement is not proof of rollback. */
+export type ExecutionCancelRequest = ExecutionReceiptQuery & { stopCommandId: string }
+export type ExecutionCancelAck =
+  | { status: 'cancel_requested' | 'started_unknown' | 'absent_with_valid_journal' | 'conflict' | 'unavailable' }
+  | { status: 'completed'; result: ToolResultAck }
 
 // ============================================================================
 // Socket.IO event maps
@@ -2287,8 +2309,8 @@ export type ExecutorClientToServerEvents = {
 
 /**
  * Executor's inbound wire surface. Kept intentionally small so an executor
- * deployed in the field only has to speak two message shapes: "run this
- * tool" and "cancel that one". Everything the host previously exposed as
+ * deployed in the field only has to speak "run this tool", "cancel that one",
+ * and read-only receipt queries. Everything the host previously exposed as
  * a bespoke RPC (fs inspection, background-task inspection, overflow
  * spill management) now travels through `tool:call` using internal tool names
  * conventionally prefixed `__`. The executor runs the named tool; only the
@@ -2309,6 +2331,8 @@ export type ExecutorServerToClientEvents = {
     payload: ToolCallMessage,
     ack: (result: ToolResultAck) => void,
   ) => void
+  'tool:receipt_query': (payload: ExecutionReceiptQuery, ack: (result: ExecutionReceiptQueryResult) => void) => void
+  'tool:cancel_ack': (payload: ExecutionCancelRequest, ack: (result: ExecutionCancelAck) => void) => void
   'tool:cancel': (payload: ToolCancelMessage) => void
   'terminal:create': (
     payload: ClientTerminalCreate,

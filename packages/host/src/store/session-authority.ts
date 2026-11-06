@@ -3,6 +3,8 @@ import type { EventEntry, RuntimeMetadataEntry } from '@agent-kernel/shared'
 
 import type { ParsedHistory, SessionOperationMatch } from './log.js'
 import type { NativePosixFileSystem } from './native-posix-fs.js'
+import type { AgentBoardTransaction } from './agent-board-state.js'
+import type { ChildCommandInbox } from './child-command-state.js'
 
 export type PersistedSessionDocument = Record<string, unknown> & {
   sessionId: string
@@ -23,6 +25,8 @@ export type SessionAuthorityMutation = {
 /** Durable Session authority consumed by SessionStore, independent of its storage backend. */
 export interface SessionAuthority {
   initialize(): Promise<void>
+  agentBoardTransaction?: AgentBoardTransaction
+  childCommandInbox?: ChildCommandInbox
   /** Internal cache epoch for the current live owner, never client routing authority.
    * Undefined means this replica has no writable cache. SQL fences remain mandatory.
    * Authorities without distributed ownership omit this hook. */
@@ -39,6 +43,13 @@ export interface SessionAuthority {
     mutationId?: string,
     options?: { fenceSessionId?: string },
   ): Promise<PersistedSessionDocument>
+  /** Atomically create a child and its first inbox command under independent parent/child fences. */
+  createChildWithCommand?(
+    document: PersistedSessionDocument,
+    commandId: string,
+    message: string,
+    maxConcurrentChildren: number,
+  ): Promise<PersistedSessionDocument>
   requestDeletion(sessionId: string, mutationId?: string): Promise<boolean>
   delete(sessionId: string, mutationId?: string): Promise<void>
   listDeleting(limit?: number, afterSessionId?: string): Promise<readonly PersistedSessionDocument[]>
@@ -46,6 +57,10 @@ export interface SessionAuthority {
   list(sessionIds?: readonly string[]): Promise<readonly PersistedSessionDocument[]>
   findOperation(sessionId: string, operationId: string): Promise<SessionOperationMatch | undefined>
   findLatestRuntimeMetadata(sessionId: string, action: string): Promise<RuntimeMetadataEntry | undefined>
+  readChildTurnEnds?(sessionId: string, commandId: string): Promise<readonly RuntimeMetadataEntry[]>
+  /** Latest committed Copilot tool-call/result pair, fenced to the current child owner. */
+  hasCommittedCopilotToolResult?(sessionId: string, callId: string): Promise<boolean>
+  findCopilotToolRequest?(sessionId: string, callId: string): Promise<{ ownerGeneration: string; requestDigest: string } | undefined>
   readEventEntries(sessionId: string): Promise<readonly EventEntry[]>
   readHistory(sessionId: string): Promise<ParsedHistory>
 }

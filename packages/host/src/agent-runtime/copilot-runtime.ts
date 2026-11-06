@@ -3,6 +3,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, renameSync, rmSync, sta
 import { dirname, join } from 'node:path'
 
 import { parseComputerScreenshotResult } from '@agent-kernel/shared'
+import { executionRequestDigest } from '@agent-kernel/executor'
 import { formatToolFailureForAgent } from '../tool-feedback.js'
 import {
   evaluateShellApprovalDecision,
@@ -39,7 +40,6 @@ import type {
 } from '@github/copilot-sdk'
 
 import type { SessionRecord } from '../store/session.js'
-import { findPersistedToolResult } from '../store/log.js'
 import { messageOperationFingerprint } from '../message-operation-fingerprint.js'
 import { mountNativePosixSession, type NativePosixMount } from './native-posix-mount.js'
 import type {
@@ -217,7 +217,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
   }
 
   async toolResultPersisted(record: SessionRecord, callId: string): Promise<boolean> {
-    return await findPersistedToolResult(record.logPath, callId, this.id)
+    return await this.context.store.findPersistedCopilotToolResult(record.sessionId, callId)
   }
 
   async send(record: SessionRecord, input: AgentRuntimeSendInput): Promise<void> {
@@ -275,7 +275,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
     } catch (error) {
       if (!this.isCurrentTurn(record.sessionId, generation)) return
       const message = error instanceof Error ? error.message : String(error)
-      await this.project(record, 'copilot.session_error', { message }, (state) => ({
+      await this.project(record, 'copilot.session_error', { message, ...(input.operationId ? { childCommandId: input.operationId } : {}) }, (state) => ({
         ...state, status: 'error', error: message, pendingCalls: [],
         messages: completeTemporalTurn(state.messages, timing, 'failed'),
       }))
@@ -308,6 +308,14 @@ export class CopilotAgentRuntime implements AgentRuntime {
       error: undefined,
     }))
     this.activeTurnTimings.delete(record.sessionId)
+  }
+
+  async cancelForChildStop(record: SessionRecord): Promise<boolean> {
+    // A successor cannot abort an SDK turn belonging to a former process.
+    // Do not project a synthetic cancelled turn in that case.
+    if (!this.sessions.has(record.sessionId) || !this.turnGenerations.has(record.sessionId)) return false
+    await this.cancel(record)
+    return true
   }
 
   async approve(record: SessionRecord, callId: string): Promise<void> {
@@ -726,6 +734,9 @@ export class CopilotAgentRuntime implements AgentRuntime {
         } else {
           await this.projectToolCall(record, pending)
         }
+        if (!this.isCurrentTurn(record.sessionId, generation)) {
+          return toolResult(false, 'cancelled', 'failure', schema.name)
+        }
         const result = await this.context.tools.callTool(record.sessionId, {
           kind: 'call_tool',
           callId: pending.callId,
@@ -892,6 +903,19 @@ export class CopilotAgentRuntime implements AgentRuntime {
     }
     if (event.type === 'assistant.message_delta') {
       this.context.broadcast.onTokenDelta(record.sessionId, event.data.deltaContent)
+      return
+    }
+    if (event.type === 'assistant.turn_end' && !event.agentId) {
+      const capture = this.turnCaptures.get(record.sessionId)
+      const timing = this.activeTurnTimings.get(record.sessionId)
+      if (!capture || !timing || capture.eventIds.has(event.id)) return
+      capture.eventIds.add(event.id)
+      const projection = this.project(record, 'copilot.assistant_turn_end', {
+        ...nativeEventPayload(event),
+        turnId: event.data.turnId,
+        childCommandId: timing.turnId,
+      }, (state) => state).catch((error) => { capture.projectionError ??= error })
+      capture.projections.push(projection)
       return
     }
     if ((event.type === 'assistant.message' || event.type === 'assistant.reasoning') && !event.agentId) {
@@ -1075,7 +1099,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
         await this.context.tools.cancelPending(record.sessionId)
       }
       const timing = this.activeTurnTimings.get(record.sessionId)
-      await this.project(record, 'copilot.session_error', { message }, (state) => ({
+      await this.project(record, 'copilot.session_error', { message, ...(input.operationId ? { childCommandId: input.operationId } : {}) }, (state) => ({
         ...state,
         messages: timing ? completeTemporalTurn(state.messages, timing, 'failed') : state.messages,
         status: 'error',
@@ -1099,7 +1123,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
     payload: Record<string, unknown>,
   ): Promise<void> {
     const timing = this.activeTurnTimings.get(record.sessionId)
-    await this.project(record, 'copilot.session_idle', payload, (state) => {
+    await this.project(record, 'copilot.session_idle', { ...payload, ...(timing ? { childCommandId: timing.turnId } : {}) }, (state) => {
       if (state.pendingCalls.length > 0) return state
       return {
         ...state,
@@ -1124,10 +1148,16 @@ export class CopilotAgentRuntime implements AgentRuntime {
   private async projectToolCall(record: SessionRecord, pending: PendingToolCall): Promise<void> {
     const timing = this.activeTurnTimings.get(record.sessionId)
     const createdAt = new Date().toISOString()
+    const owner = await this.context.assertSessionEffectOwner?.(record.sessionId)
+    const requestDigest = executionRequestDigest({
+      sessionId: record.sessionId, callId: pending.callId, name: pending.name, input: pending.input,
+      ...(record.state.cwd ? { cwd: record.state.cwd } : {}),
+    })
     await this.project(record, 'copilot.tool_call', {
       callId: pending.callId,
       name: pending.name,
       input: pending.input,
+      ...(owner?.ownerGeneration ? { ownerGeneration: owner.ownerGeneration, requestDigest } : {}),
     }, (state) => ({
       ...state,
       messages: [...state.messages, withTemporalMetadata({

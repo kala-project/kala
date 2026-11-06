@@ -45,7 +45,7 @@ import {
 } from '@agent-kernel/shared/enhancement'
 import type { SessionRecord } from './store/session.js'
 import { maybeAutoCompact } from './extensions/compaction.js'
-import { isCancelledSubAgentChild, type SubAgentRuntimeController } from './extensions/agent-tool.js'
+import { interruptSubAgentsForParent, isCancelledSubAgentChild, type SubAgentRuntimeController } from './extensions/agent-tool.js'
 import { createBuiltinExtensionRegistry } from './extensions/builtin-registry.js'
 import {
   analyzeShellCommand,
@@ -249,6 +249,7 @@ export function runHostLoop(deps: HostLoopDeps): LoopHandle {
         if (status === 'idle' || status === 'done' || status === 'error') {
           // Preserve the public cancellation contract without polluting the
           // event log/cursor with a reducer no-op.
+          await interruptSubAgentsForParent(deps, inFlightAborts, sessionId, 'parent session cancelled', handle)
           await deps.tools.cancelPending(sessionId)
           return
         }

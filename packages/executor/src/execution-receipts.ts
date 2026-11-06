@@ -1,13 +1,13 @@
 import { createHash } from 'node:crypto'
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import type { ToolCallMessage, ToolResultAck } from '@agent-kernel/shared'
+import type { ExecutionCancelAck, ExecutionCancelRequest, ExecutionReceiptQuery, ExecutionReceiptQueryResult, ToolCallMessage, ToolResultAck } from '@agent-kernel/shared'
 
 const MAX_RECEIPTS = 500
 const RECEIPT_TTL_MS = 24 * 60 * 60_000
 
-type CompletedReceipt = { completedAt: number; result: ToolResultAck; requestDigest?: string; ownerGeneration?: string }
-type StartedReceipt = { startedAt: number; callId: string; requestDigest?: string; ownerGeneration?: string }
+type CompletedReceipt = { completedAt: number; result: ToolResultAck; requestDigest?: string; ownerGeneration?: string; cancelRequestedAt?: number; stopCommandId?: string }
+type StartedReceipt = { startedAt: number; callId: string; requestDigest?: string; ownerGeneration?: string; cancelRequestedAt?: number; stopCommandId?: string }
 type Receipt = CompletedReceipt | StartedReceipt
 type CommitWaiter = { generation: number; resolve(): void; reject(error: unknown): void }
 
@@ -51,6 +51,8 @@ function validReceipt(value: unknown): value is Receipt {
   const receipt = value as Record<string, unknown>
   if (receipt.requestDigest !== undefined && (typeof receipt.requestDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(receipt.requestDigest))) return false
   if (receipt.ownerGeneration !== undefined && (typeof receipt.ownerGeneration !== 'string' || !/^[1-9]\d*$/u.test(receipt.ownerGeneration))) return false
+  if (receipt.cancelRequestedAt !== undefined && (typeof receipt.cancelRequestedAt !== 'number' || !Number.isFinite(receipt.cancelRequestedAt)
+    || typeof receipt.stopCommandId !== 'string' || !receipt.stopCommandId)) return false
   if ('result' in receipt) {
     const result = receipt.result as Partial<ToolResultAck> | null
     return typeof receipt.completedAt === 'number' && Number.isFinite(receipt.completedAt)
@@ -88,6 +90,66 @@ export class ExecutionReceiptStore {
     }
     for (const [key, receipt] of entries) this.receipts.set(key, receipt as Receipt)
     this.prune()
+  }
+
+  async query(query: ExecutionReceiptQuery): Promise<ExecutionReceiptQueryResult> {
+    if (!query || typeof query.sessionId !== 'string' || !query.sessionId
+      || typeof query.callId !== 'string' || !query.callId
+      || typeof query.requestDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(query.requestDigest)
+      || typeof query.ownerGeneration !== 'string' || !/^[1-9]\d*$/u.test(query.ownerGeneration)) {
+      return { status: 'unavailable' }
+    }
+    // Read the journal, not the process cache: a completion in memory is not
+    // evidence until committed, and a missing/replaced journal cannot prove absence.
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(await readFile(this.path, 'utf8'))
+    } catch {
+      return { status: 'unavailable' }
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { status: 'unavailable' }
+    const entries = Object.entries(parsed)
+    if (entries.some(([, receipt]) => !validReceipt(receipt))) return { status: 'unavailable' }
+    const key = `${query.sessionId}:${query.callId}`
+    const receipt = (parsed as Record<string, Receipt>)[key]
+    if (!receipt) return { status: 'absent_with_valid_journal' }
+    if (receipt.ownerGeneration === undefined || receipt.requestDigest === undefined) return { status: 'unavailable' }
+    if (receipt.ownerGeneration !== query.ownerGeneration || receipt.requestDigest !== query.requestDigest
+      || ('result' in receipt ? receipt.result.callId : receipt.callId) !== query.callId) return { status: 'conflict' }
+    if (!('result' in receipt)) return { status: 'started_unknown' }
+    if (receipt.completedAt < Date.now() - RECEIPT_TTL_MS) return { status: 'unavailable' }
+    return { status: 'completed', result: receipt.result }
+  }
+
+  async requestCancellation(request: ExecutionCancelRequest): Promise<ExecutionCancelAck> {
+    if (typeof request?.stopCommandId !== 'string' || !request.stopCommandId) return { status: 'unavailable' }
+    const observed = await this.query(request)
+    if (observed.status !== 'started_unknown') return observed
+    const key = `${request.sessionId}:${request.callId}`
+    const receipt = this.receipts.get(key)
+    if (!receipt || 'result' in receipt || receipt.ownerGeneration !== request.ownerGeneration
+      || receipt.requestDigest !== request.requestDigest || receipt.callId !== request.callId
+      || this.committingCompletions.has(key)) return { status: 'started_unknown' }
+    if (receipt.stopCommandId && receipt.stopCommandId !== request.stopCommandId) return { status: 'conflict' }
+    if (!receipt.cancelRequestedAt) {
+      const marked = { ...receipt, stopCommandId: request.stopCommandId, cancelRequestedAt: Date.now() }
+      this.receipts.set(key, marked)
+      try {
+        await this.commit()
+      } catch {
+        if (this.receipts.get(key) === marked) this.receipts.set(key, receipt)
+        return { status: 'unavailable' }
+      }
+    }
+    const after = await this.query(request)
+    if (after.status !== 'started_unknown') return after
+    try {
+      const disk = JSON.parse(await readFile(this.path, 'utf8')) as Record<string, Receipt>
+      const persisted = disk[key]
+      return persisted && !('result' in persisted) && validReceipt(persisted)
+        && persisted.stopCommandId === request.stopCommandId
+        ? { status: 'cancel_requested' } : { status: 'started_unknown' }
+    } catch { return { status: 'unavailable' } }
   }
 
   get(callId: string, requestDigest?: string, requestCallId?: string): ToolResultAck | undefined {
@@ -133,7 +195,7 @@ export class ExecutionReceiptStore {
     // Refresh insertion order so capacity pruning retains recently repeated IDs.
     const previous = this.receipts.get(callId)
     if (previous && !('result' in previous)) this.committingCompletions.add(callId)
-    const receipt = { completedAt: Date.now(), result, ...(previous?.requestDigest ? { requestDigest: previous.requestDigest } : {}), ...(previous?.ownerGeneration !== undefined ? { ownerGeneration: previous.ownerGeneration } : {}) }
+    const receipt = { completedAt: Date.now(), result, ...(previous?.requestDigest ? { requestDigest: previous.requestDigest } : {}), ...(previous?.ownerGeneration !== undefined ? { ownerGeneration: previous.ownerGeneration } : {}), ...(previous?.cancelRequestedAt ? { cancelRequestedAt: previous.cancelRequestedAt, stopCommandId: previous.stopCommandId } : {}) }
     this.receipts.delete(callId)
     this.receipts.set(callId, receipt)
     this.prune()
