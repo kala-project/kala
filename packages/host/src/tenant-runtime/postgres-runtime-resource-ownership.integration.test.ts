@@ -1759,7 +1759,7 @@ integrationDescribe('PostgresRuntimeResourceOwnershipStore isolated PostgreSQL i
             if (Number(fields[2]) !== group.pgid) continue
             const command = readFileSync(`/proc/${name}/cmdline`, 'utf8')
             observed.push(`${name}:${fields[0]}:${command.slice(0, 120)}`)
-            if (fields[0] === 'T' && command.includes('arena-git-worker.mjs')) {
+            if (fields[0] === 'T' && command.includes('kala-arena-git-worker')) {
               survivingWorker = Number(name)
               break
             }

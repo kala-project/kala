@@ -1,9 +1,38 @@
 import { spawn } from 'node:child_process'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { readdir, readFile, readlink } from 'node:fs/promises'
-import { fileURLToPath } from 'node:url'
 
 import { ToolError } from './registry.js'
+
+// Keep the isolated worker inside the CJS Executor asset; tsc does not copy .mjs sidecars.
+const ARENA_GIT_WORKER_SOURCE = `
+const { spawn } = require('node:child_process')
+process.title = 'kala-arena-git-worker'
+process.on('disconnect', () => {})
+process.once('message', ({ cwd, args, input }) => {
+  process.disconnect?.()
+  if (process.env.KALA_ARENA_TEST_PAUSE_GIT === 'probe-rev-parse'
+    && args.includes('--show-toplevel')) process.kill(process.pid, 'SIGSTOP')
+  const git = spawn('/usr/bin/git', args, {
+    cwd,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: {
+      PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1',
+    },
+  })
+  if (process.env.KALA_ARENA_TEST_PAUSE_GIT === 'worktree-add'
+    && args.includes('worktree') && args.includes('add') && git.pid) {
+    try { process.kill(git.pid, 'SIGSTOP') } catch {}
+  }
+  git.stdin.on('error', () => {})
+  git.stdin.end(input ?? '')
+  git.stdout.pipe(process.stdout)
+  git.stderr.pipe(process.stderr)
+  git.on('error', () => { process.exitCode = 127 })
+  git.on('close', (code) => { process.exitCode = code ?? 127 })
+})
+`
 
 export type ArenaProcessGroup = { pgid: number; leaderStartTicks: string; bootId: string; pidNamespace: string }
 export const arenaGroupRecorder = new AsyncLocalStorage<(group: ArenaProcessGroup) => Promise<void>>()
@@ -69,7 +98,7 @@ export async function trackedArenaGit(
   const record = arenaGroupRecorder.getStore()
   if (!record || process.platform !== 'linux') throw new ToolError('EACCES', 'Arena Git requires durable Linux process-group tracking')
   if (signal.aborted) throw new ToolError('ECANCELED', 'Arena Git aborted before launch')
-  const worker = spawn(process.execPath, [fileURLToPath(new URL('./arena-git-worker.mjs', import.meta.url))], {
+  const worker = spawn(process.execPath, ['-e', ARENA_GIT_WORKER_SOURCE], {
     detached: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     env: {
       PATH: '/usr/bin:/bin',
