@@ -6,7 +6,7 @@ import { SearchAddon } from '@xterm/addon-search'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { Terminal as XTerm } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
-import { Check, ChevronDown, ChevronRight, Copy, Download, File, Folder, Loader2, Minus, Play, Plus, RefreshCw, SquareTerminal, WrapText, X } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Copy, Download, Eye, File, Folder, Loader2, Minus, Play, Plus, RefreshCw, SquareTerminal, WrapText, X } from 'lucide-react'
 import { Tree, type NodeApi } from 'react-arborist'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -318,14 +318,13 @@ function SessionFilesPanelImpl({
       <div className="flex h-full min-h-0 flex-col bg-sidebar text-sidebar-foreground" data-testid="session-files-panel">
         <div className="flex h-10 flex-none items-center gap-2 border-b border-sidebar-border/40 bg-muted/15 px-3" data-testid="session-files-toolbar">
           <span className="min-w-0 flex-1 truncate text-caption text-sidebar-foreground/60">{cwd || t('sessionFiles.workspaceFiles')}</span>
+          <Button variant={showHidden ? 'outline' : 'ghost'} size="icon" className="h-8 w-8 flex-none rounded-lg text-sidebar-foreground/65 hover:bg-sidebar-accent/70 hover:text-sidebar-foreground" onClick={() => setShowHidden(!showHidden)} aria-label={t('sessionFiles.showHiddenFiles')} aria-pressed={showHidden} title={t('sessionFiles.showHiddenFiles')} data-testid="session-files-hidden-toggle">
+            <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+          </Button>
           <Button variant="ghost" size="icon" className="h-8 w-8 flex-none rounded-lg text-sidebar-foreground/65 hover:bg-sidebar-accent/70 hover:text-sidebar-foreground" disabled={!online || loadingPath !== null} onClick={() => void loadDir()} title={t('sessionFiles.refresh')} aria-label={t('sessionFiles.refresh')}>
             {loadingPath ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
           </Button>
         </div>
-        <label className="flex h-8 flex-none cursor-pointer items-center gap-2 border-b border-sidebar-border/40 px-3 text-caption text-sidebar-foreground/65" data-testid="session-files-hidden-toggle">
-          <input type="checkbox" className="accent-primary" checked={showHidden} onChange={(event) => setShowHidden(event.target.checked)} />
-          {t('sessionFiles.showHiddenFiles')}
-        </label>
         <div ref={treeHostRef} className="min-h-0 flex-1 overflow-hidden p-1.5">
           {!online ? (
             <WorkspaceToolState tone="offline" message={t('sessionFiles.offline')} />
@@ -359,14 +358,13 @@ function SessionFilesPanelImpl({
       <div className="flex min-h-0 flex-col border-b border-border/50 bg-muted/20 md:border-b-0 md:border-r">
         <div className="flex h-10 items-center justify-between border-b border-border/50 px-2">
           <div className="min-w-0 truncate text-xs font-medium">{t('sessionFiles.files')}</div>
+          <Button variant={showHidden ? 'outline' : 'ghost'} size="icon" className="ml-auto h-7 w-7 flex-none" onClick={() => setShowHidden(!showHidden)} aria-label={t('sessionFiles.showHiddenFiles')} aria-pressed={showHidden} title={t('sessionFiles.showHiddenFiles')} data-testid="session-files-hidden-toggle">
+            <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+          </Button>
           <Button variant="ghost" size="icon" className="h-7 w-7" disabled={!online || loadingPath !== null} onClick={() => void loadDir()} title={t('sessionFiles.refresh')} aria-label={t('sessionFiles.refresh')}>
             {loadingPath ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
           </Button>
         </div>
-        <label className="flex h-8 flex-none cursor-pointer items-center gap-2 border-b border-border/50 px-2 text-caption text-muted-foreground" data-testid="session-files-hidden-toggle">
-          <input type="checkbox" className="accent-primary" checked={showHidden} onChange={(event) => setShowHidden(event.target.checked)} />
-          {t('sessionFiles.showHiddenFiles')}
-        </label>
         <div ref={treeHostRef} className="min-h-0 flex-1 overflow-hidden p-1">
           {!online ? (
             <div className="p-3 text-xs text-muted-foreground">{t('sessionFiles.offline')}</div>

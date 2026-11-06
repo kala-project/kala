@@ -820,8 +820,8 @@ export const resources = {
           sessionSubscriptionWarmthDesc: 'Keep recently visited sessions subscribed for faster switching. Re-entering refreshes the timer. Up to 16 sessions are kept warm; set 0 to disable.',
           minutes: 'min',
           chatFontSize: 'Chat font size',
-          interfaceScale: 'Interface density',
-          interfaceScaleDesc: 'Choose a tested compact, default, or comfortable typography and layout preset. Browser zoom remains available for arbitrary scaling.',
+          interfaceScale: 'Interface zoom',
+          interfaceScaleDesc: 'Scale the entire dashboard from 75% to 200%.',
           resetSize: 'Reset {{label}} to default',
           chatFontSizeDesc: 'Adjust message text size in the transcript.',
           codeBlockFontSize: 'Code block font size',
@@ -1990,7 +1990,7 @@ export const resources = {
         scheduledFor: 'Scheduled: {{time}}', claimedAt: 'Claimed for dispatch: {{time}}', updatedAt: 'Updated: {{time}}', openSession: 'Open conversation',
         status: { enqueued: 'Queued', failed: 'Dispatch failed', needs_review: 'Needs review' },
         outcome: {
-          enqueued: 'Message queued for the session. Completion and results are not tracked here.',
+          enqueued: 'Queued for the session.',
           failed: 'The scheduled message could not be dispatched.',
           needs_review: 'Dispatch could not be confirmed. Check the conversation before retrying.',
         },
@@ -1999,7 +1999,8 @@ export const resources = {
       connectionHealth: { measuring: 'Measuring…', title: 'Connection health', subtitle: 'Reachability and round-trip latency', healthy: 'Healthy', check: 'Check connection', issue: 'Connection issue', device: 'Device', service: 'Service', executor: 'Executor', deviceHost: 'Device → Service', hostExecutor: 'Service → Executor', sessionSync: 'Session sync', offline: 'Offline', unavailable: 'Unavailable', timedOut: 'Timed out', notMeasured: 'Not measured', synchronized: 'Synchronized', measureAgain: 'Measure again', resync: 'Resync', diagnostics: 'Diagnostics', transport: 'Transport', unknown: 'unknown', historyTitle: 'Last 10 minutes', historyAria: 'Last 10 minutes connection health chart', historyEmpty: 'Waiting for the first measurement…', legendAria: 'Chart legend', hostLegend: 'Host', executorLegend: 'Executor' },
       taskGraph: { aria: 'Task graph', title: 'Task Graph', revision: 'rev {{revision}}', summary: '{{completed}} completed · {{active}} active · {{ready}} ready · {{blocked}} blocked', readyCount: '{{count}} ready', listView: 'List view', graphView: 'Graph view', active: 'Active', ready: 'Ready', blocked: 'Blocked', done: 'Done', waitingOn: 'waiting on {{ids}}' },
       sessionMetadata: {
-        storageUnavailable: 'Storage inventory is not supported for PostgreSQL and object-backed Sessions in this deployment. Stored data is intact; size measurement and UI cleanup are unavailable.',
+        storageUnavailable: 'Storage inventory is unavailable in this deployment. Stored data is intact.',
+        toolUpgrades: { title: 'Add tools to this session', description: 'Select only the tools you want this existing session to use. This permanently expands its tool permissions; new tools are never added automatically.', review: 'Review tools', confirm: 'Enable selected tools', cancel: 'Cancel', success: 'Session tools updated.', unavailable: 'Available only for resting, writable root sessions backed by durable storage.' },
         evaluation: 'Evaluation integration', evaluationDescription: 'Exports a private, reference-only task candidate. Session content and workspace paths are excluded; public use still requires explicit review, redaction, and provenance approval.', exportCandidate: 'Export governed task candidate', openEvidence: 'Open linked evaluation evidence',
         tabs: { label: 'Session information', overview: 'Overview', statistics: 'Statistics', storage: 'Storage' },
         statistics: {
@@ -3011,8 +3012,8 @@ export const resources = {
           sessionSubscriptionWarmthDesc: '保持最近访问的 Session 订阅以便快速切换；再次进入会刷新计时。最多保留 16 个，设为 0 则禁用。',
           minutes: '分钟',
           chatFontSize: '聊天字体大小',
-          interfaceScale: '界面密度',
-          interfaceScaleDesc: '选择经过验证的紧凑、标准或宽松排版布局。需要任意比例缩放时请使用浏览器缩放。',
+          interfaceScale: '界面缩放',
+          interfaceScaleDesc: '将整个界面缩放至 75%–200%。',
           resetSize: '恢复{{label}}的默认值',
           chatFontSizeDesc: '调整对话消息文本大小。',
           codeBlockFontSize: '代码块字体大小',
@@ -4180,7 +4181,7 @@ export const resources = {
         scheduledFor: '计划时间：{{time}}', claimedAt: '领取派发：{{time}}', updatedAt: '更新于：{{time}}', openSession: '打开对话',
         status: { enqueued: '已入队', failed: '派发失败', needs_review: '需要核查' },
         outcome: {
-          enqueued: '消息已加入会话队列。此处不跟踪任务完成状态或执行结果。',
+          enqueued: '已加入会话队列。',
           failed: '未能派发定时消息。',
           needs_review: '无法确认派发结果。重试前请先检查对话。',
         },
@@ -4189,7 +4190,8 @@ export const resources = {
       connectionHealth: { measuring: '测量中…', title: '连接状况', subtitle: '可达性和往返延迟', healthy: '正常', check: '检查连接', issue: '连接异常', device: '设备', service: 'Service', executor: 'Executor', deviceHost: '设备 → Service', hostExecutor: 'Service → Executor', sessionSync: '会话同步', offline: '离线', unavailable: '不可用', timedOut: '请求超时', notMeasured: '尚未测量', synchronized: '已同步', measureAgain: '重新测量', resync: '重新同步', diagnostics: '诊断信息', transport: '传输协议', unknown: '未知', historyTitle: '最近 10 分钟', historyAria: '最近 10 分钟连接状况图表', historyEmpty: '正在等待首次测量…', legendAria: '图例', hostLegend: 'Host', executorLegend: 'Executor' },
       taskGraph: { aria: '任务图', title: '任务图', revision: '修订 {{revision}}', summary: '已完成 {{completed}} · 进行中 {{active}} · 就绪 {{ready}} · 阻塞 {{blocked}}', readyCount: '{{count}} 个就绪', listView: '列表视图', graphView: '图形视图', active: '进行中', ready: '就绪', blocked: '阻塞', done: '已完成', waitingOn: '等待 {{ids}}' },
       sessionMetadata: {
-        storageUnavailable: '此部署使用 PostgreSQL 和对象存储，暂不支持会话存储统计。已存储数据不受影响，但无法在界面中测量大小或清理。',
+        storageUnavailable: '此部署暂不提供会话存储统计；已存储数据不受影响。',
+        toolUpgrades: { title: '为此会话添加工具', description: '仅选择需要为这个旧会话启用的工具。此操作会永久扩大其工具权限；新工具不会自动加入。', review: '确认所选工具', confirm: '启用所选工具', cancel: '取消', success: '会话工具已更新。', unavailable: '仅支持持久存储中已结束当前轮次、可写的根会话。' },
         evaluation: '评测集成', evaluationDescription: '导出仅供引用的私有任务候选。导出内容不包含会话内容和工作区路径；公开使用仍需明确审核、脱敏和来源批准。', exportCandidate: '导出受治理的任务候选', openEvidence: '打开关联评测证据',
         tabs: { label: '会话信息', overview: '概览', statistics: '统计', storage: '存储' },
         statistics: {

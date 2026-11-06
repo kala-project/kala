@@ -2351,7 +2351,7 @@ export function App(): JSX.Element {
                       <div className="min-h-0 flex-1 overflow-hidden">
                         <Explorer executors={control.executors} sessions={control.sessions} loading={sessionDirectoryLoadingOwner === 'explorer'} autoHideOfflineWorkspacesByDefault={!platformMode} selectedSessionId={explorerSelectedSessionId} sessionStatuses={sessionStatuses} onSelect={selectSession} onClearSelection={clearSessionSelection} onNewSession={newSession} onConnectWorkspace={runtimeCapabilities.workspace ? openConnectWorkspaceDialog : undefined} onDelete={deleteSessionAt} onRename={renameSessionAt} onRenameWorkspace={renameWorkspaceAt} embeddedHeader headerLeading={explorerHeaderLeading} fontSizePx={sessionExplorerFontSizePx} previewStore={previewStore} onOpenSessionInfo={openSessionInfoDialog} onWorkspaceInfo={setWorkspaceInfoId} onOpenWorkspaceTerminal={openWorkspaceTerminal} />
                       </div>
-                      <div className="flex flex-none justify-end bg-card px-3 py-2" data-testid="desktop-sidebar-footer">
+                      <div className="flex flex-none justify-end bg-card px-3 py-1" data-testid="desktop-sidebar-footer">
                         <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => setSettingsOpen(true)} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />
                       </div>
                     </div>
@@ -2927,7 +2927,7 @@ export function App(): JSX.Element {
                 <Explorer executors={control.executors} sessions={control.sessions} loading={sessionDirectoryLoadingOwner === 'explorer'} autoHideOfflineWorkspacesByDefault={!platformMode} selectedSessionId={explorerSelectedSessionId} sessionStatuses={sessionStatuses} onSelect={selectSessionFromExplorerDrawer} onClearSelection={clearSessionSelectionFromExplorerDrawer} onNewSession={newSessionFromExplorerDrawer} onConnectWorkspace={runtimeCapabilities.workspace ? connectWorkspaceFromExplorerDrawer : undefined} onDelete={deleteSessionAt} onRename={renameSessionAt} onRenameWorkspace={renameWorkspaceAt} embeddedHeader fontSizePx={sessionExplorerFontSizePx} previewStore={previewStore} onOpenSessionInfo={openExplorerDrawerSessionInfo} onWorkspaceInfo={openExplorerDrawerWorkspaceInfo} onOpenWorkspaceTerminal={openWorkspaceTerminalFromExplorerDrawer} />
               </div>
             ) : <div className="min-h-0 flex-1" />}
-            <div className="flex min-h-14 flex-none items-center justify-end bg-card px-3 py-2" data-testid="narrow-drawer-footer">
+            <div className="flex min-h-12 flex-none items-center justify-end bg-card px-3 py-1" data-testid="narrow-drawer-footer">
               <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => { setExplorerDrawerOpen(false); setSettingsOpen(true) }} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />
             </div>
           </div>

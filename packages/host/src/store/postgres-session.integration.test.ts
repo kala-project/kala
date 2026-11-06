@@ -14,6 +14,9 @@ import { PostgresSessionAuthority, SessionDeletingError } from './postgres-sessi
 import { SessionNotFoundError, SessionStore } from './session.js'
 import { NATIVE_POSIX_BLOCK_BYTES } from './native-posix-fs.js'
 import { authorizeExecutorShellCall } from '../connection/executor-ns.js'
+import { PostgresObjectCapacityLedger } from '../artifacts/postgres-object-capacity.js'
+import { PostgresStorageInventory } from './postgres-storage-inventory.js'
+import { migratePostgres } from '../postgres-migrations.js'
 
 const execFileAsync = promisify(execFile)
 const integrationDescribe = process.env.KALA_RUN_POSTGRES_INTEGRATION === '1' ? describe : describe.skip
@@ -39,8 +42,9 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     const port = stdout.trim()
     if (!/^\d+$/u.test(port)) throw new Error(`Docker did not assign a PostgreSQL port: ${port}`)
     connectionString = `postgresql://postgres:kala_test_only@127.0.0.1:${port}/kala_session_store_test`
+    await eventually(async () => await migratePostgres({ connectionString }), 30_000)
     const probe = makeAuthority('probe')
-    await eventually(async () => await probe.initialize(), 30_000)
+    await probe.initialize()
   }, 120_000)
 
   afterAll(async () => {
@@ -62,6 +66,39 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     const authority = makeAuthority(owner)
     return { store: new SessionStore(root, { authority, deleteRegisteredArtifacts }), root, authority }
   }
+
+  it('measures persisted session, native file, and committed object bytes within the tenant', async () => {
+    const tenantId = `storage-${randomUUID()}`
+    const authority = makeAuthority('storage-measure', tenantId)
+    await authority.initialize()
+    await authority.create({ sessionId: 'storage-parent', state: { cursor: 0 } })
+    await authority.create({ sessionId: 'storage-child', parentSessionId: 'storage-parent', state: { cursor: 0 } })
+    const ledger = new PostgresObjectCapacityLedger(tenantId, 1024, authority.hotState)
+    await ledger.initialize()
+    const committed = await ledger.reserve({
+      sessionId: 'storage-child', objectKey: 'storage-committed', kind: 'session_artifact', bytes: 42,
+    })
+    const reserved = await ledger.reserve({
+      sessionId: 'storage-parent', objectKey: 'storage-reserved', kind: 'message_attachment', bytes: 99,
+    })
+    await authority.hotState.database.transaction(async (transaction) => {
+      await ledger.applyMutation(transaction, { kind: 'commit', reservation: committed })
+    })
+    const inventory = new PostgresStorageInventory(authority)
+    await inventory.reconcile()
+    expect(inventory.getCachedTree('storage-parent')?.treeCategories['session-artifacts']).toEqual({ bytes: 42, files: 1 })
+    expect(inventory.getCachedTree('storage-parent')?.descendantCount).toBe(1)
+    expect(inventory.getCachedGlobal().categories.snapshot.bytes).toBeGreaterThan(0)
+    expect(inventory.getCachedGlobal().categories.jsonl.bytes).toBeGreaterThan(0)
+    expect(inventory.getCachedGlobal().categories['session-artifacts'].bytes).toBe(42)
+    expect(inventory.getCachedGlobal().state.source).toBe('postgres')
+    await ledger.release(reserved)
+    const other = makeAuthority('storage-other-tenant', `other-${randomUUID()}`)
+    await other.initialize()
+    await other.create({ sessionId: 'other-tenant-session', state: { cursor: 0 } })
+    await inventory.reconcile()
+    expect(inventory.getCachedTree('other-tenant-session')).toBeUndefined()
+  })
 
   it('replays a completion whose timestamp precedes a later child that committed first', async () => {
     const first = makeAuthority('late-completion-a', 'completion-race')

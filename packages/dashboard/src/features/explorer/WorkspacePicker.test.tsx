@@ -216,7 +216,7 @@ describe('NewSessionDialog', () => {
     expect(screen.getByTestId('new-session-mode-chat').textContent).toContain('One turn at a time')
     expect(screen.getByTestId('new-session-mode-dag').textContent).toContain('DAG-First')
     expect(screen.getByTestId('new-session-mode-dag').textContent).toContain('Plan dependent tasks')
-    expect(screen.getByTestId('dir-picker-actions').className).toContain('grid-cols-2')
+    expect(screen.getByTestId('dir-picker-actions').className).toContain('grid-cols-3')
     for (const id of ['up', 'root', 'refresh', 'new-folder']) {
       const button = screen.getByTestId(`dir-picker-${id}`)
       expect(button.className).toContain('h-11')

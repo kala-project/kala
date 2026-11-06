@@ -23,13 +23,7 @@ export function interfaceDensityForPercent(percent: number): InterfaceDensity {
 }
 
 export function interfaceScaleForPercent(percent: number): number {
-  const density = interfaceDensityForPercent(percent)
-  return INTERFACE_DENSITY_OPTIONS.find((option) => option.density === density)?.scale ?? 1
-}
-
-export function interfacePreferenceForPercent(percent: number): number {
-  const density = interfaceDensityForPercent(percent)
-  return INTERFACE_DENSITY_OPTIONS.find((option) => option.density === density)?.value ?? DEFAULT_INTERFACE_SCALE
+  return Math.max(INTERFACE_SCALE_MIN, Math.min(INTERFACE_SCALE_MAX, percent)) / 100
 }
 
 // Keep existing persisted indices stable; new controls display/edit pixels.

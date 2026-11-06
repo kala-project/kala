@@ -1,6 +1,6 @@
 import { randomId } from '../../lib/random-id.js'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { ArrowUp, ChevronRight, File, Folder, FolderPlus, Home, Loader2, RefreshCw, Slash } from 'lucide-react'
+import { ArrowUp, ChevronRight, Eye, File, Folder, FolderPlus, Home, Loader2, RefreshCw, Slash } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { CreateDirectoryResult, DirListResult } from '@agent-kernel/shared'
 
@@ -227,7 +227,7 @@ export function DirectoryPicker({
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex flex-col gap-2 border-b border-border/50 p-3">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <div className="grid grid-cols-2 gap-1 sm:flex sm:flex-none" data-testid="dir-picker-actions">
+          <div className="grid grid-cols-3 gap-1 sm:flex sm:flex-none" data-testid="dir-picker-actions">
           <Button
             type="button"
             variant="outline"
@@ -283,6 +283,19 @@ export function DirectoryPicker({
             <FolderPlus className="h-3.5 w-3.5 flex-none" aria-hidden="true" />
             <span>{t('directory.newFolder')}</span>
           </Button>
+          <Button
+            type="button"
+            variant={showHidden ? 'outline' : 'ghost'}
+            size="sm"
+            className="h-11 min-w-0 px-2 sm:h-9"
+            onClick={() => setShowHidden(!showHidden)}
+            aria-label={t('directory.showHiddenFiles')}
+            aria-pressed={showHidden}
+            title={t('directory.showHiddenFiles')}
+            data-testid="dir-picker-hidden-toggle"
+          >
+            <Eye className="h-4 w-4" aria-hidden="true" />
+          </Button>
           </div>
           <Input
             id={inputId}
@@ -330,10 +343,6 @@ export function DirectoryPicker({
             </Button>
           </div>
         ) : null}
-        <label className="flex w-fit cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted/50" data-testid="dir-picker-hidden-toggle">
-          <input type="checkbox" className="accent-primary" checked={showHidden} onChange={(event) => setShowHidden(event.target.checked)} />
-          {t('directory.showHiddenFiles')}
-        </label>
         {createError ? (
           <div className="text-xs text-rose-600 dark:text-rose-300" data-testid="dir-picker-create-folder-error">{createError}</div>
         ) : null}

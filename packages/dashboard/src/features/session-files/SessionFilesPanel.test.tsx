@@ -166,7 +166,7 @@ describe('SessionFilesPanel', () => {
     expect(screen.queryByText('.env')).toBeNull()
     expect(screen.queryByText('.config')).toBeNull()
     const requests = socket.emitMock.mock.calls.filter(([event]) => event === 'client:list_dirs').length
-    fireEvent.click(screen.getByTestId('session-files-hidden-toggle').querySelector('input')!)
+    fireEvent.click(screen.getByTestId('session-files-hidden-toggle'))
     expect(screen.getByText('.env')).toBeTruthy()
     expect(screen.getByText('.config')).toBeTruthy()
     expect(socket.emitMock.mock.calls.filter(([event]) => event === 'client:list_dirs')).toHaveLength(requests)
@@ -223,7 +223,7 @@ describe('SessionFilesPanel', () => {
     expect((await screen.findByTestId('monaco-editor')).getAttribute('data-font-size')).toBe('48')
     const reads = socket.emitMock.mock.calls.filter(([event]) => event === 'workspace:read_binary').length
     fireEvent(window, new StorageEvent('storage', { key: 'ak-interface-scale', newValue: '200' }))
-    expect(screen.getByTestId('monaco-editor').getAttribute('data-font-size')).toBe('54')
+    expect(screen.getByTestId('monaco-editor').getAttribute('data-font-size')).toBe('96')
     expect(socket.emitMock.mock.calls.filter(([event]) => event === 'workspace:read_binary')).toHaveLength(reads)
   })
 

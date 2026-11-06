@@ -1657,6 +1657,7 @@ export type StorageCategoryStats = {
 }
 
 export type StorageInventoryState = {
+  source?: 'postgres'
   measuredAt: string | null
   generation: number
   stale: boolean
@@ -1716,6 +1717,11 @@ export type GlobalStorageSnapshot = {
 export type ClientGetSessionStorage = {
   sessionId: string
   refresh?: boolean
+}
+
+export type ClientUpgradeSessionTools = {
+  sessionId: string
+  tools: string[]
 }
 
 export type ClientGetGlobalStorage = {
@@ -2183,6 +2189,8 @@ export type DashboardClientToServerEvents = {
   'client:prepare_session_route': (payload: ClientPrepareSessionRoute, ack: (result: RpcAck) => void) => void
   'client:load_log_artifact': (payload: ClientLoadLogArtifact) => void
   'client:get_session_storage': (payload: ClientGetSessionStorage, ack: (result: RpcAck<SessionStorageSnapshot>) => void) => void
+  'client:list_session_tool_upgrades': (payload: { sessionId: string }, ack: (result: RpcAck<readonly string[]>) => void) => void
+  'client:upgrade_session_tools': (payload: ClientUpgradeSessionTools, ack: (result: RpcAck<readonly string[]>) => void) => void
   'client:get_global_storage': (payload: ClientGetGlobalStorage, ack: (result: RpcAck<GlobalStorageSnapshot>) => void) => void
   'client:prepare_storage_cleanup': (payload: ClientPrepareStorageCleanup, ack: (result: RpcAck<StorageCleanupPlanPreview>) => void) => void
   'client:execute_storage_cleanup': (payload: ClientExecuteStorageCleanup, ack: (result: RpcAck<StorageCleanupResult>) => void) => void

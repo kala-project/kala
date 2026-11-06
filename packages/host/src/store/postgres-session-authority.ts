@@ -119,6 +119,71 @@ export class PostgresSessionAuthority implements SessionAuthority, ChildCommandI
   readonly messageQueue: PostgresMessageQueueStore
   readonly currentOwnerCacheKey?: (sessionId: string) => string | undefined
 
+  async storageEntries(): Promise<readonly {
+    sessionId: string
+    parentSessionId?: string
+    runtime?: string
+    category: 'jsonl' | 'snapshot' | 'context' | 'session-artifacts'
+    bytes: number
+    files: number
+  }[]> {
+    const schema = quoteIdentifier(this.#schemaName)
+    const result = await this.hotState.database.query<{
+      session_id: string
+      parent_session_id: string | null
+      runtime: string | null
+      category: 'jsonl' | 'snapshot' | 'context' | 'session-artifacts' | null
+      bytes: string
+      files: string
+    }>(`WITH sessions AS (
+        SELECT session_id, document ->> 'parentSessionId' AS parent_session_id,
+          document ->> 'agentRuntime' AS runtime,
+          octet_length(document::text) AS bytes
+        FROM ${this.#projectionTable}
+        WHERE tenant_id = $1 AND document IS NOT NULL
+      ), measurements AS (
+        SELECT session_id, 'snapshot' AS category, bytes::bigint AS bytes, 1::bigint AS files
+        FROM sessions
+        UNION ALL
+        SELECT scope_id, 'jsonl', SUM(octet_length(payload::text))::bigint, COUNT(*)::bigint
+        FROM ${this.#eventsTable}
+        WHERE tenant_id = $1 AND scope_type = 'session'
+        GROUP BY scope_id
+        UNION ALL
+        SELECT session_id, 'context', total_bytes, total_nodes
+        FROM ${schema}."tenant_session_native_fs_usage" WHERE tenant_id = $1
+        UNION ALL
+        SELECT session_id, 'context', total_bytes, total_nodes
+        FROM ${schema}.tenant_session_native_posix_usage WHERE tenant_id = $1
+        UNION ALL
+        SELECT session_id, 'session-artifacts', SUM(bytes)::bigint, COUNT(*)::bigint
+        FROM ${schema}.tenant_object_capacity_allocations
+        WHERE tenant_id = $1 AND state = 'committed'
+        GROUP BY session_id
+      )
+      SELECT s.session_id, s.parent_session_id, s.runtime, m.category,
+        COALESCE(SUM(m.bytes), 0)::text AS bytes,
+        COALESCE(SUM(m.files), 0)::text AS files
+      FROM sessions s LEFT JOIN measurements m ON m.session_id = s.session_id
+      GROUP BY s.session_id, s.parent_session_id, s.runtime, m.category`, [this.tenantId])
+    return result.rows.flatMap((row) => {
+      if (row.category === null) return []
+      const bytes = Number(row.bytes)
+      const files = Number(row.files)
+      if (!Number.isSafeInteger(bytes) || bytes < 0 || !Number.isSafeInteger(files) || files < 0) {
+        throw new Error('Persisted storage usage is outside the safe integer range')
+      }
+      return [{
+        sessionId: row.session_id,
+        ...(row.parent_session_id ? { parentSessionId: row.parent_session_id } : {}),
+        ...(row.runtime ? { runtime: row.runtime } : {}),
+        category: row.category,
+        bytes,
+        files,
+      }]
+    })
+  }
+
   constructor(
     readonly hotState: PostgresHotStateStore,
     readonly tenantId: string,

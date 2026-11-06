@@ -45,6 +45,8 @@ import { effectiveDelegationDepth, SessionNotFoundError, SessionStore, type Sess
 import { slimEffect, type SessionOperationMatch } from './store/log.js'
 import type { SessionAuthority } from './store/session-authority.js'
 import type { PostgresSessionAuthority } from './store/postgres-session-authority.js'
+import { PostgresSessionAuthority as PostgresSessionAuthorityClass } from './store/postgres-session-authority.js'
+import { PostgresStorageInventory } from './store/postgres-storage-inventory.js'
 import { SqliteSessionAuthority } from './store/sqlite-session-authority.js'
 import { SqliteMessageQueueStore } from './store/sqlite-message-queue.js'
 import { SqliteSessionArtifactStore } from './store/sqlite-session-artifact-store.js'
@@ -417,7 +419,7 @@ export async function startHostServer(
   let appDebug: AppDebugRelay | undefined
   let agentRuntimes: AgentRuntimeRegistry | undefined
   let dagOrchestrator: DagOrchestrator | undefined
-  let storageInventory: StorageInventory | undefined
+  let storageInventory: StorageInventory | PostgresStorageInventory | undefined
   let safeCleanup: SafeCleanupEngine | undefined
   let scheduledTaskScheduler: UnitScheduler | undefined
   let stopScheduledInboxNotifications: (() => Promise<void>) | undefined
@@ -582,9 +584,7 @@ export async function startHostServer(
     }, 60_000)
     deletionRecoveryTimer.unref()
   }
-  // The current inventory and quarantine engine measure/move local Session trees.
-  // Do not expose misleading partial results for PostgreSQL or object-backed data;
-  // Dashboard RPCs fail explicitly with "storage inventory/cleanup unavailable".
+  // Filesystem quarantine is only valid for local Session trees.
   if (!options.sessionAuthority && !options.objectStorage) {
     storageInventory = new StorageInventory(options.sessionsDir)
     safeCleanup = new SafeCleanupEngine({
@@ -596,6 +596,8 @@ export async function startHostServer(
     })
     await safeCleanup.recover(new Set())
     store.installStorageTombstones(await safeCleanup.listTombstonedSessionIds())
+  } else if (options.sessionAuthority instanceof PostgresSessionAuthorityClass && options.objectStorage) {
+    storageInventory = new PostgresStorageInventory(options.sessionAuthority)
   }
   const ownsStateStore = options.stateStore === undefined
   const stateStore = options.stateStore ?? new KalaStateStore(join(options.sessionsDir, '..', 'memos'), {

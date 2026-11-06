@@ -20,6 +20,7 @@ import type {
   ClientGetDagRun,
   ClientGetGlobalStorage,
   ClientGetSessionStorage,
+  ClientUpgradeSessionTools,
   ClientPrepareStorageCleanup,
   ClientExecuteStorageCleanup,
   ClientListDagRuns,
@@ -299,6 +300,15 @@ export const ClientGetSessionStorageSchema = z.object({
   sessionId: SessionIdSchema,
   refresh: z.boolean().optional(),
 }).strict() satisfies z.ZodType<ClientGetSessionStorage>
+
+export const ClientListSessionToolUpgradesSchema = z.object({
+  sessionId: SessionIdSchema,
+}).strict()
+
+export const ClientUpgradeSessionToolsSchema = z.object({
+  sessionId: SessionIdSchema,
+  tools: z.array(z.string().min(1).max(128)).min(1).max(64),
+}).strict() satisfies z.ZodType<ClientUpgradeSessionTools>
 
 export const ClientGetGlobalStorageSchema = z.object({
   refresh: z.boolean().optional(),

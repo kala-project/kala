@@ -8,7 +8,7 @@ import { ScrollArea } from '../../components/ui/scroll-area.js'
  * dedicated directory picker because it has its own validation flow.
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { HelpHint } from '../../components/ui/help-hint.js'
 import { Link2, RefreshCw, Trash2, X } from 'lucide-react'
@@ -104,6 +104,7 @@ export function SessionMetadataDialog({
   const approvalMode = state?.approvalMode ?? 'auto'
   const toolCardMode = summary?.preferences?.toolCardMode ?? 'dots'
   const agentRuntime = summary?.agentRuntime ?? 'kernel'
+  const canUpgradeTools = canChangeApprovalMode && (state?.status === 'idle' || state?.status === 'done' || state?.status === 'error')
   const agentRuntimeLabel = agentRuntime === 'copilot'
     ? 'GitHub Copilot SDK'
     : 'Agent Kernel'
@@ -127,6 +128,44 @@ export function SessionMetadataDialog({
   const [cleanupPlans, setCleanupPlans] = useState<readonly StorageCleanupPlanPreview[]>([])
   const [cleanupConfirmationStep, setCleanupConfirmationStep] = useState<'review' | 'final'>('review')
   const [cleanupBusy, setCleanupBusy] = useState(false)
+  const [toolUpgrades, setToolUpgrades] = useState<readonly string[]>([])
+  const [selectedTools, setSelectedTools] = useState<ReadonlySet<string>>(new Set())
+  const [toolUpgradeReview, setToolUpgradeReview] = useState(false)
+  const [toolUpgradeBusy, setToolUpgradeBusy] = useState(false)
+  const [toolUpgradeError, setToolUpgradeError] = useState<string | null>(null)
+  const toolUpgradeSessionRef = useRef(sessionId)
+  toolUpgradeSessionRef.current = sessionId
+
+  useEffect(() => {
+    setToolUpgrades([])
+    setSelectedTools(new Set())
+    setToolUpgradeReview(false)
+    setToolUpgradeBusy(false)
+    setToolUpgradeError(null)
+    if (!open || !storageSocket || summary?.parentSessionId) return
+    let active = true
+    storageSocket.emit('client:list_session_tool_upgrades', { sessionId }, (result) => {
+      if (!active) return
+      if (result.ok) setToolUpgrades(result.value)
+      else setToolUpgradeError(result.error)
+    })
+    return () => { active = false }
+  }, [open, sessionId, storageSocket, summary?.parentSessionId])
+
+  const enableSelectedTools = (): void => {
+    if (!storageSocket || selectedTools.size === 0 || !toolUpgradeReview || toolUpgradeBusy) return
+    setToolUpgradeBusy(true)
+    setToolUpgradeError(null)
+    storageSocket.emit('client:upgrade_session_tools', { sessionId, tools: [...selectedTools] }, (result) => {
+      if (toolUpgradeSessionRef.current !== sessionId) return
+      setToolUpgradeBusy(false)
+      if (!result.ok) { setToolUpgradeError(result.error); return }
+      setToolUpgrades((current) => current.filter((tool) => !result.value.includes(tool)))
+      setSelectedTools(new Set())
+      setToolUpgradeReview(false)
+      notify.success(t('sessionMetadata.toolUpgrades.success'))
+    })
+  }
 
   const loadStorage = (refresh: boolean): void => {
     if (!storageSocket || !sessionId) return
@@ -403,6 +442,39 @@ export function SessionMetadataDialog({
             </Select>
           </FieldRow>
         </div>
+        {toolUpgrades.length > 0 && !summary?.parentSessionId ? (
+          <section className="grid gap-2 border-t border-border/50 pt-3 text-sm" aria-label={t('sessionMetadata.toolUpgrades.title')}>
+            <span className="font-medium">{t('sessionMetadata.toolUpgrades.title')}</span>
+            <p className="text-xs text-muted-foreground">{t('sessionMetadata.toolUpgrades.description')}</p>
+            <div className="flex flex-wrap gap-2">
+              {toolUpgrades.map((name) => (
+                <label key={name} className="flex items-center gap-1.5 rounded-md border border-border/60 px-2 py-1 font-mono text-xs">
+                  <input type="checkbox" checked={selectedTools.has(name)} disabled={toolUpgradeBusy || toolUpgradeReview || !canUpgradeTools} onChange={(event) => {
+                    setSelectedTools((current) => {
+                      const next = new Set(current)
+                      if (event.target.checked) next.add(name)
+                      else next.delete(name)
+                      return next
+                    })
+                  }} />
+                  {name}
+                </label>
+              ))}
+            </div>
+            {!canUpgradeTools ? <p className="text-xs text-muted-foreground">{t('sessionMetadata.toolUpgrades.unavailable')}</p> : null}
+            <div className="flex gap-2">
+              {toolUpgradeReview ? (
+                <>
+                  <Button type="button" size="sm" disabled={toolUpgradeBusy} onClick={enableSelectedTools}>{t('sessionMetadata.toolUpgrades.confirm')} ({[...selectedTools].join(', ')})</Button>
+                  <Button type="button" size="sm" variant="outline" disabled={toolUpgradeBusy} onClick={() => setToolUpgradeReview(false)}>{t('sessionMetadata.toolUpgrades.cancel')}</Button>
+                </>
+              ) : (
+                <Button type="button" size="sm" variant="outline" disabled={!canUpgradeTools || selectedTools.size === 0} onClick={() => setToolUpgradeReview(true)}>{t('sessionMetadata.toolUpgrades.review')}</Button>
+              )}
+            </div>
+          </section>
+        ) : null}
+        {toolUpgradeError ? <p role="alert" className="text-xs text-destructive">{toolUpgradeError}</p> : null}
         </>
         ) : activeTab === 'statistics' ? (
         <section className="grid gap-4 text-sm" aria-label={t('sessionMetadata.tabs.statistics')} data-testid="session-statistics">
@@ -479,7 +551,9 @@ export function SessionMetadataDialog({
             <div className="flex items-center gap-1">
               <h3 className="font-medium">Stored session data</h3>
               <HelpHint label="Stored session data" testId="session-storage-help">
-                Stored data includes transcripts, runtime events, tool records, snapshots, summaries, context sidecars, and artifacts. Cleaning a sub-agent removes its detailed records and descendants while retaining the graph result and a tombstone.
+                {storage?.state.source === 'postgres'
+                  ? 'Logical bytes of PostgreSQL session snapshots, events, native files, and committed object storage. PostgreSQL indexes, database overhead, and object-storage overhead are not included. Remote cleanup is not available here.'
+                  : 'Stored data includes transcripts, runtime events, tool records, snapshots, summaries, context sidecars, and artifacts. Cleaning a sub-agent removes its detailed records and descendants while retaining the graph result and a tombstone.'}
               </HelpHint>
             </div>
             <Button type="button" variant="ghost" size="sm" disabled={storageLoading || !storageSocket || cleanupBusy} onClick={() => loadStorage(true)}>
@@ -503,7 +577,7 @@ export function SessionMetadataDialog({
                       aria-label="Select all sub-agents"
                       checked={allStorageSelected}
                       ref={(input) => { if (input) input.indeterminate = someStorageSelected }}
-                      disabled={cleanupBusy || cleanupPlans.length > 0}
+                      disabled={storage.state.source === 'postgres' || cleanupBusy || cleanupPlans.length > 0}
                       onChange={(event) => {
                         setSelectedStorageIds(event.target.checked ? new Set(storage.descendants.map((entry) => entry.sessionId)) : new Set())
                       }}
@@ -518,7 +592,7 @@ export function SessionMetadataDialog({
                           type="checkbox"
                           aria-label={`Select ${entry.sessionId}`}
                           checked={selectedStorageIds.has(entry.sessionId)}
-                          disabled={cleanupBusy || cleanupPlans.length > 0}
+                          disabled={storage.state.source === 'postgres' || cleanupBusy || cleanupPlans.length > 0}
                           onChange={(event) => {
                             setSelectedStorageIds((current) => {
                               const next = new Set(current)
@@ -585,7 +659,7 @@ export function SessionMetadataDialog({
                 </div>
               ) : null}
               <p className="text-caption text-muted-foreground">
-                Last measured {storage.state.measuredAt ? formatTs(storage.state.measuredAt) : 'not yet'}. Refresh performs a lazy metadata scan rather than reading complete session logs.
+                Last measured {storage.state.measuredAt ? formatTs(storage.state.measuredAt) : 'not yet'}. {storage.state.source === 'postgres' ? 'Refresh reads current PostgreSQL and object-storage accounting.' : 'Refresh performs a lazy metadata scan rather than reading complete session logs.'}
               </p>
             </>
           ) : !storageError ? (

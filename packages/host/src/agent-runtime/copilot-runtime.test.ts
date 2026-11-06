@@ -1708,6 +1708,7 @@ describe('Copilot runtime custom tools', () => {
       agentRuntime: 'copilot',
       config: createConfig({ tools: [], systemPrompt: 'old prompt' }),
     })
+
     sdk.responses.push(
       { type: 'assistant.message', id: 'first', timestamp: '2026-10-03T00:00:00.000Z', data: { content: 'first', messageId: 'first-message' } },
       { type: 'assistant.message', id: 'second', timestamp: '2026-10-03T00:00:01.000Z', data: { content: 'second', messageId: 'second-message' } },
@@ -1721,6 +1722,38 @@ describe('Copilot runtime custom tools', () => {
 
     expect(sdk.resumeConfigs).toHaveLength(2)
     expect(sdk.resumeConfigs[1]?.systemMessage).toEqual({ mode: 'replace', content: 'new prompt' })
+    expect(sdk.disconnect).toHaveBeenCalledOnce()
+    expect(sdk.deleteSession).not.toHaveBeenCalled()
+    await runtime.close()
+  })
+
+  it('re-resumes an existing SDK Session with an explicitly upgraded tool lock', async () => {
+    sdk.resumeSucceeds = true
+    const runtime = new CopilotAgentRuntime({
+      store,
+      tools: { async callTool() { return { ok: true, content: '' } }, cancelPending() {} },
+      broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError() {} },
+    }, { enabled: true, sessionsDir: dir })
+    const record = await store.create({
+      sessionId: 'copilot-new-tool',
+      agentRuntime: 'copilot',
+      config: createConfig({ tools: [], systemPrompt: 'original' }),
+    })
+    sdk.responses.push(
+      { type: 'assistant.message', id: 'one', timestamp: '2026-10-03T00:00:00.000Z', data: { content: 'first', messageId: 'one' } },
+      { type: 'assistant.message', id: 'two', timestamp: '2026-10-03T00:00:01.000Z', data: { content: 'second', messageId: 'two' } },
+    )
+    await runtime.start()
+    await runtime.send(record, { text: 'first turn' })
+    await vi.waitFor(() => expect(record.state.status).toBe('done'))
+    const upgraded = createConfig({
+      tools: [{ name: 'scheduled_task', description: 'Manage scheduled tasks', inputSchema: { type: 'object' }, requiresApproval: false }],
+      systemPrompt: 'original',
+    })
+    Object.assign(record, { config: upgraded, toolLock: { scheduled_task: { version: '1', schemaHash: null } } })
+    await runtime.send(record, { text: 'second turn' })
+    expect(sdk.resumeConfigs).toHaveLength(2)
+    expect(sdk.resumeConfigs[1]?.tools.map((tool) => tool.name)).toContain('scheduled_task')
     expect(sdk.disconnect).toHaveBeenCalledOnce()
     expect(sdk.deleteSession).not.toHaveBeenCalled()
     await runtime.close()

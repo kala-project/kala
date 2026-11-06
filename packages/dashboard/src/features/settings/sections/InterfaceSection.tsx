@@ -68,7 +68,7 @@ import { cn } from '../../../lib/utils.js'
 import { InterfaceToggle, SectionHeader, Toggle } from '../controls.js'
 import { formatBytes, responseError } from '../section-utils.js'
 import { SizePreference } from '../SizePreference.js'
-import { CHAT_FONT_SIZE_PX, SESSION_EXPLORER_FONT_SIZE_PX, FILE_EXPLORER_FONT_SIZE_PX, FILE_VIEW_FONT_SIZE_PX, DEFAULT_INTERFACE_SCALE, FONT_SIZE_MIN, FONT_SIZE_MAX, INTERFACE_DENSITY_OPTIONS, interfacePreferenceForPercent, readableFontSize } from '../../../lib/display-sizes.js'
+import { CHAT_FONT_SIZE_PX, SESSION_EXPLORER_FONT_SIZE_PX, FILE_EXPLORER_FONT_SIZE_PX, FILE_VIEW_FONT_SIZE_PX, DEFAULT_INTERFACE_SCALE, INTERFACE_SCALE_MIN, INTERFACE_SCALE_MAX, FONT_SIZE_MIN, FONT_SIZE_MAX, readableFontSize } from '../../../lib/display-sizes.js'
 import { DASHBOARD_PREFERENCES, PREF_INTERFACE_SCALE, numberPreferenceOptions } from '../../../lib/prefs.js'
 
 function LanguageSetting(): JSX.Element {
@@ -151,16 +151,13 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
       />
       <ul className="space-y-3 text-sm">
         <LanguageSetting />
-        <SegmentedNumberPref
+        <SizePreference
           label={t('settings.interface.interfaceScale')}
           description={t('settings.interface.interfaceScaleDesc')}
-          value={interfacePreferenceForPercent(interfaceScale)}
+          value={interfaceScale}
           onChange={setInterfaceScale}
           testId="settings-interface-scale"
-          options={INTERFACE_DENSITY_OPTIONS.map((option, index) => ({
-            value: option.value,
-            label: t(`settings.interface.size3.${index}`),
-          }))}
+          min={INTERFACE_SCALE_MIN} max={INTERFACE_SCALE_MAX} defaultValue={DEFAULT_INTERFACE_SCALE} unit="%"
         />
         <li className="flex items-center justify-between gap-2 rounded-md bg-card/60 px-4 py-3 ring-1 ring-border/50">
           <div className="min-w-0">

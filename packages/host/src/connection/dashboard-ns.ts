@@ -58,6 +58,7 @@ import type {
   ClientGetDagRun,
   ClientGetGlobalStorage,
   ClientGetSessionStorage,
+  ClientUpgradeSessionTools,
   ClientPrepareStorageCleanup,
   ClientExecuteStorageCleanup,
   ClientListDagRuns,
@@ -145,6 +146,7 @@ import { S3MessageAttachmentStore } from '../message-attachments/s3-message-atta
 import { askUserChoiceRequestFromPendingCall, type AskUserChoiceBroker } from '../ask-user-choice.js'
 import type { DagStorage } from '../dag/storage.js'
 import type { StorageInventory } from '../store/storage-inventory.js'
+import type { PostgresStorageInventory } from '../store/postgres-storage-inventory.js'
 import type { SafeCleanupEngine } from '../store/safe-cleanup.js'
 import { DAG_PLANNER_INSTRUCTION, DAG_PLAN_TOOL } from '../dag/tool.js'
 import { parseBangShellRequest } from '../bang-shell.js'
@@ -267,7 +269,7 @@ export type DashboardDeps = {
   agentRuntimes: AgentRuntimeRegistry
   askUserChoice?: AskUserChoiceBroker
   dagStore?: DagStorage
-  storageInventory?: StorageInventory
+  storageInventory?: StorageInventory | PostgresStorageInventory
   safeCleanup?: SafeCleanupEngine
   executorSnapshot?(): readonly AttachedExecutor[]
   onSessionCreated?(record: SessionRecord): void | Promise<void>
@@ -308,7 +310,7 @@ export type TenantModelPolicyEnforcer = {
 
 const READ_ONLY_DASHBOARD_EVENTS = new Set([
   'client:connection_ping', 'client:push_activity', 'client:executor_ping', 'client:list_executors', 'client:list_sessions',
-  'client:load_history', 'client:load_log_artifact', 'client:get_session_storage', 'client:get_global_storage', 'client:subscribe_channels', 'client:refresh_channels', 'client:restore_subscriptions',
+  'client:load_history', 'client:load_log_artifact', 'client:get_session_storage', 'client:get_global_storage', 'client:list_session_tool_upgrades', 'client:subscribe_channels', 'client:refresh_channels', 'client:restore_subscriptions',
   'client:unsubscribe_channels', 'subscribe', 'unsubscribe', 'client:list_dirs', 'client:list_files',
   'workspace:read_binary', 'client:read_overflow', 'client:get_dag_run', 'client:list_dag_runs', 'bg:list', 'bg:output', 'sub_agent:list', 'agent_types:list',
 ])
@@ -693,7 +695,7 @@ export function configureDashboardNamespace(
       const writeEvents = [
         'client:user_message', 'client:user_approve', 'client:user_reject', 'client:ask_user_choice', 'client:cancel', 'client:goal_control', 'client:interrupt_sub_agent',
         'client:clear', 'client:compact', 'client:cancel_stream', 'client:set_approval_mode', 'client:fork',
-        'client:create_session', 'client:delete_session', 'client:prepare_storage_cleanup', 'client:execute_storage_cleanup', 'client:update_preferences', 'client:set_cwd',
+        'client:create_session', 'client:delete_session', 'client:prepare_storage_cleanup', 'client:execute_storage_cleanup', 'client:update_preferences', 'client:set_cwd', 'client:upgrade_session_tools',
         'client:prepare_session_route', 'app_debug:control',
         'client:reorder_queued_message', 'client:update_queued_message', 'client:delete_queued_message',
         'client:rename_session', 'client:rename_workspace', 'client:create_directory', 'client:consolidate_memory', 'bg:kill',
@@ -752,6 +754,50 @@ export function configureDashboardNamespace(
       socket.emit('server:agent_runtimes', { runtimes: deps.agentRuntimes.catalog() })
     })
 
+    socket.on('client:list_session_tool_upgrades', async (raw: { sessionId: string }, ack: (result: RpcAck<readonly string[]>) => void) => {
+      const p = vparse(schema.ClientListSessionToolUpgradesSchema, raw, 'client:list_session_tool_upgrades')
+      if (!p) { ack({ ok: false, error: 'invalid request' }); return }
+      try {
+        const record = await loadRecordForDashboard(deps, p.sessionId)
+        const accessError = validateIngressSessionAccess(socket, record)
+        if (!record || accessError) throw new Error(accessError ?? 'unknown session')
+        if (!deps.store.usesExternalAuthority || record.parentSessionId) {
+          ack({ ok: true, value: [] })
+          return
+        }
+        const catalog = typeof deps.defaultConfig === 'function'
+          ? deps.defaultConfig(socket.data.dashboardActor as DashboardActor)
+          : deps.defaultConfig
+        const existing = new Set(record.config.tools.map((tool) => tool.name))
+        ack({ ok: true, value: catalog.tools.map((tool) => tool.name).filter((name) => !existing.has(name)) })
+      } catch (error) {
+        ack({ ok: false, error: error instanceof Error ? error.message : String(error) })
+      }
+    })
+
+    socket.on('client:upgrade_session_tools', async (raw: ClientUpgradeSessionTools, ack: (result: RpcAck<readonly string[]>) => void) => {
+      const p = vparse(schema.ClientUpgradeSessionToolsSchema, raw, 'client:upgrade_session_tools')
+      if (!p) { ack({ ok: false, error: 'invalid request' }); return }
+      try {
+        const record = await loadRecordForDashboard(deps, p.sessionId)
+        const accessError = validateIngressSessionAccess(socket, record)
+        if (!record || accessError) throw new Error(accessError ?? 'unknown session')
+        if (socket.data.readOnly === true) throw new Error('forbidden: runtime:write required')
+        await deps.loopDeps.assertSessionEffectOwner?.(p.sessionId)
+        if (deps.loop.hasActiveTurn(p.sessionId)) throw new Error('Finish the current turn before upgrading Session tools')
+        const catalog = typeof deps.defaultConfig === 'function'
+          ? deps.defaultConfig(socket.data.dashboardActor as DashboardActor)
+          : deps.defaultConfig
+        const added = await deps.store.upgradeSessionTools(p.sessionId, p.tools, catalog)
+        deps.audit?.log({ action: 'dashboard.session_tools_upgrade', actor: auditActor(socket), target: { sessionId: p.sessionId }, outcome: 'ok', metadata: { tools: added } })
+        ack({ ok: true, value: added })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        deps.audit?.log({ action: 'dashboard.session_tools_upgrade', actor: auditActor(socket), target: { sessionId: p.sessionId }, outcome: 'denied', error: message })
+        ack({ ok: false, error: message })
+      }
+    })
+
     socket.on('client:get_session_storage', async (
       raw: ClientGetSessionStorage,
       ack: (result: RpcAck<SessionStorageSnapshot>) => void,
@@ -771,10 +817,11 @@ export function configureDashboardNamespace(
         const record = await loadRecordForDashboard(deps, p.sessionId)
         const accessError = validateIngressSessionAccess(socket, record)
         if (!record || accessError) throw new Error(accessError ?? 'unknown session')
-        if (p.refresh) await deps.storageInventory.reconcile()
+        if (p.refresh || !deps.storageInventory.getCachedTree(p.sessionId)) await deps.storageInventory.reconcile()
         const session = deps.storageInventory.getCachedTree(p.sessionId)
         if (!session) throw new Error('storage inventory has not measured this session yet')
         let descendants = deps.storageInventory.getCachedDescendants(p.sessionId)
+        let visibleSession = session
         if (auditActor(socket).kind === 'ingress') {
           const allowed = new Set<string>()
           for (const descendant of descendants) {
@@ -782,6 +829,31 @@ export function configureDashboardNamespace(
             if (!validateIngressSessionAccess(socket, child)) allowed.add(descendant.sessionId)
           }
           descendants = descendants.filter((descendant) => allowed.has(descendant.sessionId))
+          const visible = new Map([session, ...descendants].map((entry) => [entry.sessionId, entry]))
+          const recalculate = (entry: typeof session) => {
+            const treeCategories = { ...entry.categories }
+            let descendantCount = 0
+            for (const child of descendants) {
+              let parent = child.parentSessionId
+              const visited = new Set<string>()
+              while (parent && !visited.has(parent) && visible.has(parent)) {
+                if (parent === entry.sessionId) {
+                  descendantCount++
+                  for (const [category, stats] of Object.entries(child.categories)) {
+                    const key = category as keyof typeof treeCategories
+                    const previous = treeCategories[key]
+                    treeCategories[key] = { bytes: (previous?.bytes ?? 0) + stats.bytes, files: (previous?.files ?? 0) + stats.files }
+                  }
+                  break
+                }
+                visited.add(parent)
+                parent = visible.get(parent)?.parentSessionId
+              }
+            }
+            return { ...entry, treeCategories, treeBytes: Object.values(treeCategories).reduce((total, stats) => total + stats.bytes, 0), descendantCount }
+          }
+          visibleSession = recalculate(session)
+          descendants = descendants.map(recalculate)
         }
         const descendantRecords = await Promise.all(descendants.map(async (descendant) => {
           const child = await loadRecordForDashboard(deps, descendant.sessionId)
@@ -791,7 +863,7 @@ export function configureDashboardNamespace(
         ack({
           ok: true,
           value: {
-            session: storageEntry(session),
+            session: storageEntry(visibleSession),
             descendants: descendants.map((entry) => storageEntry(entry)),
             tokenUsage: sessionTreeTokenUsage(record, descendantRecords),
             state: deps.storageInventory.getCachedGlobal().state,
@@ -814,7 +886,7 @@ export function configureDashboardNamespace(
       try {
         if (auditActor(socket).kind === 'ingress') throw new Error('global storage inventory is host-administrator only')
         if (!deps.storageInventory) throw new Error('storage inventory unavailable')
-        if (p.refresh) await deps.storageInventory.reconcile()
+        if (p.refresh || !deps.storageInventory.getCachedGlobal().state.measuredAt) await deps.storageInventory.reconcile()
         const global = deps.storageInventory.getCachedGlobal()
         const largestTrees = deps.storageInventory.getCachedLargestTrees()
         const summaries = new Map((await deps.store.listSummaries()).map((summary) => [summary.sessionId, summary]))

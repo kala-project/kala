@@ -99,6 +99,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
   private cliPath: string | undefined
   private readonly sessions = new Map<string, CopilotSession>()
   private readonly sessionSystemPrompts = new Map<string, string>()
+  private readonly sessionToolLocks = new Map<string, string>()
   private readonly approvals = new Map<string, PendingApproval>()
   private readonly cancelledCalls = new Set<string>()
   private readonly turnGenerations = new Map<string, number>()
@@ -464,6 +465,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
       await session.disconnect()
       this.sessions.delete(record.sessionId)
       this.sessionSystemPrompts.delete(record.sessionId)
+      this.sessionToolLocks.delete(record.sessionId)
     }
     this.contextEventTimes.delete(record.sessionId)
     this.contextTokenHighWater.delete(record.sessionId)
@@ -483,6 +485,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
   async close(): Promise<void> {
     this.sessions.clear()
     this.sessionSystemPrompts.clear()
+    this.sessionToolLocks.clear()
     this.turnGenerations.clear()
     this.turnSystemPrompts.clear()
     this.cancelledTurnGenerations.clear()
@@ -512,15 +515,18 @@ export class CopilotAgentRuntime implements AgentRuntime {
     canCreateNativeSession = !record.state.messages.some((message) => message.role !== 'system'),
   ): Promise<CopilotSession> {
     const effectivePrompt = record.config.systemPrompt ?? 'You are an AI coding agent.'
+    const effectiveTools = JSON.stringify(record.toolLock)
     await this.nativeClients.get(record.sessionId)?.mount.assertReady()
     const existing = this.sessions.get(record.sessionId)
-    if (existing && this.sessionSystemPrompts.get(record.sessionId) === effectivePrompt) return existing
+    if (existing && this.sessionSystemPrompts.get(record.sessionId) === effectivePrompt
+      && this.sessionToolLocks.get(record.sessionId) === effectiveTools) return existing
     if (existing) {
       // Disconnect only the local SDK object. deleteSession() would destroy the
       // resumable provider session and is intentionally reserved for user delete.
       await existing.disconnect()
       this.sessions.delete(record.sessionId)
       this.sessionSystemPrompts.delete(record.sessionId)
+      this.sessionToolLocks.delete(record.sessionId)
     }
     if (!this.client || this.status !== 'ready') {
       throw new Error(this.reason ?? 'Copilot runtime is unavailable')
@@ -576,6 +582,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
     session.on((event) => this.handleEvent(record, event))
     this.sessions.set(record.sessionId, session)
     this.sessionSystemPrompts.set(record.sessionId, effectivePrompt)
+    this.sessionToolLocks.set(record.sessionId, effectiveTools)
     await this.restorePersistedContext(record, session)
     return session
   }

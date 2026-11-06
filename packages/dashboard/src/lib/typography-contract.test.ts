@@ -26,9 +26,8 @@ describe('typography contract', () => {
     expect(stylesheet).toContain("'JetBrains Mono Variable'")
   })
 
-  it('keeps the root metric stable and exposes semantic type roles', () => {
-    expect(stylesheet).toMatch(/:root\s*\{[\s\S]*?font-size:\s*16px;/)
-    expect(stylesheet).not.toContain('font-size: calc(16px')
+  it('scales the root metric with interface zoom and exposes semantic type roles', () => {
+    expect(stylesheet).toMatch(/:root\s*\{[\s\S]*?font-size:\s*calc\(16px \* var\(--ak-interface-scale, 1\)\);/)
     for (const role of ['caption', 'meta', 'ui', 'body', 'title', 'heading', 'code']) {
       expect(stylesheet).toContain(`--ak-type-${role}-size:`)
       expect(stylesheet).toContain(`--ak-type-${role}-leading:`)

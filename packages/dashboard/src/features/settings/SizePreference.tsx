@@ -22,13 +22,13 @@ export function SizePreference({ label, description, value, onChange, min, max, 
       <div className="flex min-w-0 items-center gap-1 font-medium">
         {label}<HelpHint label={label}>{description}</HelpHint>
       </div>
-      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(3rem,4.5rem)_auto_2rem] items-center gap-1 sm:gap-2">
         <input
           type="range" min={min} max={max} step={1} value={value}
           onChange={(event) => onChange(Number(event.currentTarget.value))}
           aria-label={label} aria-valuetext={`${value}${unit}`}
           data-testid={`${testId}-slider`}
-          className="col-span-3 w-full min-w-0 accent-primary"
+          className="w-full min-w-0 accent-primary"
         />
         <input
           type="number" min={min} max={max} step={1} value={draft}
@@ -46,7 +46,7 @@ export function SizePreference({ label, description, value, onChange, min, max, 
             onChange(next)
           }}
           onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }}
-          className="h-8 w-full min-w-0 max-w-24 justify-self-end rounded-md bg-background px-1 text-sm ring-1 ring-border/70"
+          className="h-8 w-full min-w-0 rounded-md bg-background px-1 text-sm ring-1 ring-border/70"
         />
         <span className="text-xs text-muted-foreground">{unit}</span>
         <button

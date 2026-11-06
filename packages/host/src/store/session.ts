@@ -1797,6 +1797,7 @@ export class SessionStore {
         prompt,
         ...(version !== undefined ? { version } : {}),
       }
+
       const transition = step(rec.state, event, rec.config)
       if (transition.transition.outcome !== 'applied') {
         throw new Error(`System prompt update was not applied for ${sessionId}`)
@@ -1861,6 +1862,56 @@ export class SessionStore {
     try {
       await commit
       return changed
+    } finally {
+      if (this.recordTails.get(sessionId) === commit) this.recordTails.delete(sessionId)
+    }
+  }
+
+  async upgradeSessionTools(sessionId: string, names: readonly string[], catalog: AgentConfig): Promise<readonly string[]> {
+    const authority = this.options.authority
+    if (!authority) throw new Error('Tool upgrades require durable Session authority')
+    this.assertStorageWritable(sessionId)
+    if (!this.records.has(sessionId)) await this.load(sessionId)
+    this.assertStorageWritable(sessionId)
+    const previous = this.recordTails.get(sessionId) ?? Promise.resolve()
+    let added: readonly string[] = []
+    const commit = previous.catch(() => undefined).then(async () => {
+      const rec = this.records.get(sessionId)
+      if (!rec) throw new SessionNotFoundError(sessionId)
+      if (effectiveDelegationDepth(rec) !== 0) throw new Error('Only root Sessions can upgrade tools')
+      if (!['idle', 'done', 'error'].includes(rec.state.status) || rec.state.pendingCalls.length > 0) {
+        throw new Error('Finish the current turn before upgrading Session tools')
+      }
+      const available = new Map(catalog.tools.map((tool) => [tool.name, tool]))
+      const existing = new Set(rec.config.tools.map((tool) => tool.name))
+      if (names.length === 0 || new Set(names).size !== names.length || names.some((name) => !available.has(name) || existing.has(name))) {
+        throw new Error('Select one or more available tools not already enabled for this Session')
+      }
+      const persisted = await authority.mutate(sessionId, {
+        mutationId: `session.tools_upgrade:${randomMutationId()}`,
+        eventType: 'session.tools_upgraded',
+        apply(current) {
+          if (!current) throw new SessionNotFoundError(sessionId)
+          const currentConfig = current.config as AgentConfig
+          if (names.some((name) => currentConfig.tools.some((tool) => tool.name === name))) {
+            throw new Error('Session tools changed while upgrading; refresh and retry')
+          }
+          const nextConfig = { ...currentConfig, tools: [...currentConfig.tools, ...names.map((name) => available.get(name)!)] }
+          return { ...current, config: nextConfig, toolLock: toolLockFor(nextConfig), lastEventAt: new Date().toISOString() }
+        },
+      })
+      if (!persisted) throw new SessionNotFoundError(sessionId)
+      ;(rec as { config: AgentConfig }).config = persisted.config as AgentConfig
+      ;(rec as { toolLock: SessionRecord['toolLock'] }).toolLock = persisted.toolLock as SessionRecord['toolLock']
+      rec.lastEventAt = persisted.lastEventAt as string
+      this.summaryCache.delete(rec.logPath)
+      this.notifyStorageChanged(sessionId)
+      added = names
+    })
+    this.recordTails.set(sessionId, commit)
+    try {
+      await commit
+      return added
     } finally {
       if (this.recordTails.get(sessionId) === commit) this.recordTails.delete(sessionId)
     }

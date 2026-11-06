@@ -19,7 +19,7 @@ describe('DirectoryPicker Windows paths',()=>{
     render(<Harness/>)
     expect(await screen.findByText('project')).toBeTruthy()
     expect(screen.queryByText('.config')).toBeNull()
-    fireEvent.click(screen.getByTestId('dir-picker-hidden-toggle').querySelector('input')!)
+    fireEvent.click(screen.getByTestId('dir-picker-hidden-toggle'))
     expect(screen.getByText('.config')).toBeTruthy()
     expect(screen.getByText('.env')).toBeTruthy()
     expect(emit).toHaveBeenCalledTimes(1)

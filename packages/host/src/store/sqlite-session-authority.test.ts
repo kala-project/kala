@@ -59,6 +59,29 @@ describe('SqliteSessionAuthority', () => {
     expect(existsSync(sessionsDir)).toBe(false)
   })
 
+  it('only adds explicitly confirmed tools to an idle root Session and persists their lock', async () => {
+    const { databasePath, sessionsDir } = fixture()
+    const current = authority(databasePath)
+    const writer = new SessionStore(sessionsDir, { authority: current })
+    const scheduled = { name: 'scheduled_task', description: 'Manage scheduled tasks', inputSchema: { type: 'object' }, requiresApproval: false }
+    const other = { ...scheduled, name: 'other_new_tool' }
+    const catalog = createConfig({ tools: [scheduled, other], systemPrompt: 'current defaults' })
+    const root = await writer.create({ sessionId: 'old-root', config })
+    const child = await writer.create({ sessionId: 'old-child', config, parentSessionId: root.sessionId })
+    expect(root.config.tools).toEqual([])
+    await expect(writer.upgradeSessionTools(child.sessionId, [scheduled.name], catalog)).rejects.toThrow('root')
+    await expect(writer.upgradeSessionTools(root.sessionId, ['unknown'], catalog)).rejects.toThrow('available')
+    await expect(writer.upgradeSessionTools(root.sessionId, [scheduled.name], catalog)).resolves.toEqual([scheduled.name])
+    expect(root.config.tools.map((tool) => tool.name)).toEqual([scheduled.name])
+    expect(root.toolLock).toHaveProperty(scheduled.name)
+    await expect(writer.upgradeSessionTools(root.sessionId, [scheduled.name], catalog)).rejects.toThrow('already enabled')
+    const reader = new SessionStore(sessionsDir, { authority: authority(databasePath), runtimeConfig: catalog })
+    const restored = await reader.load(root.sessionId)
+    expect(restored.config.tools.map((tool) => tool.name)).toEqual([scheduled.name])
+    expect(restored.toolLock).toHaveProperty(scheduled.name)
+    expect((await reader.load(child.sessionId)).config.tools).toEqual([])
+  })
+
   it('restricts summary reads to selected authoritative projections', async () => {
     const { databasePath, sessionsDir } = fixture()
     const durable = authority(databasePath)

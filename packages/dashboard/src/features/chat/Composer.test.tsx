@@ -1214,6 +1214,7 @@ describe('Composer', () => {
     fireEvent.click(screen.getByTestId('send-mode-toggle'))
     expect(screen.getByTestId('send-mode-steer').textContent ?? '').toContain('Steer active turn')
     expect(screen.getByTestId('send-mode-queue').textContent ?? '').toContain('Queue follow-up')
+    expect(screen.getByTestId('send-mode-queue').textContent ?? '').not.toContain('FIFO')
     expect(screen.getByTestId('send-mode-steer').getAttribute('title') ?? '').toContain('current run')
     expect(screen.getByTestId('send-mode-queue').getAttribute('title') ?? '').toContain('FIFO')
     const dock = screen.getByTestId('queued-messages-dock')

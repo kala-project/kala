@@ -86,13 +86,50 @@ describe('SessionMetadataDialog', () => {
     }
   })
 
-  it('explains unavailable remote storage without claiming measurement is pending', async () => {
+  it('explains unavailable storage without claiming measurement is pending', async () => {
     const emit = vi.fn((event: string, _payload: unknown, ack: (result: unknown) => void) => {
       if (event === 'client:get_session_storage') ack({ ok: false, error: 'storage inventory unavailable' })
     })
     render(<SessionMetadataDialog open onOpenChange={() => {}} sessionId={baseSummary.sessionId} state={baseState} selectedModel={null} storageSocket={{ emit } as never} onRename={() => {}} onOpenChangeCwdDialog={() => {}} onChangeApprovalMode={() => {}} onChangeToolCardMode={() => {}} />)
     fireEvent.click(screen.getByTestId('session-info-storage-tab'))
-    expect((await screen.findByRole('alert')).textContent).toContain('PostgreSQL and object-backed Sessions')
+    expect((await screen.findByRole('alert')).textContent).toContain('Storage inventory is unavailable')
+    expect(screen.queryByText('Storage has not been measured yet.')).toBeNull()
+  })
+
+  it('requires explicit selection and confirmation before upgrading an existing Session tool', async () => {
+    const emit = vi.fn((event: string, _payload: unknown, ack: (result: unknown) => void) => {
+      if (event === 'client:list_session_tool_upgrades') ack({ ok: true, value: ['scheduled_task'] })
+      if (event === 'client:get_session_storage') ack({ ok: false, error: 'storage inventory unavailable' })
+      if (event === 'client:upgrade_session_tools') ack({ ok: true, value: ['scheduled_task'] })
+    })
+
+    render(<SessionMetadataDialog open onOpenChange={() => {}} sessionId={baseSummary.sessionId} summary={baseSummary} state={baseState} selectedModel={null} storageSocket={{ emit } as never} onRename={() => {}} onOpenChangeCwdDialog={() => {}} onChangeApprovalMode={() => {}} onChangeToolCardMode={() => {}} />)
+    const review = await screen.findByRole('button', { name: 'Review tools' })
+    expect(review.hasAttribute('disabled')).toBe(true)
+    fireEvent.click(screen.getByRole('checkbox', { name: 'scheduled_task' }))
+    fireEvent.click(review)
+    expect(emit.mock.calls.some(([event]) => event === 'client:upgrade_session_tools')).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: /Enable selected tools/ }))
+    expect(emit).toHaveBeenCalledWith('client:upgrade_session_tools', { sessionId: baseSummary.sessionId, tools: ['scheduled_task'] }, expect.any(Function))
+  })
+
+  it('displays measured PostgreSQL and object data without offering filesystem cleanup', async () => {
+    const categories = { snapshot: { bytes: 10, files: 1 }, 'session-artifacts': { bytes: 42, files: 1 } }
+    const emit = vi.fn((event: string, _payload: unknown, ack: (result: unknown) => void) => {
+      if (event === 'client:list_session_tool_upgrades') ack({ ok: true, value: [] })
+      if (event === 'client:get_session_storage') ack({
+        ok: true,
+        value: {
+          session: { sessionId: baseSummary.sessionId, directBytes: 10, treeBytes: 52, descendantCount: 1, categories, treeCategories: categories },
+          descendants: [{ sessionId: 'child', parentSessionId: baseSummary.sessionId, directBytes: 42, treeBytes: 42, descendantCount: 0, categories, treeCategories: categories }],
+          state: { source: 'postgres', measuredAt: new Date().toISOString(), generation: 1, stale: false, scan: { status: 'idle' } },
+        },
+      })
+    })
+    render(<SessionMetadataDialog open onOpenChange={() => {}} sessionId={baseSummary.sessionId} summary={baseSummary} state={baseState} selectedModel={null} storageSocket={{ emit } as never} onRename={() => {}} onOpenChangeCwdDialog={() => {}} onChangeApprovalMode={() => {}} onChangeToolCardMode={() => {}} />)
+    fireEvent.click(screen.getByTestId('session-info-storage-tab'))
+    expect(await screen.findByText(/Refresh reads current PostgreSQL/)).toBeTruthy()
+    expect(screen.getByRole('checkbox', { name: /Select child/ }).hasAttribute('disabled')).toBe(true)
     expect(screen.queryByText('Storage has not been measured yet.')).toBeNull()
   })
 

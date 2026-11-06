@@ -404,12 +404,12 @@ export function SidebarGlobalActions({
   const vertical = orientation === 'vertical'
   const expandedFooter = accountPlacement === 'footer' && !legacyTopbar
   const actionClass = cn(
-    vertical ? 'h-11 w-11 rounded-xl' : expandedFooter ? 'h-11 min-w-0 flex-1 rounded-lg' : 'h-8 w-8',
+    vertical ? 'h-11 w-11 rounded-xl' : expandedFooter ? 'h-11 min-w-0 flex-1 rounded-lg sm:h-9' : 'h-8 w-8',
     'text-muted-foreground hover:text-foreground',
   )
-  const iconActionClass = cn(vertical ? 'h-10 w-10 rounded-xl' : expandedFooter ? 'h-11 min-w-0 flex-1 rounded-lg' : 'h-8 w-8', 'text-muted-foreground hover:text-foreground')
+  const iconActionClass = cn(vertical ? 'h-10 w-10 rounded-xl' : expandedFooter ? 'h-11 min-w-0 flex-1 rounded-lg sm:h-9' : 'h-8 w-8', 'text-muted-foreground hover:text-foreground')
   return (
-    <div className={cn('flex flex-none gap-1', vertical ? 'flex-col items-center' : expandedFooter ? 'w-full items-center rounded-xl bg-muted/25 p-1' : 'ml-auto items-center')} data-testid={vertical ? 'sidebar-global-actions' : 'app-shell-global-actions'} data-orientation={orientation} data-presentation={expandedFooter ? 'expanded-footer' : undefined}>
+    <div className={cn('flex flex-none gap-1', vertical ? 'flex-col items-center' : expandedFooter ? 'w-full items-center rounded-lg bg-muted/25 p-0.5' : 'ml-auto items-center')} data-testid={vertical ? 'sidebar-global-actions' : 'app-shell-global-actions'} data-orientation={orientation} data-presentation={expandedFooter ? 'expanded-footer' : undefined}>
       {expandedFooter && (account || accountLoading) ? <AccountMenu account={account} loading={accountLoading} onSignOut={onSignOut} onOpenAccount={onOpenAccount} onOpenAdmin={onOpenAdmin} placement="footer" /> : null}
       {import.meta.env.VITE_KALA_DESKTOP_DOWNLOAD_ENABLED === 'false' ? null
         : !isDesktopClient() ? legacyTopbar ? <DesktopDownloadDialog /> : <DesktopDownloadDialog trigger={<Button variant="ghost" size="icon" className={actionClass} data-testid="app-shell-download-desktop" title={t('desktopDownload.title')} aria-label={t('desktopDownload.open')}><Download className="h-4 w-4 flex-none" aria-hidden /></Button>} /> : <DesktopUpdateEntry />}
@@ -505,7 +505,7 @@ function AccountMenu({ account, loading, onSignOut, onOpenAccount, onOpenAdmin, 
   }
   return (
     <details ref={detailsRef} open={open} className={cn('relative min-w-0', placement === 'footer' && 'flex-1')} data-testid="account-menu">
-      <summary onClick={(event) => { event.preventDefault(); setOpen(!open) }} className={cn('flex cursor-pointer list-none items-center gap-2 rounded-lg text-sm text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden', placement === 'footer' ? 'h-11 w-full justify-center' : placement === 'rail' ? 'h-11 w-11 justify-center' : 'h-8 min-w-8 justify-center px-1')} aria-haspopup="menu" aria-expanded={open} aria-label={account ? t('appShell.account.trigger', { name: account.displayName }) : t('appShell.account.loading')} data-testid="account-menu-trigger">
+      <summary onClick={(event) => { event.preventDefault(); setOpen(!open) }} className={cn('flex cursor-pointer list-none items-center gap-2 rounded-lg text-sm text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden', placement === 'footer' ? 'h-11 w-full justify-center sm:h-9' : placement === 'rail' ? 'h-11 w-11 justify-center' : 'h-8 min-w-8 justify-center px-1')} aria-haspopup="menu" aria-expanded={open} aria-label={account ? t('appShell.account.trigger', { name: account.displayName }) : t('appShell.account.loading')} data-testid="account-menu-trigger">
         <span className="flex h-7 w-7 flex-none items-center justify-center rounded-full bg-primary/10 text-primary" aria-hidden>{loading ? <span className="text-caption">…</span> : placement === 'footer' && account?.initials ? <span className="text-xs font-semibold">{account.initials}</span> : <UserRound className="h-4 w-4" />}</span>
         {account && placement === 'default' ? <span className="hidden max-w-32 min-w-0 truncate text-sm font-medium text-foreground lg:inline">{account.displayName}</span> : null}
       </summary>

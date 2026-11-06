@@ -30,6 +30,7 @@ export type StorageInventoryScanState =
   | { readonly status: 'failed'; readonly startedAt: string; readonly failedAt: string; readonly error: string }
 
 export type StorageInventoryState = {
+  readonly source?: 'postgres'
   readonly measuredAt: string | null
   readonly generation: number
   readonly stale: boolean
