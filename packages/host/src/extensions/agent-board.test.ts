@@ -651,12 +651,14 @@ describe('multi-agent message board & live subagent steering', () => {
     const otherParent = await createBlocked(firstStore, 'other-parent', 'other-call')
     const otherStore = await createBlocked(secondStore, 'shared-id', 'second-call')
     await first.loop.dispatch(first.parentId, { kind: 'cancel' })
+    await first.loop.waitForActiveTurn(first.childId)
     for (const unaffected of [otherParent, otherStore]) {
       const status = await runReadAgentTool(unaffected.deps, unaffected.parentId, {
         kind: 'call_tool', callId: 'check', name: 'read_agent', input: { agent_id: unaffected.childId },
       })
       expect(status.content).toContain('status="running"')
       await unaffected.loop.dispatch(unaffected.parentId, { kind: 'cancel' })
+      await unaffected.loop.waitForActiveTurn(unaffected.childId)
     }
   })
 
