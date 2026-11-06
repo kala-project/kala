@@ -5,6 +5,11 @@ import { dirname, isAbsolute, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { assertArenaKeeper } from '../../packages/executor/dist/src/arena-keeper.js'
+import { LATEST_POSTGRES_SCHEMA_VERSION } from '../../packages/host/dist/src/postgres-migrations.js'
+
+if (!Number.isSafeInteger(LATEST_POSTGRES_SCHEMA_VERSION) || LATEST_POSTGRES_SCHEMA_VERSION < 27) {
+  throw new Error('Built Host lacks the combined Arena operator migration; rebuild the reviewed release')
+}
 
 const [configFile, workspace, journal, caFile, operatorFile] = process.argv.slice(2)
 if (process.argv.length !== 7 || [configFile, workspace, journal, caFile, operatorFile].some((value) => !value || !isAbsolute(value))) {
@@ -49,11 +54,12 @@ console.log(JSON.stringify({
   independentKeeper: true, originalWorkspaceMounted: true,
   tlsCaFilePresent: true, operatorFilePresent: true, readyForProduction: false,
   durableDispatchIntentRequiresCurrentSchema: true,
-  requiredCombinedSchemaVersion: 25,
+  requiredCombinedSchemaVersion: LATEST_POSTGRES_SCHEMA_VERSION,
   privateArenaSchema12to18CannotAutoUpgrade: true,
-  offlineProbeReconciliationAvailable: false,
+  offlineProbeReconciliationImplemented: true,
+  offlineProbeReconciliationVerifiedForLiveExecutor: false,
   externalExecutorAcceptanceRequired: [
-    'verify exact Board v12–v18 and Arena v19–v25 migration history before enabling prepared Arena dispatch; reject old private Arena v12–v18 histories',
+    `verify the exact Runtime migration history through schema v${LATEST_POSTGRES_SCHEMA_VERSION} before enabling prepared Arena dispatch; reject old private Arena v12–v18 histories`,
     'prove the separately managed Executor uses this keeper in the original PID namespace',
     'prove the real Executor mounts the canonical workspace and its original durable journal',
     'prove the live Executor validates the Host TLS certificate against this CA',

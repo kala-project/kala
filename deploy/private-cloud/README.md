@@ -22,7 +22,7 @@ The source-only shared Identity service below is a separate **development** Comp
 - `external-nfs`: explicit legacy external NFS experiment.
 - `postgres-s3`: opt-in **fresh-install evaluation** with separate externally operated control and Runtime PostgreSQL databases, external S3, PostgreSQL Gateway login state, versioned schema migrations and independent workload roles. Runtime and Gateway do not mount authoritative application-data volumes; host secret sources and other gaps remain. This is neither the supported release profile nor an in-place upgrade; read the [PG/S3 operator prerequisites and unsupported backup boundaries](../../docs/operations/private-cloud-postgres-s3-profile.md) before using it.
 
-Arena incident credentials are **not** Compose workload secrets: after an offline combined schema-v25
+Arena incident credentials are **not** Compose workload secrets: after an offline migration to the release's current combined Runtime schema,
 migration, `packages/host/dist/bin/kala-arena-operator-provision.js` creates one
 restricted LOGIN and owner-only URL file per organization (and rotates only after
 active sessions drain). The separately operated external Executor must share a
