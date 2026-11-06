@@ -209,6 +209,21 @@ const filesystemToolset: ToolsetPlugin = {
         whenToUse: ['Investigate several related symbols or failure signatures together.', 'Reduce repeated grep calls while preserving per-search output sections.'],
         constraints: ['Batch independent symbols or hypotheses in searches instead of serial single-pattern calls when useful; one focused search remains appropriate for a narrow lookup.', 'Keep each search scoped with path/glob. Default output_mode is files_with_matches; use content for matching lines or count for per-file counts.', 'Each search supports limit/offset. Follow next_offset with the same pattern/scope/mode to continue; an incomplete-scan warning requires narrowing scope, not assuming all files were searched.', 'Per-search runtime failures preserve other result sections and report the overall call as EPARTIAL; invalid batch parameters are rejected before searching. Cancellation still stops the batch.', 'Use at most 20 searches; large aggregate output is preserved through the standard overflow channel.'],
       }, { type: 'object', required: ['searches'], properties: { searches: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', required: ['pattern'], properties: { pattern: { type: 'string' }, path: { type: 'string' }, glob: { type: 'string' }, output_mode: { type: 'string', enum: ['content', 'files_with_matches', 'count'], default: 'files_with_matches' }, limit: { type: 'integer', minimum: 1, maximum: 1000, default: 1000, description: 'Maximum returned rows per search: matching lines in content mode, files otherwise.' }, offset: { type: 'integer', minimum: 0, default: 0, description: 'Matching rows to skip in stable path/line order; use returned next_offset for more.' }, case_insensitive: { type: 'boolean' } } } } } }),
+      tool('git_context', 'executor', 'read', false, 'git_context', {
+        purpose: 'Inspect Git repository state in a single lock-free, read-only call: current branch and upstream ahead/behind counts, staged/unstaged/untracked/conflicted files, diff stats, bounded unified diff, recent commit history, and commit pre-flight safety warnings.',
+        whenToUse: ['Inspect workspace Git state before making edits, reviewing changes, or preparing a commit.', 'Replace multiple sequential git status / git diff / git log shell calls with a single structured call.'],
+        constraints: ['Read-only and lock-free (--no-optional-locks); use shell for mutating git commands such as git add or git commit.', 'Warnings are heuristic: untracked and binary file contents are not scanned; inspect them locally before committing.', 'Patches involving sensitive files or detected credentials are suppressed; Git metadata outside configured sandbox roots is rejected.'],
+      }, {
+        type: 'object',
+        properties: {
+          cwd: { type: 'string', description: 'Optional directory inside the workspace sandbox (defaults to session cwd).' },
+          scope: { type: 'string', enum: ['all', 'staged', 'unstaged', 'base'], description: 'Diff scope to return (default all).' },
+          base_ref: { type: 'string', description: 'Optional Git ref to diff against when scope=base (e.g. HEAD~1 or main).' },
+          include_diff: { type: 'boolean', description: 'Include unified diff patch (default true).' },
+          max_diff_chars: { type: 'integer', minimum: 500, maximum: 64000, description: 'Maximum characters and UTF-8 bytes of unified diff returned (default 12000).' },
+          log_limit: { type: 'integer', minimum: 0, maximum: 25, description: 'Number of recent commits to include (default 5).' },
+        },
+      }),
       tool('write_file', 'executor', 'write', true, 'write_file', {
         purpose: 'Create or fully overwrite one UTF-8 text file, creating parent directories as needed.',
         whenToUse: ['Create new files or fully replace generated files.'],
