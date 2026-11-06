@@ -3974,7 +3974,7 @@ export function ConnectionStatusProvider({ socket, status, transport, cursor, wo
     setExecutorError(null)
     setHistory([])
     setProbeFailureStreak(0)
-  }, [socket, workspaceId])
+  }, [workspaceId])
 
   useEffect(() => {
     if (!enabled) return

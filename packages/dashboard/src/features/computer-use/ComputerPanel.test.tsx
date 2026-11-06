@@ -14,6 +14,15 @@ const props = { socket, workspaceId: 'workspace', sessionId: 'session', visible:
 const image = { mimeType: 'image/png' as const, base64: 'AA==', width: 1280, height: 800, originX: -1280, originY: 0 }
 
 describe('ComputerPanel', () => {
+  it('explains an administrator-disabled Share button even without an Executor reason', async () => {
+    mocked.mockImplementation(async (_socket, request) => ({
+      requestId: request.requestId,
+      status: { available: false, platform: 'linux', active: false, allowAgent: false, computerUseEnabled: false },
+    }))
+    render(<ComputerPanel {...props} />)
+    expect((await screen.findByTestId('computer-start-reason')).textContent).toContain('Computer Use is disabled in administrator Settings.')
+    expect(screen.getByTestId('computer-start').hasAttribute('disabled')).toBe(true)
+  })
   it('does not offer preview consent or capture when the administrator has disabled desktop preview', async () => {
     mocked.mockImplementation(async (_socket, request) => ({
       requestId: request.requestId, status: { available: false, platform: 'linux', reason: 'Desktop preview is disabled in administrator Settings.',
@@ -21,6 +30,7 @@ describe('ComputerPanel', () => {
     }))
     render(<ComputerPanel {...props} />)
     await screen.findByText(/Desktop preview is disabled/)
+    expect(screen.getByTestId('computer-start-reason').textContent).toContain('Desktop preview is disabled')
     expect(screen.queryByTestId('computer-consent')).toBeNull()
     expect(screen.getByTestId('computer-start').hasAttribute('disabled')).toBe(true)
     expect(mocked.mock.calls.every(([, request]) => request.operation === 'status')).toBe(true)
@@ -52,6 +62,7 @@ describe('ComputerPanel', () => {
     await waitFor(() => expect(operations()).toHaveLength(1))
     expect(operations()[0]?.operation).toBe('status')
     expect(screen.getByRole('button', { name: 'Share desktop' }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByTestId('computer-start-reason').textContent).toContain('consent')
     expect(operations().some((request) => request.operation === 'start')).toBe(false)
   })
 

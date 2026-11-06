@@ -1,9 +1,29 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useState } from 'react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DirectoryPicker } from './DirectoryPicker.js'
 
 describe('DirectoryPicker Windows paths',()=>{
+  afterEach(()=>localStorage.removeItem('ak-show-hidden-files'))
+  it('shows dotfiles only when requested, without reloading the directory', async()=>{
+    const root='/workspace'
+    const listeners=new Map<string,(value:any)=>void>()
+    const emit=vi.fn((event:string,payload:any)=>{
+      if(event==='client:list_dirs')queueMicrotask(()=>listeners.get('server:dir_list')?.({
+        requestId:payload.requestId,workspaceId:'ws',path:root,roots:[root],
+        entries:[{name:'project',path:`${root}/project`,type:'directory'},{name:'.config',path:`${root}/.config`,type:'directory'},{name:'.env',path:`${root}/.env`,type:'file'}],
+      }))
+    })
+    const socket={emit,on:(event:string,fn:(value:any)=>void)=>listeners.set(event,fn),off:vi.fn()} as any
+    function Harness(){const [value,setValue]=useState(root);return <DirectoryPicker socket={socket} workspaceId="ws" initialPath={root} value={value} onChange={setValue}/>}
+    render(<Harness/>)
+    expect(await screen.findByText('project')).toBeTruthy()
+    expect(screen.queryByText('.config')).toBeNull()
+    fireEvent.click(screen.getByTestId('dir-picker-hidden-toggle').querySelector('input')!)
+    expect(screen.getByText('.config')).toBeTruthy()
+    expect(screen.getByText('.env')).toBeTruthy()
+    expect(emit).toHaveBeenCalledTimes(1)
+  })
   it('loads drive-letter roots and accepts typed child paths',async()=>{
     const root='C:\\Users\\admin'
     const child=`${root}\\project`

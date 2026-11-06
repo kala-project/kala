@@ -82,7 +82,18 @@ describe('SessionMetadataDialog', () => {
         configurable: true,
         value: () => false,
       })
+
     }
+  })
+
+  it('explains unavailable remote storage without claiming measurement is pending', async () => {
+    const emit = vi.fn((event: string, _payload: unknown, ack: (result: unknown) => void) => {
+      if (event === 'client:get_session_storage') ack({ ok: false, error: 'storage inventory unavailable' })
+    })
+    render(<SessionMetadataDialog open onOpenChange={() => {}} sessionId={baseSummary.sessionId} state={baseState} selectedModel={null} storageSocket={{ emit } as never} onRename={() => {}} onOpenChangeCwdDialog={() => {}} onChangeApprovalMode={() => {}} onChangeToolCardMode={() => {}} />)
+    fireEvent.click(screen.getByTestId('session-info-storage-tab'))
+    expect((await screen.findByRole('alert')).textContent).toContain('PostgreSQL and object-backed Sessions')
+    expect(screen.queryByText('Storage has not been measured yet.')).toBeNull()
   })
 
   it('copies a bounded desktop link without credentials and reports clipboard failures', async () => {

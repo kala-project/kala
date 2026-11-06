@@ -88,6 +88,7 @@ function renderTreeRows(
 
 describe('SessionFilesPanel', () => {
   beforeEach(() => {
+    localStorage.removeItem('ak-show-hidden-files')
     writeMock.mockClear()
     writelnMock.mockClear()
     setPositionMock.mockClear()
@@ -105,6 +106,7 @@ describe('SessionFilesPanel', () => {
   })
 
   afterEach(() => {
+    localStorage.removeItem('ak-show-hidden-files')
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
@@ -148,6 +150,26 @@ describe('SessionFilesPanel', () => {
     expect(screen.getByTestId('monaco-editor').getAttribute('data-font-size')).toBe('14')
     expect(socket.emitMock).toHaveBeenCalledWith('client:list_dirs', expect.objectContaining({ workspaceId: 'ws-1', sessionId: 'sess-1', path: '/repo' }))
     expect(socket.emitMock).toHaveBeenCalledWith('workspace:read_binary', expect.objectContaining({ workspaceId: 'ws-1', path: '/repo/notes.txt', maxBytes: 1024 * 1024 }), expect.any(Function))
+  })
+
+  it('hides dotfiles by default and reveals them without a new directory request', async () => {
+    const socket = makeSessionFilesSocket({
+      file: { kind: 'text', content: '', size: 0 },
+      entries: [
+        { name: 'visible.txt', path: '/repo/visible.txt', type: 'file' },
+        { name: '.env', path: '/repo/.env', type: 'file' },
+        { name: '.config', path: '/repo/.config', type: 'directory' },
+      ],
+    })
+    render(<SessionFilesPanel socket={socket.asDashboardSocket()} workspaceId="ws-1" sessionId="sess-1" cwd="/repo" mode="sidebar" />)
+    expect(await screen.findByText('visible.txt')).toBeTruthy()
+    expect(screen.queryByText('.env')).toBeNull()
+    expect(screen.queryByText('.config')).toBeNull()
+    const requests = socket.emitMock.mock.calls.filter(([event]) => event === 'client:list_dirs').length
+    fireEvent.click(screen.getByTestId('session-files-hidden-toggle').querySelector('input')!)
+    expect(screen.getByText('.env')).toBeTruthy()
+    expect(screen.getByText('.config')).toBeTruthy()
+    expect(socket.emitMock.mock.calls.filter(([event]) => event === 'client:list_dirs')).toHaveLength(requests)
   })
 
   it('reloads on a same-workspace Session switch and ignores the previous Session response', async () => {

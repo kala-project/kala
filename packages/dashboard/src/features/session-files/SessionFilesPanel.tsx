@@ -35,6 +35,8 @@ import { ReadonlyImageCanvas } from '../../components/ReadonlyImagePreview.js'
 import { MarkdownTable } from '../../components/MarkdownTable.js'
 import { ScrollArea } from '../../components/ui/scroll-area.js'
 import { DEFAULT_FILE_VIEW_FONT_SIZE, PREF_FILE_VIEW_FONT_SIZE, useNumberPref } from '../../lib/prefs.js'
+import { DASHBOARD_PREFERENCES, useBooleanPref } from '../../lib/prefs.js'
+import { visibleFileEntries } from '../../lib/hidden-files.js'
 import { FILE_VIEW_FONT_SIZE_PX, readableFontSize } from '../../lib/display-sizes.js'
 import { useInterfaceScale } from '../../lib/interface-scale.js'
 import { ensureWorkspaceSubscription, workspaceReadBinary } from '../../lib/workspace-exec.js'
@@ -234,8 +236,10 @@ function SessionFilesPanelImpl({
   fontSizePx?: number
 }): JSX.Element {
   const { t } = useTranslation()
+  const [showHidden, setShowHidden] = useBooleanPref(DASHBOARD_PREFERENCES.showHiddenFiles.key, false)
   const resourceKey = `${sessionId ?? 'unscoped'}\0${workspaceId ?? 'offline'}\0${cwd ?? ''}`
   const [nodes, setNodes] = useState<FileNode[]>([])
+  const visibleNodes = useMemo(() => filterHiddenNodes(nodes, showHidden), [nodes, showHidden])
   const [loadingPath, setLoadingPath] = useState<string | null>(null)
   const [selected, setSelected] = useState<FileNode | null>(null)
   const [viewer, setViewer] = useState<FileViewState>({ kind: 'empty' })
@@ -318,17 +322,21 @@ function SessionFilesPanelImpl({
             {loadingPath ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
           </Button>
         </div>
+        <label className="flex h-8 flex-none cursor-pointer items-center gap-2 border-b border-sidebar-border/40 px-3 text-caption text-sidebar-foreground/65" data-testid="session-files-hidden-toggle">
+          <input type="checkbox" className="accent-primary" checked={showHidden} onChange={(event) => setShowHidden(event.target.checked)} />
+          {t('sessionFiles.showHiddenFiles')}
+        </label>
         <div ref={treeHostRef} className="min-h-0 flex-1 overflow-hidden p-1.5">
           {!online ? (
             <WorkspaceToolState tone="offline" message={t('sessionFiles.offline')} />
-          ) : nodes.length === 0 && loadingPath ? (
+          ) : visibleNodes.length === 0 && loadingPath ? (
             <div className="flex items-center gap-2 p-3 text-xs text-sidebar-foreground/60"><Loader2 className="h-3.5 w-3.5 animate-spin" /> {t('sessionFiles.loadingFiles')}</div>
-          ) : nodes.length === 0 && viewer.kind === 'error' ? (
+          ) : visibleNodes.length === 0 && viewer.kind === 'error' ? (
             <div role="alert" className="p-3 text-xs text-destructive" data-testid="session-files-error">{viewer.message}</div>
-          ) : nodes.length === 0 ? (
+          ) : visibleNodes.length === 0 ? (
             <WorkspaceToolState tone="empty" message={t('sessionFiles.noFiles')} />
           ) : (
-            <Tree<FileNode> data={nodes} width="100%" height={Math.max(120, treeSize.height)} indent={fontSizePx + 2} rowHeight={Math.ceil(Math.max(28, fontSizePx * 1.5 + 12))} openByDefault={false} onActivate={(node) => void openNode(node.data)}>
+            <Tree<FileNode> data={visibleNodes} width="100%" height={Math.max(120, treeSize.height)} indent={fontSizePx + 2} rowHeight={Math.ceil(Math.max(28, fontSizePx * 1.5 + 12))} openByDefault={false} onActivate={(node) => void openNode(node.data)}>
               {(props) => <FileTreeRow {...props} fontSizePx={fontSizePx} onDownload={downloadNode} downloadingPath={downloadingPath} surface="sidebar" />}
             </Tree>
           )}
@@ -355,13 +363,17 @@ function SessionFilesPanelImpl({
             {loadingPath ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
           </Button>
         </div>
+        <label className="flex h-8 flex-none cursor-pointer items-center gap-2 border-b border-border/50 px-2 text-caption text-muted-foreground" data-testid="session-files-hidden-toggle">
+          <input type="checkbox" className="accent-primary" checked={showHidden} onChange={(event) => setShowHidden(event.target.checked)} />
+          {t('sessionFiles.showHiddenFiles')}
+        </label>
         <div ref={treeHostRef} className="min-h-0 flex-1 overflow-hidden p-1">
           {!online ? (
             <div className="p-3 text-xs text-muted-foreground">{t('sessionFiles.offline')}</div>
           ) : nodes.length === 0 && loadingPath ? (
             <div className="flex items-center gap-2 p-3 text-xs text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" /> {t('sessionFiles.loadingFiles')}</div>
           ) : (
-            <Tree<FileNode> data={nodes} width="100%" height={Math.max(120, treeSize.height)} indent={fontSizePx + 4} rowHeight={Math.ceil(Math.max(30, fontSizePx * 1.5 + 12))} openByDefault={false} onActivate={(node) => void openNode(node.data)}>
+            <Tree<FileNode> data={visibleNodes} width="100%" height={Math.max(120, treeSize.height)} indent={fontSizePx + 4} rowHeight={Math.ceil(Math.max(30, fontSizePx * 1.5 + 12))} openByDefault={false} onActivate={(node) => void openNode(node.data)}>
               {(props) => <FileTreeRow {...props} fontSizePx={fontSizePx} onDownload={downloadNode} downloadingPath={downloadingPath} />}
             </Tree>
           )}
@@ -378,6 +390,11 @@ function SessionFilesPanelImpl({
 }
 
 export const SessionFilesPanel = memo(SessionFilesPanelImpl)
+
+function filterHiddenNodes(nodes: readonly FileNode[], showHidden: boolean): FileNode[] {
+  return visibleFileEntries(nodes, showHidden).map((node) =>
+    node.children ? { ...node, children: filterHiddenNodes(node.children, showHidden) } : node)
+}
 
 function WorkspaceToolState({ tone, message }: { tone: 'offline' | 'empty'; message: string }): JSX.Element {
   return (

@@ -49,6 +49,7 @@ export const DASHBOARD_PREFERENCES = definePreferenceRegistry({
   liveToolActivityTailCount: { key: 'ak-live-tool-activity-tail-count', type: 'number', defaultValue: 3, min: 0, max: 50 },
   toolActivityIconScale: { key: 'ak-tool-activity-icon-scale', type: 'number', defaultValue: 150, min: 100, max: 300 },
   explorerOpen: { key: 'ak-explorer-open', type: 'boolean', defaultValue: true },
+  showHiddenFiles: { key: 'ak-show-hidden-files', type: 'boolean', defaultValue: false },
   sessionExplorerSectionOpen: { key: 'ak-session-explorer-section-open', type: 'boolean', defaultValue: true },
   inspectorOpen: { key: 'ak-inspector-open', type: 'boolean', defaultValue: true },
   topbarOpen: { key: 'ak-topbar-open', type: 'boolean', defaultValue: true },

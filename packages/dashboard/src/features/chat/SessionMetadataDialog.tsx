@@ -487,7 +487,7 @@ export function SessionMetadataDialog({
               Refresh
             </Button>
           </div>
-          {storageError ? <p className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">{storageError}</p> : null}
+          {storageError ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">{storageError === 'storage inventory unavailable' ? t('sessionMetadata.storageUnavailable') : storageError}</p> : null}
           {storage ? (
             <>
               <div className="grid grid-cols-3 gap-2 rounded-md border border-border/50 bg-muted/20 p-3">
@@ -588,9 +588,9 @@ export function SessionMetadataDialog({
                 Last measured {storage.state.measuredAt ? formatTs(storage.state.measuredAt) : 'not yet'}. Refresh performs a lazy metadata scan rather than reading complete session logs.
               </p>
             </>
-          ) : (
+          ) : !storageError ? (
             <p className="text-xs text-muted-foreground">{storageLoading ? 'Measuring storage…' : 'Storage has not been measured yet.'}</p>
-          )}
+          ) : null}
         </section>
         )}
         </DialogBody>

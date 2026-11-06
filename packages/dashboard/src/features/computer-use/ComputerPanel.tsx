@@ -182,6 +182,14 @@ export function ComputerPanel({ socket, workspaceId, sessionId, visible }: Props
     void send({ type: 'key', key: [...(event.ctrlKey ? ['Ctrl'] : []), ...(event.altKey ? ['Alt'] : []), ...(event.shiftKey ? ['Shift'] : []), ...(event.metaKey ? ['Super'] : []), key].join('+') })
   }
 
+  const startBlockedReason = !workspaceId || !sessionId ? t('computer.workspaceRequired')
+    : !status ? t('computer.checking')
+    : !status.available ? status.reason ?? t(status.computerUseEnabled === false
+      ? 'computer.adminDisabled'
+      : status.desktopPreviewEnabled === false ? 'computer.previewDisabled' : 'computer.unavailable')
+    : status.active && !(status.automatic && status.sessionId === sessionId) ? t('computer.occupied')
+    : status.manualAuthorizationRequired !== false && !consent ? t('computer.consentRequired')
+    : null
   const panel = (
     <div className="flex h-full min-h-0 flex-col overflow-hidden" data-testid="computer-panel">
       <div className="flex items-center gap-2 bg-card px-3 py-2">
@@ -205,11 +213,10 @@ export function ComputerPanel({ socket, workspaceId, sessionId, visible }: Props
       {error ? <p role="alert" className="break-words px-3 py-2 text-xs text-destructive">{error}</p> : null}
       {!lease.current ? <ScrollArea className="text-xs" contentClassName="space-y-3 p-3 min-h-full">
         <p>{t('computer.description')}</p>
-        {!workspaceId || !sessionId ? <p>{t('computer.workspaceRequired')}</p> : !status?.available ? <p className="break-words text-muted-foreground">{status?.reason ?? t('computer.checking')}</p> : null}
-        {status?.active && !(status.automatic && status.sessionId === sessionId) ? <p className="text-amber-600">{t('computer.occupied')}</p> : null}
         {status?.computerUseEnabled !== false && status?.desktopPreviewEnabled !== false && status?.manualAuthorizationRequired !== false ? <label className="flex items-start gap-2"><input data-testid="computer-consent" type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />{t('computer.consent')}</label> : null}
         {status?.computerUseEnabled !== false && status?.desktopPreviewEnabled !== false ? <label className="flex items-start gap-2"><input type="checkbox" checked={allowAgent} onChange={(event) => setAllowAgent(event.target.checked)} />{t('computer.allowAgent')}</label> : null}
-        <Button data-testid="computer-start" disabled={(status?.manualAuthorizationRequired !== false && !consent) || !status?.available || (status.active && !(status.automatic && status.sessionId === sessionId)) || busy} onClick={() => { void start() }}>{busy ? t('computer.starting') : t('computer.start')}</Button>
+        <Button data-testid="computer-start" aria-describedby={startBlockedReason ? 'computer-start-reason' : undefined} disabled={Boolean(startBlockedReason) || busy} onClick={() => { void start() }}>{busy ? t('computer.starting') : t('computer.start')}</Button>
+        {startBlockedReason ? <p id="computer-start-reason" data-testid="computer-start-reason" className="break-words text-muted-foreground">{startBlockedReason}</p> : null}
       </ScrollArea> : <>
         <div className="flex items-center justify-between gap-2 border-b border-border/50 px-3 py-2 text-xs">
           <span className="text-emerald-600">{t('computer.sharing')}</span>

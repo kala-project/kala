@@ -146,6 +146,21 @@ describe('ConnectionStatus', () => {
     expect(screen.queryByTestId('connection-segment-service-executor')).toBeNull()
   })
 
+  it('retains the open health panel and recent measurements across Session sockets on the same Workspace', () => {
+    const first = socketWithRtt()
+    const view = render(<ConnectionStatus socket={first as never} workspaceId="w1" status="ready" cursor={1} executorConnected onResync={() => {}} />)
+    fireEvent.click(screen.getByTestId('connection-status'))
+    expect(screen.getAllByTestId('connection-health-host-marker').length).toBeGreaterThan(0)
+    const next = {
+      connected: true,
+      timeout: () => ({ emit: (_event: string, _arg: unknown, _callback: (...args: unknown[]) => void) => {} }),
+    }
+    view.rerender(<ConnectionStatus socket={next as never} workspaceId="w1" status="ready" cursor={2} executorConnected onResync={() => {}} />)
+    expect(screen.getByTestId('connection-status-popover')).toBeTruthy()
+    expect(screen.getAllByTestId('connection-health-host-marker').length).toBeGreaterThan(0)
+    expect(screen.getByTestId('connection-headline-latency').textContent).toBe('46 ms')
+  })
+
   it('presents the complete Device to Service to Executor RTT as the headline', async () => {
     const socket = socketWithRtt()
     render(<ConnectionStatus socket={socket as never} status="ready" transport="websocket" cursor={9} workspaceId="w1" executorConnected onResync={() => {}} />)

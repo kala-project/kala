@@ -1754,6 +1754,7 @@ export const resources = {
         loading: 'Loading directories...',
         selectWorkspace: 'Select a workspace.',
         noSubdirectories: 'No subdirectories',
+        showHiddenFiles: 'Show hidden files',
       },
       artifacts: {
         modes: {
@@ -1948,6 +1949,8 @@ export const resources = {
         consent: 'I authorize sharing and controlling this real desktop and any locally attached browser. Screens and page/control information may contain private data. Agent observations are sent to the model and retained with this conversation.',
         allowAgent: 'Also allow this session’s Agent to observe and operate the desktop.',
         start: 'Share desktop', starting: 'Starting…', stop: 'Stop sharing',
+        consentRequired: 'Agree to the desktop sharing consent above to continue.', unavailable: 'Desktop sharing is unavailable on this Workspace.',
+        adminDisabled: 'Computer Use is disabled in administrator Settings.', previewDisabled: 'Desktop preview is disabled in administrator Settings.',
         occupied: 'This desktop is already controlled by another connection. Stop that connection or wait for access to expire.',
         checking: 'Checking availability…', workspaceRequired: 'Select a session with an online Workspace.',
         invalidLease: 'The Executor did not return desktop authorization.',
@@ -1992,10 +1995,11 @@ export const resources = {
           needs_review: 'Dispatch could not be confirmed. Check the conversation before retrying.',
         },
       },
-      sessionFiles: { workspaceFiles: 'Workspace files', files: 'Files', refresh: 'Refresh files', refreshFile: 'Refresh file', offline: 'Workspace Executor is offline.', loadingFiles: 'Loading files', noFiles: 'No files in this workspace.', download: 'Download file', downloadNamed: 'Download {{name}}', copyPath: 'Copy path', copyContent: 'Copy visible content', wordWrap: 'Toggle word wrap', showSource: 'Show source', showPreview: 'Show structured preview', source: 'Source', preview: 'Preview', decreaseFont: 'Decrease file view font size', increaseFont: 'Increase file view font size', currentFont: 'Current file view font size: {{size}}px', close: 'Close file view', readOnly: 'Read-only file view.', fileView: 'File view', loadingFile: 'Loading file', viewTruncated: 'view truncated', text: 'text', tooLarge: 'too large', binary: 'binary', notFound: 'not found', capped: 'Large file view is capped. Full content was not loaded.' },
+      sessionFiles: { showHiddenFiles: 'Show hidden files', workspaceFiles: 'Workspace files', files: 'Files', refresh: 'Refresh files', refreshFile: 'Refresh file', offline: 'Workspace Executor is offline.', loadingFiles: 'Loading files', noFiles: 'No files in this workspace.', download: 'Download file', downloadNamed: 'Download {{name}}', copyPath: 'Copy path', copyContent: 'Copy visible content', wordWrap: 'Toggle word wrap', showSource: 'Show source', showPreview: 'Show structured preview', source: 'Source', preview: 'Preview', decreaseFont: 'Decrease file view font size', increaseFont: 'Increase file view font size', currentFont: 'Current file view font size: {{size}}px', close: 'Close file view', readOnly: 'Read-only file view.', fileView: 'File view', loadingFile: 'Loading file', viewTruncated: 'view truncated', text: 'text', tooLarge: 'too large', binary: 'binary', notFound: 'not found', capped: 'Large file view is capped. Full content was not loaded.' },
       connectionHealth: { measuring: 'Measuring…', title: 'Connection health', subtitle: 'Reachability and round-trip latency', healthy: 'Healthy', check: 'Check connection', issue: 'Connection issue', device: 'Device', service: 'Service', executor: 'Executor', deviceHost: 'Device → Service', hostExecutor: 'Service → Executor', sessionSync: 'Session sync', offline: 'Offline', unavailable: 'Unavailable', timedOut: 'Timed out', notMeasured: 'Not measured', synchronized: 'Synchronized', measureAgain: 'Measure again', resync: 'Resync', diagnostics: 'Diagnostics', transport: 'Transport', unknown: 'unknown', historyTitle: 'Last 10 minutes', historyAria: 'Last 10 minutes connection health chart', historyEmpty: 'Waiting for the first measurement…', legendAria: 'Chart legend', hostLegend: 'Host', executorLegend: 'Executor' },
       taskGraph: { aria: 'Task graph', title: 'Task Graph', revision: 'rev {{revision}}', summary: '{{completed}} completed · {{active}} active · {{ready}} ready · {{blocked}} blocked', readyCount: '{{count}} ready', listView: 'List view', graphView: 'Graph view', active: 'Active', ready: 'Ready', blocked: 'Blocked', done: 'Done', waitingOn: 'waiting on {{ids}}' },
       sessionMetadata: {
+        storageUnavailable: 'Storage inventory is not supported for PostgreSQL and object-backed Sessions in this deployment. Stored data is intact; size measurement and UI cleanup are unavailable.',
         evaluation: 'Evaluation integration', evaluationDescription: 'Exports a private, reference-only task candidate. Session content and workspace paths are excluded; public use still requires explicit review, redaction, and provenance approval.', exportCandidate: 'Export governed task candidate', openEvidence: 'Open linked evaluation evidence',
         tabs: { label: 'Session information', overview: 'Overview', statistics: 'Statistics', storage: 'Storage' },
         statistics: {
@@ -3941,6 +3945,7 @@ export const resources = {
         loading: '正在加载目录...',
         selectWorkspace: '请选择工作区。',
         noSubdirectories: '没有子目录',
+        showHiddenFiles: '显示隐藏文件',
       },
       artifacts: {
         modes: {
@@ -4135,6 +4140,8 @@ export const resources = {
         consent: '我同意共享和操控这台机器的真实桌面及本地接入的浏览器。画面、网页和控件信息可能包含隐私；Agent 观察结果会发送给模型并随会话保留。',
         allowAgent: '同时允许当前会话的 Agent 查看并操控桌面。',
         start: '共享桌面', starting: '正在启动…', stop: '停止共享',
+        consentRequired: '请先同意上方的桌面共享授权。', unavailable: '此工作区无法共享桌面。',
+        adminDisabled: '管理员在设置中关闭了 Computer Use。', previewDisabled: '管理员在设置中关闭了桌面预览。',
         occupied: '其他连接正在操控这台桌面，请先停止该连接或等待授权过期。',
         checking: '正在检查可用性…', workspaceRequired: '请选择关联在线工作区的会话。',
         invalidLease: 'Executor 未返回桌面授权。',
@@ -4178,10 +4185,11 @@ export const resources = {
           needs_review: '无法确认派发结果。重试前请先检查对话。',
         },
       },
-      sessionFiles: { workspaceFiles: '工作区文件', files: '文件', refresh: '刷新文件', refreshFile: '刷新文件内容', offline: '工作区 Executor 已离线。', loadingFiles: '正在加载文件', noFiles: '此工作区中没有文件。', download: '下载文件', downloadNamed: '下载 {{name}}', copyPath: '复制路径', copyContent: '复制可见内容', wordWrap: '切换自动换行', showSource: '显示源码', showPreview: '显示结构化预览', source: '源码', preview: '预览', decreaseFont: '减小文件字体', increaseFont: '增大文件字体', currentFont: '当前文件查看字号：{{size}}px', close: '关闭文件查看器', readOnly: '只读文件查看器。', fileView: '文件查看器', loadingFile: '正在加载文件', viewTruncated: '内容已截断', text: '文本', tooLarge: '文件过大', binary: '二进制', notFound: '未找到', capped: '大型文件预览已限制，未加载完整内容。' },
+      sessionFiles: { showHiddenFiles: '显示隐藏文件', workspaceFiles: '工作区文件', files: '文件', refresh: '刷新文件', refreshFile: '刷新文件内容', offline: '工作区 Executor 已离线。', loadingFiles: '正在加载文件', noFiles: '此工作区中没有文件。', download: '下载文件', downloadNamed: '下载 {{name}}', copyPath: '复制路径', copyContent: '复制可见内容', wordWrap: '切换自动换行', showSource: '显示源码', showPreview: '显示结构化预览', source: '源码', preview: '预览', decreaseFont: '减小文件字体', increaseFont: '增大文件字体', currentFont: '当前文件查看字号：{{size}}px', close: '关闭文件查看器', readOnly: '只读文件查看器。', fileView: '文件查看器', loadingFile: '正在加载文件', viewTruncated: '内容已截断', text: '文本', tooLarge: '文件过大', binary: '二进制', notFound: '未找到', capped: '大型文件预览已限制，未加载完整内容。' },
       connectionHealth: { measuring: '测量中…', title: '连接状况', subtitle: '可达性和往返延迟', healthy: '正常', check: '检查连接', issue: '连接异常', device: '设备', service: 'Service', executor: 'Executor', deviceHost: '设备 → Service', hostExecutor: 'Service → Executor', sessionSync: '会话同步', offline: '离线', unavailable: '不可用', timedOut: '请求超时', notMeasured: '尚未测量', synchronized: '已同步', measureAgain: '重新测量', resync: '重新同步', diagnostics: '诊断信息', transport: '传输协议', unknown: '未知', historyTitle: '最近 10 分钟', historyAria: '最近 10 分钟连接状况图表', historyEmpty: '正在等待首次测量…', legendAria: '图例', hostLegend: 'Host', executorLegend: 'Executor' },
       taskGraph: { aria: '任务图', title: '任务图', revision: '修订 {{revision}}', summary: '已完成 {{completed}} · 进行中 {{active}} · 就绪 {{ready}} · 阻塞 {{blocked}}', readyCount: '{{count}} 个就绪', listView: '列表视图', graphView: '图形视图', active: '进行中', ready: '就绪', blocked: '阻塞', done: '已完成', waitingOn: '等待 {{ids}}' },
       sessionMetadata: {
+        storageUnavailable: '此部署使用 PostgreSQL 和对象存储，暂不支持会话存储统计。已存储数据不受影响，但无法在界面中测量大小或清理。',
         evaluation: '评测集成', evaluationDescription: '导出仅供引用的私有任务候选。导出内容不包含会话内容和工作区路径；公开使用仍需明确审核、脱敏和来源批准。', exportCandidate: '导出受治理的任务候选', openEvidence: '打开关联评测证据',
         tabs: { label: '会话信息', overview: '概览', statistics: '统计', storage: '存储' },
         statistics: {
