@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import type { MessageContent, ReferencedFileContent } from '@agent-kernel/kernel'
 
-export const MAX_MESSAGE_ATTACHMENT_BYTES = 2 * 1024 * 1024
+export const MAX_MESSAGE_ATTACHMENT_BYTES = 16 * 1024 * 1024
 export const MAX_SESSION_ATTACHMENT_BYTES = 64 * 1024 * 1024
 export const MAX_SESSION_ATTACHMENTS = 256
 export const MAX_ATTACHMENT_STORE_BYTES = 512 * 1024 * 1024

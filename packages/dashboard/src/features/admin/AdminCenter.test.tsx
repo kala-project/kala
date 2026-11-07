@@ -111,6 +111,21 @@ it('shows view-only boundaries without exposing organization mutations', async (
   expect(fetchMock).toHaveBeenCalledTimes(1)
 })
 
+it('lets an organization administrator save a per-file limit for all members', async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) === '/organization/attachment-policy' && init?.method === 'PUT') return new Response(null, { status: 204 })
+    return Response.json({ ...policySnapshot, organization: { ...policySnapshot.organization, attachment_max_bytes: 2 * 1024 * 1024 } })
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  render(<AdminCenter onClose={() => {}} />)
+  fireEvent.click(await screen.findByRole('button', { name: i18n.t('admin.tabs.policies') }))
+  fireEvent.change(screen.getByLabelText(i18n.t('attachmentPolicy.label')), { target: { value: String(8 * 1024 * 1024) } })
+  fireEvent.click(screen.getByRole('button', { name: i18n.t('attachmentPolicy.save') }))
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/organization/attachment-policy', expect.objectContaining({
+    method: 'PUT', body: JSON.stringify({ maxBytes: 8 * 1024 * 1024 }),
+  })))
+})
+
 it('edits only session days and requires confirmation before applying cleanup scope', async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     if (String(input) === '/organization/retention' && init?.method === 'PUT') return new Response(null, { status: 204 })

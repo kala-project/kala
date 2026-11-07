@@ -74,6 +74,8 @@ describe('image message policy', () => {
     })
     expect(validateInlineMessageFiles([{ ...file(1), data: 'invalid!' }])).toMatchObject({ ok: false, error: { code: 'FILE_INVALID_BASE64' } })
     expect(validateInlineMessageFiles([file(MAX_FILE_DECODED_BYTES + 1)])).toMatchObject({ ok: false, error: { code: 'FILE_TOO_LARGE' } })
+    expect(validateInlineMessageFiles([file(4 * 1024 * 1024)], 4 * 1024 * 1024)).toMatchObject({ ok: true })
+    expect(validateInlineMessageFiles([file(4 * 1024 * 1024 + 1)], 4 * 1024 * 1024)).toMatchObject({ ok: false, error: { code: 'FILE_TOO_LARGE' } })
     expect(validateInlineMessageFiles(Array.from({ length: 9 }, () => file(1)))).toMatchObject({ ok: false, error: { code: 'FILE_COUNT_EXCEEDED' } })
   })
 

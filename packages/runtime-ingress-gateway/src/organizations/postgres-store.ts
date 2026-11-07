@@ -4,7 +4,7 @@ import type { AuthenticatedIdentity } from '../assignments/store.js'
 import { identityKey, inviteKey } from '../assignments/store.js'
 import type { SqlExecutor } from '../persistence/postgres.js'
 import { ACTIVE_CONTRACT_SQL } from './contract-access.js'
-import { assertInviteExpiration, normalizeInviteEmail, type CreatedOrganizationInvite, type Organization, type OrganizationAccess, type OrganizationInvite, type OrganizationMembership, type OrganizationRole, type OrganizationStatus, type OrganizationStore } from './store.js'
+import { assertInviteExpiration, isAllowedAttachmentLimit, normalizeInviteEmail, type CreatedOrganizationInvite, type Organization, type OrganizationAccess, type OrganizationInvite, type OrganizationMembership, type OrganizationRole, type OrganizationStatus, type OrganizationStore } from './store.js'
 
 export class PostgresOrganizationStore implements OrganizationStore {
   constructor(
@@ -22,7 +22,7 @@ export class PostgresOrganizationStore implements OrganizationStore {
     const result = await this.database.query<AccessRow>(`
       SELECT o.id, o.name,
         CASE WHEN o.status = 'active' AND NOT ${ACTIVE_CONTRACT_SQL} THEN 'expired' ELSE o.status END AS status,
-        o.runtime_unit_id, o.created_at, m.role, m.created_at AS membership_created_at
+        o.runtime_unit_id, o.created_at, o.attachment_max_bytes, m.role, m.created_at AS membership_created_at
       FROM principals p
       JOIN organization_memberships m ON m.principal_id = p.id AND m.status = 'active'
       JOIN organizations o ON o.id = m.organization_id
@@ -206,7 +206,7 @@ export class PostgresOrganizationStore implements OrganizationStore {
 
   async administrationSnapshot(organizationId: string): Promise<Record<string, unknown>> {
     const queries = await Promise.all([
-      this.database.query('SELECT id,name,status,runtime_unit_id,authorization_version,created_at,updated_at FROM organizations WHERE id=$1', [organizationId]),
+      this.database.query('SELECT id,name,status,runtime_unit_id,attachment_max_bytes,authorization_version,created_at,updated_at FROM organizations WHERE id=$1', [organizationId]),
       this.database.query('SELECT contract_reference,support_tier,starts_at,ends_at,grace_ends_at,seat_limit,concurrent_session_limit,workspace_limit,monthly_token_limit,storage_bytes_limit FROM contract_entitlements WHERE organization_id=$1', [organizationId]),
       this.database.query('SELECT session_days,artifact_days,audit_days,deleted_resource_grace_days,version,updated_at FROM retention_policies WHERE organization_id=$1', [organizationId]),
       this.database.query(`SELECT COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens),0)::text AS tokens,COUNT(DISTINCT session_id)::int AS sessions,COUNT(*)::int AS entries FROM usage_ledger WHERE organization_id=$1 AND occurred_at>=date_trunc('month',now())`, [organizationId]),
@@ -237,16 +237,29 @@ export class PostgresOrganizationStore implements OrganizationStore {
     const result = await this.database.query(`UPDATE retention_policies SET session_days=$2,version=version+1,updated_at=now() WHERE organization_id=$1`, [organizationId, policy.sessionDays])
     if (result.rowCount !== 1) throw new Error('retention_policy_not_found')
   }
+
+  async updateAttachmentLimit(organizationId: string, maxBytes: number, actor: AuthenticatedIdentity): Promise<void> {
+    if (!isAllowedAttachmentLimit(maxBytes)) throw new Error('invalid_attachment_limit')
+    await this.database.transaction(async (transaction) => {
+      const current = await transaction.query<{ attachment_max_bytes: number }>('SELECT attachment_max_bytes FROM organizations WHERE id=$1 FOR UPDATE', [organizationId])
+      if (!current.rows[0]) throw new Error('organization not found')
+      await transaction.query('UPDATE organizations SET attachment_max_bytes=$2,updated_at=now() WHERE id=$1', [organizationId, maxBytes])
+      await transaction.query(`INSERT INTO audit_events(id,organization_id,actor_principal_id,actor_kind,action,target_type,target_id,result,metadata)
+        VALUES ($1,$2,(SELECT id FROM principals WHERE issuer=$3 AND subject=$4),'human','organization.attachment_limit.update','organization',$2,'succeeded',$5::jsonb)`,
+      [`aud_${randomBytes(13).toString('hex')}`, organizationId, actor.issuer, actor.subject,
+        JSON.stringify({ previousMaxBytes: current.rows[0].attachment_max_bytes, maxBytes })])
+    })
+  }
 }
 
-type AccessRow = { id: string; name: string; status: OrganizationStatus; runtime_unit_id: string; created_at: Date; role: OrganizationRole; membership_created_at: Date }
+type AccessRow = { id: string; name: string; status: OrganizationStatus; runtime_unit_id: string; attachment_max_bytes: number; created_at: Date; role: OrganizationRole; membership_created_at: Date }
 type MemberRow = { issuer: string; subject: string; display_name: string | null; email: string | null; role: OrganizationRole; created_at: Date }
 type MemberRoleRow = { issuer: string; subject: string; role: OrganizationRole }
 type InviteRow = { id: string; organization_id: string; email_normalized: string; role: Exclude<OrganizationRole, 'owner'>; created_at: Date; expires_at: Date; accepted_at: Date | null; revoked_at: Date | null }
 type AcceptInviteRow = { id: string; organization_id: string; email_normalized: string; role: Exclude<OrganizationRole, 'owner'>; name: string; status: OrganizationStatus; runtime_unit_id: string; organization_created_at: Date }
 
 function accessFromRow(row: AccessRow, identity: AuthenticatedIdentity): OrganizationAccess {
-  const organization: Organization = { id: row.id, name: row.name, unitId: row.runtime_unit_id, status: row.status, createdAt: row.created_at.toISOString() }
+  const organization: Organization = { id: row.id, name: row.name, unitId: row.runtime_unit_id, status: row.status, createdAt: row.created_at.toISOString(), attachmentMaxBytes: row.attachment_max_bytes }
   return { organization, membership: { organizationId: row.id, identity, role: row.role, createdAt: row.membership_created_at.toISOString() } }
 }
 function inviteFromRow(row: InviteRow): OrganizationInvite {

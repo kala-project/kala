@@ -47,6 +47,54 @@ const running: Array<{ close(): Promise<void> }> = []
 afterEach(async () => { await Promise.all(running.splice(0).map((server) => server.close())) })
 
 describe('Private Cloud edge request path', () => {
+  it('scopes attachment limits to the organization, refuses member edits, and replaces forged Runtime limits', async () => {
+    const observed: string[] = []
+    const upstream = createServer((request, response) => {
+      observed.push(String(request.headers['x-agent-runlab-attachment-max-bytes']))
+      response.writeHead(200).end()
+    })
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve))
+    running.push({ close: () => new Promise<void>((resolve) => upstream.close(() => resolve())) })
+    const address = upstream.address()
+    const originHost = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`
+    const organizations = new TestOrganizationStore()
+    const owner = { issuer: 'https://identity.test', subject: 'owner' }
+    const access = await organizations.getOrCreateForIdentity(owner)
+    const member = { ...owner, subject: 'member' }
+    await organizations.addMember(access.organization.id, member, 'member')
+    const otherOwner = { ...owner, subject: 'other-owner' }
+    await organizations.getOrCreateForIdentity(otherOwner)
+    const sessionFor = async (identity: typeof owner): Promise<{ origin: string; cookie: string }> => {
+      const gateway = await createGateway(originHost, undefined, { organizations, callbackIdentity: () => identity })
+      const origin = `http://127.0.0.1:${gateway.port}`
+      const login = await fetch(`${origin}/auth/login`, { redirect: 'manual' })
+      const callback = await fetch(`${origin}/auth/callback?code=ok`, {
+        headers: { cookie: `ak_login=${cookieValue(login.headers.getSetCookie(), 'ak_login')}` }, redirect: 'manual',
+      })
+      return { origin, cookie: `ak_session=${cookieValue(callback.headers.getSetCookie(), 'ak_session')}` }
+    }
+    const ownerSession = await sessionFor(owner)
+    const memberSession = await sessionFor(member)
+    const otherSession = await sessionFor(otherOwner)
+    const policy = async ({ origin, cookie }: { origin: string; cookie: string }) =>
+      fetch(`${origin}/organization/attachment-policy`, { headers: { cookie } }).then((response) => response.json())
+    const update = (session: { origin: string; cookie: string }, value: unknown, origin = session.origin) =>
+      fetch(`${session.origin}/organization/attachment-policy`, {
+        method: 'PUT', headers: { cookie: session.cookie, origin, 'content-type': 'application/json' },
+        body: JSON.stringify({ maxBytes: value }),
+      })
+    expect(await policy(ownerSession)).toEqual({ maxBytes: 2 * 1024 * 1024 })
+    expect((await update(memberSession, 8 * 1024 * 1024)).status).toBe(403)
+    expect((await update(ownerSession, 8 * 1024 * 1024, 'https://evil.test')).status).toBe(403)
+    expect((await update(ownerSession, 3 * 1024 * 1024)).status).toBe(400)
+    expect((await update(ownerSession, 8 * 1024 * 1024)).status).toBe(204)
+    expect(await policy(memberSession)).toEqual({ maxBytes: 8 * 1024 * 1024 })
+    expect(await policy(otherSession)).toEqual({ maxBytes: 2 * 1024 * 1024 })
+    expect((await fetch(`${memberSession.origin}/memo`, {
+      headers: { cookie: memberSession.cookie, 'x-agent-runlab-attachment-max-bytes': '16777216' },
+    })).status).toBe(200)
+    expect(observed.at(-1)).toBe(String(8 * 1024 * 1024))
+  })
   it('routes Socket.IO Admin assets to Runtime only for the Dedicated Owner, never a Private Cloud organization Owner', async () => {
     let reads = 0
     const upstream = createServer((request, response) => {

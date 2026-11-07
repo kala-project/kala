@@ -8,7 +8,7 @@ export type OrganizationPermission = 'runtime:read' | 'runtime:write' | 'workspa
 // `expired` is an effective authorization status, not a persisted organizations.status.
 export type OrganizationStatus = 'provisioning' | 'active' | 'expired' | 'suspended' | 'closing' | 'closed'
 
-export type Organization = { id: string; name: string; unitId: string; status: OrganizationStatus; createdAt: string }
+export type Organization = { id: string; name: string; unitId: string; status: OrganizationStatus; createdAt: string; attachmentMaxBytes?: number }
 export type OrganizationMembership = { organizationId: string; identity: AuthenticatedIdentity; role: OrganizationRole; createdAt: string }
 export type OrganizationAccess = { organization: Organization; membership: OrganizationMembership }
 export type OrganizationInvite = { id: string; organizationId: string; email: string; role: Exclude<OrganizationRole, 'owner'>; createdAt: string; expiresAt: string; acceptedAt?: string; revokedAt?: string }
@@ -31,6 +31,7 @@ export interface OrganizationStore {
   findUnitByExecutorRouteHint(inviteHash: string): Promise<string | undefined>
   administrationSnapshot?(organizationId: string): Promise<Record<string, unknown>>
   updateRetentionPolicy?(organizationId: string, policy: { sessionDays: number; artifactDays: number; auditDays: number; deletedResourceGraceDays: number }): Promise<void>
+  updateAttachmentLimit?(organizationId: string, maxBytes: number, actor: AuthenticatedIdentity): Promise<void>
 }
 
 const ROLE_PERMISSIONS: Record<OrganizationRole, ReadonlySet<OrganizationPermission>> = {
@@ -65,6 +66,13 @@ export class MemoryOrganizationStore implements OrganizationStore {
     const membership = this.memberships.get(identityKey(identity))
     const organization = membership ? this.organizations.get(membership.organizationId) : undefined
     return membership && organization ? { organization, membership } : undefined
+  }
+
+  async updateAttachmentLimit(organizationId: string, maxBytes: number): Promise<void> {
+    if (!isAllowedAttachmentLimit(maxBytes)) throw new Error('invalid_attachment_limit')
+    const organization = this.organizations.get(organizationId)
+    if (!organization) throw new Error('organization not found')
+    this.organizations.set(organizationId, { ...organization, attachmentMaxBytes: maxBytes })
   }
 
   async listMembers(organizationId: string): Promise<readonly OrganizationMembership[]> {
@@ -147,6 +155,11 @@ export class MemoryOrganizationStore implements OrganizationStore {
 }
 
 export function newOrganizationId(): string { return `org_${randomBytes(13).toString('hex')}` }
+
+export const DEFAULT_ATTACHMENT_LIMIT = 2 * 1024 * 1024
+export function isAllowedAttachmentLimit(value: unknown): value is number {
+  return typeof value === 'number' && [2, 4, 8, 16].some((mib) => value === mib * 1024 * 1024)
+}
 
 export function normalizeInviteEmail(email: string): string {
   const normalized = email.trim().toLowerCase()

@@ -11,6 +11,7 @@
  * mapping only.
  */
 
+import { effectiveAttachmentLimit } from '../message-attachment-policy.js'
 import type {
   ClientCancel,
   ClientCancelStream,
@@ -1358,7 +1359,14 @@ export function configureDashboardNamespace(
       if (!p) { ack?.({ ok: false, error: 'INVALID_MESSAGE: invalid payload' }); return }
       const imageValidation = validateInlineMessageImages(p.content)
       if (!imageValidation.ok) { ack?.({ ok: false, error: `${imageValidation.error.code}: ${imageValidation.error.message}` }); return }
-      const fileValidation = validateInlineMessageFiles(p.content)
+      let maxAttachmentBytes: number
+      try {
+        maxAttachmentBytes = effectiveAttachmentLimit(socket.handshake.headers, deps.auth?.requireIngressIdentity === true && auditActor(socket).kind === 'ingress')
+      } catch (error) {
+        ack?.({ ok: false, error: error instanceof Error ? error.message : String(error) })
+        return
+      }
+      const fileValidation = validateInlineMessageFiles(p.content, maxAttachmentBytes)
       if (!fileValidation.ok) { ack?.({ ok: false, error: `${fileValidation.error.code}: ${fileValidation.error.message}` }); return }
       const result = await runOperation('client:user_message', p.sessionId, p.operationId, p, async () => {
         deps.audit?.log({ action: 'dashboard.user_message', actor: auditActor(socket), target: { sessionId: p.sessionId }, outcome: 'ok', metadata: { messageBytes: Buffer.byteLength(p.text, 'utf8'), mode: p.mode ?? 'steer', intent: p.intent } })

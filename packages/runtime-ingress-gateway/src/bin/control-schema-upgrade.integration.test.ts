@@ -11,9 +11,9 @@ import { createPostgresControlPlaneDatabase, migrateControlPlane, readControlPla
 const exec = promisify(execFile)
 const integration = process.env.KALA_RUN_POSTGRES_INTEGRATION === '1' ? describe : describe.skip
 
-integration('control schema 10-to-11 on isolated PostgreSQL', () => {
+integration('control schema 10-to-12 on isolated PostgreSQL', () => {
   it('preserves existing browser sessions and rejects replay or altered source history', async () => {
-    const name = `kala-control-10-11-${randomUUID()}`
+    const name = `kala-control-10-12-${randomUUID()}`
     const password = randomUUID()
     const installationId = randomUUID()
     const checkpointId = randomUUID()
@@ -24,7 +24,7 @@ integration('control schema 10-to-11 on isolated PostgreSQL', () => {
       const migrations = await readControlPlaneMigrations(resolve('migrations'))
       const plan = validateControlUpgradePlan({
         fromVersion: 10,
-        toVersion: 11,
+        toVersion: 12,
         writerRole: 'kala_gateway',
         migrations: migrationIdentities(migrations),
       }, migrations)
@@ -83,7 +83,7 @@ integration('control schema 10-to-11 on isolated PostgreSQL', () => {
       await expect(migrateControlPlane(database, migrations, {
         beforeApply: (tx) => assertControlUpgradeSource(tx, plan, installationId, 16, true),
         afterApply: (tx) => grantControlWriter(tx, plan.writerRole),
-      })).resolves.toBe(11)
+      })).resolves.toBe(12)
       expect((await database.query<{ identity_profile: unknown; token_hash: string }>(
         "SELECT identity_profile, token_hash FROM browser_sessions WHERE id='bs_upgrade'")).rows[0])
         .toMatchObject({ identity_profile: null, token_hash: 'upgrade-token' })
@@ -93,7 +93,7 @@ integration('control schema 10-to-11 on isolated PostgreSQL', () => {
       await expect(migrateControlPlane(database, migrations, {
         beforeApply: (tx) => assertControlUpgradeSource(tx, plan, installationId, 16, true),
       })).rejects.toThrow('Source migration history differs')
-      expect((await database.health()).schemaVersion).toBe(11)
+      expect((await database.health()).schemaVersion).toBe(12)
     } finally {
       await database?.close()
       await admin?.close()

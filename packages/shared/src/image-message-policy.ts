@@ -6,8 +6,9 @@ export const MAX_MESSAGE_IMAGES = 4
 export const MAX_IMAGE_DECODED_BYTES = 2 * 1024 * 1024
 export const MAX_MESSAGE_IMAGE_BYTES = 4 * 1024 * 1024
 export const MAX_MESSAGE_FILES = 8
-export const MAX_FILE_DECODED_BYTES = 2 * 1024 * 1024
-export const MAX_MESSAGE_FILE_BYTES = 4 * 1024 * 1024
+export const DEFAULT_FILE_DECODED_BYTES = 2 * 1024 * 1024
+export const MAX_FILE_DECODED_BYTES = 16 * 1024 * 1024
+export const MAX_MESSAGE_FILE_BYTES = 16 * 1024 * 1024
 export const IMAGE_COMPRESSION_MAX_EDGE = 2048
 export const IMAGE_COMPRESSION_QUALITY = 0.82
 
@@ -78,7 +79,7 @@ export function validateInlineMessageImages(content: readonly MessageContent[] |
   return { ok: true, imageCount: images.length, decodedImageBytes: total }
 }
 
-export function validateInlineMessageFiles(content: readonly MessageContent[] | undefined): FileMessagePolicyResult {
+export function validateInlineMessageFiles(content: readonly MessageContent[] | undefined, maxFileBytes = DEFAULT_FILE_DECODED_BYTES): FileMessagePolicyResult {
   const files = (content ?? []).filter((block): block is FileContent => block.type === 'file')
   if (files.length > MAX_MESSAGE_FILES) {
     return failure('FILE_COUNT_EXCEEDED', `A message can contain at most ${MAX_MESSAGE_FILES} files.`)
@@ -87,12 +88,12 @@ export function validateInlineMessageFiles(content: readonly MessageContent[] | 
   for (const file of files) {
     const bytes = 'source' in file ? file.source.bytes : decodedBase64Bytes(file.data)
     if (bytes === null) return failure('FILE_INVALID_BASE64', `Attached file "${file.name}" contains invalid base64 data.`)
-    if (bytes > MAX_FILE_DECODED_BYTES) {
-      return failure('FILE_TOO_LARGE', `Each attached file must be at most ${formatMiB(MAX_FILE_DECODED_BYTES)}.`)
+    if (bytes > maxFileBytes) {
+      return failure('FILE_TOO_LARGE', `Each attached file must be at most ${formatMiB(maxFileBytes)}.`)
     }
     total += bytes
-    if (total > MAX_MESSAGE_FILE_BYTES) {
-      return failure('MESSAGE_FILES_TOO_LARGE', `Files in one message must total at most ${formatMiB(MAX_MESSAGE_FILE_BYTES)}.`)
+    if (total > Math.max(4 * 1024 * 1024, maxFileBytes)) {
+      return failure('MESSAGE_FILES_TOO_LARGE', `Files in one message must total at most ${formatMiB(Math.max(4 * 1024 * 1024, maxFileBytes))}.`)
     }
   }
   return { ok: true, fileCount: files.length, decodedFileBytes: total }

@@ -117,7 +117,7 @@ export const HostAttachmentReferenceSchema = z.object({
   kind: z.literal('host_ref'),
   attachmentId: z.string().uuid(),
   sha256: z.string().regex(/^[a-f0-9]{64}$/u),
-  bytes: z.number().int().positive().max(2 * 1024 * 1024),
+  bytes: z.number().int().positive().max(16 * 1024 * 1024),
 }).strict()
 
 export const ReferencedFileContentSchema = z.object({

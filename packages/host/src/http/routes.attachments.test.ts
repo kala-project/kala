@@ -31,6 +31,7 @@ describe('message attachment upload route', () => {
       sessionId: 'session-1',
       config: createConfig({ tools: [], systemPrompt: 'test' }),
     })
+
     const messageAttachments = new MessageAttachmentStore(join(root, 'message-attachments'))
     const acceptedOperations = new Set<string>()
     server = createServer()
@@ -276,5 +277,28 @@ describe('message attachment upload route', () => {
     })
     expect(response.status).toBe(400)
     expect(await response.text()).toContain('cannot send binary attachment')
+  })
+
+  it('enforces the trusted per-organization upload size while keeping the legacy default', async () => {
+    const sessions = new SessionStore(join(root, 'sessions'))
+    await sessions.create({
+      sessionId: 'organization-session', config: createConfig({ tools: [], systemPrompt: 'test' }),
+      organizationId: 'org_test', principal: 'principal_test', organizationRole: 'member',
+    })
+    const messageAttachments = new MessageAttachmentStore(join(root, 'message-attachments'))
+    server = createServer()
+    attachJsonRoutes(server, { models: [], defaultModel: '', sessions, messageAttachments, auth: { requireIngressIdentity: true } })
+    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    if (!address || typeof address === 'string') throw new Error('test server did not bind')
+    const url = `http://127.0.0.1:${address.port}/runtime/attachments?sessionId=organization-session`
+    const body = Buffer.alloc(3 * 1024 * 1024, 0x61)
+    const headers = { 'x-agent-runlab-principal': 'principal_test', 'x-agent-runlab-organization-id': 'org_test',
+      'x-agent-runlab-organization-role': 'member', 'x-agent-runlab-attachment-name': 'large.txt', 'content-type': 'text/plain' }
+    expect((await fetch(url, { method: 'POST', headers, body })).status).toBe(413)
+    const allowed = await fetch(url, { method: 'POST', headers: { ...headers, 'x-agent-runlab-attachment-max-bytes': String(4 * 1024 * 1024) }, body })
+    expect(allowed.status).toBe(201)
+    expect((await allowed.json() as { file: ReferencedFileContent }).file.source).toMatchObject({ bytes: body.length })
+    expect((await fetch(url, { method: 'POST', headers: { ...headers, 'x-agent-runlab-attachment-max-bytes': String(2 * 1024 * 1024) }, body })).status).toBe(413)
   })
 })

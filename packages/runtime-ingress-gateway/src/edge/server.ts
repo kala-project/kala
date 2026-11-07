@@ -11,7 +11,7 @@ import { createOnlineTelemetryFromEnv, type OnlineTelemetry } from '@agent-kerne
 import type { LoginStateStore } from '../auth/login-state-store.js'
 import type { OidcClient } from '../auth/oidc-client.js'
 import { inviteKey, type AuthenticatedIdentity, type RuntimeAssignmentStore } from '../assignments/store.js'
-import { permits, type OrganizationAccess, type OrganizationStore } from '../organizations/store.js'
+import { DEFAULT_ATTACHMENT_LIMIT, isAllowedAttachmentLimit, permits, type OrganizationAccess, type OrganizationStore } from '../organizations/store.js'
 import { browserDeviceFromUserAgent, browserSessionTokenHash, isLive, type BrowserSession, type BrowserSessionStore } from '../auth/browser-session-store.js'
 import type { SessionSecretBox } from '../auth/session-secret-box.js'
 import type { EnterpriseSsoResolver } from '../auth/enterprise-sso.js'
@@ -947,6 +947,7 @@ export async function startRuntimeIngressGateway(options: {
       delete request.headers['x-agent-runlab-organization-id']
       delete request.headers['x-agent-runlab-organization-role']
       delete request.headers['x-agent-runlab-principal']
+      delete request.headers['x-agent-runlab-attachment-max-bytes']
       request.headers['x-agent-runlab-runtime-unit'] = unitId
       request.headers['x-agent-runlab-ingress-secret'] = options.ingressSecret
       request.headers['x-agent-runlab-organization-id'] = organizationId
@@ -954,6 +955,7 @@ export async function startRuntimeIngressGateway(options: {
         ? (write ? 'member' : 'viewer')
         : organizationAccess!.membership.role
       request.headers['x-agent-runlab-principal'] = principal
+      if (organizationAccess) request.headers['x-agent-runlab-attachment-max-bytes'] = String(organizationAccess.organization.attachmentMaxBytes ?? DEFAULT_ATTACHMENT_LIMIT)
       const runtimeOrigin = await resolveRuntimeOrigin(unitId)
       proxy.web(request, response, { target: runtimeOrigin }, () => {
         if (!response.headersSent) apiGatewayError(response, 502, 'internal_error', 'Runtime API is unavailable')
@@ -986,6 +988,40 @@ export async function startRuntimeIngressGateway(options: {
         ...(administration ?? {}),
         invites,
       })); return
+    }
+    if (url.pathname === '/organization/attachment-policy' && organizationAccess && options.organizations) {
+      if (request.method === 'GET') {
+        response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        response.end(JSON.stringify({ maxBytes: organizationAccess.organization.attachmentMaxBytes ?? DEFAULT_ATTACHMENT_LIMIT }))
+        return
+      }
+      if (request.method === 'PUT') {
+        if (!requireSameOriginWhenPresent(request, response)) return
+        if (!permits(organizationAccess.membership.role, 'policy:manage')) {
+          response.writeHead(403, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+          response.end(JSON.stringify({ error: 'forbidden' }))
+          return
+        }
+        if (!options.organizations.updateAttachmentLimit) {
+          response.writeHead(501, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+          response.end(JSON.stringify({ error: 'attachment_policy_not_supported' }))
+          return
+        }
+        let body: unknown
+        try { body = JSON.parse((await readRequestBody(request)).toString('utf8')) } catch {
+          response.writeHead(400, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+          response.end(JSON.stringify({ error: 'invalid_attachment_limit' }))
+          return
+        }
+        const maxBytes = body !== null && typeof body === 'object' && 'maxBytes' in body ? body.maxBytes : undefined
+        if (!isAllowedAttachmentLimit(maxBytes)) {
+          response.writeHead(400, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+          response.end(JSON.stringify({ error: 'invalid_attachment_limit' }))
+          return
+        }
+        await options.organizations.updateAttachmentLimit(organizationAccess.organization.id, maxBytes, identity!)
+        response.writeHead(204, { 'cache-control': 'no-store' }); response.end(); return
+      }
     }
     if (url.pathname === '/organization/retention' && request.method === 'PUT' && organizationAccess && options.organizations?.updateRetentionPolicy) {
       if (!requireSameOriginWhenPresent(request, response)) return
@@ -1129,6 +1165,7 @@ export async function startRuntimeIngressGateway(options: {
     delete request.headers['x-agent-runlab-organization-id']
     delete request.headers['x-agent-runlab-organization-role']
     delete request.headers['x-agent-runlab-principal']
+    delete request.headers['x-agent-runlab-attachment-max-bytes']
     delete request.headers['x-agent-runlab-route-session-id']
     request.headers['x-agent-runlab-runtime-unit'] = assignment.unitId
     request.headers['x-agent-runlab-ingress-secret'] = options.ingressSecret
@@ -1136,6 +1173,7 @@ export async function startRuntimeIngressGateway(options: {
       request.headers['x-agent-runlab-organization-id'] = organizationAccess.organization.id
       request.headers['x-agent-runlab-organization-role'] = organizationAccess.membership.role
       request.headers['x-agent-runlab-principal'] = Buffer.from(`${identity.issuer}\0${identity.subject}`, 'utf8').toString('base64url')
+      request.headers['x-agent-runlab-attachment-max-bytes'] = String(organizationAccess.organization.attachmentMaxBytes ?? DEFAULT_ATTACHMENT_LIMIT)
     }
     let runtimeOrigin: string
     let replayBody: Buffer | undefined
@@ -1210,6 +1248,7 @@ export async function startRuntimeIngressGateway(options: {
             'x-agent-runlab-organization-id': organizationAccess.organization.id,
             'x-agent-runlab-organization-role': organizationAccess.membership.role,
             'x-agent-runlab-principal': Buffer.from(`${identity!.issuer}\0${identity!.subject}`, 'utf8').toString('base64url'),
+            'x-agent-runlab-attachment-max-bytes': String(organizationAccess.organization.attachmentMaxBytes ?? DEFAULT_ATTACHMENT_LIMIT),
           } : {}),
         }, body, options.runtimeTls)
       let text = upstream.body.toString('utf8')
@@ -1342,6 +1381,7 @@ export async function startRuntimeIngressGateway(options: {
     delete request.headers['x-agent-runlab-organization-id']
     delete request.headers['x-agent-runlab-organization-role']
     delete request.headers['x-agent-runlab-principal']
+    delete request.headers['x-agent-runlab-attachment-max-bytes']
     delete request.headers['x-agent-runlab-route-session-id']
     if (routeSessionId) request.headers['x-agent-runlab-route-session-id'] = routeSessionId
     delete request.headers['x-kala-executor-route']
@@ -1353,6 +1393,7 @@ export async function startRuntimeIngressGateway(options: {
       request.headers['x-agent-runlab-organization-id'] = organizationAccess.organization.id
       request.headers['x-agent-runlab-organization-role'] = organizationAccess.membership.role
       request.headers['x-agent-runlab-principal'] = Buffer.from(`${identity!.issuer}\0${identity!.subject}`, 'utf8').toString('base64url')
+      request.headers['x-agent-runlab-attachment-max-bytes'] = String(organizationAccess.organization.attachmentMaxBytes ?? DEFAULT_ATTACHMENT_LIMIT)
     }
     if (session && organizationAccess && !executorEnrollment) monitorBrowserSocket(socket, session, organizationAccess, routeCurrent)
     else if (executorEnrollment) monitorExecutorSocket(socket, executorInvite ? inviteKey(executorInvite) : routeHint!, unitId, routeCurrent)

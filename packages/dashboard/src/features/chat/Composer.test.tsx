@@ -50,6 +50,7 @@ function renderComposer(props?: {
   simpleFooterExtras?: React.ReactNode
   leftAccessory?: React.ReactNode
   onOpenVoiceSettings?: () => void
+  organizationManagedAttachments?: boolean
 }) {
   return render(
     <Composer
@@ -64,6 +65,7 @@ function renderComposer(props?: {
       queuedMessages={props?.queuedMessages ?? []}
       displayPrefs={props?.displayPrefs}
       disabled={props?.disabled}
+      organizationManagedAttachments={props?.organizationManagedAttachments}
       serviceUnavailable={props?.serviceUnavailable}
       workspaceUnavailable={props?.workspaceUnavailable}
       workspaceOnline={props?.workspaceOnline}
@@ -1654,6 +1656,39 @@ describe('Composer', () => {
     expect((await screen.findByTestId('composer-toast')).textContent).toContain('at most 4 images')
     expect(screen.queryByTestId('pasted-image-tray')).toBeNull()
     expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('shows oversized file feedback next to the attachment area and clears it after a valid selection', async () => {
+    renderComposer()
+    fireEvent.change(screen.getByTestId('composer-file-input'), {
+      target: { files: [new File([new Uint8Array(2 * 1024 * 1024 + 1)], 'too-large.txt', { type: 'text/plain' })] },
+    })
+
+    expect((await screen.findByTestId('attachment-error')).textContent).toContain('at most 2.0 MB')
+    expect(screen.getByTestId('composer-full-shell').contains(screen.getByTestId('attachment-error'))).toBe(true)
+    expect(screen.queryByTestId('composer-toast')).toBeNull()
+    fireEvent.change(screen.getByTestId('composer-file-input'), {
+      target: { files: [new File(['ok'], 'small.txt', { type: 'text/plain' })] },
+    })
+    await screen.findByTestId('attachment-tray')
+    expect(screen.queryByTestId('attachment-error')).toBeNull()
+  })
+
+  it('uses the organization attachment limit and rejects files beyond it next to the tray', async () => {
+    const fetchPolicy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ maxBytes: 4 * 1024 * 1024 }), { status: 200 }))
+    try {
+      renderComposer({ organizationManagedAttachments: true })
+      await waitFor(() => expect(fetchPolicy).toHaveBeenCalledWith('/organization/attachment-policy', expect.objectContaining({ cache: 'no-store' })))
+      fireEvent.change(screen.getByTestId('composer-file-input'), {
+        target: { files: [new File([new Uint8Array(4 * 1024 * 1024 + 1)], 'too-large.txt', { type: 'text/plain' })] },
+      })
+      expect((await screen.findByTestId('attachment-error')).textContent).toContain('at most 4.0 MB')
+      fireEvent.change(screen.getByTestId('composer-file-input'), {
+        target: { files: [new File([new Uint8Array(3 * 1024 * 1024)], 'allowed.txt', { type: 'text/plain' })] },
+      })
+      await screen.findByTestId('attachment-tray')
+      expect(screen.queryByTestId('attachment-error')).toBeNull()
+    } finally { fetchPolicy.mockRestore() }
   })
 
   it('keeps an oversized pasted image and explains why it cannot be sent', async () => {

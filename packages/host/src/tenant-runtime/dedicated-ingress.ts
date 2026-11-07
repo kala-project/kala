@@ -7,6 +7,7 @@ import type { Socket } from 'node:net'
 
 import { schema, validateClientMessagePayload, validateInlineMessageFiles, validateInlineMessageImages, type PublicUrlPattern } from '@agent-kernel/shared'
 import { authenticateDashboardHandshake, type AuthConfig, type DashboardActor } from '../auth-control.js'
+import { effectiveAttachmentLimit } from '../message-attachment-policy.js'
 import { createRuntimeUnitIngress } from './runtime-unit-ingress.js'
 import { AdmissionBackpressureError, DedicatedAdmissionLedger, type AdmissionMessage } from './dedicated-admission-ledger.js'
 import { DEDICATED_RUNTIME_UNIT_ID } from './dedicated-unit.js'
@@ -360,7 +361,7 @@ async function acceptAdmission(
   if (!parsed.success) throw new AdmissionHttpError(400, 'invalid admission message')
   const imageValidation = validateInlineMessageImages(parsed.data.content)
   if (!imageValidation.ok) throw new AdmissionHttpError(400, `${imageValidation.error.code}: ${imageValidation.error.message}`)
-  const fileValidation = validateInlineMessageFiles(parsed.data.content)
+  const fileValidation = validateInlineMessageFiles(parsed.data.content, effectiveAttachmentLimit(request.headers, auth?.requireIngressIdentity === true && authenticated.actor.kind === 'ingress'))
   if (!fileValidation.ok) throw new AdmissionHttpError(400, `${fileValidation.error.code}: ${fileValidation.error.message}`)
   const message: AdmissionMessage = {
     schemaVersion: 1, principalDigest: principalDigest(authenticated.actor), unitId: 'local',

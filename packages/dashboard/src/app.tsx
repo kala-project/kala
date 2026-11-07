@@ -2677,6 +2677,7 @@ export function App(): JSX.Element {
                           allowApprovalMode={currentAgentRuntimeCapabilities.approvalMode}
                           allowQueue={currentAgentRuntimeCapabilities.queue}
                           allowAttachments={currentAgentRuntimeCapabilities.attachments}
+                          organizationManagedAttachments={platformMode}
                           state={session.state}
                           config={session.config}
                           contextSnapshot={session.contextSnapshot}

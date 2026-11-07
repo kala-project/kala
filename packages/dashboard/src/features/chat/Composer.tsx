@@ -8,8 +8,7 @@ import type { TFunction } from 'i18next'
 import {
   MAX_MESSAGE_IMAGES,
   MAX_MESSAGE_FILES,
-  MAX_FILE_DECODED_BYTES,
-  MAX_MESSAGE_FILE_BYTES,
+  DEFAULT_FILE_DECODED_BYTES,
   validateClientMessagePayload,
   validateInlineMessageImages,
   type ContextUsageSnapshot,
@@ -81,6 +80,7 @@ type Props = {
   allowApprovalMode?: boolean
   allowQueue?: boolean
   allowAttachments?: boolean
+  organizationManagedAttachments?: boolean
   state: AgentState | null
   config: AgentConfig | null
   contextSnapshot: ContextUsageSnapshot | null
@@ -278,6 +278,7 @@ export function Composer({
   allowApprovalMode = true,
   allowQueue = true,
   allowAttachments = true,
+  organizationManagedAttachments = false,
   state,
   config,
   contextSnapshot,
@@ -379,11 +380,39 @@ export function Composer({
   }, [sessionId])
   const [pastedImages, setPastedImages] = useState<readonly PastedImage[]>([])
   const [attachedFiles, setAttachedFiles] = useState<readonly AttachedFile[]>([])
+  const [attachmentError, setAttachmentError] = useState<string | null>(null)
+  const [attachmentMaxBytes, setAttachmentMaxBytes] = useState(DEFAULT_FILE_DECODED_BYTES)
+  const [attachmentPolicyError, setAttachmentPolicyError] = useState<string | null>(null)
+  useEffect(() => {
+    if (!organizationManagedAttachments || !allowAttachments) return
+    const controller = new AbortController()
+    const loadPolicy = async (): Promise<void> => {
+      try {
+        const response = await fetch('/organization/attachment-policy', { cache: 'no-store', signal: controller.signal })
+        if (!response.ok) throw new Error(`Attachment limit unavailable (${response.status})`)
+        const policy: unknown = await response.json()
+        const maxBytes = policy !== null && typeof policy === 'object' && 'maxBytes' in policy ? policy.maxBytes : undefined
+        if (typeof maxBytes !== 'number' || ![2, 4, 8, 16].some((mib) => maxBytes === mib * 1024 * 1024)) throw new Error('Invalid organization attachment limit')
+        if (!controller.signal.aborted) { setAttachmentMaxBytes(maxBytes); setAttachmentPolicyError(null) }
+      } catch (reason) {
+        if (!controller.signal.aborted) setAttachmentPolicyError(reason instanceof Error ? reason.message : String(reason))
+      }
+    }
+    void loadPolicy()
+    window.addEventListener('focus', loadPolicy)
+    window.addEventListener('kala:attachment-policy-updated', loadPolicy)
+    return () => {
+      controller.abort()
+      window.removeEventListener('focus', loadPolicy)
+      window.removeEventListener('kala:attachment-policy-updated', loadPolicy)
+    }
+  }, [organizationManagedAttachments, allowAttachments])
   const [submitting, setSubmitting] = useState(false)
   const submitInFlight = useRef(false)
   useEffect(() => {
     setPastedImages([])
     setAttachedFiles([])
+    setAttachmentError(null)
   }, [sessionId])
   const [mentionState, setMentionState] = useState<MentionState | null>(null)
   const [mentionFiles, setMentionFiles] = useState<readonly FileListEntry[]>([])
@@ -786,7 +815,10 @@ export function Composer({
           writeStoredDraftIntent(sessionId, submittedText, submittedIntent)
         }
       }
-      if (currentSessionId.current === sessionId) setPendingToast(error instanceof Error ? error.message : String(error))
+      if (currentSessionId.current === sessionId) {
+        if (!admissionStarted && uploadingFiles) setAttachmentError(error instanceof Error ? error.message : String(error))
+        else setPendingToast(error instanceof Error ? error.message : String(error))
+      }
     } finally {
       if (uploadingFiles || lockWhileSubmitting) {
         submitInFlight.current = false
@@ -830,6 +862,7 @@ export function Composer({
 
   async function addFiles(files: readonly File[]): Promise<boolean> {
     if (!allowAttachments || shellMode || files.length === 0) return false
+    if (attachmentPolicyError) { setAttachmentError(attachmentPolicyError); return false }
     try {
       const imageFiles = files.filter((file) => file.type.startsWith('image/'))
       const genericFiles = files.filter((file) => !file.type.startsWith('image/'))
@@ -861,11 +894,12 @@ export function Composer({
           file,
         })
       }
-      const fileError = validateSelectedFiles([...attachedFiles, ...nextFiles])
+      const fileError = validateSelectedFiles([...attachedFiles, ...nextFiles], attachmentMaxBytes)
       if (fileError) {
-        setPendingToast(fileError)
+        setAttachmentError(fileError)
         return false
       }
+      setAttachmentError(null)
       if (nextImages.length > 0) setPastedImages((current) => [...current, ...nextImages])
       if (nextFiles.length > 0) setAttachedFiles((current) => [...current, ...nextFiles])
       return true
@@ -936,6 +970,7 @@ export function Composer({
 
   function removeFile(id: string): void {
     setAttachedFiles((prev) => prev.filter((file) => file.id !== id))
+    setAttachmentError(null)
   }
 
   function handleSubmit(e: FormEvent<HTMLFormElement>): void {
@@ -1095,6 +1130,7 @@ export function Composer({
                   {shellModeIndicator}
                   {contextUsageBar('compact')}
                   <AttachmentTray images={pastedImages} files={attachedFiles} onRemoveImage={removeImage} onRemoveFile={removeFile} bordered />
+                  {attachmentError || attachmentPolicyError ? <p role="alert" data-testid="attachment-error" className="px-3 py-1 text-sm text-destructive">{attachmentError ?? attachmentPolicyError}</p> : null}
                   <div className="flex min-h-12 min-w-0 flex-nowrap items-center gap-1 px-1 py-0.5" data-testid="composer-simple-controls">
                   <SlashCommandMenu
                     commands={matchingCommands}
@@ -1156,6 +1192,7 @@ export function Composer({
           {contextUsageBar('full')}
           {shellModeIndicator}
           <AttachmentTray images={pastedImages} files={attachedFiles} onRemoveImage={removeImage} onRemoveFile={removeFile} bordered />
+          {attachmentError || attachmentPolicyError ? <p role="alert" data-testid="attachment-error" className="px-3 py-1 text-sm text-destructive">{attachmentError ?? attachmentPolicyError}</p> : null}
           <div className="relative">
             <Textarea
               ref={textareaRef}
@@ -1836,11 +1873,12 @@ function pastedImageAsFile(image: PastedImage, index: number): File {
   return new File([bytes], `pasted-image-${index + 1}.${extension}`, { type: image.mediaType })
 }
 
-function validateSelectedFiles(files: readonly AttachedFile[]): string | undefined {
-  const oversized = files.find((file) => file.size > MAX_FILE_DECODED_BYTES)
-  if (oversized) return `Each attached file must be at most ${formatAttachmentBytes(MAX_FILE_DECODED_BYTES)}.`
+function validateSelectedFiles(files: readonly AttachedFile[], maxFileBytes: number): string | undefined {
+  const oversized = files.find((file) => file.size > maxFileBytes)
+  if (oversized) return `Each attached file must be at most ${formatAttachmentBytes(maxFileBytes)}.`
   const total = files.reduce((sum, file) => sum + file.size, 0)
-  if (total > MAX_MESSAGE_FILE_BYTES) return `Files in one message must total at most ${formatAttachmentBytes(MAX_MESSAGE_FILE_BYTES)}.`
+  const maxTotalBytes = Math.max(4 * 1024 * 1024, maxFileBytes)
+  if (total > maxTotalBytes) return `Files in one message must total at most ${formatAttachmentBytes(maxTotalBytes)}.`
   return undefined
 }
 

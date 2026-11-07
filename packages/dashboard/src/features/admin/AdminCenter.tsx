@@ -114,6 +114,16 @@ function Members({ snapshot, canManage, load, setError, t }: { snapshot: Organiz
 function Workspaces({ snapshot, t }: { snapshot: OrganizationSnapshot; t: TFunction }): JSX.Element { return <div className="grid gap-3"><ReadOnlyNotice t={t} /><Grid><Card title={t('admin.tabs.workspaces')}>{snapshot.workspaces.length ? snapshot.workspaces.map((workspace) => <Line key={workspace.id} title={workspace.name} subtitle={`${workspace.status} · policy v${workspace.policy_version}`} />) : <Empty title={t('admin.emptyWorkspacesTitle')} text={t('admin.noWorkspaces')} />}</Card><Card title={t('admin.executorPools')}>{snapshot.executorPools.length ? snapshot.executorPools.map((pool) => <Line key={pool.id} title={pool.name} subtitle={`${pool.mode}${pool.workspace_id ? ` · ${pool.workspace_id}` : ''}`} />) : <Empty title={t('admin.emptyPoolsTitle')} text={t('admin.emptyPoolsDescription')} />}</Card></Grid></div> }
 function Executors({ snapshot, t }: { snapshot: OrganizationSnapshot; t: TFunction }): JSX.Element { return <div className="grid gap-3"><ReadOnlyNotice t={t} /><Card title={t('admin.tabs.executors')}>{snapshot.executors.length ? snapshot.executors.map((executor) => <Line key={executor.id} title={executor.name} subtitle={`${executor.status} · ${t('admin.lastSeen', { value: executor.last_seen_at || t('admin.never') })}`} />) : <Empty title={t('admin.emptyExecutorsTitle')} text={t('admin.noExecutors')} />}</Card></div> }
 function Policies({ snapshot, canPolicy, load, setError, t }: { snapshot: OrganizationSnapshot; canPolicy: boolean; load(): Promise<void>; setError(value: string): void; t: TFunction }): JSX.Element {
+  const [attachmentMaxBytes, setAttachmentMaxBytes] = useState(Number(snapshot.organization.attachment_max_bytes ?? 2 * 1024 * 1024))
+  const [savingAttachment, setSavingAttachment] = useState(false)
+  const saveAttachment = async (): Promise<void> => {
+    setSavingAttachment(true)
+    try {
+      await mutate('/organization/attachment-policy', 'PUT', { maxBytes: attachmentMaxBytes })
+      await load()
+      window.dispatchEvent(new Event('kala:attachment-policy-updated'))
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) } finally { setSavingAttachment(false) }
+  }
   const currentSessionDays = Number(snapshot.retention?.session_days)
   const canEditSessionDays = canPolicy && Number.isSafeInteger(currentSessionDays) && currentSessionDays >= 1
   const [editing, setEditing] = useState(false)
@@ -146,6 +156,17 @@ function Policies({ snapshot, canPolicy, load, setError, t }: { snapshot: Organi
     setEditing(false)
   }
   return <>
+    <Card title={t('attachmentPolicy.title')}>
+      {!canPolicy ? <RestrictedNotice text={t('attachmentPolicy.restricted')} /> : null}
+      <div className="flex flex-wrap items-center gap-3">
+        <label htmlFor="admin-attachment-limit" className="text-sm">{t('attachmentPolicy.label')}</label>
+        <select id="admin-attachment-limit" disabled={!canPolicy || savingAttachment} value={attachmentMaxBytes} onChange={(event) => setAttachmentMaxBytes(Number(event.target.value))} className="h-9 rounded border border-border/50 bg-background px-2 text-sm">
+          {[2, 4, 8, 16].map((mib) => <option key={mib} value={mib * 1024 * 1024}>{mib} MiB</option>)}
+        </select>
+        {canPolicy ? <Button size="sm" disabled={savingAttachment || attachmentMaxBytes === Number(snapshot.organization.attachment_max_bytes ?? 2 * 1024 * 1024)} onClick={() => void saveAttachment()}>{t('attachmentPolicy.save')}</Button> : null}
+      </div>
+      <p className="mt-2 text-xs text-muted-foreground">{t('attachmentPolicy.scope')}</p>
+    </Card>
     <Card title={t('admin.retention')} action={canEditSessionDays && !editing ? <Button size="sm" onClick={() => setEditing(true)}>{t('admin.editSessionRetention')}</Button> : undefined}>
       {!canPolicy ? <RestrictedNotice text={t('admin.policyRestricted')} /> : null}
       <KV rows={{ [t('admin.labels.sessionDays')]: snapshot.retention?.session_days, [t('admin.labels.version')]: snapshot.retention?.version }} />

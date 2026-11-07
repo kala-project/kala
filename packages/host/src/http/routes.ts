@@ -72,9 +72,9 @@ import {
 import type { AuditActor, AuditLogger } from '../audit-log.js'
 import type { SessionArtifactStorage } from '../session-artifact-registry.js'
 import {
-  MAX_MESSAGE_ATTACHMENT_BYTES,
   type MessageAttachmentStorage,
 } from '../message-attachment-store.js'
+import { effectiveAttachmentLimit } from '../message-attachment-policy.js'
 import { assertImageAttachmentBytes, assertKernelTextAttachment, supportedImageMediaType, validateMessageAttachmentReferences } from '../message-attachment-resolver.js'
 import type { OperationalMetrics } from '../operational-metrics.js'
 import type { MemoStore } from '../memo-store.js'
@@ -849,7 +849,7 @@ export function attachJsonRoutes(
         if (!input.success || !input.data.operationId) throw new HttpRouteError(400, 'invalid admission message')
         const imageValidation = validateInlineMessageImages(input.data.content)
         if (!imageValidation.ok) throw new HttpRouteError(400, `${imageValidation.error.code}: ${imageValidation.error.message}`)
-        const fileValidation = validateInlineMessageFiles(input.data.content)
+        const fileValidation = validateInlineMessageFiles(input.data.content, effectiveAttachmentLimit(req.headers, payloads.auth?.requireIngressIdentity === true && Boolean(ingressActorFromHeaders(req))))
         if (!fileValidation.ok) throw new HttpRouteError(400, `${fileValidation.error.code}: ${fileValidation.error.message}`)
         if (!input.data.text.trim() && !input.data.content?.length) throw new HttpRouteError(400, 'message content is required')
         await validateMessageAttachmentReferences(payloads.messageAttachments, input.data.sessionId, input.data.content)
@@ -882,13 +882,14 @@ export function attachJsonRoutes(
         let name: string
         try { name = decodeURIComponent(encodedName) } catch { throw new HttpRouteError(400, 'invalid attachment name') }
         const declaredLength = Number(req.headers['content-length'])
-        if (Number.isFinite(declaredLength) && declaredLength > MAX_MESSAGE_ATTACHMENT_BYTES) {
-          throw new HttpRouteError(413, `Attachment exceeds ${MAX_MESSAGE_ATTACHMENT_BYTES} bytes`)
+        const maxAttachmentBytes = effectiveAttachmentLimit(req.headers, payloads.auth?.requireIngressIdentity === true && Boolean(ingressActorFromHeaders(req)))
+        if (Number.isFinite(declaredLength) && declaredLength > maxAttachmentBytes) {
+          throw new HttpRouteError(413, `Attachment exceeds ${maxAttachmentBytes} bytes`)
         }
         const session = await payloads.sessions!.load(sessionId, { recoverDangling: false })
         const accessError = httpSessionAccessError(req, session)
         if (accessError) throw new HttpRouteError(accessError.status, accessError.message)
-        const data = await readBytes(req, MAX_MESSAGE_ATTACHMENT_BYTES)
+        const data = await readBytes(req, maxAttachmentBytes)
         await assertTenantStorageQuota(payloads.storageQuota, session, 'message_attachment', data.byteLength)
         const mediaType = typeof req.headers['content-type'] === 'string'
           ? req.headers['content-type'].split(';', 1)[0]!.trim().toLowerCase()
