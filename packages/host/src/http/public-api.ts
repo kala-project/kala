@@ -16,6 +16,7 @@ import {
   type SessionSummary,
 } from '@agent-kernel/shared'
 import { validateSchedule } from '../scheduled-tasks/recurrence.js'
+import { ScheduledTaskFencedError } from '../scheduled-tasks/postgres-store.js'
 import type {
   CreateScheduledTask,
   ScheduledInbox,
@@ -237,6 +238,7 @@ class ApiHttpError extends Error {
 
 function normalizeError(error: unknown): ApiHttpError {
   if (error instanceof ApiHttpError) return error
+  if (error instanceof ScheduledTaskFencedError) return new ApiHttpError(503, 'service_unavailable', 'scheduled task writer temporarily unavailable; retry shortly')
   const message = error instanceof Error ? error.message : String(error)
   if (/not found|does not exist|unknown session/iu.test(message)) return new ApiHttpError(404, 'not_found', message)
   if (/conflict|already|active turn|mismatch/iu.test(message)) return new ApiHttpError(409, 'conflict', message)

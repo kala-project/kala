@@ -395,6 +395,7 @@ describe('Private Cloud edge request path', () => {
     expect(crossOrigin.status).toBe(403)
     const created = await fetch(`${ownerOrigin}/auth/executor-invites`, { method: 'POST', headers: { cookie: `ak_session=${ownerSession}`, 'content-type': 'application/json', origin: ownerOrigin }, body: '{}' })
     expect(created.status).toBe(200)
+    await expect(created.json()).resolves.toMatchObject({ installerOrigin: ownerOrigin })
     expect(await directory.findUnitByExecutorInvite('ak_invite_org_a')).toBe(access.organization.unitId)
     expect(upstreamRequests).toEqual([{ unit: access.organization.unitId, organization: access.organization.id, role: 'owner', principal: Buffer.from('http://identity.example\0alice').toString('base64url') }])
 

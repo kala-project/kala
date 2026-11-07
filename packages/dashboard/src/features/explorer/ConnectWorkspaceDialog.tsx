@@ -33,7 +33,7 @@ type Props = {
 }
 
 type InstallResponse = ExecutorInstallStatusSnapshot & { command?: string; setupCode?: string }
-type ExecutorInviteResponse = { id: string; inviteToken: string }
+type ExecutorInviteResponse = { id: string; inviteToken: string; installerOrigin: string }
 type FormState = Pick<CreateExecutorInstall, 'platform' | 'mode' | 'privilegeMode'>
 
 const POLL_INTERVAL_MS = 2_000
@@ -52,6 +52,7 @@ export function ConnectWorkspaceDialog({ open, onOpenChange, host, privateCloud 
   const [installation, setInstallation] = useState<InstallResponse | null>(null)
   const [command, setCommand] = useState('')
   const [inviteToken, setInviteToken] = useState<string | null>(null)
+  const [inviteInstallerOrigin, setInviteInstallerOrigin] = useState<string | null>(null)
   const [windowsCapability, setWindowsCapability] = useState<{ key: string; available: boolean } | null>(null)
   const [pairingCode, setPairingCode] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -90,6 +91,7 @@ export function ConnectWorkspaceDialog({ open, onOpenChange, host, privateCloud 
       setInstallation(null)
       setCommand('')
       setInviteToken(null)
+      setInviteInstallerOrigin(null)
       setWindowsCapability(null)
       setPairingCode(null)
       setError(null)
@@ -106,6 +108,7 @@ export function ConnectWorkspaceDialog({ open, onOpenChange, host, privateCloud 
       setPairingCode(null)
       setCommand('')
       setInviteToken(null)
+      setInviteInstallerOrigin(null)
       setError(null)
       if (!canCreateOrganizationInvite) return () => controller.abort()
       void request<ExecutorInviteResponse>(apiEndpoint(host, '/auth/executor-invites'), {
@@ -115,7 +118,13 @@ export function ConnectWorkspaceDialog({ open, onOpenChange, host, privateCloud 
         signal: controller.signal,
       }).then((invite) => {
         if (generationRef.current !== generation) return
+        if (!invite.installerOrigin) throw new Error('Gateway did not provide a public Executor installer origin')
+        const origin = new URL(invite.installerOrigin)
+        if (origin.protocol !== 'https:' || origin.href !== `${origin.origin}/`) {
+          throw new Error('Public Executor installer origin must be an HTTPS origin')
+        }
         setInviteToken(invite.inviteToken)
+        setInviteInstallerOrigin(origin.origin)
       }).catch((cause: unknown) => {
         if (!controller.signal.aborted && generationRef.current === generation) setError(errorMessage(cause))
       })
@@ -148,11 +157,11 @@ export function ConnectWorkspaceDialog({ open, onOpenChange, host, privateCloud 
 
   useEffect(() => {
     if (!privateCloud || !open) return
-    setCommand(inviteToken && (form.platform !== 'windows' || windowsAvailable)
-      ? organizationInviteCommand(host, inviteToken, form.platform, form.mode, form.privilegeMode)
+    setCommand(inviteToken && inviteInstallerOrigin && (form.platform !== 'windows' || windowsAvailable)
+      ? organizationInviteCommand(inviteInstallerOrigin, inviteToken, form.platform, form.mode, form.privilegeMode)
       : '')
     setCopied(false)
-  }, [form.mode, form.platform, form.privilegeMode, host, inviteToken, open, privateCloud, windowsAvailable])
+  }, [form.mode, form.platform, form.privilegeMode, inviteInstallerOrigin, inviteToken, open, privateCloud, windowsAvailable])
 
   useEffect(() => {
     if (privateCloud || !open || !installation || !createdFormRef.current || sameForm(form, createdFormRef.current)) return
@@ -457,8 +466,7 @@ function apiEndpoint(host: string | undefined, path: string): string {
   return host ? new URL(path, host).toString() : path
 }
 
-function organizationInviteCommand(host: string | undefined, inviteToken: string, platform: ExecutorInstallPlatform, mode: ExecutorInstallMode, privilegeMode: ExecutorPrivilegeMode): string {
-  const origin = host ? new URL(host).origin : window.location.origin
+function organizationInviteCommand(origin: string, inviteToken: string, platform: ExecutorInstallPlatform, mode: ExecutorInstallMode, privilegeMode: ExecutorPrivilegeMode): string {
   if (platform === 'windows') return `$env:EXECUTOR_INVITE=${quotePs(inviteToken)}; $env:KALA_INVITE_INSTALL_MODE=${quotePs(mode)}; irm ${quotePs(`${origin}/install/invite.ps1`)} | iex`
   const options = [
     `EXECUTOR_INVITE=${quoteSh(inviteToken)}`,

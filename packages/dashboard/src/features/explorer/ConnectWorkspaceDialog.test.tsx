@@ -33,7 +33,7 @@ describe('ConnectWorkspaceDialog', () => {
         if (windowsCapability === 'invalid') return response({ platforms: { windows: { available: 'true' } } })
         return response({ platforms: { linux: { available: true }, macos: { available: true }, windows: { available: windowsCapability === 'ready' } } })
       }
-      if ((url === '/auth/executor-invites' || url === 'https://cloud.example.test/auth/executor-invites') && init?.method === 'POST') return response({ id: 'inv_1', inviteToken: 'ak_invite_org_a' })
+      if ((url === '/auth/executor-invites' || url === 'https://cloud.example.test/auth/executor-invites' || url === 'http://localhost:3000/auth/executor-invites') && init?.method === 'POST') return response({ id: 'inv_1', inviteToken: 'ak_invite_org_a', installerOrigin: 'https://cloud.example.test' })
       if (url === '/api/executor-installs' && init?.method === 'POST') {
         const input = JSON.parse(String(init.body)) as Record<string, string>
         if (input.platform === 'windows') return response({ ...base, ...input, command: "$env:KALA_SETUP_CODE='F6E7D8C9B0'; irm 'http://localhost:3000/install.ps1' | iex" })
@@ -210,6 +210,13 @@ describe('ConnectWorkspaceDialog', () => {
     await waitFor(() => expect(command.textContent).toContain("KALA_INVITE_INSTALL_MODE='temporary'"))
     expect(vi.mocked(fetch).mock.calls.some(([url, init]) => String(url) === 'https://cloud.example.test/auth/executor-invites' && init?.method === 'POST')).toBe(true)
     expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes('/api/executor-installs'))).toBe(false)
+  })
+
+  it('uses the Gateway public origin instead of a localhost Dashboard endpoint in invite scripts', async () => {
+    render(<ConnectWorkspaceDialog open privateCloud organizationRole="admin" host="http://localhost:3000" onOpenChange={() => {}} />)
+    const command = await screen.findByText(/EXECUTOR_INVITE=/)
+    expect(command.textContent).toContain("curl -fsSL 'https://cloud.example.test/install/invite.sh'")
+    expect(command.textContent).not.toContain('localhost')
   })
 
   it('issues a Windows PowerShell invite command only with Private Cloud asset readiness', async () => {

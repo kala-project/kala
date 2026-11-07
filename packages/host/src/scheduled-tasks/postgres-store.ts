@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 
 import type { PostgresSchemaManagement } from '../postgres-migrations.js'
 import type { HotStateDatabase, HotStateSqlExecutor } from '../tenant-runtime/postgres-hot-state.js'
+import type { RuntimeUnitPlacementLease } from '../tenant-runtime/postgres-runtime-unit-placement-store.js'
 import {
   assertResourceOwner,
   RuntimeResourceOwnershipFencedError,
@@ -89,6 +90,7 @@ export class PostgresScheduledTaskStore implements ScheduledTaskStorage {
   readonly #resourceOwnerForSession?: (sessionId: string) => RuntimeResourceOwnership | undefined
   readonly #writerMode: 'exclusive' | 'parallel-v1'
   readonly #tryPrepareScheduledSessionOwner?: (sessionId: string) => Promise<boolean>
+  readonly #unitPlacement?: RuntimeUnitPlacementLease
   #unitId: string | undefined
   #token: LeaseToken | undefined
   #heartbeat: ReturnType<typeof setInterval> | undefined
@@ -104,6 +106,7 @@ export class PostgresScheduledTaskStore implements ScheduledTaskStorage {
       prepareSessionOwner?: (sessionId: string) => Promise<void>;
       resourceOwnerForSession?: (sessionId: string) => RuntimeResourceOwnership | undefined;
       writerMode?: 'exclusive' | 'parallel-v1';
+      unitPlacement?: RuntimeUnitPlacementLease;
       tryPrepareScheduledSessionOwner?: (sessionId: string) => Promise<boolean> } = {},
   ) {
     if (!namespace.trim()) throw new TypeError('scheduled task namespace must be a non-empty string')
@@ -118,6 +121,7 @@ export class PostgresScheduledTaskStore implements ScheduledTaskStorage {
     this.#prepareSessionOwner = options.prepareSessionOwner
     this.#resourceOwnerForSession = options.resourceOwnerForSession
     this.#writerMode = options.writerMode ?? 'exclusive'
+    this.#unitPlacement = options.unitPlacement
     this.#tryPrepareScheduledSessionOwner = options.tryPrepareScheduledSessionOwner
     if (Boolean(this.#prepareSessionOwner) !== Boolean(this.#resourceOwnerForSession)) {
       throw new TypeError('scheduled task Session owner requires both prepare and live lease provider')
@@ -126,12 +130,16 @@ export class PostgresScheduledTaskStore implements ScheduledTaskStorage {
       && (!this.#prepareSessionOwner || !this.#resourceOwnerForSession || !this.#tryPrepareScheduledSessionOwner)) {
       throw new TypeError('parallel-v1 scheduled task writers require Session ownership and deterministic scheduler acquisition')
     }
+    if (this.#unitPlacement && (this.#unitPlacement.organizationId !== namespace || this.#writerMode !== 'exclusive')) {
+      throw new TypeError('exclusive scheduled task placement must match the tenant')
+    }
     if (!Number.isSafeInteger(this.#leaseTtlMs) || this.#leaseTtlMs < 100) throw new TypeError('leaseTtlMs must be an integer of at least 100')
     if (!Number.isSafeInteger(this.#heartbeatMs) || this.#heartbeatMs < 25 || this.#heartbeatMs >= this.#leaseTtlMs) throw new TypeError('heartbeatMs must be positive and less than leaseTtlMs')
   }
 
   async start(unitId: string): Promise<void> {
     if (!unitId.trim()) throw new TypeError('unitId must be a non-empty string')
+    if (this.#unitPlacement && this.#unitPlacement.unitId !== unitId) throw new TypeError('scheduled task placement must match the Unit')
     if (this.#unitId) throw new Error('scheduled task store is already started')
     await this.initialize()
     if (this.#writerMode === 'parallel-v1') return await this.startParallel(unitId)
@@ -192,11 +200,11 @@ export class PostgresScheduledTaskStore implements ScheduledTaskStorage {
   }
 
   async listTasks(ownerKey: string): Promise<ScheduledTask[]> {
-    return (await this.readState()).tasks.filter((task) => task.ownerKey === ownerKey).map(clone)
+    return (await this.readSnapshot()).tasks.filter((task) => task.ownerKey === ownerKey).map(clone)
   }
 
   async getTask(ownerKey: string, taskId: string): Promise<ScheduledTask | undefined> {
-    const task = (await this.readState()).tasks.find((item) => item.id === taskId && item.ownerKey === ownerKey)
+    const task = (await this.readSnapshot()).tasks.find((item) => item.id === taskId && item.ownerKey === ownerKey)
     return task ? clone(task) : undefined
   }
 
@@ -210,7 +218,7 @@ export class PostgresScheduledTaskStore implements ScheduledTaskStorage {
   }
 
   async history(ownerKey: string, taskId: string): Promise<ScheduledRun[] | undefined> {
-    const state = await this.readState()
+    const state = await this.readSnapshot()
     const owned = state.tasks.some((task) => task.id === taskId && task.ownerKey === ownerKey)
       || state.runs.some((run) => run.taskId === taskId && run.task.ownerKey === ownerKey)
     if (!owned) return undefined
@@ -219,14 +227,14 @@ export class PostgresScheduledTaskStore implements ScheduledTaskStorage {
 
   async origins(ownerKey: string, sessionId: string): Promise<Record<string, string>> {
     const origins: Record<string, string> = Object.create(null) as Record<string, string>
-    for (const run of (await this.readState()).runs) {
+    for (const run of (await this.readSnapshot()).runs) {
       if (run.task.ownerKey === ownerKey && run.sessionId === sessionId) origins[run.operationId] = run.taskId
     }
     return origins
   }
 
   async inbox(ownerKey: string, principal: string): Promise<ScheduledInbox> {
-    return inboxFor(await this.readState(), ownerKey, principal)
+    return inboxFor(await this.readSnapshot(), ownerKey, principal)
   }
 
   async markInboxSeen(ownerKey: string, principal: string, occurrenceIds: readonly string[]): Promise<ScheduledInboxSeenResult> {
@@ -528,14 +536,41 @@ export class PostgresScheduledTaskStore implements ScheduledTaskStorage {
       // A read must check current DB authority, not renew it. The heartbeat and
       // fenced mutations own renewal; polling must not create persistent writes.
       return await this.serialized(async () => {
-        const token = this.requireToken()
-        const result = await this.database.query<StateRow>(`SELECT state.document
+        if (this.#closing || !this.#token) throw new ScheduledTaskFencedError()
+        let token = this.#token
+        const query = `SELECT state.document
           FROM ${this.#states} AS state JOIN ${this.#leases} AS lease
             ON lease.namespace = state.namespace AND lease.unit_id = state.unit_id
           WHERE state.namespace = $1 AND state.unit_id = $2
             AND lease.owner_id = $3 AND lease.generation = $4
-            AND lease.expires_at > clock_timestamp()`,
-        [this.namespace, token.unitId, token.ownerId, token.generation.toString()])
+            AND lease.expires_at > clock_timestamp()`
+        let result = await this.database.query<StateRow>(query,
+          [this.namespace, token.unitId, token.ownerId, token.generation.toString()])
+        const placement = this.#unitPlacement
+        if (!result.rows[0] && placement) {
+          const renewed = await this.database.transaction(async (transaction) => {
+            const current = await transaction.query(`SELECT 1 FROM ${quoteIdentifier(this.#schema)}.tenant_runtime_unit_placement_leases
+              WHERE organization_id = $1 AND unit_id = $2 AND node_id = $3 AND owner_token = $4
+                AND generation = $5 AND expires_at > clock_timestamp()
+              FOR SHARE`, [placement.organizationId, placement.unitId, placement.nodeId, placement.ownerToken, placement.generation.toString()])
+            if (current.rowCount !== 1) return undefined
+            const claimed = await transaction.query<LeaseRow>(`UPDATE ${this.#leases}
+              SET generation = generation + 1,
+                  expires_at = clock_timestamp() + $5 * interval '1 millisecond', updated_at = clock_timestamp()
+              WHERE namespace = $1 AND unit_id = $2 AND owner_id = $3 AND generation = $4
+                AND expires_at <= clock_timestamp()
+              RETURNING generation::text`, [this.namespace, token.unitId, token.ownerId, token.generation.toString(), this.#leaseTtlMs])
+            return claimed.rows[0]?.generation
+          })
+          if (renewed) {
+            token = { ...token, generation: BigInt(renewed) }
+            this.#token = token
+            this.#fenceError = undefined
+            this.startHeartbeat()
+            result = await this.database.query<StateRow>(query,
+              [this.namespace, token.unitId, token.ownerId, token.generation.toString()])
+          }
+        }
         if (!result.rows[0]) throw new ScheduledTaskFencedError()
         return parseState(result.rows[0].document)
       })
@@ -547,6 +582,15 @@ export class PostgresScheduledTaskStore implements ScheduledTaskStorage {
       if (!result.rows[0]) throw new Error('scheduled task state not found')
       return parseState(result.rows[0].document)
     }))
+  }
+
+  private async readSnapshot(): Promise<State> {
+    const unitId = this.#unitId
+    if (!unitId) throw new Error('scheduled task store is not started')
+    const result = await this.database.query<StateRow>(`SELECT document FROM ${this.#states}
+      WHERE namespace = $1 AND unit_id = $2`, [this.namespace, unitId])
+    if (!result.rows[0]) throw new Error('scheduled task state not found')
+    return parseState(result.rows[0].document)
   }
 
   private async mutate<T>(operation: (state: State, transaction: HotStateSqlExecutor) => Promise<T> | T): Promise<T> {

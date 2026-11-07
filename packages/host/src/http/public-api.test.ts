@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -7,6 +8,46 @@ import { createConfig } from '@agent-kernel/kernel'
 import { KalaApiClient, PRIVATE_CLOUD_DEPLOYMENT, DEDICATED_DEPLOYMENT } from '@agent-kernel/shared'
 
 import { startHostServer, type HostServer } from '../server.js'
+import { ScheduledTaskFencedError } from '../scheduled-tasks/postgres-store.js'
+import { createPublicApiHandler, type PublicApiDependencies } from './public-api.js'
+
+it('reports a fenced scheduler writer as a retryable service failure', async () => {
+  const unavailable = async (): Promise<never> => { throw new ScheduledTaskFencedError() }
+  const deps: PublicApiDependencies = {
+    authorize: () => ({ ok: true, actor: { principal: 'alice', organizationId: 'org-a', canWrite: true } }),
+    listSessions: async () => [],
+    canAccessSession: async () => false,
+    getSession: async () => undefined,
+    createSession: unavailable,
+    deleteSession: unavailable,
+    sendMessage: unavailable,
+    getDagRun: unavailable,
+    answerDagDecision: unavailable,
+    scheduledTasks: {
+      list: unavailable, get: unavailable, create: unavailable, update: unavailable,
+      pause: unavailable, delete: unavailable, history: unavailable, origins: unavailable,
+      inbox: unavailable, markInboxSeen: unavailable,
+    },
+  }
+  const handler = createPublicApiHandler(deps)
+  const http = createServer((request, response) => { void handler(request, response) })
+  await new Promise<void>((resolve) => http.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = http.address()
+    if (!address || typeof address === 'string') throw new Error('test server did not bind')
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/scheduled-tasks/inbox/seen`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ occurrenceIds: [] }),
+    })
+    expect(response.status).toBe(503)
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'service_unavailable', message: expect.stringContaining('retry shortly') },
+    })
+  } finally {
+    await new Promise<void>((resolve, reject) => http.close((error) => error ? reject(error) : resolve()))
+  }
+})
 
 describe('versioned product API', () => {
   let server: HostServer | undefined

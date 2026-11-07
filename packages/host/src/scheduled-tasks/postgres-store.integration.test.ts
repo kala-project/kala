@@ -201,6 +201,63 @@ integrationDescribe('Private Cloud PostgreSQL scheduled task store', () => {
     } finally { await store.close() }
   })
 
+  it('keeps tenant-scoped task reads available after expiry while fencing scheduler and writes', async () => {
+    const namespace = `tenant-${randomUUID()}`
+    const database = makeDatabase('read-fenced-snapshot')
+    const store = new PostgresScheduledTaskStore(database.database, namespace, { leaseTtlMs: 120_000, heartbeatMs: 60_000 })
+    await store.start('unit-read-snapshot')
+    try {
+      const task = await store.create({
+        ownerKey: 'organization:acme', createdBy: 'alice', prompt: 'snapshot',
+        target: { kind: 'session', sessionId: 'session-a' },
+        schedule: { kind: 'once', at: new Date(Date.now() + 60_000).toISOString() },
+      })
+      await database.database.query(`UPDATE scheduled_task_writer_leases
+        SET expires_at = clock_timestamp() - interval '1 second'
+        WHERE namespace = $1 AND unit_id = $2`, [namespace, 'unit-read-snapshot'])
+      expect(await store.listTasks('organization:acme')).toEqual([task])
+      expect(await store.listTasks('organization:other')).toEqual([])
+      expect(await store.getTask('organization:acme', task.id)).toEqual(task)
+      expect(await store.getTask('organization:other', task.id)).toBeUndefined()
+      await expect(store.due(10)).rejects.toBeInstanceOf(ScheduledTaskFencedError)
+      await expect(store.setPaused('organization:acme', task.id, true)).rejects.toBeInstanceOf(ScheduledTaskFencedError)
+    } finally { await store.close() }
+  })
+
+  it('reacquires an expired scheduler lease only under the same live Unit placement', async () => {
+    const namespace = randomUUID()
+    const unitId = parseTenantRuntimeUnitId(randomUUID())
+    const database = makeDatabase('placement-recovery')
+    const placement = {
+      organizationId: namespace, unitId, nodeId: randomUUID(), ownerToken: randomUUID(),
+      origin: 'https://runtime.example.test', generation: 1n, expiresAt: new Date(Date.now() + 120_000),
+    }
+    await database.database.query(`INSERT INTO tenant_runtime_unit_placement_leases
+      (organization_id, unit_id, node_id, owner_token, origin, generation, expires_at)
+      VALUES ($1, $2, $3, $4, $5, $6, clock_timestamp() + interval '2 minutes')`,
+    [namespace, unitId, placement.nodeId, placement.ownerToken, placement.origin, placement.generation.toString()])
+    const store = new PostgresScheduledTaskStore(database.database, namespace, {
+      unitPlacement: placement, leaseTtlMs: 120_000, heartbeatMs: 60_000,
+    })
+    await store.start(unitId)
+    try {
+      const expire = async () => await database.database.query(`UPDATE scheduled_task_writer_leases
+        SET expires_at = clock_timestamp() - interval '1 second'
+        WHERE namespace = $1 AND unit_id = $2`, [namespace, unitId])
+      await expire()
+      await expect(store.due(10)).resolves.toEqual([])
+      const generations = await database.database.query(`SELECT generation FROM scheduled_task_writer_leases
+        WHERE namespace = $1 AND unit_id = $2`, [namespace, unitId])
+      expect(Number(generations.rows[0]?.generation)).toBe(2)
+      await expire()
+      await database.database.query(`UPDATE tenant_runtime_unit_placement_leases
+        SET expires_at = clock_timestamp() - interval '1 second'
+        WHERE organization_id = $1 AND unit_id = $2`, [namespace, unitId])
+      await expect(store.due(10)).rejects.toBeInstanceOf(ScheduledTaskFencedError)
+      await expect(store.claimedRuns()).rejects.toBeInstanceOf(ScheduledTaskFencedError)
+    } finally { await store.close() }
+  })
+
   it('fences an old writer after a newer generation takes over', async () => {
     const namespace = `tenant-${randomUUID()}`
     const firstDb = makeDatabase('fence-a')

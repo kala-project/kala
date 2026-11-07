@@ -1211,10 +1211,11 @@ export async function startRuntimeIngressGateway(options: {
             'x-agent-runlab-principal': Buffer.from(`${identity!.issuer}\0${identity!.subject}`, 'utf8').toString('base64url'),
           } : {}),
         }, body, options.runtimeTls)
-      const text = upstream.body.toString('utf8')
+      let text = upstream.body.toString('utf8')
       if (upstream.status >= 200 && upstream.status < 300) {
         const invite = JSON.parse(text) as { inviteToken?: string }
         if (invite.inviteToken) await options.directory.bindExecutorInvite(invite.inviteToken, assignment.unitId)
+        text = JSON.stringify({ ...invite, installerOrigin: publicUrl.port === '0' ? `http://127.0.0.1:${port}` : publicUrl.origin })
       }
       response.writeHead(upstream.status, { 'content-type': upstream.contentType, 'cache-control': 'no-store' })
       response.end(text)

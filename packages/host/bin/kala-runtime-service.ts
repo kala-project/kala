@@ -676,6 +676,7 @@ async function createExperimentalUnitStorage(
     await dagStore.initialize()
     const scheduledTaskStore = new PostgresScheduledTaskStore(hotState.database, organizationId, {
       schemaManagement: config.schemaManagement,
+      ...(placementLease.protocol !== 'parallel-v1' ? { unitPlacement: placementLease } : {}),
       ...(sessionOwnership ? {
         prepareSessionOwner: async (sessionId: string) => { await sessionOwnership.ensure(sessionId) },
         resourceOwnerForSession: (sessionId: string) => sessionOwnership.activeLease(sessionId),

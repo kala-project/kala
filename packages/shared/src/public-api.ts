@@ -13,6 +13,7 @@ export type ApiErrorCode =
   | 'conflict'
   | 'invalid_request'
   | 'rate_limited'
+  | 'service_unavailable'
   | 'internal_error'
 
 export type ApiErrorEnvelope = {
