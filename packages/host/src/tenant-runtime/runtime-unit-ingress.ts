@@ -51,6 +51,12 @@ export function createRuntimeUnitIngress(options: {
   const trackUpgrade = (set: Set<Duplex>, socket: Duplex): void => {
     set.add(socket)
     socket.once('close', () => set.delete(socket))
+    socket.once('error', (error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ECONNRESET' && error.code !== 'EPIPE') {
+        console.warn('[runtime ingress] upgrade transport failed', { code: error.code ?? 'unknown' })
+      }
+      resetTransport(socket)
+    })
   }
   const closeUpgradePair = (socket: Duplex): void => {
     const peer = upgradePeers.get(socket)
@@ -98,7 +104,7 @@ export function createRuntimeUnitIngress(options: {
     response.end(JSON.stringify({ error: message }))
   }
   const rejectUpgrade = (socket: Duplex, status: number, message: string): void => {
-    if (!socket.writable) return
+    if (socket.destroyed || !socket.writable || socket.writableEnded) return
     socket.end(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`)
   }
 

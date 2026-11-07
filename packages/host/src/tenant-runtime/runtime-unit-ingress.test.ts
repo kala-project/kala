@@ -57,6 +57,34 @@ describe('RuntimeUnitIngress', () => {
     expect(socket.destroyed).toBe(true)
   })
 
+  it('survives a client reset while rejecting an unresolved WebSocket upgrade', async () => {
+    let rejectResolution: ((error: Error) => void) | undefined
+    let upgradeSocket: TcpSocket | undefined
+    const ingress = createServer()
+    const router = createRuntimeUnitIngress({
+      resolve: () => new Promise((_resolve, reject) => { rejectResolution = reject }),
+    })
+    router.attach(ingress)
+    ingress.on('upgrade', (_request, socket) => { upgradeSocket = socket })
+    const port = await listen(ingress)
+    const client = connectTcp(port, '127.0.0.1')
+    client.on('error', () => undefined)
+    try {
+      await new Promise<void>((resolve) => client.once('connect', resolve))
+      client.write('GET /socket.io/ HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
+      await eventually(async () => expect(rejectResolution).toBeDefined())
+      client.destroy()
+      rejectResolution?.(new Error('unit unavailable'))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(upgradeSocket).toBeDefined()
+      expect(() => upgradeSocket?.emit('error', Object.assign(new Error('write ECONNRESET'), { code: 'ECONNRESET' }))).not.toThrow()
+      expect(ingress.listening).toBe(true)
+    } finally {
+      client.destroy()
+      router.close()
+    }
+  })
+
   it.each(['polling', 'websocket'] as const)('routes independent %s Socket.IO and ACK traffic', async (transport) => {
     const a = await unit('a')
     const b = await unit('b')
