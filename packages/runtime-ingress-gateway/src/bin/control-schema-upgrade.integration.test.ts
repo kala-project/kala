@@ -6,14 +6,15 @@ import { describe, expect, it } from 'vitest'
 
 import { assertControlUpgradeSource, migrationIdentities, validateControlUpgradePlan } from './control-schema-upgrade.js'
 import { grantControlWriter } from './init-control-plane.js'
+import { PostgresOrganizationStore } from '../organizations/postgres-store.js'
 import { createPostgresControlPlaneDatabase, migrateControlPlane, readControlPlaneMigrations } from '../persistence/postgres.js'
 
 const exec = promisify(execFile)
 const integration = process.env.KALA_RUN_POSTGRES_INTEGRATION === '1' ? describe : describe.skip
 
-integration('control schema 10-to-12 on isolated PostgreSQL', () => {
+integration('control schema 10-to-11 and attachment policy migration on isolated PostgreSQL', () => {
   it('preserves existing browser sessions and rejects replay or altered source history', async () => {
-    const name = `kala-control-10-12-${randomUUID()}`
+    const name = `kala-control-10-11-${randomUUID()}`
     const password = randomUUID()
     const installationId = randomUUID()
     const checkpointId = randomUUID()
@@ -22,12 +23,13 @@ integration('control schema 10-to-12 on isolated PostgreSQL', () => {
     let admin: ReturnType<typeof createPostgresControlPlaneDatabase> | undefined
     try {
       const migrations = await readControlPlaneMigrations(resolve('migrations'))
+      const reviewedMigrations = migrations.slice(0, 11)
       const plan = validateControlUpgradePlan({
         fromVersion: 10,
-        toVersion: 12,
+        toVersion: 11,
         writerRole: 'kala_gateway',
-        migrations: migrationIdentities(migrations),
-      }, migrations)
+        migrations: migrationIdentities(reviewedMigrations),
+      }, reviewedMigrations)
       await docker('run', '-d', '--rm', '--pull=never', '--name', name,
         '--label', `dev.kala.test.project=${name}`,
         '--tmpfs', '/var/lib/postgresql/data:rw,noexec,nosuid,size=256m',
@@ -80,20 +82,30 @@ integration('control schema 10-to-12 on isolated PostgreSQL', () => {
         assertControlUpgradeSource(tx, plan, installationId, 16, false)))
         .rejects.toThrow('Source migration history differs')
       await database.query('UPDATE control_plane_schema_migrations SET checksum=$1 WHERE version=10', [migrations[9]!.checksum])
-      await expect(migrateControlPlane(database, migrations, {
+      await expect(migrateControlPlane(database, reviewedMigrations, {
         beforeApply: (tx) => assertControlUpgradeSource(tx, plan, installationId, 16, true),
         afterApply: (tx) => grantControlWriter(tx, plan.writerRole),
-      })).resolves.toBe(12)
+      })).resolves.toBe(11)
       expect((await database.query<{ identity_profile: unknown; token_hash: string }>(
         "SELECT identity_profile, token_hash FROM browser_sessions WHERE id='bs_upgrade'")).rows[0])
         .toMatchObject({ identity_profile: null, token_hash: 'upgrade-token' })
       expect((await database.query<{ allowed: boolean }>(
         "SELECT has_table_privilege('kala_gateway','control_plane_schema_migrations','UPDATE') AS allowed")).rows[0]?.allowed)
         .toBe(false)
-      await expect(migrateControlPlane(database, migrations, {
+      await expect(migrateControlPlane(database, reviewedMigrations, {
         beforeApply: (tx) => assertControlUpgradeSource(tx, plan, installationId, 16, true),
       })).rejects.toThrow('Source migration history differs')
-      expect((await database.health()).schemaVersion).toBe(12)
+      expect((await database.health()).schemaVersion).toBe(11)
+      await expect(migrateControlPlane(database, migrations)).resolves.toBe(12)
+      const store = new PostgresOrganizationStore(database)
+      const identity = { issuer: 'issuer', subject: 'subject' }
+      expect((await store.findAccess(identity))?.organization.attachmentMaxBytes).toBe(2 * 1024 * 1024)
+      await store.updateAttachmentLimit('org_upgrade', 8 * 1024 * 1024, identity)
+      expect((await store.findAccess(identity))?.organization.attachmentMaxBytes).toBe(8 * 1024 * 1024)
+      await expect(store.updateAttachmentLimit('org_upgrade', 3 * 1024 * 1024, identity)).rejects.toThrow('invalid_attachment_limit')
+      expect((await database.query<{ action: string; actor_principal_id: string }>(
+        "SELECT action,actor_principal_id FROM audit_events WHERE organization_id='org_upgrade' AND action='organization.attachment_limit.update'"
+      )).rows).toEqual([{ action: 'organization.attachment_limit.update', actor_principal_id: 'prn_upgrade' }])
     } finally {
       await database?.close()
       await admin?.close()
