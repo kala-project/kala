@@ -32,6 +32,7 @@ export type AgentRuntimeContext = {
   tools: ToolDispatcher
   /** Optional fail-closed owner check before sending the SDK's model request. */
   assertSessionEffectOwner?: (sessionId: string) => Promise<void | { ownerGeneration: string }>
+  observeCopilotStage?: (stage: 'native_mount' | 'sdk_start' | 'sdk_resume' | 'first_activity', durationMs: number, outcome: 'succeeded' | 'failed') => void
   broadcast: AgentRuntimeBroadcast
   messageAttachments?: MessageAttachmentStorage
   publishLocalImages?: (sessionId: string, record: SessionRecord, message: Message) => Promise<Message>

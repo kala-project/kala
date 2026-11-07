@@ -66,6 +66,7 @@ type ActiveTurnTiming = {
   turnId: string
   startedAt: string
   terminalObserved?: boolean
+  firstActivityObserved?: boolean
 }
 
 type ActiveCompaction = {
@@ -538,7 +539,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
           fs: this.context.store.copilotNativePosixSessionFs(record.sessionId),
           onError: error => this.context.broadcast.onError(record.sessionId,
             error instanceof Error ? error.message : String(error)),
-        }))
+        }), true, (durationMs, outcome) => this.context.observeCopilotStage?.('native_mount', durationMs, outcome))
         const connection = this.sdk!.RuntimeConnection.forStdio({
           args: ['--no-remote-export'], ...(this.cliPath ? { path: this.cliPath } : {}),
         })
@@ -546,7 +547,8 @@ export class CopilotAgentRuntime implements AgentRuntime {
           mode: 'empty', connection, baseDirectory: mount.baseDirectory,
           ...(this.options.gitHubToken ? { gitHubToken: this.options.gitHubToken, useLoggedInUser: false } : {}),
         })
-        try { await observeSlowSessionOperation(record.sessionId, 'SDK start', () => dedicatedClient.start()) } catch (error) {
+        try { await observeSlowSessionOperation(record.sessionId, 'SDK start', () => dedicatedClient.start(),
+          true, (durationMs, outcome) => this.context.observeCopilotStage?.('sdk_start', durationMs, outcome)) } catch (error) {
           await dedicatedClient.stop()
           await mount.close()
           throw error
@@ -561,7 +563,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
       session = await observeSlowSessionOperation(record.sessionId, 'SDK resume', () => client.resumeSession(record.externalSessionId ?? record.sessionId, {
         ...config,
         continuePendingWork: false,
-      }))
+      }), true, (durationMs, outcome) => this.context.observeCopilotStage?.('sdk_resume', durationMs, outcome))
     } catch (error) {
       // Never replace an existing durable conversation with an empty SDK Session.
       // Unmarked local installations keep their historical SDK storage behavior.
@@ -759,6 +761,18 @@ export class CopilotAgentRuntime implements AgentRuntime {
     const generation = this.trackEventGeneration(record.sessionId, event)
     if (isTurnScopedEvent(event) && generation !== undefined && !this.isCurrentTurn(record.sessionId, generation)) {
       return
+    }
+    if (!event.agentId && (event.type === 'assistant.message_delta' && event.data.deltaContent
+      || event.type === 'assistant.message' && event.data.content
+      || event.type === 'tool.execution_start')) {
+      const timing = this.activeTurnTimings.get(record.sessionId)
+      if (timing && !timing.firstActivityObserved && generation !== undefined
+        && this.isCurrentTurn(record.sessionId, generation)) {
+        timing.firstActivityObserved = true
+        const durationMs = Date.now() - Date.parse(timing.startedAt)
+        this.context.observeCopilotStage?.('first_activity', durationMs, 'succeeded')
+        if (durationMs >= 10_000) console.warn('[copilot] slow first activity', { sessionId: record.sessionId, durationMs })
+      }
     }
     if (event.type === 'assistant.usage') {
       if (event.data.apiCallId) this.accountedUsageCallIds.add(event.data.apiCallId)
@@ -1638,9 +1652,11 @@ async function observeSlowSessionOperation<T>(
   stage: string,
   operation: () => Promise<T>,
   reportSlowCompletion = true,
+  onDuration?: (durationMs: number, outcome: 'succeeded' | 'failed') => void,
 ): Promise<T> {
   const started = Date.now()
   const cpuStarted = process.cpuUsage()
+  let outcome: 'succeeded' | 'failed' = 'failed'
   let expected = started + 15_000
   const timer = setInterval(() => {
     const now = Date.now()
@@ -1652,10 +1668,13 @@ async function observeSlowSessionOperation<T>(
   }, 15_000)
   timer.unref()
   try {
-    return await operation()
+    const result = await operation()
+    outcome = 'succeeded'
+    return result
   } finally {
     clearInterval(timer)
     const elapsedMs = Date.now() - started
+    onDuration?.(elapsedMs, outcome)
     const cpu = process.cpuUsage(cpuStarted)
     if (reportSlowCompletion && elapsedMs >= 15_000
       || !reportSlowCompletion && elapsedMs >= 30_000 && cpu.user + cpu.system >= 15_000_000) {

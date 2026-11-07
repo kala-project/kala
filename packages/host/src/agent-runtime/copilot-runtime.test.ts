@@ -234,6 +234,34 @@ describe('Copilot runtime custom tools', () => {
     await runtime.close()
   })
 
+  it('observes cold resume and only the first root activity without recording content', async () => {
+    const observeCopilotStage = vi.fn()
+    const runtime = new CopilotAgentRuntime({
+      store, tools: { async callTool() { return { ok: true, content: 'unused' } }, cancelPending() {} },
+      observeCopilotStage,
+      broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError() {} },
+    }, { enabled: true, sessionsDir: dir })
+    const record = await store.create({ sessionId: 'stage-observation', agentRuntime: 'copilot', config: createConfig({ tools: [] }) })
+    let finish!: (value: unknown) => void
+    sdk.responses.push(new Promise(resolve => { finish = resolve }))
+    await runtime.start()
+    await runtime.send(record, { text: 'private prompt' })
+    await vi.waitFor(() => expect(sdk.sentMessages).toHaveLength(1))
+    expect(observeCopilotStage).toHaveBeenCalledWith('sdk_resume', expect.any(Number), 'failed')
+    for (const listener of [...sdk.listeners]) {
+      listener({ type: 'assistant.message_delta', id: 'child', agentId: 'child', timestamp: new Date().toISOString(), parentId: null, data: { deltaContent: 'private child text' } })
+      listener({ type: 'assistant.message_delta', id: 'root', timestamp: new Date().toISOString(), parentId: null, data: { deltaContent: 'private answer' } })
+      listener({ type: 'assistant.message_delta', id: 'root-again', timestamp: new Date().toISOString(), parentId: null, data: { deltaContent: 'more private text' } })
+    }
+    expect(observeCopilotStage.mock.calls.filter(([stage]) => stage === 'first_activity')).toEqual([
+      ['first_activity', expect.any(Number), 'succeeded'],
+    ])
+    expect(JSON.stringify(observeCopilotStage.mock.calls)).not.toMatch(/private/u)
+    finish({ type: 'assistant.message', id: 'response', data: { content: 'private answer' } })
+    await vi.waitFor(() => expect(store.get(record.sessionId)?.state.status).toBe('done'))
+    await runtime.close()
+  })
+
   it('counts unique persisted SDK model-turn endings for the named child command, not assistant messages', async () => {
     const runtime = new CopilotAgentRuntime({
       store, tools: { async callTool() { return { ok: true, content: 'unused' } }, cancelPending() {} },

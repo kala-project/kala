@@ -17,6 +17,7 @@ import { authorizeExecutorShellCall } from '../connection/executor-ns.js'
 import { PostgresObjectCapacityLedger } from '../artifacts/postgres-object-capacity.js'
 import { PostgresStorageInventory } from './postgres-storage-inventory.js'
 import { migratePostgres } from '../postgres-migrations.js'
+import type { HotStateSqlExecutor } from '../tenant-runtime/postgres-hot-state.js'
 
 const execFileAsync = promisify(execFile)
 const integrationDescribe = process.env.KALA_RUN_POSTGRES_INTEGRATION === '1' ? describe : describe.skip
@@ -267,10 +268,22 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     await native.write('/checkpoints/events', NATIVE_POSIX_BLOCK_BYTES - 2, Buffer.from([0, 0xfe, 0xfd, 0]))
     original.set([0, 0xfe, 0xfd, 0], NATIVE_POSIX_BLOCK_BYTES - 2)
     await native.sync('/checkpoints/events')
-    const reader = makeAuthority('posix-ranges-reader', 'posix-a').nativePosixSessionFs('posix-ranges')
+    const readerAuthority = makeAuthority('posix-ranges-reader', 'posix-a')
+    const database = readerAuthority.hotState.database
+    const transaction = database.transaction.bind(database)
+    let fullProjectionReads = 0
+    const reads = vi.spyOn(database, 'transaction').mockImplementation(async <T>(operation: (sql: HotStateSqlExecutor) => Promise<T>) =>
+      await transaction(async sql => await operation({
+        query: async <Row extends Record<string, unknown>>(text: string, values?: readonly unknown[]) => {
+          if (/SELECT document\s+FROM .*tenant_session_latest_projection/u.test(text)) fullProjectionReads++
+          return await sql.query<Row>(text, values)
+        },
+      })))
+    const reader = readerAuthority.nativePosixSessionFs('posix-ranges')
     await expect(reader.read('/checkpoints/events', 0, original.length)).resolves.toEqual(original)
     await expect(reader.read('/checkpoints/events', original.length, 100)).resolves.toEqual(Buffer.alloc(0))
     await expect(reader.readdir('/checkpoints')).resolves.toEqual(['events'])
+    expect(fullProjectionReads).toBe(1)
     await expect(reader.read('/checkpoints/events', -1, 1)).rejects.toMatchObject({ code: 'EINVAL' })
     await expect(reader.read('/checkpoints/events', 0, 1024 * 1024 + 1)).rejects.toMatchObject({ code: 'EINVAL' })
     await expect(reader.stat('/../events')).rejects.toMatchObject({ code: 'EINVAL' })
@@ -280,6 +293,8 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     await expect(other.nativePosixSessionFs('posix-ranges').stat('/checkpoints')).rejects.toMatchObject({ code: 'ENOENT' })
     await writer.requestDeletion('posix-ranges')
     await expect(reader.read('/checkpoints/events', 0, 1)).rejects.toBeInstanceOf(SessionDeletingError)
+    expect(fullProjectionReads).toBe(2)
+    reads.mockRestore()
     await writer.delete('posix-ranges')
     const { rows } = await writer.hotState.database.query(`SELECT count(*)::int AS count
       FROM tenant_session_native_posix_blocks WHERE tenant_id='posix-a' AND session_id='posix-ranges'`)

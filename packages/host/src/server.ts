@@ -362,6 +362,12 @@ export async function startHostServer(
   const telemetry = options.telemetry ?? createOnlineTelemetryFromEnv('kala-runtime')
   const ownsTelemetry = options.telemetry === undefined
   const agentTelemetry = telemetry ? new AgentTelemetryBridge(telemetry, options.resourceUnitId ?? 'local') : undefined
+  const observeCopilotStage = (stage: 'native_mount' | 'sdk_start' | 'sdk_resume' | 'first_activity',
+    durationMs: number, outcome: 'succeeded' | 'failed'): void => {
+    telemetry?.histogram('kala_copilot_stage_duration_ms', durationMs, 'ms', {
+      component: 'host', operation: stage, outcome,
+    })
+  }
   const metrics = new OperationalMetrics((name, value, labels) => telemetry?.counter(name, value, {
     ...(labels.component ? { component: labels.component } : {}),
     ...(labels.operation ? { operation: labels.operation } : {}),
@@ -2411,6 +2417,7 @@ export async function startHostServer(
   }
   const copilotTools = createRuntimeToolDispatcher(loopDeps, executors, loop, runtimeController)
   const copilotRuntime = new CopilotAgentRuntime({
+    observeCopilotStage,
     store,
     tools: copilotTools,
     ...(options.assertSessionEffectOwner ? { assertSessionEffectOwner: options.assertSessionEffectOwner } : {}),
@@ -2924,6 +2931,8 @@ export async function startHostServer(
 
   configureDashboardNamespace(dashboardNs, {
     sessionScopedIngress: deployment.architecture === 'platform',
+    observeSessionList: (durationMs, outcome) => telemetry?.histogram('kala_dashboard_session_list_duration_ms',
+      durationMs, 'ms', { component: 'host', operation: 'list_sessions', outcome }),
     pushActivity,
     store,
     loop,

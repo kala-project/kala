@@ -942,8 +942,17 @@ export class PostgresSessionAuthority implements SessionAuthority, ChildCommandI
   nativePosixSessionFs(sessionId: string, options: { importId?: string } = {}): NativePosixFileSystem {
     validateSessionId(sessionId)
     let ownerEpoch: string | undefined
+    let validatedVersion: string | undefined
     return new PostgresNativePosixFileSystem(this.tenantId, sessionId, async operation => {
-      return this.#nativePosixTransaction(sessionId, async transaction => {
+      return this.#withNativePosixOwner(sessionId, async transaction => {
+        const projected = await transaction.query<{ version: string }>(`SELECT version::text
+          FROM ${this.#projectionTable} WHERE tenant_id=$1 AND session_id=$2 FOR SHARE`, [this.tenantId, sessionId])
+        const version = projected.rows[0]?.version
+        if (!version) throw new Error(`Session not found: ${sessionId}`)
+        if (validatedVersion !== version) {
+          await this.#validNativePosixDocument(transaction, sessionId)
+          validatedVersion = version
+        }
         assertNativeFsAdmission(await lockNativeFsAdmission(transaction, this.#nativeFsAdmissionTable,
           this.tenantId, sessionId), 'posix', options.importId)
         return operation(transaction)
@@ -1023,22 +1032,39 @@ export class PostgresSessionAuthority implements SessionAuthority, ChildCommandI
     operation: (transaction: HotStateSqlExecutor, document: PersistedSessionDocument) => Promise<T>,
     pinOwner?: (owner: RuntimeResourceOwnership) => void,
   ): Promise<T> {
+    return this.#withNativePosixOwner(sessionId, async transaction => {
+      const document = await this.#validNativePosixDocument(transaction, sessionId)
+      return operation(transaction, document)
+    }, pinOwner)
+  }
+
+  async #validNativePosixDocument(
+    transaction: HotStateSqlExecutor, sessionId: string,
+  ): Promise<PersistedSessionDocument> {
+    const projected = await transaction.query<{ document: PersistedSessionDocument | null }>(`SELECT document
+      FROM ${this.#projectionTable} WHERE tenant_id=$1 AND session_id=$2 FOR SHARE`, [this.tenantId, sessionId])
+    const document = decodePostgresJson(projected.rows[0]?.document)
+    if (!document) throw new Error(`Session not found: ${sessionId}`)
+    if (sessionDeletion(document)) throw new SessionDeletingError(sessionId)
+    if (hasNonemptyLegacyNativeFs(document[LEGACY_NATIVE_FS_FIELD])) {
+      throw new Error(`Session ${sessionId} requires explicit legacy native filesystem migration`)
+    }
+    return document
+  }
+
+  async #withNativePosixOwner<T>(
+    sessionId: string,
+    operation: (transaction: HotStateSqlExecutor) => Promise<T>,
+    pinOwner?: (owner: RuntimeResourceOwnership) => void,
+  ): Promise<T> {
     validateSessionId(sessionId)
     await this.#prepareSessionOwner?.(sessionId)
     const owner = this.#currentOwner(sessionId)
     if (owner) pinOwner?.(owner)
     return this.hotState.database.transaction(async transaction => {
       if (owner) await this.hotState.assertResourceOwnerForScope(transaction, this.#scope(sessionId), owner)
-      const projected = await transaction.query<{ document: PersistedSessionDocument | null }>(`SELECT document
-        FROM ${this.#projectionTable} WHERE tenant_id=$1 AND session_id=$2 FOR SHARE`, [this.tenantId, sessionId])
-      const document = decodePostgresJson(projected.rows[0]?.document)
-      if (!document) throw new Error(`Session not found: ${sessionId}`)
-      if (sessionDeletion(document)) throw new SessionDeletingError(sessionId)
-      if (hasNonemptyLegacyNativeFs(document[LEGACY_NATIVE_FS_FIELD])) {
-        throw new Error(`Session ${sessionId} requires explicit legacy native filesystem migration`)
-      }
       await transaction.query('SET LOCAL synchronous_commit = on')
-      return operation(transaction, document)
+      return operation(transaction)
     })
   }
 

@@ -241,6 +241,7 @@ export function isRestingStatus(status: AgentState['status']): boolean {
 
 export type DashboardDeps = {
   store: SessionStore
+  observeSessionList?: (durationMs: number, outcome: 'succeeded' | 'failed') => void
   loop: LoopHandle
   loopDeps: HostLoopDeps
   executors: ReturnType<typeof createExecutorRegistry>
@@ -749,9 +750,18 @@ export function configureDashboardNamespace(
 
     socket.on('client:list_sessions', async (raw: ClientListSessions) => {
       if (!vparse(schema.ClientListSessionsSchema, raw, 'client:list_sessions')) return
-      const sessions = withQueuedCounts(deps, await deps.store.listSummaries())
-      socket.emit('server:sessions', { sessions })
-      socket.emit('server:agent_runtimes', { runtimes: deps.agentRuntimes.catalog() })
+      const started = Date.now()
+      let outcome: 'succeeded' | 'failed' = 'failed'
+      try {
+        const sessions = withQueuedCounts(deps, await deps.store.listSummaries())
+        socket.emit('server:sessions', { sessions })
+        socket.emit('server:agent_runtimes', { runtimes: deps.agentRuntimes.catalog() })
+        outcome = 'succeeded'
+      } finally {
+        const durationMs = Date.now() - started
+        deps.observeSessionList?.(durationMs, outcome)
+        if (durationMs >= 2_000) console.warn('[dashboard] slow session list', { durationMs, outcome })
+      }
     })
 
     socket.on('client:list_session_tool_upgrades', async (raw: { sessionId: string }, ack: (result: RpcAck<readonly string[]>) => void) => {
