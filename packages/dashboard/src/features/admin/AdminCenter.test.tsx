@@ -14,13 +14,11 @@ const policySnapshot = {
   workspaces: [{ id: 'workspace_test', name: 'Test workspace', status: 'active', policy_version: 1 }], executorPools: [{ id: 'pool_test', name: 'Default pool', mode: 'shared' }], executors: [], invites: [], browserSessions: [], serviceAccounts: [], webhooks: [], audit: [], integrations: {},
 }
 
-it('keeps admin title help available without hiding access failures', async () => {
+it('keeps access failures visible without rendering organization controls', async () => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 403 })))
   render(<AdminCenter onClose={() => {}} />)
   expect(await screen.findByText(i18n.t('admin.loadFailed'))).toBeTruthy()
-  expect(screen.queryByText(i18n.t('admin.subtitle'))).toBeNull()
-  fireEvent.click(screen.getByRole('button', { name: i18n.t('common.aboutLabel', { label: i18n.t('admin.title') }) }))
-  expect(screen.getByRole('tooltip').textContent).toBe(i18n.t('admin.subtitle'))
+  expect(screen.queryByRole('navigation', { name: i18n.t('admin.sections') })).toBeNull()
   expect(screen.getByText(i18n.t('admin.loadFailed'))).toBeTruthy()
 })
 
@@ -63,9 +61,13 @@ it('makes the organization scope, role, and first routine tasks explicit', async
   render(<AdminCenter onClose={() => {}} />)
 
   expect(await screen.findByRole('heading', { name: policySnapshot.organization.name })).toBeTruthy()
+  expect(screen.getByTestId('admin-center').style.position).toBe('fixed')
   expect(screen.getByText(`${i18n.t('admin.labels.role')}: ${i18n.t('admin.roles.owner')}`)).toBeTruthy()
-  expect(screen.getByText(i18n.t('admin.organizationBoundary'))).toBeTruthy()
-  expect(screen.getByText(i18n.t('admin.startHereDescription'))).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: i18n.t('common.aboutLabel', { label: i18n.t('admin.organizationScope') }) }))
+  expect(screen.getByRole('tooltip').textContent).toContain(i18n.t('admin.organizationBoundary'))
+  expect(screen.getByRole('heading', { name: i18n.t('admin.startHere') })).toBeTruthy()
+  expect(screen.getByRole('group', { name: i18n.t('adminNavigation.manage') })).toBeTruthy()
+  expect(screen.getByRole('group', { name: i18n.t('adminNavigation.review') })).toBeTruthy()
   expect(screen.getByRole('button', { name: i18n.t('admin.tabs.overview') }).getAttribute('aria-current')).toBe('page')
 
   fireEvent.click(screen.getByRole('button', { name: i18n.t('admin.openMembers') }))
@@ -77,7 +79,7 @@ it('identifies the deployment operator as responsible for every status-only area
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json(policySnapshot)))
   render(<AdminCenter onClose={() => {}} />)
 
-  expect(await screen.findByText(i18n.t('admin.readOnlyOperator'))).toBeTruthy()
+  await screen.findByRole('heading', { name: policySnapshot.organization.name })
   for (const tab of ['workspaces', 'executors', 'usage', 'integrations'] as const) {
     fireEvent.click(screen.getByRole('button', { name: i18n.t(`admin.tabs.${tab}`) }))
     expect(screen.getByText(i18n.t('admin.readOnlyOperator'))).toBeTruthy()
@@ -101,7 +103,7 @@ it('shows view-only boundaries without exposing organization mutations', async (
 
   fireEvent.click(screen.getByRole('button', { name: i18n.t('admin.tabs.members') }))
   expect(screen.getByText(i18n.t('admin.membersRestricted'))).toBeTruthy()
-  expect((screen.getByLabelText(i18n.t('admin.memberRole')) as HTMLSelectElement).disabled).toBe(true)
+  expect((screen.getByRole('combobox', { name: `${i18n.t('admin.memberRole')}: Member` }) as HTMLSelectElement).disabled).toBe(true)
   expect(screen.queryByRole('button', { name: i18n.t('admin.createInvite') })).toBeNull()
   expect(screen.queryByRole('button', { name: i18n.t('admin.remove') })).toBeNull()
 
@@ -135,9 +137,9 @@ it('edits only session days and requires confirmation before applying cleanup sc
   render(<AdminCenter onClose={() => {}} />)
 
   fireEvent.click(await screen.findByRole('button', { name: i18n.t('admin.tabs.policies') }))
-  expect(screen.getByText(i18n.t('admin.retentionCleanupWarning'))).toBeTruthy()
   expect(screen.getByText(i18n.t('admin.unsupportedRetentionFields'))).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: i18n.t('admin.editSessionRetention') }))
+  expect(screen.getByText(i18n.t('admin.retentionCleanupWarning'))).toBeTruthy()
 
   const input = screen.getByRole('spinbutton', { name: i18n.t('admin.labels.sessionDays') })
   expect(screen.queryByRole('spinbutton', { name: i18n.t('admin.labels.artifactDays') })).toBeNull()
@@ -155,6 +157,21 @@ it('edits only session days and requires confirmation before applying cleanup sc
   await waitFor(() => expect(fetchMock.mock.calls.filter(([input, init]) => String(input) === '/organization/retention' && init?.method === 'PUT')).toHaveLength(1))
   const updateCall = fetchMock.mock.calls.find(([input, init]) => String(input) === '/organization/retention' && init?.method === 'PUT')
   expect(JSON.parse(String(updateCall?.[1]?.body))).toEqual({ sessionDays: 7, artifactDays: 60, auditDays: 365, deletedResourceGraceDays: 30 })
+})
+
+it('keeps the active policy form and its draft visible after a failed save', async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
+    String(input) === '/organization/attachment-policy' && init?.method === 'PUT'
+      ? new Response(null, { status: 503 })
+      : Response.json(policySnapshot))
+  vi.stubGlobal('fetch', fetchMock)
+  render(<AdminCenter onClose={() => {}} />)
+  fireEvent.click(await screen.findByRole('button', { name: i18n.t('admin.tabs.policies') }))
+  fireEvent.change(screen.getByLabelText(i18n.t('attachmentPolicy.label')), { target: { value: String(8 * 1024 * 1024) } })
+  fireEvent.click(screen.getByRole('button', { name: i18n.t('attachmentPolicy.save') }))
+  expect((await screen.findByRole('alert')).textContent).toContain('503')
+  expect((screen.getByLabelText(i18n.t('attachmentPolicy.label')) as HTMLSelectElement).value).toBe(String(8 * 1024 * 1024))
+  expect(screen.getByRole('button', { name: i18n.t('attachmentPolicy.save') })).toBeTruthy()
 })
 
 it('provides equivalent English and Chinese retention safety guidance', () => {
