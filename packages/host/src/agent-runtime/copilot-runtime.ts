@@ -526,18 +526,19 @@ export class CopilotAgentRuntime implements AgentRuntime {
     }
     const config = this.sessionConfig(record, model)
     let client = this.client
-    if (this.options.nativePosixRoot) {
+    const nativePosixRoot = this.options.nativePosixRoot
+    if (nativePosixRoot) {
       let native = this.nativeClients.get(record.sessionId)
       if (!native) {
         await this.context.assertSessionEffectOwner?.(record.sessionId)
-        const mount = await mountNativePosixSession({
-          root: this.options.nativePosixRoot,
+        const mount = await observeSlowSessionOperation(record.sessionId, 'native mount', () => mountNativePosixSession({
+          root: nativePosixRoot,
           sessionId: record.externalSessionId ?? record.sessionId,
           scope: `${this.options.sessionsDir}\0${record.sessionId}`,
           fs: this.context.store.copilotNativePosixSessionFs(record.sessionId),
           onError: error => this.context.broadcast.onError(record.sessionId,
             error instanceof Error ? error.message : String(error)),
-        })
+        }))
         const connection = this.sdk!.RuntimeConnection.forStdio({
           args: ['--no-remote-export'], ...(this.cliPath ? { path: this.cliPath } : {}),
         })
@@ -545,7 +546,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
           mode: 'empty', connection, baseDirectory: mount.baseDirectory,
           ...(this.options.gitHubToken ? { gitHubToken: this.options.gitHubToken, useLoggedInUser: false } : {}),
         })
-        try { await dedicatedClient.start() } catch (error) {
+        try { await observeSlowSessionOperation(record.sessionId, 'SDK start', () => dedicatedClient.start()) } catch (error) {
           await dedicatedClient.stop()
           await mount.close()
           throw error
@@ -557,10 +558,10 @@ export class CopilotAgentRuntime implements AgentRuntime {
     }
     let session: CopilotSession
     try {
-      session = await client.resumeSession(record.externalSessionId ?? record.sessionId, {
+      session = await observeSlowSessionOperation(record.sessionId, 'SDK resume', () => client.resumeSession(record.externalSessionId ?? record.sessionId, {
         ...config,
         continuePendingWork: false,
-      })
+      }))
     } catch (error) {
       // Never replace an existing durable conversation with an empty SDK Session.
       // Unmarked local installations keep their historical SDK storage behavior.
@@ -576,7 +577,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
     this.sessions.set(record.sessionId, session)
     this.sessionSystemPrompts.set(record.sessionId, effectivePrompt)
     this.sessionToolLocks.set(record.sessionId, effectiveTools)
-    await this.restorePersistedContext(record, session)
+    await observeSlowSessionOperation(record.sessionId, 'restore context', () => this.restorePersistedContext(record, session))
     return session
   }
 
@@ -1066,7 +1067,8 @@ export class CopilotAgentRuntime implements AgentRuntime {
     try {
       const message = await copilotMessageOptions(this.context, record, input, requestId)
       await this.context.assertSessionEffectOwner?.(record.sessionId)
-      const response = await sendAndWaitWithActivityTimeout(session, message)
+      const response = await observeSlowSessionOperation(record.sessionId, 'SDK send',
+        () => sendAndWaitWithActivityTimeout(session, message), false)
       if (!this.isCurrentTurn(record.sessionId, generation)) return
       await Promise.all(capture.projections)
       if (capture.projectionError) throw capture.projectionError
@@ -1629,6 +1631,39 @@ function completeTemporalTurn(
       },
     }
   })
+}
+
+async function observeSlowSessionOperation<T>(
+  sessionId: string,
+  stage: string,
+  operation: () => Promise<T>,
+  reportSlowCompletion = true,
+): Promise<T> {
+  const started = Date.now()
+  const cpuStarted = process.cpuUsage()
+  let expected = started + 15_000
+  const timer = setInterval(() => {
+    const now = Date.now()
+    const lag = now - expected
+    if (reportSlowCompletion || lag >= 10_000) {
+      console.warn('[copilot] slow session operation', { sessionId, stage, elapsedMs: now - started, eventLoopLagMs: Math.max(0, lag) })
+    }
+    expected = now + 15_000
+  }, 15_000)
+  timer.unref()
+  try {
+    return await operation()
+  } finally {
+    clearInterval(timer)
+    const elapsedMs = Date.now() - started
+    const cpu = process.cpuUsage(cpuStarted)
+    if (reportSlowCompletion && elapsedMs >= 15_000
+      || !reportSlowCompletion && elapsedMs >= 30_000 && cpu.user + cpu.system >= 15_000_000) {
+      console.warn('[copilot] session operation completed', {
+        sessionId, stage, elapsedMs, processCpuMs: Math.round((cpu.user + cpu.system) / 1000),
+      })
+    }
+  }
 }
 
 async function copilotMessageOptions(
