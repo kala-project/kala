@@ -310,6 +310,7 @@ export function App(): JSX.Element {
   const [accountCenterOpen, setAccountCenterOpen] = useState(false)
   const [adminCenterOpen, setAdminCenterOpen] = useState(false)
   const [metadataOpen, setMetadataOpen] = useState(false)
+  const [metadataInitialTab, setMetadataInitialTab] = useState<'overview' | 'tools'>('overview')
   const [metadataSessionId, setMetadataSessionId] = useState<string | null>(null)
   const [slashDelete, setSlashDelete] = useState<SlashDeleteState | null>(null)
   const [slashDeletePhrase, setSlashDeletePhrase] = useState('')
@@ -1388,10 +1389,32 @@ export function App(): JSX.Element {
   const openConnectWorkspaceDialog = useCallback((): void => {
     setConnectWorkspaceOpen(true)
   }, [])
-  const openSessionInfoDialog = useCallback((sessionId: string): void => {
+  const openSessionInfoDialog = useCallback((sessionId: string, initialTab: 'overview' | 'tools' = 'overview'): void => {
     setMetadataSessionId(sessionId)
+    setMetadataInitialTab(initialTab)
     setMetadataOpen(true)
   }, [])
+  const toolUpgradeNotices = useRef(new Set<string>())
+  useEffect(() => {
+    if (!controlSocket || !activeSessionId) return
+    let active = true
+    const check = () => {
+      controlSocket.emit('client:list_session_tool_upgrades', { sessionId: activeSessionId }, (result) => {
+        if (!active || !result.ok || result.value.length === 0) return
+        const key = `${activeSessionId}:${[...result.value].sort().join(',')}`
+        if (toolUpgradeNotices.current.has(key)) return
+        toolUpgradeNotices.current.add(key)
+        notify.info(t('sessionMetadata.toolUpgrades.notice'), {
+          id: 'session-tools-available',
+          action: { label: t('sessionMetadata.toolUpgrades.open'), onClick: () => openSessionInfoDialog(activeSessionId, 'tools') },
+          duration: 10_000,
+        })
+      })
+    }
+    if (controlSocket.connected) check()
+    controlSocket.on('connect', check)
+    return () => { active = false; controlSocket.off('connect', check) }
+  }, [activeSessionId, controlSocket, openSessionInfoDialog, t])
   const renameCurrentSessionFromSlash = useCallback((label: string | null): void => {
     if (activeSessionId === null) return
     if (label === null) {
@@ -1414,6 +1437,7 @@ export function App(): JSX.Element {
   const openExplorerDrawerSessionInfo = useCallback((sessionId: string): void => {
     setExplorerDrawerOpen(false)
     setMetadataSessionId(sessionId)
+    setMetadataInitialTab('overview')
     setMetadataOpen(true)
   }, [])
   const openExplorerDrawerWorkspaceInfo = useCallback((workspaceId: string): void => {
@@ -1928,6 +1952,7 @@ export function App(): JSX.Element {
         run: () => {
           if (activeSessionId === null) return
           setMetadataSessionId(activeSessionId)
+          setMetadataInitialTab('overview')
           setMetadataOpen(true)
         },
       },
@@ -3089,6 +3114,7 @@ export function App(): JSX.Element {
       <SessionMetadataDialog
         evaluationUrl={runtimeDeployment.evaluationUrl}
         open={metadataOpen}
+        initialTab={metadataInitialTab}
         onOpenChange={(open) => {
           setMetadataOpen(open)
           if (!open) setMetadataSessionId(null)

@@ -104,14 +104,42 @@ describe('SessionMetadataDialog', () => {
     })
 
     render(<SessionMetadataDialog open onOpenChange={() => {}} sessionId={baseSummary.sessionId} summary={baseSummary} state={baseState} selectedModel={null} storageSocket={{ emit } as never} onRename={() => {}} onOpenChangeCwdDialog={() => {}} onChangeApprovalMode={() => {}} onChangeToolCardMode={() => {}} />)
-    fireEvent.click(await screen.findByText('Add tools to this session'))
-    const review = await screen.findByRole('button', { name: 'Review tools' })
+    expect((await screen.findByTestId('session-tool-upgrade-count')).textContent).toBe('1')
+    fireEvent.click(screen.getByTestId('session-info-tools-tab'))
+    const review = await screen.findByRole('button', { name: 'Review selection' })
     expect(review.hasAttribute('disabled')).toBe(true)
     fireEvent.click(screen.getByRole('checkbox', { name: 'scheduled_task' }))
     fireEvent.click(review)
     expect(emit.mock.calls.some(([event]) => event === 'client:upgrade_session_tools')).toBe(false)
+    expect(screen.getByText('Confirm Session permissions')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: /Enable selected tools/ }))
     expect(emit).toHaveBeenCalledWith('client:upgrade_session_tools', { sessionId: baseSummary.sessionId, tools: ['scheduled_task'] }, expect.any(Function))
+    expect(screen.getByText('This Session has all currently available tools.')).toBeTruthy()
+  })
+
+  it('lets a resting Session from the directory upgrade tools without requiring active approval controls', async () => {
+    const emit = vi.fn((event: string, _payload: unknown, ack: (result: unknown) => void) => {
+      if (event === 'client:list_session_tool_upgrades') ack({ ok: true, value: ['scheduled_task'] })
+      if (event === 'client:get_session_storage') ack({ ok: false, error: 'storage inventory unavailable' })
+    })
+    render(<SessionMetadataDialog open onOpenChange={() => {}} sessionId={baseSummary.sessionId} summary={{ ...baseSummary, status: 'done' }}
+      state={null} selectedModel={null} canChangeApprovalMode={false} storageSocket={{ emit } as never}
+      onRename={() => {}} onOpenChangeCwdDialog={() => {}} onChangeApprovalMode={() => {}} onChangeToolCardMode={() => {}} />)
+    fireEvent.click(screen.getByTestId('session-info-tools-tab'))
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'scheduled_task' }))
+    expect(screen.getByRole('button', { name: 'Review selection' }).hasAttribute('disabled')).toBe(false)
+  })
+
+  it('opens the tools review directly from a new-tools notice', async () => {
+    const emit = vi.fn((event: string, _payload: unknown, ack: (result: unknown) => void) => {
+      if (event === 'client:list_session_tool_upgrades') ack({ ok: true, value: ['scheduled_task'] })
+      if (event === 'client:get_session_storage') ack({ ok: false, error: 'storage inventory unavailable' })
+    })
+    render(<SessionMetadataDialog open initialTab="tools" onOpenChange={() => {}} sessionId={baseSummary.sessionId}
+      summary={baseSummary} state={baseState} selectedModel={null} storageSocket={{ emit } as never}
+      onRename={() => {}} onOpenChangeCwdDialog={() => {}} onChangeApprovalMode={() => {}} onChangeToolCardMode={() => {}} />)
+    expect(await screen.findByText('Add tools to this session')).toBeTruthy()
+    expect(screen.getByRole('checkbox', { name: 'scheduled_task' })).toBeTruthy()
   })
 
   it('displays measured PostgreSQL and object data without offering filesystem cleanup', async () => {
@@ -177,6 +205,8 @@ describe('SessionMetadataDialog', () => {
     expect(candidate).toMatchObject({ sourceClassification: 'private_workspace', publicTaskPack: false, candidateMetadata: { contentIncluded: false, workspacePathIncluded: false }, governance: { requiresExplicitOperatorReview: true, redactionStatus: 'not_reviewed', provenanceApprovalStatus: 'not_reviewed' } })
     expect(JSON.stringify(candidate)).not.toContain('/tmp/current')
     expect(screen.getByTestId('session-open-evaluation-reference').getAttribute('href')).toContain('/defects?runId=run-one&findingId=finding-one')
+    expect(screen.queryByText('Evaluation integration')).toBeNull()
+    expect(screen.queryByText(/Exports a private, reference-only task candidate/)).toBeNull()
   })
 
   it('does not infer an evaluation link without an explicit session-scoped reference', () => {

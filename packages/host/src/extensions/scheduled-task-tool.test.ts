@@ -15,6 +15,7 @@ import { MAX_CREATE_RECEIPTS } from '../scheduled-tasks/create-receipts.js'
 import type { ScheduledTaskState } from '../scheduled-tasks/state-store.js'
 import { UnitScheduler } from '../scheduled-tasks/scheduler.js'
 import { assertNoResumableGoal } from '../scheduled-tasks/goal-guard.js'
+import { BackgroundAuthorizationError } from '../scheduled-tasks/authorization.js'
 import type { HostLoopDeps } from '../loop-types.js'
 import {
   normalizeScheduleInput,
@@ -493,6 +494,22 @@ describe('scheduled_task tool', () => {
       expect((await runScheduledTaskTool(deps, session.sessionId, {
         type: 'tool_call', callId: 'list', name: 'scheduled_task', input: { action: 'list' },
       })).content).toContain('authority is unavailable')
+    })
+
+    it.each([
+      ['denied', "recorded principal is no longer authorized"],
+      ['unavailable', 'temporarily unavailable'],
+    ] as const)('explains %s organization authority without exposing the saved identity', async (reason, explanation) => {
+      const session = await store.create({
+        config: TEST_CONFIG, organizationId: 'org-a', principal: 'historical-identity', organizationRole: 'owner',
+      })
+      deps.authorizeScheduledTaskPrincipal = async () => { throw new BackgroundAuthorizationError(reason) }
+      const result = await runScheduledTaskTool(deps, session.sessionId, {
+        type: 'tool_call', callId: 'list', name: 'scheduled_task', input: { action: 'list' },
+      })
+      expect(result).toMatchObject({ ok: false, content: expect.stringContaining(explanation) })
+      expect(result.content).not.toContain('historical-identity')
+      expect(result.content).toContain('No task was changed')
     })
 
     it('rechecks authority after asynchronous target validation before writing', async () => {

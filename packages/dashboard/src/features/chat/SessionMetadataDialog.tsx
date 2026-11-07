@@ -57,6 +57,7 @@ import {
 type Props = {
   open: boolean
   onOpenChange(open: boolean): void
+  initialTab?: 'overview' | 'tools'
   sessionId: string
   summary?: SessionSummary & { costUsd?: number | null }
   state: AgentState | null
@@ -83,6 +84,7 @@ const APPROVAL_MODE_ITEMS: ReadonlyArray<{ value: ApprovalMode; labelKey: string
 export function SessionMetadataDialog({
   open,
   onOpenChange,
+  initialTab = 'overview',
   sessionId,
   summary,
   state,
@@ -104,7 +106,12 @@ export function SessionMetadataDialog({
   const approvalMode = state?.approvalMode ?? 'auto'
   const toolCardMode = summary?.preferences?.toolCardMode ?? 'dots'
   const agentRuntime = summary?.agentRuntime ?? 'kernel'
-  const canUpgradeTools = canChangeApprovalMode && (state?.status === 'idle' || state?.status === 'done' || state?.status === 'error')
+  const sessionStatus = state?.status ?? summary?.status
+  const canUpgradeTools = !summary?.parentSessionId
+    && sessionStatus !== undefined
+    && ['idle', 'done', 'error'].includes(sessionStatus)
+    && (summary?.queuedCount ?? 0) === 0
+    && (state?.pendingCalls.length ?? 0) === 0
   const agentRuntimeLabel = agentRuntime === 'copilot'
     ? 'GitHub Copilot SDK'
     : 'Agent Kernel'
@@ -116,7 +123,7 @@ export function SessionMetadataDialog({
   const [labelDraft, setLabelDraft] = useState(initialLabel)
   const [approvalDraft, setApprovalDraft] = useState<ApprovalMode>(approvalMode)
   const [toolCardModeDraft, setToolCardModeDraft] = useState<ToolCardMode>(toolCardMode)
-  const [activeTab, setActiveTab] = useState<'overview' | 'statistics' | 'storage'>('overview')
+  const [activeTab, setActiveTab] = useState<'overview' | 'tools' | 'statistics' | 'storage'>('overview')
   const [numberDisplay, setNumberDisplay] = useState<'compact' | 'exact'>(() => {
     if (typeof window === 'undefined') return 'compact'
     return window.localStorage.getItem('ak-session-statistics-number-display') === 'exact' ? 'exact' : 'compact'
@@ -132,6 +139,7 @@ export function SessionMetadataDialog({
   const [selectedTools, setSelectedTools] = useState<ReadonlySet<string>>(new Set())
   const [toolUpgradeReview, setToolUpgradeReview] = useState(false)
   const [toolUpgradeBusy, setToolUpgradeBusy] = useState(false)
+  const [toolUpgradeLoading, setToolUpgradeLoading] = useState(false)
   const [toolUpgradeError, setToolUpgradeError] = useState<string | null>(null)
   const toolUpgradeSessionRef = useRef(sessionId)
   toolUpgradeSessionRef.current = sessionId
@@ -141,11 +149,14 @@ export function SessionMetadataDialog({
     setSelectedTools(new Set())
     setToolUpgradeReview(false)
     setToolUpgradeBusy(false)
+    setToolUpgradeLoading(false)
     setToolUpgradeError(null)
     if (!open || !storageSocket || summary?.parentSessionId) return
     let active = true
+    setToolUpgradeLoading(true)
     storageSocket.emit('client:list_session_tool_upgrades', { sessionId }, (result) => {
       if (!active) return
+      setToolUpgradeLoading(false)
       if (result.ok) setToolUpgrades(result.value)
       else setToolUpgradeError(result.error)
     })
@@ -160,9 +171,11 @@ export function SessionMetadataDialog({
       if (toolUpgradeSessionRef.current !== sessionId) return
       setToolUpgradeBusy(false)
       if (!result.ok) { setToolUpgradeError(result.error); return }
-      setToolUpgrades((current) => current.filter((tool) => !result.value.includes(tool)))
+      const remaining = toolUpgrades.filter((tool) => !result.value.includes(tool))
+      setToolUpgrades(remaining)
       setSelectedTools(new Set())
       setToolUpgradeReview(false)
+      notify.dismiss('session-tools-available')
       notify.success(t('sessionMetadata.toolUpgrades.success'))
     })
   }
@@ -237,13 +250,13 @@ export function SessionMetadataDialog({
       setLabelDraft(initialLabel)
       setApprovalDraft(approvalMode)
       setToolCardModeDraft(toolCardMode)
-      setActiveTab('overview')
+      setActiveTab(initialTab)
       setSelectedStorageIds(new Set())
       setCleanupPlans([])
       setCleanupConfirmationStep('review')
       loadStorage(false)
     }
-  }, [open, initialLabel, approvalMode, toolCardMode, sessionId, storageSocket])
+  }, [open, initialTab, initialLabel, approvalMode, toolCardMode, sessionId, storageSocket])
 
   const labelChanged = labelDraft.trim() !== (summary?.label ?? '').trim()
   const approvalChanged = approvalDraft !== approvalMode
@@ -304,6 +317,10 @@ export function SessionMetadataDialog({
             <MetadataTab active={activeTab === 'overview'} testId="session-info-overview-tab" onClick={() => setActiveTab('overview')}>
               {t('sessionMetadata.tabs.overview')}
             </MetadataTab>
+            <MetadataTab active={activeTab === 'tools'} testId="session-info-tools-tab" onClick={() => setActiveTab('tools')}>
+              {t('sessionMetadata.tabs.tools')}
+              {toolUpgrades.length > 0 ? <span className="ml-1 rounded-full bg-primary/15 px-1.5 py-0.5 text-xs font-semibold text-primary" data-testid="session-tool-upgrade-count">{toolUpgrades.length}</span> : null}
+            </MetadataTab>
             <MetadataTab active={activeTab === 'statistics'} testId="session-info-statistics-tab" onClick={() => setActiveTab('statistics')}>
               {t('sessionMetadata.tabs.statistics')}
             </MetadataTab>
@@ -357,13 +374,10 @@ export function SessionMetadataDialog({
 
         <div className="border-t border-border/50 pt-3" />
 
-        <section className="grid gap-2 text-sm" aria-label={t('sessionMetadata.evaluation')}>
-          <span className="text-xs uppercase tracking-wider text-muted-foreground">{t('sessionMetadata.evaluation')}</span>
-          <p className="text-xs text-muted-foreground">{t('sessionMetadata.evaluationDescription')}</p>
-          <div className="flex flex-wrap gap-2">
+        <section className="flex flex-wrap items-center gap-2 text-sm" aria-label={t('sessionMetadata.evaluation')}>
             <Button type="button" variant="outline" size="sm" data-testid="session-export-task-candidate" onClick={() => void exportTaskCandidate()}>{t('sessionMetadata.exportCandidate')}</Button>
+            <HelpHint label={t('sessionMetadata.exportCandidate')}>{t('sessionMetadata.evaluationDescription')}</HelpHint>
             {evaluationReference && evaluationUrl ? <Button type="button" variant="outline" size="sm" asChild><a data-testid="session-open-evaluation-reference" href={evaluationReferenceUrl(evaluationReference, evaluationUrl)} target="_blank" rel="noreferrer">{t('sessionMetadata.openEvidence')}</a></Button> : null}
-          </div>
         </section>
 
         <div className="border-t border-border/50 pt-3" />
@@ -442,14 +456,22 @@ export function SessionMetadataDialog({
             </Select>
           </FieldRow>
         </div>
-        {toolUpgrades.length > 0 && !summary?.parentSessionId ? (
-          <details className="border-t border-border/50 pt-3 text-sm" data-testid="session-tool-upgrades">
-            <summary className="cursor-pointer font-medium">{t('sessionMetadata.toolUpgrades.title')}</summary>
-            <div className="mt-2 grid gap-2">
-            <p className="text-xs text-muted-foreground">{t('sessionMetadata.toolUpgrades.description')}</p>
-            <div className="flex flex-wrap gap-2">
+        </>
+        ) : activeTab === 'tools' ? (
+        <section className="grid gap-4 text-sm" aria-label={t('sessionMetadata.tabs.tools')} data-testid="session-tool-upgrades">
+          <div className="flex items-center gap-2">
+            <h3 className="text-base font-semibold">{t('sessionMetadata.toolUpgrades.title')}</h3>
+            <HelpHint label={t('sessionMetadata.toolUpgrades.title')}>{t('sessionMetadata.toolUpgrades.description')}</HelpHint>
+          </div>
+          {toolUpgradeLoading ? <p role="status">{t('sessionMetadata.toolUpgrades.loading')}</p> : null}
+          {!toolUpgradeLoading && toolUpgrades.length === 0 && !toolUpgradeError
+            ? <p className="text-muted-foreground">{t('sessionMetadata.toolUpgrades.empty')}</p> : null}
+          {toolUpgrades.length > 0 ? (
+          <>
+            <p className="font-medium">{t('sessionMetadata.toolUpgrades.available', { count: toolUpgrades.length })}</p>
+            <div className="grid gap-2 sm:grid-cols-2">
               {toolUpgrades.map((name) => (
-                <label key={name} className="flex items-center gap-1.5 rounded-md border border-border/60 px-2 py-1 font-mono text-xs">
+                <label key={name} className="flex min-h-12 cursor-pointer items-center gap-3 rounded-lg border border-border/70 px-3 py-2 text-sm has-[:checked]:border-primary has-[:checked]:bg-primary/5">
                   <input type="checkbox" checked={selectedTools.has(name)} disabled={toolUpgradeBusy || toolUpgradeReview || !canUpgradeTools} onChange={(event) => {
                     setSelectedTools((current) => {
                       const next = new Set(current)
@@ -458,33 +480,36 @@ export function SessionMetadataDialog({
                       return next
                     })
                   }} />
-                  {name}
+                  <span className="break-all font-mono">{name}</span>
                 </label>
               ))}
             </div>
-            {!canUpgradeTools ? <p className="text-xs text-muted-foreground">{t('sessionMetadata.toolUpgrades.unavailable')}</p> : null}
-            <div className="flex gap-2">
+            {!canUpgradeTools ? <p role="status" className="text-muted-foreground">{t('sessionMetadata.toolUpgrades.unavailable')}</p> : null}
+            {toolUpgradeReview ? (
+              <div className="rounded-lg border border-primary/40 bg-primary/5 p-3" role="status">
+                <p className="font-medium">{t('sessionMetadata.toolUpgrades.reviewTitle')}</p>
+                <p className="mt-1 break-words font-mono">{[...selectedTools].join(', ')}</p>
+                <p className="mt-2">{t('sessionMetadata.toolUpgrades.description')}</p>
+              </div>
+            ) : null}
+            <div className="flex flex-wrap gap-2">
               {toolUpgradeReview ? (
                 <>
-                  <Button type="button" size="sm" disabled={toolUpgradeBusy} onClick={enableSelectedTools}>{t('sessionMetadata.toolUpgrades.confirm')} ({[...selectedTools].join(', ')})</Button>
-                  <Button type="button" size="sm" variant="outline" disabled={toolUpgradeBusy} onClick={() => setToolUpgradeReview(false)}>{t('sessionMetadata.toolUpgrades.cancel')}</Button>
+                  <Button type="button" disabled={toolUpgradeBusy} onClick={enableSelectedTools}>{t('sessionMetadata.toolUpgrades.confirm')}</Button>
+                  <Button type="button" variant="outline" disabled={toolUpgradeBusy} onClick={() => setToolUpgradeReview(false)}>{t('sessionMetadata.toolUpgrades.cancel')}</Button>
                 </>
               ) : (
-                <Button type="button" size="sm" variant="outline" disabled={!canUpgradeTools || selectedTools.size === 0} onClick={() => setToolUpgradeReview(true)}>{t('sessionMetadata.toolUpgrades.review')}</Button>
+                <Button type="button" disabled={!canUpgradeTools || selectedTools.size === 0} onClick={() => setToolUpgradeReview(true)}>{t('sessionMetadata.toolUpgrades.review')}</Button>
               )}
             </div>
-            </div>
-          </details>
-        ) : null}
-        {toolUpgradeError ? <p role="alert" className="text-xs text-destructive">{toolUpgradeError}</p> : null}
-        </>
+          </>
+          ) : null}
+          {toolUpgradeError ? <p role="alert" className="text-destructive">{toolUpgradeError}</p> : null}
+        </section>
         ) : activeTab === 'statistics' ? (
         <section className="grid gap-4 text-sm" aria-label={t('sessionMetadata.tabs.statistics')} data-testid="session-statistics">
           <div className="flex items-center justify-between gap-3">
-            <div>
-              <h3 className="font-medium">{t('sessionMetadata.statistics.title')}</h3>
-              <p className="text-xs text-muted-foreground">{t('sessionMetadata.statistics.description')}</p>
-            </div>
+            <h3 className="font-medium">{t('sessionMetadata.statistics.title')}</h3>
             <div className="inline-flex rounded-md border border-border/60 bg-muted/20 p-0.5" role="group" aria-label={t('sessionMetadata.numberDisplay.label')} data-testid="session-statistics-number-toggle">
               {(['compact', 'exact'] as const).map((value) => (
                 <button
@@ -504,7 +529,7 @@ export function SessionMetadataDialog({
           </div>
           <div className="overflow-hidden rounded-lg border border-border/45 bg-muted/10" data-testid="session-statistics-grid">
             <div className="grid grid-cols-[minmax(7.5rem,1fr)_minmax(0,1fr)_minmax(0,1fr)] items-center gap-x-3 border-b border-border/45 bg-muted/25 px-3 py-1.5 text-caption font-semibold uppercase tracking-wider text-muted-foreground">
-              <span>{t('sessionMetadata.statistics.title')}</span>
+              <span className="sr-only">{t('sessionMetadata.statistics.title')}</span>
               <span>{t('sessionMetadata.statistics.allSessions')}</span>
               <span>{t('sessionMetadata.statistics.thisSession')}</span>
             </div>

@@ -106,6 +106,13 @@ describe('ScheduledTasksPanel', () => {
     expect(screen.getByText(/每月 1、15 日/)).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: /创建新的定时任务/ }))
     expect(onOpen).toHaveBeenCalledWith(workspaceTarget)
+
+    fireEvent.click(screen.getByRole('tab', { name: '组织任务' }))
+    expect(screen.getByTestId('scheduled-task-card-task-1')).toBeTruthy()
+    expect(screen.getByTestId('scheduled-task-card-task-2')).toBeTruthy()
+    fireEvent.click(screen.getByTestId('scheduled-task-card-task-2'))
+    expect(onTaskOpen).toHaveBeenCalledWith('task-2', workspaceTarget)
+    expect(screen.getByRole('button', { name: /创建新的定时任务/ }).hasAttribute('disabled')).toBe(true)
   })
 
   it('ignores an old account load that resolves after the replacement account', async () => {

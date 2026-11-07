@@ -2000,9 +2000,9 @@ export const resources = {
       taskGraph: { aria: 'Task graph', title: 'Task Graph', revision: 'rev {{revision}}', summary: '{{completed}} completed · {{active}} active · {{ready}} ready · {{blocked}} blocked', readyCount: '{{count}} ready', listView: 'List view', graphView: 'Graph view', active: 'Active', ready: 'Ready', blocked: 'Blocked', done: 'Done', waitingOn: 'waiting on {{ids}}' },
       sessionMetadata: {
         storageUnavailable: 'Storage inventory is unavailable in this deployment. Stored data is intact.',
-        toolUpgrades: { title: 'Add tools to this session', description: 'Select only the tools you want this existing session to use. This permanently expands its tool permissions; new tools are never added automatically.', review: 'Review tools', confirm: 'Enable selected tools', cancel: 'Cancel', success: 'Session tools updated.', unavailable: 'Available only for resting, writable root sessions backed by durable storage.' },
+        toolUpgrades: { title: 'Add tools to this session', description: 'Selected tools become available to this Session permanently. Existing Sessions never gain new tool permissions automatically.', available: '{{count}} new tools available', loading: 'Checking available tools…', empty: 'This Session has all currently available tools.', notice: 'New tools are available for this Session', open: 'Review tools', reviewTitle: 'Confirm Session permissions', review: 'Review selection', confirm: 'Enable selected tools', cancel: 'Back to selection', success: 'Session tools updated.', unavailable: 'Finish the current turn to add tools. Only writable root Sessions with durable storage can be upgraded.' },
         evaluation: 'Evaluation integration', evaluationDescription: 'Exports a private, reference-only task candidate. Session content and workspace paths are excluded; public use still requires explicit review, redaction, and provenance approval.', exportCandidate: 'Export governed task candidate', openEvidence: 'Open linked evaluation evidence',
-        tabs: { label: 'Session information', overview: 'Overview', statistics: 'Statistics', storage: 'Storage' },
+        tabs: { label: 'Session information', overview: 'Overview', tools: 'Tools', statistics: 'Statistics', storage: 'Storage' },
         statistics: {
           title: 'Usage and activity', description: 'Context, API usage, cost, events, turns, and timing for this session.',
           currentContext: 'Current context', currentContextHelp: 'Tokens currently retained in model context. All sessions includes descendants; this session excludes them. Context can decrease after compaction.', currentContextDirectHelp: 'Tokens currently retained in model context for this session. Context can decrease after compaction.',
@@ -4191,9 +4191,9 @@ export const resources = {
       taskGraph: { aria: '任务图', title: '任务图', revision: '修订 {{revision}}', summary: '已完成 {{completed}} · 进行中 {{active}} · 就绪 {{ready}} · 阻塞 {{blocked}}', readyCount: '{{count}} 个就绪', listView: '列表视图', graphView: '图形视图', active: '进行中', ready: '就绪', blocked: '阻塞', done: '已完成', waitingOn: '等待 {{ids}}' },
       sessionMetadata: {
         storageUnavailable: '此部署暂不提供会话存储统计；已存储数据不受影响。',
-        toolUpgrades: { title: '为此会话添加工具', description: '仅选择需要为这个旧会话启用的工具。此操作会永久扩大其工具权限；新工具不会自动加入。', review: '确认所选工具', confirm: '启用所选工具', cancel: '取消', success: '会话工具已更新。', unavailable: '仅支持持久存储中已结束当前轮次、可写的根会话。' },
+        toolUpgrades: { title: '为此会话添加工具', description: '所选工具将永久加入此会话。旧会话不会自动获得新工具权限。', available: '有 {{count}} 个新工具可用', loading: '正在检查可用工具…', empty: '此会话已拥有当前可用的全部工具。', notice: '此会话有新工具可用', open: '查看工具', reviewTitle: '确认会话权限变更', review: '复核所选工具', confirm: '启用所选工具', cancel: '返回选择', success: '会话工具已更新。', unavailable: '请先结束当前轮次；仅可升级持久存储中可写的根会话。' },
         evaluation: '评测集成', evaluationDescription: '导出仅供引用的私有任务候选。导出内容不包含会话内容和工作区路径；公开使用仍需明确审核、脱敏和来源批准。', exportCandidate: '导出受治理的任务候选', openEvidence: '打开关联评测证据',
-        tabs: { label: '会话信息', overview: '概览', statistics: '统计', storage: '存储' },
+        tabs: { label: '会话信息', overview: '概览', tools: '工具', statistics: '统计', storage: '存储' },
         statistics: {
           title: '用量与活动', description: '此会话的上下文、API 用量、费用、事件、轮次和时间统计。',
           currentContext: '当前上下文', currentContextHelp: '模型上下文中当前保留的 token。“全部会话”包含后代子 Agent，“此会话”不包含。压缩后上下文可能减少。', currentContextDirectHelp: '此会话模型上下文中当前保留的 token。压缩后可能减少。',

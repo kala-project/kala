@@ -6,6 +6,7 @@ import type { CallToolEffect, ToolSchema } from '@agent-kernel/kernel'
 import type { HostLoopDeps } from '../loop-types.js'
 import { validateSchedule } from '../scheduled-tasks/recurrence.js'
 import { assertNoResumableGoal } from '../scheduled-tasks/goal-guard.js'
+import { BackgroundAuthorizationError } from '../scheduled-tasks/authorization.js'
 import { ScheduledTaskStore, type ScheduledTaskStorage } from '../scheduled-tasks/store.js'
 import type {
   ScheduleSpec,
@@ -521,8 +522,9 @@ export async function runScheduledTaskTool(
     try {
       const role = await deps.authorizeScheduledTaskPrincipal(record.organizationId, actor.principal)
       actor = { ...actor, role, canWrite: role !== 'viewer' }
-    } catch {
-      return { ok: false, content: 'current organization authority denied or unavailable' }
+    } catch (error) {
+      if (!(error instanceof BackgroundAuthorizationError)) throw error
+      return { ok: false, content: scheduledAuthorityMessage(error) }
     }
   }
   if (isMutation && !actor.canWrite) {
@@ -782,11 +784,18 @@ async function assertCurrentMutationAuthority(
   let role: 'owner' | 'admin' | 'member' | 'viewer'
   try {
     role = await deps.authorizeScheduledTaskPrincipal(record.organizationId, actor.principal)
-  } catch {
-    throw new Error('current organization authority denied or unavailable')
+  } catch (error) {
+    if (!(error instanceof BackgroundAuthorizationError)) throw error
+    throw new Error(scheduledAuthorityMessage(error), { cause: error })
   }
   if (role === 'viewer') throw new Error('current viewer role cannot create or modify scheduled tasks')
   if (task) assertCanMutateTask({ ...actor, role }, task, revoking)
+}
+
+function scheduledAuthorityMessage(error: BackgroundAuthorizationError): string {
+  return error.reason === 'denied'
+    ? "This Session's recorded principal is no longer authorized for this organization. Use Scheduled Tasks > Organization tasks with your current sign-in to inspect tasks; start a new Session under an authorized identity for agent-managed tasks. No task was changed."
+    : 'Organization authorization is temporarily unavailable. Retry after the service recovers. No task was changed.'
 }
 
 function resolveSessionScheduleActor(record: SessionRecord): SessionScheduleActor {

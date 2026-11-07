@@ -225,7 +225,7 @@ export function ScheduledTasksPanel({ target, workspaceTarget, host, token, clie
   const client = useMemo(() => suppliedClient ?? (host ? createScheduledTasksClient({ host, ...(token ? { token } : {}) }) : null), [host, suppliedClient, token])
   const sessionTarget = target?.kind === 'session' ? target : null
   const resolvedWorkspaceTarget = workspaceTarget ?? (target?.kind === 'workspace' ? target : null)
-  const [scope, setScope] = useState<ScheduledTaskTarget['kind']>(target?.kind ?? 'session')
+  const [scope, setScope] = useState<ScheduledTaskTarget['kind'] | 'organization'>(target?.kind ?? 'session')
   const [tasks, setTasks] = useState<readonly ScheduledTask[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -263,15 +263,16 @@ export function ScheduledTasksPanel({ target, workspaceTarget, host, token, clie
 
   useEffect(() => { void load() }, [load, reloadKey])
 
-  const activeTarget = scope === 'session' ? sessionTarget : resolvedWorkspaceTarget
-  const visibleTasks = activeTarget ? tasks.filter((task) => targetMatches(task.target, activeTarget)) : []
+  const activeTarget = scope === 'session' ? sessionTarget : scope === 'workspace' ? resolvedWorkspaceTarget : null
+  const visibleTasks = scope === 'organization' ? tasks : activeTarget ? tasks.filter((task) => targetMatches(task.target, activeTarget)) : []
 
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="scheduled-tasks-panel">
       <div className="shrink-0 px-4 pt-3">
-        <div className="grid grid-cols-2 gap-1 rounded-xl bg-muted/65 p-1" role="tablist" aria-label="计划范围">
+        <div className="grid grid-cols-3 gap-1 rounded-xl bg-muted/65 p-1" role="tablist" aria-label="计划范围">
           <button type="button" role="tab" aria-selected={scope === 'session'} onClick={() => setScope('session')} className={scope === 'session' ? 'rounded-lg bg-card py-2 text-xs font-medium shadow-sm' : 'py-2 text-xs text-muted-foreground'}>此对话</button>
           <button type="button" role="tab" aria-selected={scope === 'workspace'} onClick={() => setScope('workspace')} className={scope === 'workspace' ? 'rounded-lg bg-card py-2 text-xs font-medium shadow-sm' : 'py-2 text-xs text-muted-foreground'}>此工作区</button>
+          <button type="button" role="tab" aria-selected={scope === 'organization'} onClick={() => setScope('organization')} className={scope === 'organization' ? 'rounded-lg bg-card py-2 text-xs font-medium shadow-sm' : 'py-2 text-xs text-muted-foreground'}>组织任务</button>
         </div>
       </div>
       <ScrollArea className="min-h-0 flex-1" contentClassName="px-4 py-4 min-h-full">
@@ -282,12 +283,13 @@ export function ScheduledTasksPanel({ target, workspaceTarget, host, token, clie
         {!client ? <p className="mt-5 text-center text-xs text-muted-foreground">连接后显示计划</p> : null}
         {loading ? <p role="status" className="mt-5 text-center text-xs text-muted-foreground">正在加载计划…</p> : null}
         {error ? <div role="alert" className="mt-4 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">{error}<Button type="button" variant="ghost" size="sm" onClick={() => void load()}>重试</Button></div> : null}
-        {!loading && !error && client && !activeTarget ? <p className="mt-5 text-center text-xs text-muted-foreground">当前范围不可用</p> : null}
-        {!loading && !error && client && activeTarget && visibleTasks.length === 0 ? <p className="mt-5 text-center text-xs text-muted-foreground">此范围还没有计划</p> : null}
+        {!loading && !error && client && !activeTarget && scope !== 'organization' ? <p className="mt-5 text-center text-xs text-muted-foreground">当前范围不可用</p> : null}
+        {!loading && !error && client && (activeTarget || scope === 'organization') && visibleTasks.length === 0 ? <p className="mt-5 text-center text-xs text-muted-foreground">此范围还没有计划</p> : null}
         <div className="mt-3 space-y-2">
           {visibleTasks.map((task) => (
             <button key={task.id} type="button" onClick={() => onTaskOpen?.(task.id, task.target)} className="w-full rounded-xl border border-border/70 bg-card p-3 text-left hover:bg-muted/35" data-testid={`scheduled-task-card-${task.id}`}>
               <span className="flex items-start justify-between gap-2"><span className="line-clamp-2 text-sm font-medium leading-5">{taskTitle(task)}</span><ChevronRight className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden /></span>
+              {scope === 'organization' ? <span className="mt-1 block truncate text-xs text-muted-foreground">{targetLabel(task.target)}</span> : null}
               <span className="mt-2 block text-xs text-muted-foreground">{scheduleLabel(task.schedule)}</span>
               <span className="mt-2 flex items-center justify-between gap-2 text-caption"><span className={task.status === 'active' ? 'text-emerald-700 dark:text-emerald-300' : 'text-muted-foreground'}>{task.status === 'active' ? '运行中' : '已暂停'}</span><span className="truncate text-muted-foreground">下次 {formatDate(task.nextRunAt)}</span></span>
             </button>
