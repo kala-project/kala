@@ -90,6 +90,28 @@ describe('MessageAttachmentStore', () => {
     }])).rejects.toThrow('cannot send binary attachment')
   })
 
+  it('keeps large text and non-text attachments out of Kernel model input while exposing Session IDs', async () => {
+    const store = new MessageAttachmentStore(root)
+    const large = await store.register({
+      sessionId: 'session-a', name: 'snapshot.json', mediaType: 'application/json',
+      data: Buffer.from('{"payload":"' + 'x'.repeat(9 * 1024 * 1024) + '"}'),
+    })
+    const binary = await store.register({
+      sessionId: 'session-a', name: 'archive.zip', mediaType: 'application/zip',
+      data: Buffer.from([0, 1, 2, 3]),
+    })
+    const resolved = await resolveKernelMessageAttachments(store, 'session-a', [{
+      role: 'user', content: [large, binary],
+    }], true)
+    expect(resolved[0]?.content).toEqual([
+      { type: 'text', text: expect.stringContaining(large.source.attachmentId) },
+      { type: 'text', text: expect.stringContaining(binary.source.attachmentId) },
+    ])
+    expect(JSON.stringify(resolved)).not.toContain('x'.repeat(1024))
+    await expect(resolveKernelMessageAttachments(store, 'session-a', [{ role: 'user', content: [large] }]))
+      .rejects.toThrow('requires the Session attachment Tool')
+  })
+
   it('awaits asynchronous attachment resolution and rejects unavailable SDK paths explicitly', async () => {
     const store = new MessageAttachmentStore(root)
     const file = await store.register({

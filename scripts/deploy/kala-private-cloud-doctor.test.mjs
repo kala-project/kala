@@ -189,6 +189,20 @@ function makeFixture(t, options = {}) {
 
   const config = join(scratch, 'config'); const secrets = join(config, 'secrets')
   mkdirSync(secrets, { recursive: true, mode: 0o700 })
+  const installationId = '00000000-0000-4000-8000-000000000001'
+  writeFileSync(join(config, 'installation-id'), `${installationId}\n`, { mode: 0o600 })
+  writeFileSync(join(config, 'storage-origin.json'), `${JSON.stringify({ schemaVersion: 1, storageMode: 'postgres-s3', installationId })}\n`, { mode: 0o600 })
+  const pg = (user, database) => `postgresql://${user}:fixture@db.example.test/${database}?sslmode=require`
+  for (const [name, value] of Object.entries({
+    control_postgres_migration_owner_url: pg('control_owner', 'runlab_control'),
+    control_postgres_writer_url: pg('control_writer', 'runlab_control'),
+    runtime_postgres_owner_url: pg('runtime_owner', 'kala_runtime'),
+    runtime_postgres_writer_url: pg('runtime_writer', 'kala_runtime'),
+    runtime_postgres_reader_url: pg('runtime_reader', 'kala_runtime'),
+    runtime_s3_access_key_id: 'runtime-access', runtime_s3_secret_access_key: 'runtime-secret',
+    installation_claim_s3_access_key_id: 'claim-access', installation_claim_s3_secret_access_key: 'claim-secret',
+  })) writeFileSync(join(secrets, name), value, { mode: 0o600 })
+  writeFileSync(join(secrets, 'runtime_state_master_key'), Buffer.alloc(32, 7), { mode: 0o600 })
   for (const name of secretNames) writeFileSync(join(secrets, name), name === 'llm_api_key' ? sensitive : `fixture-${name}`, { mode: 0o600 })
   const bin = join(scratch, 'bin'); mkdirSync(bin)
   const dockerCapture = join(scratch, 'docker.jsonl')
@@ -202,7 +216,10 @@ if(process.env.FAIL_INGRESS==='1'&&args[1]?.includes('/ingress@')){console.error
 
 function configure(config, values) {
   writeFileSync(join(config, 'deployment.env'), [
-    `KALA_PROFILE=${values.profile}`, 'KALA_STORAGE=nfs', 'COMPOSE_PROJECT_NAME=kala-private-cloud',
+    `KALA_PROFILE=${values.profile}`, 'KALA_STORAGE=postgres-s3', 'COMPOSE_PROJECT_NAME=kala-private-cloud-pg-s3-eval-doctor',
+    'KALA_IDENTITY_MODE=external', 'KALA_PG_S3_EVALUATION_ACK=1', 'KALA_PG_S3_EXTERNAL_BACKUP_ACK=1',
+    'KALA_CONTROL_DML_ROLE=control_writer', 'KALA_RUNTIME_DML_ROLE=runtime_writer', 'KALA_RUNTIME_READER_ROLE=runtime_reader',
+    'KALA_S3_ENDPOINT=https://objects.example.test', 'KALA_S3_REGION=test-1', 'KALA_S3_BUCKET=kala-runtime-eval',
     `KALA_PUBLIC_URLS=${values.publicUrl}`, `OIDC_ISSUER=${values.issuer}`, `OIDC_DISCOVERY_ORIGIN=${values.discoveryOrigin}`,
     'KALA_PUBLIC_LISTEN=127.0.0.1:13001', '',
   ].join('\n'), { mode: 0o600 })

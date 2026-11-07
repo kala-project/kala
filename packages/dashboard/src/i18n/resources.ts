@@ -943,6 +943,10 @@ export const resources = {
         },
         deployment: {
           managementTools: 'Management tools',
+          siloAccessHelp: 'SILO Console uses this same HTTPS origin. Kala checks your Dedicated Owner session before every request; SILO requires its own separate administrator login. Storage credentials are never displayed here.',
+          socketMode: 'Socket.IO Admin mode: running {{current}}, configured {{configured}}. Set Runtime',
+          socketModeRestart: 'restart Runtime to apply',
+          socketModeRedacted: 'Detailed diagnostics are redacted: no event arguments, handshake headers, socket data or room names.',
           aspireLocalAccess: 'Open on the deployment machine (Dedicated container), not on your browser’s local machine.',
           aspireAccessHelp: 'Open the native Aspire dashboard at the deployment address shown here. A loopback address refers to the deployment machine; remote access requires a secure port forward. The login token is revealed only on request to the Dedicated Owner. Kala does not fetch or export Aspire telemetry.',
           aspireToken: 'Aspire login token',
@@ -3145,6 +3149,10 @@ export const resources = {
         },
         deployment: {
           managementTools: '管理工具',
+          siloAccessHelp: 'SILO Console 使用当前 HTTPS 同源入口。Kala 每次请求都会校验 Dedicated Owner 会话；SILO 还需要独立的管理员登录，此处不显示存储凭据。',
+          socketMode: 'Socket.IO Admin 模式：当前 {{current}}，配置 {{configured}}。Runtime 环境参数',
+          socketModeRestart: '重启 Runtime 后生效',
+          socketModeRedacted: '详细诊断已脱敏：不包含事件参数、握手请求头、Socket 数据或房间名称。',
           aspireLocalAccess: '请在部署机器（Dedicated 容器）上访问，而不是在浏览器所在机器的本机地址访问。',
           aspireAccessHelp: '从此处显示的部署地址打开原生 Aspire。回环地址指部署机器；远程访问需要安全端口转发。登录令牌仅在 Dedicated Owner 主动请求时显示。Kala 不会抓取或导出 Aspire 的观测数据。',
           aspireToken: 'Aspire 登录令牌',

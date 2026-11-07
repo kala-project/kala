@@ -134,8 +134,19 @@ and WebSocket route, without a separate password, public port, or external
 `admin.socket.io` connection. Logout/revocation closes the existing Gateway
 transport.
 
-Dedicated instrumentation stays in production mode (aggregated diagnostics,
-without broad event-payload capture). Images must retain
+`KALA_SOCKET_ADMIN_MODE=development` is the Dedicated default and enables the
+official event inspection view. This is **metadata-only**: event names and
+timing remain visible, but event arguments, handshake headers
+(including cookies), socket data, and room names are redacted before reaching
+the Admin client. Raw upstream development mode is unsafe even behind Owner
+authentication: it forwards credentials and Session content. This mode is
+restart-only, not a live Settings switch; `/settings` reports
+`socketAdmin.runtimeMode` and `socketAdmin.configuredMode` to the authenticated
+Dedicated Owner. Set `KALA_SOCKET_ADMIN_MODE=production` at Runtime startup to
+disable per-event capture and its overhead.
+
+Production mode retains aggregated diagnostics without per-event inspection.
+Images must retain
 `@socket.io/admin-ui/ui/dist` from the existing Host dependency, or provide the
 embedded official assets. Missing assets leave `settings.socketAdmin.active`
 false with an unavailable reason; startup never downloads them. Portable's

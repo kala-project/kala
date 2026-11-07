@@ -11,6 +11,7 @@ import type { NetworkAuditEvent, NetworkPolicy } from '@agent-kernel/shared'
 
 export type ToolContext = {
   readonly origin?: 'host'
+  readonly ownerGeneration?: string
   /** Set by the Executor transport only after Host approval of this exact high-risk shell call. */
   readonly shellApprovalVerified?: boolean
   readonly desktopManualAuthorizationRequired?: boolean

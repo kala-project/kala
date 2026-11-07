@@ -896,7 +896,9 @@ export function attachJsonRoutes(
           : 'application/octet-stream'
         const imageMediaType = supportedImageMediaType(mediaType)
         if (imageMediaType) assertImageAttachmentBytes(imageMediaType, data)
-        if (session.agentRuntime === 'kernel') assertKernelTextAttachment({ name, mediaType }, data)
+        if (session.agentRuntime === 'kernel' && !session.config.tools.some((tool) => tool.name === 'session_attachment')) {
+          assertKernelTextAttachment({ name, mediaType }, data)
+        }
         const file = await payloads.messageAttachments!.register({
           sessionId,
           name,

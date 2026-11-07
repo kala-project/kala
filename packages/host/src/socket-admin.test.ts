@@ -27,6 +27,18 @@ it('reports missing installed Dedicated assets without enabling instrumentation 
   })
 })
 
+it('defaults Dedicated to development, supports explicit production, and rejects invalid modes even without assets', () => {
+  vi.mocked(existsSync).mockReturnValue(false)
+  delete process.env.KALA_SOCKET_ADMIN_MODE
+  expect(loadGatewayOwnerSocketAdminConfig({ currentModulePath: import.meta.url }).summary.runtimeMode).toBe('development')
+  process.env.KALA_SOCKET_ADMIN_MODE = 'production'
+  expect(loadGatewayOwnerSocketAdminConfig({ currentModulePath: import.meta.url }).summary).toMatchObject({
+    runtimeMode: 'production', configuredMode: 'production',
+  })
+  process.env.KALA_SOCKET_ADMIN_MODE = 'verbose'
+  expect(() => loadGatewayOwnerSocketAdminConfig({ currentModulePath: import.meta.url })).toThrow('KALA_SOCKET_ADMIN_MODE')
+})
+
 describe('loadSocketAdminConfig', () => {
   it('defaults Socket.IO Admin UI mode to development before initialization', () => {
     delete process.env.KALA_SOCKET_ADMIN_MODE

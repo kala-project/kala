@@ -21,15 +21,13 @@ for (const [name, expected] of Object.entries(manifest.files ?? {})) {
 const actualNames = readdirSync(directory).sort()
 const expectedNames = Object.keys(manifest.files).concat('manifest.json').sort()
 if (JSON.stringify(actualNames) !== JSON.stringify(expectedNames)) fail('bundle file set does not exactly match manifest')
-const compose = yaml('compose.yaml')
 const lockedServices = {
   'control-plane-init': 'KALA_INGRESS_IMAGE',
   'runtime-host': 'KALA_RUNTIME_IMAGE',
   'runtime-ingress': 'KALA_INGRESS_IMAGE',
   dashboard: 'KALA_DASHBOARD_IMAGE',
 }
-verifyComposeImages(compose, 'legacy Compose', lockedServices)
-for (const name of ['compose.storage-local.yaml', 'compose.storage-nfs.yaml', 'compose.storage-external-nfs.yaml']) if (!actualNames.includes(name)) fail(`legacy installation recovery asset is missing: ${name}`)
+for (const name of ['compose.yaml', 'compose.storage-local.yaml', 'compose.storage-nfs.yaml', 'compose.storage-external-nfs.yaml']) if (actualNames.includes(name)) fail(`obsolete storage asset must not ship: ${name}`)
 if (!actualNames.includes('compose.postgres-s3-base.yaml')) fail('independent PostgreSQL/S3 root is missing')
 const postgresS3Base = yaml('compose.postgres-s3-base.yaml')
 verifyComposeImages(postgresS3Base, 'PostgreSQL/S3 root', lockedServices)
@@ -56,7 +54,7 @@ for (const marker of ['!override', 'control_postgres_migration_owner_url', 'runt
 }
 const identityComposeSource = readFileSync(join(directory, 'compose.identity-local.yaml'), 'utf8')
 const identityCompose = yaml('compose.identity-local.yaml')
-verifyComposeImages(identityCompose, 'bundled identity', {}, compose.services)
+verifyComposeImages(identityCompose, 'bundled identity', {}, postgresS3Base.services)
 if (!identityComposeSource.includes('127.0.0.1:${KALA_IDENTITY_PORT:-13002}:8080') || !identityComposeSource.includes('identity-local.Caddyfile')) fail('bundled identity must publish loopback only and use the signed proxy configuration')
 if (actualNames.includes('compose.dev.yaml')) fail('source-build override must not ship')
 const operators = actualNames.filter((name) => name === 'kala-private-cloud' || name === 'kala-private-cloud.mjs')

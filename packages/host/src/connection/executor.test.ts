@@ -123,6 +123,28 @@ function callEffect(
 }
 
 describe('ExecutorRegistry', () => {
+  it('sends attachment bytes only through the trusted Host transfer entry', async () => {
+    const registry = createExecutorRegistry(fakeIo() as never, {
+      ...makeResolver({ x: 'ws-default' }),
+      assertSessionEffectOwner: async () => ({ ownerGeneration: '9' }),
+    })
+    const socket = makeFakeSocket('attachment-executor')
+    registry.attach(socket as never, announceOf('attachment-executor'))
+    const effect = callEffect('transfer-1', '__workspace_attachment_transfer', undefined, {
+      action: 'begin', transferId: 'transfer-1', path: '/workspace/file.bin', bytes: 1,
+      sha256: 'a'.repeat(64), ownerGeneration: '9',
+    })
+    await expect(registry.callTool('x', effect)).resolves.toMatchObject({ ok: false })
+    expect(socket.emitted).toHaveLength(0)
+    const pending = registry.callHostAttachmentTransfer('x', effect)
+    await vi.waitFor(() => expect(socket.emitted).toHaveLength(1))
+    expect(socket.emitted[0]?.payload).toMatchObject({
+      name: '__workspace_attachment_transfer', origin: 'host', ownerGeneration: '9',
+    })
+    socket.emitted[0]!.ack!({ callId: effect.callId, ok: true, content: '{"ok":true}' })
+    await expect(pending).resolves.toMatchObject({ ok: true })
+  })
+
   it('does not send a named Arena effect to an old Executor without keeper enforcement', async () => {
     const reg = createExecutorRegistry(fakeIo() as never, {
       ...makeResolver({ x: 'ws-default' }),

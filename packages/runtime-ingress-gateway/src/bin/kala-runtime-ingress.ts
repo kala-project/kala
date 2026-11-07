@@ -245,9 +245,12 @@ async function main(): Promise<void> {
   }
   const aspireTokenFile = process.env.KALA_ASPIRE_BROWSER_TOKEN_FILE
   if (aspireTokenFile && (!dedicated || !observabilityUrl)) throw new Error('Aspire token access requires a Dedicated dashboard URL')
-  const operatorServices = dedicated && (observabilityUrl || identityConsoleUrl) ? {
+  const siloConsoleEnabled = process.env.KALA_SILO_CONSOLE_ENABLED === '1'
+  if (siloConsoleEnabled && !dedicated) throw new Error('SILO console access requires Dedicated Owner authentication')
+  const operatorServices = dedicated && (observabilityUrl || identityConsoleUrl || siloConsoleEnabled) ? {
     ...(identityConsoleUrl ? { identityConsoleUrl } : {}),
     ...(observabilityUrl ? { observabilityUrl } : {}),
+    ...(siloConsoleEnabled ? { siloConsolePath: '/silo/' as const } : {}),
     ...(aspireTokenFile ? { readObservabilityToken: () => readRequiredSecretEnv('KALA_ASPIRE_BROWSER_TOKEN') } : {}),
   } : undefined
   const gateway = await startRuntimeIngressGateway({

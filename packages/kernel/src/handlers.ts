@@ -154,7 +154,9 @@ export function onLlmResponse(
   const decisions: Array<{ call: ToolCallContent; decision: Decision; rejectionReason?: string }> =
     toolCalls.map((tc) => {
       const schema = config.tools.find((t) => t.name === tc.name)
-      const needsApproval = schema?.requiresApproval ?? true
+      const needsApproval = tc.name === 'session_attachment' && tc.input?.action === 'save'
+        ? true
+        : schema?.requiresApproval ?? true
       if (tc.name === 'shell' || tc.name === 'bash') {
         const command = typeof tc.input?.command === 'string' ? tc.input.command : ''
         const safety = analyzeShellCommand(command)

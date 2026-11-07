@@ -809,7 +809,8 @@ async function performCallLlm(
       }
     : undefined
   try {
-    const messages = await resolveKernelMessageAttachments(deps.messageAttachments, sessionId, persistedMessages)
+    const attachmentToolAvailable = effect.tools.some((tool) => tool.name === 'session_attachment')
+    const messages = await resolveKernelMessageAttachments(deps.messageAttachments, sessionId, persistedMessages, attachmentToolAvailable)
     const disclosedTools = visibleTools(effect.tools, config.toolDisclosureMode ?? 'legacy_full', new Set())
     await maybeRecordToolDisclosure(deps, live, effect.tools, disclosedTools)
     const callInput = {
@@ -834,6 +835,7 @@ async function performCallLlm(
         deps.messageAttachments,
         sessionId,
         emergencyTruncate(current, config, contextLimitForSession(deps, sessionId)),
+        attachmentToolAvailable,
       )
       res = await callLlmWithQuota(callInput, retryMessages, sessionId, model)
     }
@@ -846,6 +848,7 @@ async function performCallLlm(
           deps.messageAttachments,
           sessionId,
           deps.store.get(sessionId)?.state.messages ?? persistedMessages,
+          attachmentToolAvailable,
         )
         res = await callLlmWithQuota({
           deps,

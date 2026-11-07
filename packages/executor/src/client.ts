@@ -61,6 +61,7 @@ import { McpClientManager, type McpToolDescriptor } from './mcp-client.js'
 import { parseDashboardMcpServers, type DashboardMcpServerConfig, type McpServerConfig } from './mcp-config.js'
 import { readDashboardMcpServers, writeDashboardMcpServers } from './mcp-managed-config.js'
 import { ComputerUseManager, computerUseTools } from './computer-use/manager.js'
+import { attachmentTransferOwnerMatches, createAttachmentTransferTool } from './tools/attachment-transfer.js'
 
 let desktopManager: ComputerUseManager | undefined
 let desktopManagerUsers = 0
@@ -100,6 +101,7 @@ function compactDiagnostic(error: unknown): string {
 
 function safeToolInput(value: unknown, key = '', depth = 0): unknown {
   if (SENSITIVE_KEY.test(key)) return '[REDACTED]'
+  if (key === 'data') return '[BINARY chunk omitted]'
   if (depth > 4) return '[TRUNCATED depth]'
   if (typeof value === 'string') {
     const scrubbed = value
@@ -245,7 +247,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
   const sandbox: Sandbox = createSandbox({ roots: sandboxRoots })
   const computer = desktopManager ??= new ComputerUseManager()
   desktopManagerUsers += 1
-  const tools = createToolRegistry(options.tools ?? [...defaultTools, ...computerUseTools(computer)])
+  const tools = createToolRegistry([...(options.tools ?? [...defaultTools, ...computerUseTools(computer)]), createAttachmentTransferTool()])
   const executorId = options.executorId ?? ulid()
   const workspaceId = options.workspaceId ?? loadOrCreateWorkspaceId()
   const workspaceName = options.workspaceName ?? hostname()
@@ -537,6 +539,33 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
   })
 
   socket.on('tool:call', async (payload: ToolCallMessage, ack) => {
+    if (payload.name === '__workspace_attachment_transfer'
+      && (payload.origin !== 'host' || (payload.ownerGeneration !== undefined
+        && (typeof payload.ownerGeneration !== 'string'
+          || !/^[1-9][0-9]*$/u.test(payload.ownerGeneration))))) {
+      ack({ callId: payload.callId, ok: false,
+        content: 'ERROR: EACCES: attachment transfer requires Host admission and a valid owner generation when supplied' })
+      return
+    }
+    if (payload.name === '__workspace_attachment_transfer') {
+      if (payload.input?.ownerGeneration !== payload.ownerGeneration) {
+        ack({ callId: payload.callId, ok: false,
+          content: 'ERROR: EACCES: attachment transfer input owner generation does not match dispatch generation' })
+        return
+      }
+      try {
+        if (!await attachmentTransferOwnerMatches(sandbox, payload.input?.transferId,
+          payload.sessionId, payload.ownerGeneration)) {
+          ack({ callId: payload.callId, ok: false,
+            content: 'ERROR: EACCES: attachment transfer owner generation or session mismatch' })
+          return
+        }
+      } catch {
+        ack({ callId: payload.callId, ok: false,
+          content: 'ERROR: EACCES: attachment transfer owner verification unavailable' })
+        return
+      }
+    }
     const internal = payload.name.startsWith('__')
     const arenaAction = ['probe', 'status', 'diff', 'init', 'apply', 'cleanup'].find((action) => payload.name === `arena_git_${action}`)
     if (payload.name === 'skill_file' && payload.input.action !== 'read' && payload.ownerGeneration
@@ -1011,6 +1040,7 @@ async function runOne(
       ...(typeof payload.desktopManualAuthorizationRequired === 'boolean'
         ? { desktopManualAuthorizationRequired: payload.desktopManualAuthorizationRequired } : {}),
       ...(payload.origin === 'host' ? { origin: 'host' as const } : {}),
+      ...(payload.ownerGeneration ? { ownerGeneration: payload.ownerGeneration } : {}),
       sessionId: payload.sessionId,
       callId: payload.callId,
       sandbox,

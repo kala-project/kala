@@ -7,7 +7,23 @@
 
 {$KALA_PUBLIC_HOSTNAME} {
 	encode zstd gzip
-	reverse_proxy gateway:13001
+	@silo path /silo /silo/*
+	handle @silo {
+		redir /silo /silo/ 308
+		route {
+			forward_auth gateway:13001 {
+				uri /auth/silo/authorize
+			}
+			uri strip_prefix /silo
+			reverse_proxy silo:9001 {
+				header_up Cookie "(^|;[[:space:]]*)ak_session=[^;]*(;[[:space:]]*)?" "$1"
+				stream_timeout 5m
+			}
+		}
+	}
+	handle {
+		reverse_proxy gateway:13001
+	}
 }
 
 # Container-local liveness only; never published and never bypasses public TLS.

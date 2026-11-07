@@ -23,6 +23,7 @@ import {
   resetLearningMetrics,
 } from './memory-consolidation.js'
 import { runToolCatalogTool } from './tool-catalog.js'
+import { runSessionAttachmentTool } from './session-attachment.js'
 import { runDagPlanTool } from '../dag/tool.js'
 import { runDagWorkerTool } from '../dag/worker-tool.js'
 import { runWorktreeArenaTool } from './worktree-arena.js'
@@ -40,6 +41,7 @@ export const BUILTIN_HOST_TOOL_HANDLERS = [
   'scheduled_task',
   'tool_search',
   'tool_describe',
+  'session_attachment',
   'skill',
   'skill_manager',
   'dag_plan',
@@ -115,6 +117,9 @@ export function createBuiltinExtensionRegistry(additional: readonly HostExtensio
           const record = deps.store.get(sessionId)
           if (!record) return { ok: false, content: 'Session is unavailable' }
           return await runToolCatalogTool(record, 'tool_describe', effect.input, deps.store)
+        },
+        async session_attachment({ deps, sessionId, effect }) {
+          return await runSessionAttachmentTool(deps, sessionId, effect)
         },
         async skill({ deps, sessionId, effect }) {
           if (!deps.skills) return { ok: false, content: 'skills are not configured on this host' }

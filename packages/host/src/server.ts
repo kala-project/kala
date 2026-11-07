@@ -99,7 +99,7 @@ import { setWireValidationLogger } from './wire-validation.js'
 import type { RuntimeLogger } from './logger.js'
 import { AGENT_RUNTIME_CAPABILITIES, FULL_RUNTIME_CAPABILITIES, PORTABLE_DEPLOYMENT, effectiveTenancy, productVariant, type ProductDeploymentConfig, type RuntimeCapabilities } from '@agent-kernel/shared'
 import { SOCKET_MAX_HTTP_BUFFER_BYTES } from '@agent-kernel/shared'
-import { GATEWAY_OWNER_SOCKET_ADMIN_BOOTSTRAP, isGatewaySocketAdminOwner, loadGatewayOwnerSocketAdminConfig, redactApplicationDebugAdminEvents, type SocketAdminConfig } from './socket-admin.js'
+import { GATEWAY_OWNER_SOCKET_ADMIN_BOOTSTRAP, isGatewaySocketAdminOwner, loadGatewayOwnerSocketAdminConfig, redactApplicationDebugAdminEvents, redactGatewayOwnerAdminEvents, type SocketAdminConfig } from './socket-admin.js'
 import { defaultRestartStatePath, RestartCoordinator } from './restart-coordinator.js'
 import { inspectUnitQuiescence } from './tenant-runtime/quiescence.js'
 import { socketConnectionAuditSnapshot } from './connection/socket-audit.js'
@@ -506,7 +506,8 @@ export async function startHostServer(
         next(isGatewaySocketAdminOwner(socket.request, options.resourceUnitId) ? undefined : new Error('deployment_owner_required'))
       })
     }
-    redactApplicationDebugAdminEvents(namespace)
+    if (config.authentication === 'gateway-owner') redactGatewayOwnerAdminEvents(namespace)
+    else redactApplicationDebugAdminEvents(namespace)
     instrument(io, {
       auth: config.authentication === 'gateway-owner' ? false : {
         type: 'basic',

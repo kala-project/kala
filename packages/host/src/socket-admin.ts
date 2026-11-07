@@ -25,6 +25,56 @@ export function redactApplicationDebugAdminEvents(namespace: Namespace): void {
   }
 }
 
+/**
+ * The upstream development mode includes complete event arguments and socket
+ * handshake headers (including browser cookies). Keep only diagnostic metadata
+ * at both outbound paths: namespace broadcasts and the initial per-socket
+ * all_sockets response. Do not mutate the application socket or its payload.
+ */
+export function redactGatewayOwnerAdminEvents(namespace: Namespace): void {
+  const snapshot = (value: unknown) => {
+    if (!value || typeof value !== 'object') return {}
+    const socket = value as Record<string, unknown>
+    return {
+      id: socket.id,
+      nsp: socket.nsp,
+      clientId: socket.clientId,
+      transport: socket.transport,
+      data: {},
+      handshake: {},
+      rooms: [],
+    }
+  }
+  const emit = namespace.emit
+  namespace.emit = function (event: string, ...args: unknown[]) {
+    if (event === 'event_received' || event === 'event_sent') {
+      const original = args[2]
+      const name = Array.isArray(original) && typeof original[0] === 'string'
+        && /^[\w:.-]{1,80}$/.test(original[0]) ? original[0] : '[redacted]'
+      args[2] = [name, { redacted: true }]
+    } else if (event === 'socket_connected') {
+      args[0] = snapshot(args[0])
+    } else if (event === 'socket_updated') {
+      const update = args[0]
+      args[0] = update && typeof update === 'object'
+        ? { id: (update as Record<string, unknown>).id, nsp: (update as Record<string, unknown>).nsp }
+        : {}
+    } else if (event === 'room_joined' || event === 'room_left') {
+      args[1] = '[redacted]'
+    }
+    return emit.call(this, event, ...args)
+  }
+  namespace.prependListener('connection', socket => {
+    const socketEmit = socket.emit
+    socket.emit = function (this: typeof socket, event: string, ...args: unknown[]) {
+      if (event === 'all_sockets') {
+        args[0] = Array.isArray(args[0]) ? args[0].map(snapshot) : []
+      }
+      return socketEmit.call(this, event, ...args)
+    } as typeof socket.emit
+  })
+}
+
 export type SocketAdminMode = 'development' | 'production'
 
 type SocketAdminAssets = {
@@ -69,14 +119,15 @@ export function loadGatewayOwnerSocketAdminConfig(opts: {
   currentModulePath: string
   embeddedAssets?: readonly EmbeddedSocketAdminAsset[]
 }): { runtime?: SocketAdminConfig; summary: SocketAdminSummary; indexHtml?: string } {
+  const mode = parseDedicatedMode(process.env.KALA_SOCKET_ADMIN_MODE)
   const summary: SocketAdminSummary = {
     authentication: 'gateway-owner',
     active: false,
     initialized: false,
     path: DEFAULT_PATH,
     username: '',
-    runtimeMode: 'production',
-    configuredMode: 'production',
+    runtimeMode: mode,
+    configuredMode: mode,
     configPath: '',
   }
   const embeddedIndex = opts.embeddedAssets?.find((asset) => asset.path === 'index.html')
@@ -101,10 +152,16 @@ export function loadGatewayOwnerSocketAdminConfig(opts: {
   const indexHtml = html.replace(/<link\b[^>]*href=["']https?:\/\/[^>]*>/gi, '')
     .replace('<head>', '<head><script src="kala-bootstrap.js"></script>')
   return {
-    runtime: { enabled: true, authentication: 'gateway-owner', path: DEFAULT_PATH, username: '', mode: 'production', distSource, ...(distDir ? { distDir } : {}) },
+    runtime: { enabled: true, authentication: 'gateway-owner', path: DEFAULT_PATH, username: '', mode, distSource, ...(distDir ? { distDir } : {}) },
     summary: { ...summary, active: true, initialized: true, distSource },
     indexHtml,
   }
+}
+
+function parseDedicatedMode(value: string | undefined): SocketAdminMode {
+  if (value === undefined || value.trim() === '' || value.trim() === 'development') return 'development'
+  if (value.trim() === 'production') return 'production'
+  throw new Error('KALA_SOCKET_ADMIN_MODE must be production or development')
 }
 
 export const GATEWAY_OWNER_SOCKET_ADMIN_BOOTSTRAP = `(() => {

@@ -19,13 +19,9 @@ if (!/^[0-9a-f]{40}$/u.test(revision)) throw new Error('revision must be an exac
 rmSync(output, { recursive: true, force: true })
 mkdirSync(output, { recursive: true, mode: 0o755 })
 const files = [
-  'deploy/private-cloud/compose.yaml',
   'deploy/private-cloud/compose.postgres-s3-base.yaml',
   'deploy/private-cloud/compose.oidc-private-ca.yaml',
   'deploy/private-cloud/compose.s3-private-ca.yaml',
-  'deploy/private-cloud/compose.storage-nfs.yaml',
-  'deploy/private-cloud/compose.storage-external-nfs.yaml',
-  'deploy/private-cloud/compose.storage-local.yaml',
   'deploy/private-cloud/compose.storage-postgres-s3.yaml',
   'deploy/private-cloud/compose.local.yaml',
   'deploy/private-cloud/compose.cloudflare.yaml',

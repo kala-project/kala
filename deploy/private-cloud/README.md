@@ -84,6 +84,16 @@ Per-Unit concurrency, durable queue length, and artifact storage limits are conf
 `KALA_RUNTIME_UNIT_MAX_CONCURRENT_TURNS`, `KALA_RUNTIME_UNIT_MAX_QUEUED_MESSAGES`, and
 `KALA_RUNTIME_UNIT_MAX_ARTIFACT_BYTES`.
 
+Dedicated Socket.IO Admin instrumentation is controlled at Runtime startup by
+`KALA_SOCKET_ADMIN_MODE=development|production` (default `development`; configure
+it in the deployment environment before replacing the Runtime service).
+Development exposes only redacted event metadata to the authenticated
+deployment Owner; raw upstream development capture is unsafe because it includes
+Session payloads and browser cookies. Changing the environment alone does not
+change a running Runtime Unit. See `packages/host/README.md` for the
+metadata-only contract; this does not add a public endpoint or change the
+Private Cloud organization Owner policy.
+
 The versioned Product API is served at `/api/v1`; its OpenAPI document is
 `/api/v1/openapi.json`. Browser Sessions and organization-scoped Service Accounts are
 supported. Service Account tokens are shown once, stored only as hashes, and bounded by

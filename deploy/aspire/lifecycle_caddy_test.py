@@ -11,6 +11,18 @@ from unittest import mock
 import lifecycle_operator as op
 
 
+class CaddySiloRouteTests(unittest.TestCase):
+    def test_silo_console_is_fenced_before_subpath_rewrite_and_private_proxy(self):
+        config = (Path(__file__).parent / "Caddyfile").read_text()
+        silo = config.split("@silo path /silo /silo/*", 1)[1].split("\n\thandle {", 1)[0]
+        self.assertLess(silo.index("forward_auth gateway:13001"), silo.index("uri strip_prefix /silo"))
+        self.assertLess(silo.index("uri strip_prefix /silo"), silo.index("reverse_proxy silo:9001"))
+        self.assertIn("uri /auth/silo/authorize", silo)
+        self.assertIn("header_up Cookie", silo)
+        self.assertIn("stream_timeout 5m", silo)
+        self.assertNotIn("reverse_proxy silo:9000", config)
+
+
 class CaddyVolumeContractTests(unittest.TestCase):
     def config(self):
         services = {name: {"volumes": []} for name in op.SERVICES}

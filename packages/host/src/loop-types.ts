@@ -144,6 +144,13 @@ export type ToolDispatcher = {
     failure?: import('@agent-kernel/kernel').ToolFailure
     durationMs?: number
   }>
+  /** Private Host-to-Executor attachment transfer; never dispatch model tool calls through this entry. */
+  callHostAttachmentTransfer?(sessionId: string, eff: CallToolEffect): Promise<{
+    ok: boolean
+    content: string
+    failure?: import('@agent-kernel/kernel').ToolFailure
+    durationMs?: number
+  }>
   /** Host-only synthetic Arena Bash call; bound to an explicitly approved parent. */
   callArenaShell?(sessionId: string, parentCallId: string, eff: CallToolEffect): Promise<{
     ok: boolean

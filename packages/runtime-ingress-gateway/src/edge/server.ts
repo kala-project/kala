@@ -250,6 +250,7 @@ export async function startRuntimeIngressGateway(options: {
   operatorServices?: {
     identityConsoleUrl?: string
     observabilityUrl?: string
+    siloConsolePath?: '/silo/'
     readObservabilityToken?: () => Promise<string>
   }
   directory: RuntimeAssignmentStore
@@ -665,6 +666,22 @@ export async function startRuntimeIngressGateway(options: {
       }
       return
     }
+    if (url.pathname === '/auth/silo/authorize') {
+      const deny = (status: number) => { response.writeHead(status, { 'cache-control': 'no-store' }); response.end() }
+      if (!options.singleTenantOwner || options.operatorServices?.siloConsolePath !== '/silo/') { deny(404); return }
+      if (request.method !== 'GET' || url.search) { deny(405); return }
+      const origin = request.headers.origin
+      if (origin && origin !== requestPublicOrigin(request)) { deny(403); return }
+      const forwardedMethod = request.headers['x-forwarded-method']
+      if (typeof forwardedMethod === 'string' && !['GET', 'HEAD', 'OPTIONS'].includes(forwardedMethod)
+          && origin !== requestPublicOrigin(request)) { deny(403); return }
+      const session = await authenticate(request)
+      if (!session) { deny(401); return }
+      const access = await options.organizations?.findAccess(session.identity)
+      if (!access || access.organization.status !== 'active' || access.membership.role !== 'owner') { deny(403); return }
+      deny(204)
+      return
+    }
     if (url.pathname === '/auth/me') {
       if (request.method !== 'GET') { response.writeHead(405, { allow: 'GET', 'cache-control': 'no-store' }); response.end(); return }
       const session = await authenticate(request)
@@ -673,11 +690,12 @@ export async function startRuntimeIngressGateway(options: {
       response.end(JSON.stringify(session ? {
         authenticated: true,
         profile: publicProfile(session.identity),
-        ...(options.singleTenantOwner && access?.membership.role === 'owner' && options.operatorServices ? {
+        ...(options.singleTenantOwner && access?.organization.status === 'active' && access.membership.role === 'owner' && options.operatorServices ? {
           deploymentServices: {
             ...(options.operatorServices.identityConsoleUrl ? { identityConsoleUrl: options.operatorServices.identityConsoleUrl } : {}),
             observability: Boolean(options.operatorServices.observabilityUrl),
             ...(options.operatorServices.observabilityUrl ? { observabilityUrl: options.operatorServices.observabilityUrl } : {}),
+            ...(options.operatorServices.siloConsolePath ? { siloConsolePath: options.operatorServices.siloConsolePath } : {}),
             ...(options.operatorServices.readObservabilityToken ? { observabilityTokenAvailable: true } : {}),
           },
         } : {}),

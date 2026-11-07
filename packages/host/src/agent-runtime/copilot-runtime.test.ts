@@ -13,6 +13,8 @@ import { findSessionOperation, readSessionLog, snapshotSidecarPath } from '../st
 import { messageOperationFingerprint } from '../message-operation-fingerprint.js'
 import { CopilotAgentRuntime } from './copilot-runtime.js'
 import { MessageAttachmentStore } from '../message-attachment-store.js'
+import { createBuiltinTools } from '../builtin-tools.js'
+import { runSessionAttachmentTool } from '../extensions/session-attachment.js'
 
 type CapturedTool = {
   name: string
@@ -1044,7 +1046,7 @@ describe('Copilot runtime custom tools', () => {
     await vi.waitFor(() => expect(store.get(record.sessionId)?.state.status).toBe('done'))
 
     expect(sdk.sentMessages).toContainEqual(expect.objectContaining({
-      prompt: expect.stringContaining(`Review this file.\n\nSession attachments (not workspace files): "config.json": ${reference.source.attachmentId}`),
+      prompt: 'Review this file.',
       attachments: [{
         type: 'blob',
         data: Buffer.from('{"ok":true}', 'utf8').toString('base64'),
@@ -1069,10 +1071,38 @@ describe('Copilot runtime custom tools', () => {
 
   it('lets Copilot read oversized text attachments in bounded chunks without sending an omitted SDK blob', async () => {
     const messageAttachments = new MessageAttachmentStore(join(dir, 'message-attachments'))
+    const savedChunks: Buffer[] = []
+    const executorTools: ToolDispatcher = {
+      async callTool() {
+        throw new Error('internal transfers must not use the model tool dispatch entry')
+      },
+      async callHostAttachmentTransfer(_sessionId, effect) {
+        expect(effect.name).toBe('__workspace_attachment_transfer')
+        const { action, offset, data, path, bytes, sha256 } = effect.input
+        if (action === 'chunk') {
+          expect(offset).toBe(savedChunks.reduce((total, chunk) => total + chunk.length, 0))
+          const chunk = Buffer.from(String(data), 'base64')
+          expect(chunk.length).toBeLessThanOrEqual(128 * 1024)
+          savedChunks.push(chunk)
+          return { ok: true, content: JSON.stringify({ ok: true, nextOffset: Number(offset) + chunk.length }) }
+        }
+        if (action === 'finish') {
+          expect(Buffer.concat(savedChunks).equals(Buffer.from(text))).toBe(true)
+          return { ok: true, content: JSON.stringify({ ok: true, state: 'completed', path, bytes, sha256 }) }
+        }
+        return { ok: true, content: JSON.stringify({ ok: true, state: 'active', nextOffset: 0 }) }
+      },
+      cancelPending() {},
+    }
     const runtime = new CopilotAgentRuntime({
       store,
       messageAttachments,
-      tools: { async callTool() { throw new Error('Attachment reads must not reach the Executor') }, cancelPending() {} },
+      tools: {
+        async callTool(sessionId, effect) {
+          return await runSessionAttachmentTool({ store, messageAttachments, tools: executorTools }, sessionId, effect)
+        },
+        cancelPending() {},
+      },
       broadcast: {
         onState() {},
         onTokenDelta() {},
@@ -1083,7 +1113,7 @@ describe('Copilot runtime custom tools', () => {
     const record = await store.create({
       sessionId: 'oversized-attachment-session',
       agentRuntime: 'copilot',
-      config: createConfig({ tools: [] }),
+      config: createConfig({ tools: [createBuiltinTools().find((tool) => tool.name === 'session_attachment')!] }),
     })
     const text = '{"payload":"' + 'x'.repeat(9 * 1024 * 1024) + '"}'
     const reference = await messageAttachments.register({
@@ -1106,19 +1136,38 @@ describe('Copilot runtime custom tools', () => {
       prompt: expect.stringContaining(reference.source.attachmentId),
     })
     expect(sdk.sentMessages.at(-1)).not.toHaveProperty('attachments')
-    const tool = sdk.configs.at(-1)?.tools.find((item) => item.name === 'read_session_attachment')
+    const tool = sdk.configs.at(-1)?.tools.find((item) => item.name === 'session_attachment')
     expect(tool).toBeDefined()
-    const excerpt = await tool!.handler({ attachmentId: reference.source.attachmentId, offset: text.length - 4, maxChars: 4 }, { toolCallId: 'read-tail' })
+    const excerpt = await tool!.handler({ action: 'read_text', attachmentId: reference.source.attachmentId, offset: text.length - 4, maxChars: 4 }, { toolCallId: 'read-tail' })
     expect(excerpt.textResultForLlm).toContain(`characters ${text.length - 4}-${text.length} of ${text.length}`)
     expect(excerpt.textResultForLlm).toContain('x"}')
-    const search = await tool!.handler({ attachmentId: reference.source.attachmentId, query: 'PAYLOAD' }, { toolCallId: 'search-key' })
+    const search = await tool!.handler({ action: 'search_text', attachmentId: reference.source.attachmentId, query: 'PAYLOAD' }, { toolCallId: 'search-key' })
     expect(search.textResultForLlm).toContain('1 match(es)')
     expect(search.textResultForLlm).toContain('2: ')
     const foreign = await messageAttachments.register({
       sessionId: 'another-session', name: 'private.json', mediaType: 'application/json', data: Buffer.from('{"private":true}'),
     })
-    const denied = await tool!.handler({ attachmentId: foreign.source.attachmentId }, { toolCallId: 'read-foreign' })
+    const denied = await tool!.handler({ action: 'read_text', attachmentId: foreign.source.attachmentId }, { toolCallId: 'read-foreign' })
     expect(denied.textResultForLlm).toContain('not referenced by a user message')
+    const saved = await runSessionAttachmentTool(
+      { store, messageAttachments, tools: executorTools },
+      record.sessionId,
+      { kind: 'call_tool', callId: 'save-original', name: 'session_attachment', input: {
+        action: 'save', attachmentId: reference.source.attachmentId, path: '/workspace/snapshot.json',
+      } },
+    )
+    expect(saved).toMatchObject({ ok: true, content: expect.stringContaining('/workspace/snapshot.json') })
+    expect(savedChunks.length).toBeGreaterThan(1)
+    savedChunks.length = 0
+    const pendingSave = tool!.handler({
+      action: 'save', attachmentId: reference.source.attachmentId, path: '/workspace/snapshot.json',
+    }, { toolCallId: 'save-awaiting-approval' })
+    await vi.waitFor(() => expect(store.get(record.sessionId)?.state.pendingCalls)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ callId: 'save-awaiting-approval', status: 'awaiting_approval' })])))
+    expect(savedChunks).toHaveLength(0)
+    await runtime.reject(record, 'save-awaiting-approval')
+    expect((await pendingSave).textResultForLlm).toContain('rejected')
+    expect(savedChunks).toHaveLength(0)
     await runtime.close()
   })
 

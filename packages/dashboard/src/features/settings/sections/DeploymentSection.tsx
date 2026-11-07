@@ -51,7 +51,16 @@ export function DeploymentSection({ payload, host, token, services }: { payload:
         <div className="flex flex-wrap gap-2">
           {services.identityConsoleUrl ? <Button asChild variant="outline"><a href={services.identityConsoleUrl} target="_blank" rel="noreferrer">{t('deploymentCenter.openIdentity')}</a></Button> : null}
           {payload.socketAdmin?.active && payload.socketAdmin.path ? <Button asChild variant="outline"><a href={payload.socketAdmin.path} target="_blank" rel="noreferrer">Socket.IO Admin</a></Button> : null}
+          {services.siloConsolePath ? <Button asChild variant="outline"><a href={services.siloConsolePath} target="_blank" rel="noreferrer" data-testid="settings-open-silo">SILO Console</a></Button> : null}
         </div>
+        {services.siloConsolePath ? <p className="text-sm text-muted-foreground" data-testid="settings-silo-explanation">{t('settings.deployment.siloAccessHelp')}</p> : null}
+        {payload.socketAdmin?.authentication === 'gateway-owner' ? <p className="text-sm text-muted-foreground" data-testid="settings-socket-mode">
+          {t('settings.deployment.socketMode', {
+            current: t(`settings.socketAdmin.${payload.socketAdmin.runtimeMode === 'development' ? 'modeDevelopment' : 'modeProduction'}`),
+            configured: t(`settings.socketAdmin.${payload.socketAdmin.configuredMode === 'development' ? 'modeDevelopment' : 'modeProduction'}`),
+          })} <code>KALA_SOCKET_ADMIN_MODE</code>{payload.socketAdmin.restartRequired ? ` · ${t('settings.deployment.socketModeRestart')}` : null}
+          {payload.socketAdmin.runtimeMode === 'development' ? ` · ${t('settings.deployment.socketModeRedacted')}` : null}
+        </p> : null}
         {aspireUrl ? <div data-testid="settings-native-aspire">
           <div className="flex items-center gap-1 text-sm font-medium">Aspire<HelpHint label="Aspire">{t('settings.deployment.aspireAccessHelp')}</HelpHint></div>
           <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2"><code className="min-w-0 break-all text-sm">{aspireUrl}</code><CopyButton value={aspireUrl} /><Button asChild><a href={aspireUrl} target="_blank" rel="noreferrer">{t('settings.socketAdmin.open')}</a></Button></div>

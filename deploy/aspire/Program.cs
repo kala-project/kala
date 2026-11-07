@@ -94,6 +94,8 @@ var silo = builder.AddContainer("silo", siloImage)
     .WithEnvironment("MINIO_ROOT_PASSWORD", siloRootSecretKey)
     .WithBindMount(siloDataDirectory, "/data")
     .WithImagePullPolicy(ImagePullPolicy.Missing);
+if (bundledIngress)
+    silo.WithEnvironment("MINIO_BROWSER_REDIRECT_URL", publicOrigin + "/silo/");
 
 var dashboard = builder.AddContainer("dashboard", dashboardImage)
     .WithImagePullPolicy(ImagePullPolicy.Missing);
@@ -217,6 +219,7 @@ var gateway = builder.AddContainer("gateway", gatewayImage)
     .WithEnvironment("KALA_INGRESS_PORT", "13001")
     .WithEnvironment("KALA_INGRESS_LISTEN_HOST", "0.0.0.0")
     .WithEnvironment("KALA_PUBLIC_URLS", publicOrigin)
+    .WithEnvironment("KALA_SILO_CONSOLE_ENABLED", bundledIngress ? "1" : "0")
     .WithEnvironment("KALA_RUNTIME_HOST_ORIGIN", "http://runtime:13002")
     .WithEnvironment("KALA_INGRESS_DASHBOARD_ORIGIN", "http://dashboard:8080")
     .WithEnvironment("KALA_INGRESS_DATABASE_URL", gatewayDatabaseUrl)

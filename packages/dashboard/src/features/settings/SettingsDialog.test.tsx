@@ -133,9 +133,9 @@ describe('SettingsDialog', () => {
       ...payload, runtimeManagement: 'external',
       deployment: { product: 'dedicated', deployment: DEDICATED_DEPLOYMENT, capabilities: FULL_RUNTIME_CAPABILITIES },
       modelConfiguration: { management: 'dashboard' },
-      socketAdmin: { ...payload.socketAdmin, authentication: 'gateway-owner' },
+      socketAdmin: { ...payload.socketAdmin, authentication: 'gateway-owner', runtimeMode: 'development', configuredMode: 'production', restartRequired: true },
     }), { status: 200 }))
-    render(<SettingsDialog open platform organizationRole="owner" initialSection="models" deploymentServices={{ identityConsoleUrl: '/ui/console/instance', observability: true, observabilityUrl: 'http://127.0.0.1:28888', observabilityTokenAvailable: true }} onOpenChange={() => {}} />)
+    render(<SettingsDialog open platform organizationRole="owner" initialSection="models" deploymentServices={{ identityConsoleUrl: '/ui/console/instance', observability: true, observabilityUrl: 'http://127.0.0.1:28888', observabilityTokenAvailable: true, siloConsolePath: '/silo/' }} onOpenChange={() => {}} />)
     await screen.findByTestId('settings-provider-api-key-input')
     fireEvent.click(screen.getByRole('button', { name: 'Edit provider Anthropic' }))
     expect((screen.getByTestId('settings-provider-base-url-input') as HTMLInputElement).value).toBe('http://private-3.example.com/v1')
@@ -144,6 +144,11 @@ describe('SettingsDialog', () => {
     fireEvent.click(screen.getByTestId('settings-tab-socketAdmin'))
     expect(screen.getByTestId('settings-open-socket-admin').getAttribute('href')).toBe('/admin/socket.io')
     fireEvent.click(screen.getByTestId('settings-tab-deployment'))
+    expect(screen.getByTestId('settings-open-silo').getAttribute('href')).toBe('/silo/')
+    expect(screen.getByTestId('settings-silo-explanation').textContent).toContain('separate administrator login')
+    expect(screen.getByTestId('settings-socket-mode').textContent).toContain('KALA_SOCKET_ADMIN_MODE')
+    expect(screen.getByTestId('settings-socket-mode').textContent).toContain('Detailed diagnostics are redacted')
+    expect(screen.getByTestId('settings-socket-mode').textContent).toContain('restart Runtime to apply')
     expect(screen.getByTestId('settings-native-aspire').textContent).toContain('http://127.0.0.1:28888')
     expect(screen.getByTestId('settings-native-aspire').querySelector('a')?.getAttribute('href')).toBe('http://127.0.0.1:28888')
     for (const [label, path] of [['Structured logs', 'structuredlogs'], ['Traces', 'traces'], ['Metrics', 'metrics']]) {

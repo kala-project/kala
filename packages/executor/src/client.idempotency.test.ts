@@ -14,7 +14,7 @@ import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { once } from 'node:events'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -80,6 +80,87 @@ function makeMockSocket() {
 }
 
 describe('executor idempotency', () => {
+  it('requires both attachment generations to be absent in Portable mode', async () => {
+    const root = await mkdtemp(join(process.cwd(), '.attachment-generation-test-'))
+    const socket = makeMockSocket()
+    const handle = startExecutor({
+      host: 'http://localhost', workspaceId: 'ws-generation', executorId: 'executor-generation',
+      sandboxRoots: [root], tools: [], receiptStorePath: false, ioFactory: (() => socket) as never,
+    })
+    try {
+      const request = { sessionId: 'session', callId: 'begin', name: '__workspace_attachment_transfer',
+        origin: 'host' as const,
+        input: { action: 'begin', transferId: 'generation-check', path: 'a.bin', bytes: 1, sha256: '0'.repeat(64) } }
+      const first = vi.fn()
+      socket.__trigger('tool:call', { ...request, ownerGeneration: '2' }, first)
+      await vi.waitFor(() => expect(first).toHaveBeenCalledWith(
+        expect.objectContaining({ ok: false, content: expect.stringContaining('input owner generation') })))
+      const second = vi.fn()
+      socket.__trigger('tool:call', { ...request, input: { ...request.input, ownerGeneration: '2' } }, second)
+      await vi.waitFor(() => expect(second).toHaveBeenCalledWith(
+        expect.objectContaining({ ok: false, content: expect.stringContaining('input owner generation') })))
+      await expect(lstat(join(root, '.kala', 'attachment-transfers'))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { await handle.close(); await rm(root, { force: true, recursive: true }) }
+  })
+
+  it('rejects forged attachment transfer calls at the transport before dispatch', async () => {
+    const root = await mkdtemp(join(process.cwd(), '.attachment-transport-test-'))
+    const socket = makeMockSocket()
+    const handle = startExecutor({
+      host: 'http://localhost', workspaceId: 'ws-transfer', executorId: 'executor-transfer',
+      sandboxRoots: [root], tools: [], receiptStorePath: false, ioFactory: (() => socket) as never,
+    })
+    try {
+      const request = { sessionId: 'session', callId: 'begin-1', name: '__workspace_attachment_transfer',
+        input: { action: 'begin', transferId: 'transport-check', path: 'a.bin', bytes: 1, sha256: '0'.repeat(64) } }
+      const reply = vi.fn()
+      socket.__trigger('tool:call', request, reply)
+      await vi.waitFor(() => expect(reply).toHaveBeenCalledWith(
+        expect.objectContaining({ ok: false, content: expect.stringContaining('Host admission') })))
+      socket.__trigger('tool:call', { ...request, origin: 'host', ownerGeneration: 'invalid' }, reply)
+      await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(2))
+      expect(reply.mock.calls[1]![0]).toMatchObject({ ok: false })
+      await expect(lstat(join(root, '.kala', 'attachment-transfers'))).rejects.toMatchObject({ code: 'ENOENT' })
+      socket.__trigger('tool:call', {
+        ...request, origin: 'host', ownerGeneration: '2',
+        input: { ...request.input, ownerGeneration: '1' },
+      }, reply)
+      await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(3))
+      expect(reply.mock.calls[2]![0]).toMatchObject({
+        ok: false, content: expect.stringContaining('input owner generation does not match dispatch generation'),
+      })
+      await expect(lstat(join(root, '.kala', 'attachment-transfers'))).rejects.toMatchObject({ code: 'ENOENT' })
+      socket.__trigger('tool:call', { ...request, origin: 'host' }, reply)
+      await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(4))
+      expect(reply.mock.calls[3]![0]).toMatchObject({ ok: true })
+      expect(JSON.parse(reply.mock.calls[3]![0].content)).toMatchObject({ ok: true, state: 'active' })
+      socket.__trigger('tool:call', {
+        ...request, callId: 'status-forged', origin: 'host', ownerGeneration: '2',
+        input: { ...request.input, action: 'status', ownerGeneration: '2' },
+      }, reply)
+      await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(5))
+      expect(reply.mock.calls[4]![0]).toMatchObject({
+        ok: false, content: expect.stringContaining('owner generation or session mismatch'),
+      })
+      socket.__trigger('tool:call', {
+        ...request, callId: 'begin-fenced', origin: 'host', ownerGeneration: '2',
+        input: { ...request.input, transferId: 'fenced', ownerGeneration: '2' },
+      }, reply)
+      await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(6))
+      expect(JSON.parse(reply.mock.calls[5]![0].content)).toMatchObject({ ok: true, state: 'active' })
+      socket.__trigger('tool:call', {
+        ...request, callId: 'chunk-stale', origin: 'host', ownerGeneration: '3',
+        input: { ...request.input, action: 'chunk', transferId: 'fenced', ownerGeneration: '2',
+          offset: 0, data: Buffer.from([1]).toString('base64') },
+      }, reply)
+      await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(7))
+      expect(reply.mock.calls[6]![0]).toMatchObject({
+        ok: false, content: expect.stringContaining('input owner generation does not match dispatch generation'),
+      })
+      expect(await lstat(join(root, 'a.bin')).catch(() => undefined)).toBeUndefined()
+    } finally { await handle.close(); await rm(root, { force: true, recursive: true }) }
+  })
+
   it.skipIf(process.platform !== 'linux')('advertises recoverable v2 effects only for exact built-ins with a live keeper', async () => {
     const root = await mkdtemp(join(tmpdir(), 'kala-learning-capability-'))
     const keeper = await testKeeper(root)

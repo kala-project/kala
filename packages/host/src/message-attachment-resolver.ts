@@ -40,6 +40,7 @@ export async function resolveKernelMessageAttachments(
   store: Pick<MessageAttachmentStorage, 'resolve'> | undefined,
   sessionId: string,
   messages: readonly Message[],
+  attachmentToolAvailable = false,
 ): Promise<readonly Message[]> {
   let changed = false
   const resolved: Message[] = []
@@ -51,8 +52,18 @@ export async function resolveKernelMessageAttachments(
         continue
       }
       if (!store) throw new Error(`Attachment "${block.name}" cannot be resolved because Host attachment storage is unavailable`)
-      const data = await (await store.resolve(sessionId, block)).read()
+      const file = await store.resolve(sessionId, block)
       const imageType = supportedImageMediaType(block.mediaType)
+      if (file.bytes > 1024 * 1024 || !imageType && !isTextAttachment(block.mediaType, block.name)) {
+        if (!attachmentToolAvailable) throw new Error(`Attachment "${block.name}" requires the Session attachment Tool to access it without exceeding model limits`)
+        content.push({
+          type: 'text',
+          text: `Session attachment ${JSON.stringify(block.name)} (${block.mediaType}, ${file.bytes} bytes), ID ${block.source.attachmentId}. It is not a workspace file; use session_attachment to inspect/read it or save it to an Executor workspace.`,
+        })
+        changed = true
+        continue
+      }
+      const data = await file.read()
       if (imageType) {
         content.push({ type: 'image', source: { kind: 'base64', mediaType: imageType, data: data.toString('base64') } })
       } else {

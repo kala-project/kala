@@ -89,7 +89,7 @@ it('serves the installed official UI and connects a Dedicated Owner through exis
   expect(bootstrap).toContain('"ws_only", "true"')
   expect(bootstrap).not.toMatch(/password|token|admin\.socket\.io/)
   const settings = await (await fetch(`${origin}/settings`, { headers })).json()
-  expect(settings.socketAdmin).toMatchObject({ authentication: 'gateway-owner', active: true, initialized: true, runtimeMode: 'production' })
+  expect(settings.socketAdmin).toMatchObject({ authentication: 'gateway-owner', active: true, initialized: true, runtimeMode: 'development' })
   const admin = await connect(origin, headers)
   expect(admin.connected).toBe(true)
 })
@@ -114,13 +114,50 @@ it('never promotes a Private Cloud organization Owner to deployment administrato
   expect(settings.socketAdmin).toBeUndefined()
 })
 
-it('keeps Dedicated instrumentation in production even when legacy development mode is configured', () => {
+it('allows an explicit Dedicated production opt-out', () => {
   const before = process.env.KALA_SOCKET_ADMIN_MODE
-  process.env.KALA_SOCKET_ADMIN_MODE = 'development'
+  process.env.KALA_SOCKET_ADMIN_MODE = 'production'
   try {
     const config = loadGatewayOwnerSocketAdminConfig({ currentModulePath: import.meta.url })
     expect(config.runtime?.mode).toBe('production')
     expect(config.runtime?.authentication).toBe('gateway-owner')
+  } finally {
+    if (before === undefined) delete process.env.KALA_SOCKET_ADMIN_MODE
+    else process.env.KALA_SOCKET_ADMIN_MODE = before
+  }
+})
+
+it('advertises the effective default development mode only to the Dedicated Owner', async () => {
+  const before = process.env.KALA_SOCKET_ADMIN_MODE
+  delete process.env.KALA_SOCKET_ADMIN_MODE
+  try {
+    const origin = await start()
+    const owner = await (await fetch(`${origin}/settings`, { headers: ownerHeaders })).json()
+    expect(owner.socketAdmin).toMatchObject({
+      authentication: 'gateway-owner', active: true,
+      runtimeMode: 'development', configuredMode: 'development',
+    })
+    const member = await (await fetch(`${origin}/settings`, {
+      headers: { ...ownerHeaders, 'x-agent-runlab-organization-role': 'member' },
+    })).json()
+    expect(member.socketAdmin).toBeUndefined()
+    expect((await connect(origin, ownerHeaders)).connected).toBe(true)
+  } finally {
+    if (before === undefined) delete process.env.KALA_SOCKET_ADMIN_MODE
+    else process.env.KALA_SOCKET_ADMIN_MODE = before
+  }
+})
+
+it('reports an explicit production opt-out from the running Dedicated Host', async () => {
+  const before = process.env.KALA_SOCKET_ADMIN_MODE
+  process.env.KALA_SOCKET_ADMIN_MODE = 'production'
+  try {
+    const origin = await start()
+    const owner = await (await fetch(`${origin}/settings`, { headers: ownerHeaders })).json()
+    expect(owner.socketAdmin).toMatchObject({
+      authentication: 'gateway-owner', runtimeMode: 'production', configuredMode: 'production',
+    })
+    expect((await connect(origin, ownerHeaders)).connected).toBe(true)
   } finally {
     if (before === undefined) delete process.env.KALA_SOCKET_ADMIN_MODE
     else process.env.KALA_SOCKET_ADMIN_MODE = before

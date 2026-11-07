@@ -175,6 +175,42 @@ describe('Private Cloud edge request path', () => {
     expect((await fetch(`http://127.0.0.1:${shared.port}/auth/aspire/login-token`, { method: 'POST' })).status).toBe(404)
   })
 
+  it('authorizes SILO console requests only for an active same-origin Dedicated Owner', async () => {
+    const organizations = new TestOrganizationStore()
+    const access = await organizations.getOrCreateForIdentity({ issuer: 'http://identity.example', subject: 'alice' })
+    const operatorServices = { siloConsolePath: '/silo/' as const }
+    const gateway = await createGateway('http://127.0.0.1:9', undefined, { organizations, singleTenantOwner: true, operatorServices })
+    const origin = `http://127.0.0.1:${gateway.port}`
+    const endpoint = `${origin}/auth/silo/authorize`
+    expect((await fetch(endpoint)).status).toBe(401)
+    const login = await fetch(`${origin}/auth/login`, { redirect: 'manual' })
+    const callback = await fetch(`${origin}/auth/callback?code=ok`, { headers: { cookie: `ak_login=${cookieValue(login.headers.getSetCookie(), 'ak_login')}` }, redirect: 'manual' })
+    const headers = { cookie: `ak_session=${cookieValue(callback.headers.getSetCookie(), 'ak_session')}` }
+    expect((await (await fetch(`${origin}/auth/me`, { headers })).json()).deploymentServices).toEqual({ observability: false, siloConsolePath: '/silo/' })
+    const allowed = await fetch(endpoint, { headers })
+    expect(allowed.status).toBe(204)
+    expect(allowed.headers.get('cache-control')).toBe('no-store')
+    expect((await fetch(endpoint, { headers: { ...headers, origin: 'https://other.example' } })).status).toBe(403)
+    expect((await fetch(endpoint, { headers: { ...headers, 'x-forwarded-method': 'POST' } })).status).toBe(403)
+    expect((await fetch(endpoint, { headers: { ...headers, origin } })).status).toBe(204)
+    expect((await fetch(endpoint, { headers: { ...headers, origin, 'x-forwarded-method': 'POST' } })).status).toBe(204)
+    expect((await fetch(`${endpoint}?token=bad`, { headers })).status).toBe(405)
+    expect((await fetch(endpoint, { method: 'POST', headers })).status).toBe(405)
+    organizations.setStatus(access.organization.id, 'suspended')
+    expect((await fetch(endpoint, { headers })).status).toBe(403)
+    expect((await (await fetch(`${origin}/auth/me`, { headers })).json()).deploymentServices).toBeUndefined()
+    organizations.setStatus(access.organization.id, 'active')
+    const findAccess = organizations.findAccess.bind(organizations)
+    const roleOverride = vi.spyOn(organizations, 'findAccess').mockImplementation(async identity => {
+      const current = await findAccess(identity)
+      return current ? { ...current, membership: { ...current.membership, role: 'member' } } : undefined
+    })
+    expect((await fetch(endpoint, { headers })).status).not.toBe(204)
+    roleOverride.mockRestore()
+    const shared = await createGateway('http://127.0.0.1:9', undefined, { organizations, operatorServices })
+    expect((await fetch(`http://127.0.0.1:${shared.port}/auth/silo/authorize`, { headers })).status).toBe(404)
+  })
+
   it('advertises native Aspire access only to the Dedicated Owner without fetching telemetry', async () => {
     let reads = 0
     const upstream = createServer((_request, response) => {

@@ -367,6 +367,25 @@ describe('step: llm_response with tool calls', () => {
     ])
   })
 
+  it('approves Session attachment reads but requires write approval for save', () => {
+    const config = createConfig({
+      tools: [...TOOLS, { name: 'session_attachment', description: 'Manage attached files', inputSchema: { type: 'object' }, requiresApproval: false }],
+    })
+    const s0 = { ...initial(), status: 'thinking' as const }
+    const read = step(s0, { kind: 'llm_response', message: asst({
+      type: 'tool_call', callId: 'read-attachment', name: 'session_attachment', input: { action: 'read_text' },
+    }) }, config)
+    expect(read.effects[0]?.kind).toBe('call_tool')
+    const save = step(s0, { kind: 'llm_response', message: asst({
+      type: 'tool_call', callId: 'save-attachment', name: 'session_attachment', input: { action: 'save', path: '/workspace/snapshot.json' },
+    }) }, config)
+    expect(save.effects[0]?.kind).toBe('request_approval')
+    const denied = step({ ...s0, approvalMode: 'deny' }, { kind: 'llm_response', message: asst({
+      type: 'tool_call', callId: 'denied-save', name: 'session_attachment', input: { action: 'save' },
+    }) }, config)
+    expect(denied.effects).not.toContainEqual(expect.objectContaining({ kind: 'call_tool' }))
+  })
+
   it('handles mixed approval/auto in one response', () => {
     const s0 = { ...initial(), status: 'thinking' as const }
     const { next, effects } = step(

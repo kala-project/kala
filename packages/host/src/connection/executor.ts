@@ -608,6 +608,7 @@ export function createExecutorRegistry(
     })
   }
 
+  const trustedAttachmentTransfers = new WeakSet<CallToolEffect>()
   return {
     authorizeArenaShell(sessionId, callId, command, workspaceId) {
       const admission = arenaShellAdmissions.get(JSON.stringify([sessionId, callId]))
@@ -627,6 +628,14 @@ export function createExecutorRegistry(
       arenaShellAdmissions.set(key, { parentCallId, command: eff.input.command, workspaceId })
       try { return await this.callTool(sessionId, eff) }
       finally { arenaShellAdmissions.delete(key) }
+    },
+    async callHostAttachmentTransfer(sessionId, eff) {
+      if (eff.name !== '__workspace_attachment_transfer') {
+        return { ok: false, content: 'Invalid Host attachment transfer tool' }
+      }
+      trustedAttachmentTransfers.add(eff)
+      try { return await this.callTool(sessionId, eff) }
+      finally { trustedAttachmentTransfers.delete(eff) }
     },
     async inspectArenaReceipt(sessionId, callId) {
       if (!/^arena-(probe|init|apply|cleanup|status|diff)-[A-Z0-9]+$/u.test(callId)) return { state: 'unavailable' }
@@ -918,6 +927,11 @@ export function createExecutorRegistry(
       }
     },
     async callTool(sessionId, eff: CallToolEffect, turnId?: string) {
+      const trustedAttachmentTransfer = eff.name === '__workspace_attachment_transfer'
+        && trustedAttachmentTransfers.has(eff)
+      if (eff.name === '__workspace_attachment_transfer' && !trustedAttachmentTransfer) {
+        return { ok: false, content: 'Attachment transfer requires a trusted Host dispatch' }
+      }
       const arenaAction = ['probe', 'status', 'diff', 'init', 'apply', 'cleanup'].find((action) => eff.name === `arena_git_${action}`) as 'probe' | 'status' | 'diff' | 'init' | 'apply' | 'cleanup' | undefined
       const skillMutation = eff.name === 'skill_file' && eff.input.action !== 'read'
       const fencedSkill = skillMutation && resolver.requireSkillEffectBarrier
@@ -1061,7 +1075,7 @@ export function createExecutorRegistry(
             callId: eff.callId,
             name: eff.name,
             input: eff.input,
-            ...(arenaAction || fencedSkill || fencedMemory ? { origin: 'host' as const } : {}),
+            ...(arenaAction || fencedSkill || fencedMemory || trustedAttachmentTransfer ? { origin: 'host' as const } : {}),
             ...(eff.cwd !== undefined ? { cwd: eff.cwd } : {}),
             ackTimeoutMs,
             ...(turnId ? { turnId } : {}),

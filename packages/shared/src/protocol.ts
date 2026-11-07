@@ -2014,7 +2014,7 @@ export type ExternalDeploymentHealth = {
   checks: readonly { component: 'gateway' | 'runtime' | 'dashboard'; ready: boolean }[]
 }
 
-export type DeploymentServices = { identityConsoleUrl?: string; observability: boolean; observabilityUrl?: string; observabilityTokenAvailable?: boolean }
+export type DeploymentServices = { identityConsoleUrl?: string; observability: boolean; observabilityUrl?: string; observabilityTokenAvailable?: boolean; siloConsolePath?: '/silo/' }
 export type OperatorObservabilitySnapshot = {
   checkedAt: string
   retainedLogs: number
