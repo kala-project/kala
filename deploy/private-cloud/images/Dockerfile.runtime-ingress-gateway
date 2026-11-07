@@ -5,7 +5,8 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY packages/runtime-ingress-gateway/package.json packages/runtime-ingress-gateway/package.json
 COPY packages/shared/package.json packages/shared/package.json
 COPY packages/kernel/package.json packages/kernel/package.json
-RUN pnpm install --frozen-lockfile --filter @agent-kernel/runtime-ingress-gateway...
+ARG PNPM_FETCH_TIMEOUT=300000
+RUN pnpm install --frozen-lockfile --fetch-timeout="${PNPM_FETCH_TIMEOUT}" --filter @agent-kernel/runtime-ingress-gateway...
 COPY packages/runtime-ingress-gateway packages/runtime-ingress-gateway
 COPY packages/shared packages/shared
 COPY packages/kernel packages/kernel

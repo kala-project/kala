@@ -9,7 +9,9 @@ COPY packages/executor/package.json packages/executor/package.json
 COPY packages/host/package.json packages/host/package.json
 COPY packages/runtime-ingress-gateway/package.json packages/runtime-ingress-gateway/package.json
 COPY packages/dashboard/package.json packages/dashboard/package.json
-RUN pnpm install --frozen-lockfile --filter @agent-kernel/host... --filter @agent-kernel/runtime-ingress-gateway... --filter @agent-kernel/dashboard...
+# Large native and Dashboard packages can exceed the default fetch timeout on clean workers.
+ARG PNPM_FETCH_TIMEOUT=300000
+RUN pnpm install --frozen-lockfile --fetch-timeout="${PNPM_FETCH_TIMEOUT}" --filter @agent-kernel/host... --filter @agent-kernel/runtime-ingress-gateway... --filter @agent-kernel/dashboard...
 COPY packages/kernel packages/kernel
 COPY packages/shared packages/shared
 COPY packages/executor packages/executor
