@@ -50,8 +50,9 @@ describe('private native POSIX bridge', () => {
       rename: async () => {}, chmod: async () => {}, touch: async () => {}, sync: async () => {},
     }
     const onError = vi.fn()
+    const onOperation = vi.fn()
     const socketPath = join(root, 'native.sock')
-    const bridge = await startNativePosixBridge({ socketPath, fs, onError })
+    const bridge = await startNativePosixBridge({ socketPath, fs, onError, onOperation })
     try {
       const bytes = Buffer.from([0, 255, 0, 129])
       const request = frame(6, Buffer.from('/cache.db'), bytes)
@@ -67,6 +68,9 @@ describe('private native POSIX bridge', () => {
       const response = await call(socketPath, frame(1, Buffer.from('/cache.db')))
       expect(response.errno).toBe(0)
       expect(response.body.readBigUInt64BE(8)).toBe(42n)
+      expect(onOperation).toHaveBeenCalledTimes(2)
+      expect(onOperation).toHaveBeenCalledWith(6, bytes.length, expect.any(Number))
+      expect(onOperation).toHaveBeenCalledWith(1, 0, expect.any(Number))
       expect(onError).not.toHaveBeenCalled()
     } finally {
       await bridge.close()

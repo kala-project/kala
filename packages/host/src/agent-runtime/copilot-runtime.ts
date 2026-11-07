@@ -1,6 +1,7 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { PerformanceObserver } from 'node:perf_hooks'
 
 import { parseComputerScreenshotResult } from '@agent-kernel/shared'
 import { executionRequestDigest } from '@agent-kernel/executor'
@@ -62,6 +63,15 @@ type TurnCapture = {
   projectionError?: unknown
 }
 
+type NativeSendStats = {
+  reads: number
+  readBytes: number
+  writes: number
+  writtenBytes: number
+  otherOperations: number
+  operationWallMs: number
+}
+
 type ActiveTurnTiming = {
   turnId: string
   startedAt: string
@@ -97,6 +107,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
   private client: CopilotClient | undefined
   private sdk: typeof import('@github/copilot-sdk') | undefined
   private readonly nativeClients = new Map<string, { client: CopilotClient; mount: NativePosixMount }>()
+  private readonly nativeSendStats = new Map<string, NativeSendStats>()
   private cliPath: string | undefined
   private readonly sessions = new Map<string, CopilotSession>()
   private readonly sessionSystemPrompts = new Map<string, string>()
@@ -539,6 +550,14 @@ export class CopilotAgentRuntime implements AgentRuntime {
           fs: this.context.store.copilotNativePosixSessionFs(record.sessionId),
           onError: error => this.context.broadcast.onError(record.sessionId,
             error instanceof Error ? error.message : String(error)),
+          onOperation: (operation, bytes, durationMs) => {
+            const stats = this.nativeSendStats.get(record.sessionId)
+            if (!stats) return
+            stats.operationWallMs += durationMs
+            if (operation === 5) { stats.reads++; stats.readBytes += bytes }
+            else if (operation === 6) { stats.writes++; stats.writtenBytes += bytes }
+            else stats.otherOperations++
+          },
         }), true, (durationMs, outcome) => this.context.observeCopilotStage?.('native_mount', durationMs, outcome))
         const connection = this.sdk!.RuntimeConnection.forStdio({
           args: ['--no-remote-export'], ...(this.cliPath ? { path: this.cliPath } : {}),
@@ -1081,8 +1100,21 @@ export class CopilotAgentRuntime implements AgentRuntime {
     try {
       const message = await copilotMessageOptions(this.context, record, input, requestId)
       await this.context.assertSessionEffectOwner?.(record.sessionId)
+      const nativeStats: NativeSendStats = {
+        reads: 0, readBytes: 0, writes: 0, writtenBytes: 0, otherOperations: 0, operationWallMs: 0,
+      }
+      this.nativeSendStats.set(record.sessionId, nativeStats)
       const response = await observeSlowSessionOperation(record.sessionId, 'SDK send',
-        () => sendAndWaitWithActivityTimeout(session, message), false)
+        () => sendAndWaitWithActivityTimeout(session, message), false, (durationMs) => {
+          if (this.nativeSendStats.get(record.sessionId) === nativeStats) this.nativeSendStats.delete(record.sessionId)
+          if (durationMs >= 15_000) {
+            console.warn('[copilot] native IO during SDK send', {
+              sessionKey: createHash('sha256').update(record.sessionId).digest('hex').slice(0, 12),
+              durationMs, ...nativeStats,
+              operationWallMs: Math.round(nativeStats.operationWallMs),
+            })
+          }
+        })
       if (!this.isCurrentTurn(record.sessionId, generation)) return
       await Promise.all(capture.projections)
       if (capture.projectionError) throw capture.projectionError
@@ -1656,6 +1688,17 @@ async function observeSlowSessionOperation<T>(
 ): Promise<T> {
   const started = Date.now()
   const cpuStarted = process.cpuUsage()
+  const gc = { count: 0, durationMs: 0 }
+  const recordGc = (entries: readonly PerformanceEntry[]): void => {
+    for (const entry of entries) {
+      gc.count++
+      gc.durationMs += entry.duration
+    }
+  }
+  const gcObserver = stage === 'SDK send'
+    ? new PerformanceObserver((list) => recordGc(list.getEntries()))
+    : undefined
+  gcObserver?.observe({ entryTypes: ['gc'] })
   let outcome: 'succeeded' | 'failed' = 'failed'
   let expected = started + 15_000
   const timer = setInterval(() => {
@@ -1673,6 +1716,10 @@ async function observeSlowSessionOperation<T>(
     return result
   } finally {
     clearInterval(timer)
+    if (gcObserver) {
+      await new Promise<void>(resolve => setImmediate(resolve))
+      gcObserver.disconnect()
+    }
     const elapsedMs = Date.now() - started
     onDuration?.(elapsedMs, outcome)
     const cpu = process.cpuUsage(cpuStarted)
@@ -1680,6 +1727,7 @@ async function observeSlowSessionOperation<T>(
       || !reportSlowCompletion && elapsedMs >= 30_000 && cpu.user + cpu.system >= 15_000_000) {
       console.warn('[copilot] session operation completed', {
         sessionId, stage, elapsedMs, processCpuMs: Math.round((cpu.user + cpu.system) / 1000),
+        ...(gcObserver ? { processGcEvents: gc.count, processGcMs: Math.round(gc.durationMs) } : {}),
       })
     }
   }

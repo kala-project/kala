@@ -1897,6 +1897,7 @@ describe('Copilot runtime custom tools', () => {
 
   it('aborts a Copilot turn that never produces initial activity', async () => {
     vi.useFakeTimers()
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
       const cancelPending = vi.fn()
       const runtime = new CopilotAgentRuntime({
@@ -1929,8 +1930,12 @@ describe('Copilot runtime custom tools', () => {
       expect(store.get(record.sessionId)?.state.error).toContain('without initial Copilot session activity')
       expect(sdk.abort).toHaveBeenCalledOnce()
       expect(cancelPending).toHaveBeenCalledWith(record.sessionId)
+      const ioWarning = warning.mock.calls.find(([message]) => message === '[copilot] native IO during SDK send')
+      expect(ioWarning?.[1]).toMatchObject({ reads: 0, writes: 0, durationMs: expect.any(Number) })
+      expect(JSON.stringify(ioWarning)).not.toContain(record.sessionId)
       await runtime.close()
     } finally {
+      warning.mockRestore()
       vi.useRealTimers()
     }
   })

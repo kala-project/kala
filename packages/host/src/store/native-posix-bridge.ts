@@ -2,6 +2,7 @@ import { chmod, lstat, unlink } from 'node:fs/promises'
 import { createServer, type Server } from 'node:net'
 import { dirname } from 'node:path'
 import { TextDecoder } from 'node:util'
+import { performance } from 'node:perf_hooks'
 
 import {
   NATIVE_POSIX_REQUEST_BYTES,
@@ -35,6 +36,7 @@ export async function startNativePosixBridge(options: {
   socketPath: string
   fs: NativePosixFileSystem
   onError(error: unknown): void
+  onOperation?(operation: number, bytes: number, durationMs: number): void
 }): Promise<{ server: Server; close(): Promise<void> }> {
   const parent = await lstat(dirname(options.socketPath))
   if (!parent.isDirectory() || parent.isSymbolicLink() || (parent.mode & 0o077) !== 0) {
@@ -78,7 +80,16 @@ export async function startNativePosixBridge(options: {
       if (expected !== undefined && data.length >= expected) {
         dispatched = true
         if (data.length !== expected) { respond(errno.EINVAL!); return }
-        void dispatch(data, options.fs).then(body => respond(0, body), error => {
+        const operation = data.readUInt32BE(4)
+        const startedAt = performance.now()
+        void dispatch(data, options.fs).then(body => {
+          try {
+            options.onOperation?.(operation, operation === 5 ? body.length : operation === 6 ? data.readUInt32BE(12) : 0, performance.now() - startedAt)
+          } catch (error) {
+            options.onError(error)
+          }
+          respond(0, body)
+        }, error => {
           const code = error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : undefined
           if (!code || !errno[code] || errno[code] === errno.EIO) options.onError(error)
           respond(code && errno[code] ? errno[code]! : errno.EIO!)

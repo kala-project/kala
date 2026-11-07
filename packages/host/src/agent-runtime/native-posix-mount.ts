@@ -15,6 +15,7 @@ export async function mountNativePosixSession(options: {
   scope: string
   fs: NativePosixFileSystem
   onError(error: unknown): void
+  onOperation?(operation: number, bytes: number, durationMs: number): void
 }): Promise<NativePosixMount> {
   if (!isAbsolute(options.root) || !/^[a-z0-9_-][a-z0-9._-]{0,127}$/iu.test(options.sessionId)) {
     throw new Error('Invalid native POSIX mount root or external Session ID')
@@ -34,6 +35,7 @@ export async function mountNativePosixSession(options: {
   await mkdir(mountpoint, { recursive: true, mode: 0o700 })
   const bridge = await startNativePosixBridge({
     socketPath: join(bridgeDirectory, 'native.sock'), fs: options.fs, onError: options.onError,
+    ...(options.onOperation ? { onOperation: options.onOperation } : {}),
   })
   async function request(action: 'mount' | 'unmount'): Promise<void> {
     const requestId = randomUUID()
