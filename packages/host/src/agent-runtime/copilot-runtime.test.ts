@@ -1044,7 +1044,7 @@ describe('Copilot runtime custom tools', () => {
     await vi.waitFor(() => expect(store.get(record.sessionId)?.state.status).toBe('done'))
 
     expect(sdk.sentMessages).toContainEqual(expect.objectContaining({
-      prompt: 'Review this file.',
+      prompt: expect.stringContaining(`Review this file.\n\nSession attachments (not workspace files): "config.json": ${reference.source.attachmentId}`),
       attachments: [{
         type: 'blob',
         data: Buffer.from('{"ok":true}', 'utf8').toString('base64'),
@@ -1064,6 +1064,61 @@ describe('Copilot runtime custom tools', () => {
     const persisted = readFileSync(snapshotSidecarPath(record.logPath), 'utf8')
     expect(persisted).toContain(reference.source.attachmentId)
     expect(persisted).not.toContain(Buffer.from('{"ok":true}', 'utf8').toString('base64'))
+    await runtime.close()
+  })
+
+  it('lets Copilot read oversized text attachments in bounded chunks without sending an omitted SDK blob', async () => {
+    const messageAttachments = new MessageAttachmentStore(join(dir, 'message-attachments'))
+    const runtime = new CopilotAgentRuntime({
+      store,
+      messageAttachments,
+      tools: { async callTool() { throw new Error('Attachment reads must not reach the Executor') }, cancelPending() {} },
+      broadcast: {
+        onState() {},
+        onTokenDelta() {},
+        onApprovalRequired() {},
+        onError() {},
+      },
+    }, { enabled: true, sessionsDir: dir })
+    const record = await store.create({
+      sessionId: 'oversized-attachment-session',
+      agentRuntime: 'copilot',
+      config: createConfig({ tools: [] }),
+    })
+    const text = '{"payload":"' + 'x'.repeat(9 * 1024 * 1024) + '"}'
+    const reference = await messageAttachments.register({
+      sessionId: record.sessionId, name: 'snapshot.json', mediaType: 'application/json', data: Buffer.from(text),
+    })
+    await runtime.start()
+    sdk.responses.push({
+      type: 'assistant.message',
+      data: { content: 'I can read the attached file.', messageId: 'oversized-reply' },
+      id: 'oversized-event',
+      timestamp: new Date().toISOString(),
+    })
+    await runtime.send(record, {
+      text: 'Read my snapshot.',
+      content: [{ type: 'text', text: 'Read my snapshot.' }, reference],
+    })
+    await vi.waitFor(() => expect(store.get(record.sessionId)?.state.status).toBe('done'))
+
+    expect(sdk.sentMessages.at(-1)).toMatchObject({
+      prompt: expect.stringContaining(reference.source.attachmentId),
+    })
+    expect(sdk.sentMessages.at(-1)).not.toHaveProperty('attachments')
+    const tool = sdk.configs.at(-1)?.tools.find((item) => item.name === 'read_session_attachment')
+    expect(tool).toBeDefined()
+    const excerpt = await tool!.handler({ attachmentId: reference.source.attachmentId, offset: text.length - 4, maxChars: 4 }, { toolCallId: 'read-tail' })
+    expect(excerpt.textResultForLlm).toContain(`characters ${text.length - 4}-${text.length} of ${text.length}`)
+    expect(excerpt.textResultForLlm).toContain('x"}')
+    const search = await tool!.handler({ attachmentId: reference.source.attachmentId, query: 'PAYLOAD' }, { toolCallId: 'search-key' })
+    expect(search.textResultForLlm).toContain('1 match(es)')
+    expect(search.textResultForLlm).toContain('2: ')
+    const foreign = await messageAttachments.register({
+      sessionId: 'another-session', name: 'private.json', mediaType: 'application/json', data: Buffer.from('{"private":true}'),
+    })
+    const denied = await tool!.handler({ attachmentId: foreign.source.attachmentId }, { toolCallId: 'read-foreign' })
+    expect(denied.textResultForLlm).toContain('not referenced by a user message')
     await runtime.close()
   })
 
