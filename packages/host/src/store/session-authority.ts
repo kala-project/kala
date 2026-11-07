@@ -55,6 +55,8 @@ export interface SessionAuthority {
   listDeleting(limit?: number, afterSessionId?: string): Promise<readonly PersistedSessionDocument[]>
   loadDeleting(sessionId: string): Promise<PersistedSessionDocument | undefined>
   list(sessionIds?: readonly string[]): Promise<readonly PersistedSessionDocument[]>
+  /** Optional database-side projection for sidebar summaries; never load full transcripts on the hot path. */
+  listSummaryDocuments?(sessionIds?: readonly string[]): Promise<readonly PersistedSessionDocument[]>
   findOperation(sessionId: string, operationId: string): Promise<SessionOperationMatch | undefined>
   findLatestRuntimeMetadata(sessionId: string, action: string): Promise<RuntimeMetadataEntry | undefined>
   readChildTurnEnds?(sessionId: string, commandId: string): Promise<readonly RuntimeMetadataEntry[]>

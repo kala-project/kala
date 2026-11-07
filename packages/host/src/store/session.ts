@@ -2227,7 +2227,8 @@ export class SessionStore {
     if (selected?.size === 0) return []
     if (this.options.authority) {
       await this.authorityReady
-      const records = (await this.options.authority.list(options.sessionIds))
+      const records = (await (this.options.authority.listSummaryDocuments?.(options.sessionIds)
+        ?? this.options.authority.list(options.sessionIds)))
         .filter((document) => !selected || selected.has(document.sessionId))
         .filter((document) => !Object.hasOwn(options, 'organizationId') || document.organizationId === options.organizationId)
         .map((document) => restoreSessionRecord(document, this.pathFor(document.sessionId)))

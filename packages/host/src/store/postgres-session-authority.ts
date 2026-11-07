@@ -1344,6 +1344,54 @@ export class PostgresSessionAuthority implements SessionAuthority, ChildCommandI
     return documents.filter((document): document is PersistedSessionDocument => document !== undefined)
   }
 
+  async listSummaryDocuments(sessionIds?: readonly string[]): Promise<readonly PersistedSessionDocument[]> {
+    const selected = sessionIds === undefined ? undefined : [...new Set(sessionIds)]
+    if (selected?.length === 0) return []
+    selected?.forEach(validateSessionId)
+    const result = await this.hotState.database.query<{
+      scope_id: string
+      projection_session_id: string | null
+      document: PersistedSessionDocument | null
+    }>(`SELECT scopes.scope_id, projection.session_id AS projection_session_id,
+      CASE WHEN projection.document IS NULL OR projection.document = 'null'::jsonb THEN NULL
+        ELSE jsonb_strip_nulls(jsonb_build_object(
+        'sessionId', projection.document->'sessionId',
+        'agentRuntime', projection.document->'agentRuntime',
+        'executionMode', projection.document->'executionMode',
+        'agentRuntimeVersion', projection.document->'agentRuntimeVersion',
+        'createdAt', projection.document->'createdAt',
+        'lastEventAt', projection.document->'lastEventAt',
+        'parentSessionId', projection.document->'parentSessionId',
+        'organizationId', projection.document->'organizationId',
+        'workspaceId', projection.document->'workspaceId',
+        'workspaceName', projection.document->'workspaceName',
+        'firstUserMessage', left(projection.document->>'firstUserMessage', 120),
+        'label', projection.document->'label',
+        'goal', projection.document->'goal',
+        '${SESSION_DELETION_FIELD}', projection.document->'${SESSION_DELETION_FIELD}',
+        'preferences', COALESCE(projection.document->'preferences', '{}'::jsonb),
+        'state', jsonb_strip_nulls(jsonb_build_object(
+          'cursor', projection.document#>'{state,cursor}',
+          'status', projection.document#>'{state,status}',
+          'cwd', projection.document#>'{state,cwd}'
+        ))
+      )) END AS document
+      FROM (
+        SELECT DISTINCT scope_id FROM ${this.#eventsTable}
+        WHERE tenant_id = $1 AND scope_type = 'session'
+          ${selected ? 'AND scope_id = ANY($2::text[])' : ''}
+      ) AS scopes
+      LEFT JOIN ${this.#projectionTable} AS projection
+        ON projection.tenant_id = $1 AND projection.session_id = scopes.scope_id
+      ORDER BY scopes.scope_id`, selected ? [this.tenantId, selected] : [this.tenantId])
+    const documents = await Promise.all(result.rows.map(async (row) => {
+      if (row.projection_session_id === null) return await this.load(row.scope_id)
+      const document = decodePostgresJson(row.document)
+      return document && !sessionDeletion(document) ? document : undefined
+    }))
+    return documents.filter((document): document is PersistedSessionDocument => document !== undefined)
+  }
+
   async findOperation(sessionId: string, operationId: string): Promise<SessionOperationMatch | undefined> {
     validateSessionId(sessionId)
     if (!operationId) throw new TypeError('operationId must be a non-empty string')

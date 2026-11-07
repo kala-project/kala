@@ -434,6 +434,49 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     expect(existsSync(second.root)).toBe(false)
   })
 
+  it('lists PostgreSQL summaries without transferring transcripts and still repairs missing projections', async () => {
+    const tenantId = `summary-${randomUUID()}`
+    const authority = makeAuthority('summary-reader', tenantId)
+    const root = mkdtempSync(join(tmpdir(), 'kala-summary-reader-'))
+    roots.push(root)
+    const store = new SessionStore(root, { authority })
+    const record = await store.create({
+      sessionId: 'large-summary-session', agentRuntime: 'copilot', config,
+      organizationId: 'summary-org', workspaceId: 'summary-workspace',
+    })
+    await store.recordRuntimeProjection(record.sessionId, {
+      ...record.state,
+      cursor: 1,
+      status: 'done',
+      messages: [...record.state.messages, { role: 'user', content: [{ type: 'text', text: `first message ${'x'.repeat(1024 * 1024)}` }] }],
+    }, 'summary.large_message', {})
+    await store.rename(record.sessionId, 'Summary label')
+    await store.updatePreferences(record.sessionId, { toolCardMode: 'standard' })
+
+    const [document] = await authority.listSummaryDocuments()
+    expect(document).toMatchObject({
+      sessionId: record.sessionId, state: { cursor: 1, status: 'done' },
+      label: 'Summary label', workspaceId: 'summary-workspace',
+    })
+    expect(document).not.toHaveProperty('config')
+    expect(document?.state).not.toHaveProperty('messages')
+    expect(JSON.stringify(document).length).toBeLessThan(5_000)
+    expect((await store.listSummaries({ organizationId: 'summary-org' }))[0]).toMatchObject({
+      sessionId: record.sessionId, eventCount: 1, status: 'done',
+      workspaceId: 'summary-workspace', label: 'Summary label',
+      preferences: { toolCardMode: 'standard' },
+    })
+    expect(await store.listSummaries({ organizationId: undefined })).toEqual([])
+
+    await authority.hotState.database.query(`DELETE FROM tenant_session_latest_projection
+      WHERE tenant_id=$1 AND session_id=$2`, [tenantId, record.sessionId])
+    expect((await store.listSummaries({ sessionIds: [record.sessionId] }))[0]?.eventCount).toBe(1)
+    await authority.requestDeletion(record.sessionId)
+    expect(await store.listSummaries({ sessionIds: [record.sessionId] })).toEqual([])
+    await authority.delete(record.sessionId)
+    expect(await store.listSummaries({ sessionIds: [record.sessionId] })).toEqual([])
+  })
+
   it('replays explicit shell approval and command identity from PostgreSQL authority', async () => {
     const authority = makeAuthority('shell-approval-writer', 'shell-approval')
     const writer = new SessionStore(join(process.cwd(), '.kala-pg-shell-writer'), {
@@ -452,7 +495,7 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     })
     const sessionId = `pg-shell-${randomUUID()}`
     const record = await writer.create({
-      sessionId, config: shellConfig, workspaceId: 'pg-shell-workspace', initialApprovalMode: 'allow_all',
+      sessionId, config: shellConfig, workspaceId: 'pg-shell-workspace', initialApprovalMode: 'ask',
     })
     const events = [
       { kind: 'user_message' as const, text: 'test approval' },
