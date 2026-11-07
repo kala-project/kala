@@ -264,14 +264,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
       if (input.model) await session.setModel(input.model)
       if (!this.isCurrentTurn(record.sessionId, generation)) return
       void this.runTurn(record, session, input, generation, requestId).catch(() => {
-        // Even the error projection can be fenced/rejected. Stop this local
-        // generation without fabricating a durable completion or escaping into
-        // a process-wide unhandled rejection; recovery owns unknown effects.
-        if (!this.isCurrentTurn(record.sessionId, generation)) return
-        this.turnGenerations.set(record.sessionId, generation + 1)
-        void Promise.resolve().then(() => session.abort()).catch(() => undefined)
-        void Promise.resolve().then(() => this.context.tools.cancelPending(record.sessionId)).catch(() => undefined)
-        this.context.broadcast.onError(record.sessionId, 'Session persistence failed; the turn was stopped without replay. Inspect durable state before continuing.')
+        this.stopOnProjectionFailure(record, generation)
       })
     } catch (error) {
       if (!this.isCurrentTurn(record.sessionId, generation)) return
@@ -776,7 +769,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
           cacheCreationTokens: state.usage.cacheCreationTokens + (event.data.cacheWriteTokens ?? 0),
           cacheReadTokens: state.usage.cacheReadTokens + (event.data.cacheReadTokens ?? 0),
         },
-      }))
+      })).catch(() => this.stopOnProjectionFailure(record, generation))
       return
     }
     if (event.type === 'session.usage_info') {
@@ -983,9 +976,26 @@ export class CopilotAgentRuntime implements AgentRuntime {
         status: 'error',
         pendingCalls: [],
         error: event.data.message,
-      })).finally(() => this.activeTurnTimings.delete(record.sessionId))
+      })).catch(() => this.stopOnProjectionFailure(record, generation))
+        .finally(() => this.activeTurnTimings.delete(record.sessionId))
       this.context.broadcast.onError(record.sessionId, event.data.message)
     }
+  }
+
+  private stopOnProjectionFailure(record: SessionRecord, generation?: number): void {
+    if (generation === undefined || !this.isCurrentTurn(record.sessionId, generation)) return
+    this.turnGenerations.set(record.sessionId, generation + 1)
+    const session = this.sessions.get(record.sessionId)
+    if (session) {
+      void Promise.resolve().then(() => session.abort()).catch(error => {
+        this.context.broadcast.onError(record.sessionId, error instanceof Error ? error.message : String(error))
+      })
+    }
+    void Promise.resolve().then(() => this.context.tools.cancelPending(record.sessionId)).catch(error => {
+      this.context.broadcast.onError(record.sessionId, error instanceof Error ? error.message : String(error))
+    })
+    this.context.broadcast.onError(record.sessionId,
+      'Session persistence failed; the turn was stopped without replay. Inspect durable state before continuing.')
   }
 
   private trackEventGeneration(sessionId: string, event: SessionEvent): number | undefined {

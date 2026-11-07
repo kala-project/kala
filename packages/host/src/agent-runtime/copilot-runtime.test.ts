@@ -299,6 +299,42 @@ describe('Copilot runtime custom tools', () => {
     await runtime.close()
   })
 
+  it.each(['assistant.usage', 'session.error'] as const)(
+    'stops a turn without an unhandled rejection when %s cannot be persisted',
+    async (type) => {
+      const onError = vi.fn()
+      const cancelPending = vi.fn()
+      const runtime = new CopilotAgentRuntime({
+        store, tools: { async callTool() { return { ok: true, content: 'unused' } }, cancelPending },
+        broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError },
+      }, { enabled: true, sessionsDir: dir })
+      const record = await store.create({
+        sessionId: `unpersisted-${type.replace('.', '-')}`,
+        agentRuntime: 'copilot',
+        config: createConfig({ tools: [] }),
+      })
+      await runtime.start()
+      await runtime.send(record, { text: 'one turn' })
+      vi.spyOn(store, 'recordRuntimeProjection').mockRejectedValueOnce(new Error('resource fenced'))
+      for (const listener of [...sdk.listeners]) {
+        listener({
+          type, id: 'fenced-event', timestamp: new Date().toISOString(), parentId: null,
+          data: type === 'assistant.usage'
+            ? { inputTokens: 1, outputTokens: 1 }
+            : { message: 'SDK failed' },
+        })
+      }
+      await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(
+        record.sessionId,
+        'Session persistence failed; the turn was stopped without replay. Inspect durable state before continuing.',
+      ))
+      expect(sdk.abort).toHaveBeenCalledOnce()
+      expect(cancelPending).toHaveBeenCalledWith(record.sessionId)
+      expect(record.state.status).toBe('thinking')
+      await runtime.close()
+    },
+  )
+
   it('uses an admitted POSIX mount and dedicated SDK client without the whole-file string transport', async () => {
     store = new SessionStore(join(dir, 'sessions'), { authority: new SqliteSessionAuthority(join(dir, 'state.sqlite')) })
     await store.initialize()
