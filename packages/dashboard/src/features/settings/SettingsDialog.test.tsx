@@ -146,6 +146,9 @@ describe('SettingsDialog', () => {
     fireEvent.click(screen.getByTestId('settings-tab-deployment'))
     expect(screen.getByTestId('settings-native-aspire').textContent).toContain('http://127.0.0.1:28888')
     expect(screen.getByTestId('settings-native-aspire').querySelector('a')?.getAttribute('href')).toBe('http://127.0.0.1:28888')
+    for (const [label, path] of [['Structured logs', 'structuredlogs'], ['Traces', 'traces'], ['Metrics', 'metrics']]) {
+      expect(screen.getByRole('link', { name: label }).getAttribute('href')).toBe(`http://127.0.0.1:28888/${path}`)
+    }
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/auth/aspire/login-token'))).toBe(false)
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ token: 'native-test-token' }), { status: 200 }))
     fireEvent.click(screen.getByRole('button', { name: 'Show token' }))

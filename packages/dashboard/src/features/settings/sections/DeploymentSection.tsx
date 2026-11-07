@@ -15,6 +15,7 @@ const DASHBOARD_VERSION = packageJson.version
 
 export function DeploymentSection({ payload, host, token, services }: { payload: ServerSettingsPayload; host: string; token?: string; services?: DeploymentServices }): JSX.Element {
   const { t } = useTranslation()
+  const aspireUrl = services?.observabilityUrl
   const statusQuery = useQuery({
     queryKey: ['dedicated-deployment-status', host],
     queryFn: async (): Promise<DedicatedDeploymentStatus | ExternalDeploymentHealth | null> => {
@@ -51,9 +52,14 @@ export function DeploymentSection({ payload, host, token, services }: { payload:
           {services.identityConsoleUrl ? <Button asChild variant="outline"><a href={services.identityConsoleUrl} target="_blank" rel="noreferrer">{t('deploymentCenter.openIdentity')}</a></Button> : null}
           {payload.socketAdmin?.active && payload.socketAdmin.path ? <Button asChild variant="outline"><a href={payload.socketAdmin.path} target="_blank" rel="noreferrer">Socket.IO Admin</a></Button> : null}
         </div>
-        {services.observabilityUrl ? <div data-testid="settings-native-aspire">
+        {aspireUrl ? <div data-testid="settings-native-aspire">
           <div className="flex items-center gap-1 text-sm font-medium">Aspire<HelpHint label="Aspire">{t('settings.deployment.aspireAccessHelp')}</HelpHint></div>
-          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2"><code className="min-w-0 break-all text-sm">{services.observabilityUrl}</code><CopyButton value={services.observabilityUrl} /><Button asChild><a href={services.observabilityUrl} target="_blank" rel="noreferrer">{t('settings.socketAdmin.open')}</a></Button></div>
+          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2"><code className="min-w-0 break-all text-sm">{aspireUrl}</code><CopyButton value={aspireUrl} /><Button asChild><a href={aspireUrl} target="_blank" rel="noreferrer">{t('settings.socketAdmin.open')}</a></Button></div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {(['structuredlogs', 'traces', 'metrics'] as const).map((page) =>
+              <Button key={page} asChild variant="outline" size="sm"><a href={`${aspireUrl.replace(/\/$/u, '')}/${page}`} target="_blank" rel="noreferrer">{t(`deploymentCenter.${page === 'structuredlogs' ? 'logs' : page}`)}</a></Button>,
+            )}
+          </div>
           {services.observabilityTokenAvailable ? <AspireLoginToken host={host} token={token} /> : null}
         </div> : null}
       </section> : null}

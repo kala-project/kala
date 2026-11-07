@@ -59,7 +59,8 @@ The authenticated Dedicated Owner can find the native Aspire URL under
 login token there. This is a separate, loopback-only browser UI, not an
 embedded Kala observability page. A remote browser needs an authorized tunnel
 to the operator host; its own `127.0.0.1` does not refer to that host. The
-standalone Aspire sidebar offers Structured logs, Traces, and Metrics, but
+Deployment settings also link directly to Structured logs, Traces, and Metrics.
+The standalone Aspire sidebar offers those three views, but
 not the AppHost-only Resources view. Kala does not expose a substitute
 `/organization/observability` snapshot endpoint. Identity-console access is
 separately authorized by the IdP.
