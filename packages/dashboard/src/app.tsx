@@ -270,6 +270,33 @@ function PageLoadingFallback({ compact = false }: { compact?: boolean }): JSX.El
   )
 }
 
+function toolUpgradeNoticeKey(namespace: string, sessionId: string): string {
+  return `${namespace}:tool-upgrade-notice:${sessionId}`
+}
+
+export function toolUpgradeNoticeSeen(namespace: string, sessionId: string, seen: Set<string>): boolean {
+  const key = toolUpgradeNoticeKey(namespace, sessionId)
+  if (seen.has(key)) return true
+  try {
+    if (localStorage.getItem(key) !== '1') return false
+    seen.add(key)
+    return true
+  } catch (error) {
+    console.warn('Unable to read tool upgrade notification state', error)
+    return false
+  }
+}
+
+export function markToolUpgradeNoticeSeen(namespace: string, sessionId: string, seen: Set<string>): void {
+  const key = toolUpgradeNoticeKey(namespace, sessionId)
+  seen.add(key)
+  try {
+    localStorage.setItem(key, '1')
+  } catch (error) {
+    console.warn('Unable to save tool upgrade notification state', error)
+  }
+}
+
 export function App(): JSX.Element {
   const { t } = useTranslation()
   const [config, setConfig] = useState(() => readInitialConfig())
@@ -538,9 +565,6 @@ export function App(): JSX.Element {
   // Dedicated effects require a Session-bound connection even without route
   // tickets. Keep the control connection for legacy/unselected Dedicated views.
   const transportSocket = sessionRouteTickets || (sessionScoped && config.sessionId) ? session.socket : controlSocket
-  const connectedSocketRef = useRef<DashboardSocket | null>(null)
-  if (transportSocket?.connected) connectedSocketRef.current = transportSocket
-  const transportStatus = connectionStatusForTransport(transportSocket, session.status, connectedSocketRef.current === transportSocket)
   useEffect(() => previewStore.connect(controlSocket, sessionViewCache), [controlSocket, previewStore, sessionViewCache])
   const control = useControlPlane(controlSocket)
   const sessionNames = useMemo(() => new Map(control.sessions.map((item) => [item.sessionId, sessionDisplayLabel(item, t('scheduledTaskInbox.unnamedSession'))])), [control.sessions, t])
@@ -681,10 +705,10 @@ export function App(): JSX.Element {
     || (currentSession?.agentRuntime === 'copilot' ? '' : resolveModelKey(availableModels, defaultModel) || defaultModel)
     || modelKey(availableModels[0])
   useEffect(() => {
-    if (!controlSocket || !currentSession?.workspaceId || !currentSession.sessionId) return
+    if (!controlSocket || !currentSession?.workspaceId) return
     const releaseWorkspace = dashboardConnectionManager(controlSocket).acquire(`workspace:${currentSession.workspaceId}`)
     return releaseWorkspace
-  }, [controlSocket, currentSession?.sessionId, currentSession?.workspaceId])
+  }, [controlSocket, currentSession?.workspaceId])
   useEffect(() => {
     setWorkspaceTerminalReady(false)
     if (!controlSocket || !workspaceTerminal) return
@@ -1399,11 +1423,11 @@ export function App(): JSX.Element {
     if (!controlSocket || !activeSessionId) return
     let active = true
     const check = () => {
+      if (toolUpgradeNoticeSeen(cacheNamespace, activeSessionId, toolUpgradeNotices.current)) return
       controlSocket.emit('client:list_session_tool_upgrades', { sessionId: activeSessionId }, (result) => {
         if (!active || !result.ok || result.value.length === 0) return
-        const key = `${activeSessionId}:${[...result.value].sort().join(',')}`
-        if (toolUpgradeNotices.current.has(key)) return
-        toolUpgradeNotices.current.add(key)
+        if (toolUpgradeNoticeSeen(cacheNamespace, activeSessionId, toolUpgradeNotices.current)) return
+        markToolUpgradeNoticeSeen(cacheNamespace, activeSessionId, toolUpgradeNotices.current)
         notify.info(t('sessionMetadata.toolUpgrades.notice'), {
           id: 'session-tools-available',
           action: { label: t('sessionMetadata.toolUpgrades.open'), onClick: () => openSessionInfoDialog(activeSessionId, 'tools') },
@@ -1414,7 +1438,7 @@ export function App(): JSX.Element {
     if (controlSocket.connected) check()
     controlSocket.on('connect', check)
     return () => { active = false; controlSocket.off('connect', check) }
-  }, [activeSessionId, controlSocket, openSessionInfoDialog, t])
+  }, [activeSessionId, cacheNamespace, controlSocket, openSessionInfoDialog, t])
   const renameCurrentSessionFromSlash = useCallback((label: string | null): void => {
     if (activeSessionId === null) return
     if (label === null) {
@@ -1467,8 +1491,16 @@ export function App(): JSX.Element {
   )
   const metadataIsCurrentSession = metadataTargetSessionId !== null && metadataTargetSessionId === activeSessionId
   const hasSelectedSession = currentSession !== undefined
-  const connectionSocket = hasSelectedSession ? transportSocket : controlSocket
-  const connectionStatus = connectionStatusForTransport(connectionSocket, transportStatus, connectedSocketRef.current === connectionSocket)
+  const connectionSocket = connectionHealthSocket(controlSocket, transportSocket, hasSelectedSession, currentSession?.workspaceId)
+  const connectedSocketRef = useRef<DashboardSocket | null>(null)
+  const connectedSessionSocketRef = useRef<DashboardSocket | null>(null)
+  if (connectionSocket?.connected) connectedSocketRef.current = connectionSocket
+  if (transportSocket?.connected) connectedSessionSocketRef.current = transportSocket
+  const connectionStatus = connectionStatusForTransport(
+    connectionSocket, connectionSocket === transportSocket ? session.status : 'connecting',
+    connectedSocketRef.current === connectionSocket,
+  )
+  const sessionSyncStatus = connectionStatusForTransport(transportSocket, session.status, connectedSessionSocketRef.current === transportSocket)
   // Private Cloud Simple Chat has no workspace executor by design. Do not block the
   // empty-session entry point on an executor snapshot that is irrelevant there.
   // A Session directory is useful as soon as its own snapshot arrives. The
@@ -2300,7 +2332,7 @@ export function App(): JSX.Element {
 
   return (
     <PwaLifecycleHost>
-    <ConnectionStatusProvider socket={connectionSocket} status={connectionStatus} transport={connectionSocket?.io.engine?.transport.name} cursor={session.state?.cursor ?? 0} workspaceId={currentSession?.workspaceId} executorConnected={sessionWorkspaceOnline} sessionSelected={hasSelectedSession} onResync={resyncSession}>
+    <ConnectionStatusProvider socket={connectionSocket} status={connectionStatus} sessionSyncStatus={sessionSyncStatus} transport={connectionSocket?.io.engine?.transport.name} cursor={session.state?.cursor ?? 0} workspaceId={currentSession?.workspaceId} executorConnected={sessionWorkspaceOnline} sessionSelected={hasSelectedSession} onResync={resyncSession}>
     <div className="ak-app-shell ak-workspace-canvas flex flex-row text-foreground">
       {wideLayout && (section !== 'agent' || !explorerOpen) ? (
         <DesktopSessionRail
@@ -3886,6 +3918,10 @@ export function TopbarRestoreButton({ onClick }: { onClick(): void }): JSX.Eleme
 const CONNECTION_HEALTH_WINDOW_MS = 10 * 60 * 1000
 const CONNECTION_HEALTH_FAILURES_BEFORE_ISSUE = 2
 
+export function connectionHealthSocket<T>(controlSocket: T | null, sessionSocket: T | null, sessionSelected: boolean, workspaceId?: string): T | null {
+  return workspaceId ? controlSocket : sessionSelected ? sessionSocket : controlSocket
+}
+
 type ConnectionHealthSample = {
   at: number
   hostRttMs: number | null
@@ -3902,7 +3938,7 @@ export function connectionStatusForTransport(socket: { connected: boolean } | nu
   return sessionStatus === 'error' ? 'error' : 'connecting'
 }
 
-type ConnectionStatusProps = { socket: DashboardSocket | null; status: string; transport?: string; cursor: number; workspaceId?: string; executorConnected: boolean; sessionSelected?: boolean; onResync(): void; compact?: boolean; appearance?: 'default' | 'brand'; triggerId?: string }
+type ConnectionStatusProps = { socket: DashboardSocket | null; status: string; sessionSyncStatus?: string; transport?: string; cursor: number; workspaceId?: string; executorConnected: boolean; sessionSelected?: boolean; onResync(): void; compact?: boolean; appearance?: 'default' | 'brand'; triggerId?: string }
 type ConnectionStatusEntryOptions = Pick<ConnectionStatusProps, 'compact' | 'appearance' | 'triggerId'>
 type ConnectionStatusRenderer = (options: ConnectionStatusEntryOptions) => JSX.Element
 
@@ -3918,7 +3954,7 @@ export function ConnectionStatusEntry(options: ConnectionStatusEntryOptions): JS
   return sharedRenderer(options)
 }
 
-export function ConnectionStatusProvider({ socket, status, transport, cursor, workspaceId, executorConnected, sessionSelected = true, onResync, children, enabled = true }: ConnectionStatusProps & { children: ReactNode; enabled?: boolean }): JSX.Element {
+export function ConnectionStatusProvider({ socket, status, sessionSyncStatus, transport, cursor, workspaceId, executorConnected, sessionSelected = true, onResync, children, enabled = true }: ConnectionStatusProps & { children: ReactNode; enabled?: boolean }): JSX.Element {
   const { t } = useTranslation()
   const [openTrigger, setOpenTrigger] = useState<string | null>(null)
   const [hostRtt, setHostRtt] = useState<number | null>(null)
@@ -4035,12 +4071,16 @@ export function ConnectionStatusProvider({ socket, status, transport, cursor, wo
   const transientProbeFailed = hostError !== null || executorRequired && executorConnected && executorError !== null
   const probeFailed = status === 'ready' && transientProbeFailed && probeFailureStreak >= CONNECTION_HEALTH_FAILURES_BEFORE_ISSUE
   const executorOffline = status === 'ready' && executorRequired && !executorConnected
-  const displayStatus = probeFailed || executorOffline ? 'error' : status
-  const label = probeFailed || executorOffline ? t('connectionHealth.issue') : hostStatusLabel(status, t)
+  const measurementUnknown = status === 'ready'
+    && (hostRtt === null || executorRequired && executorConnected && executorRtt === null)
+  const displayStatus = probeFailed || executorOffline ? 'error' : measurementUnknown ? 'connecting' : status
+  const syncStatus = sessionSyncStatus ?? status
+  const label = probeFailed || executorOffline ? t('connectionHealth.issue')
+    : measurementUnknown ? t('connectionHealth.notMeasured') : hostStatusLabel(status, t)
   const healthy = displayStatus === 'ready' && (!executorRequired || executorConnected)
   const failed = displayStatus === 'error' || displayStatus === 'disconnected'
-  const hostTone = status === 'ready' && !hostError ? 'healthy' : hostError || status === 'disconnected' || status === 'error' ? 'failed' : 'pending'
-  const executorTone = !executorConnected || executorError ? 'failed' : 'healthy'
+  const hostTone = status === 'ready' && hostRtt !== null && !hostError ? 'healthy' : hostError || status === 'disconnected' || status === 'error' ? 'failed' : 'pending'
+  const executorTone = !executorConnected || executorError ? 'failed' : executorRtt === null ? 'pending' : 'healthy'
   const headlineLatency = executorRequired && executorConnected
     ? hostRtt !== null && executorRtt !== null ? hostRtt + executorRtt : null
     : hostRtt
@@ -4082,9 +4122,11 @@ export function ConnectionStatusProvider({ socket, status, transport, cursor, wo
               executorSegment={executorRequired ? { label: t('connectionHealth.hostExecutor'), state: !executorConnected ? t('connectionHealth.offline') : executorError ?? t('common.connected'), tone: executorTone, latency: executorRtt, measuring: checking && executorConnected && executorRtt === null && !executorError } : undefined}
               measuringLabel={t('connectionHealth.measuring')}
             />
-            {sessionSelected ? <HealthRow label={t('connectionHealth.sessionSync')} state={displayStatus === 'ready' ? t('connectionHealth.synchronized') : label} tone={displayStatus === 'ready' ? 'healthy' : displayStatus === 'disconnected' || displayStatus === 'error' ? 'failed' : 'pending'} measuringLabel={t('connectionHealth.measuring')} /> : null}
+            {sessionSelected ? <HealthRow label={t('connectionHealth.sessionSync')} state={syncStatus === 'ready' ? t('connectionHealth.synchronized') : hostStatusLabel(syncStatus, t)} tone={syncStatus === 'ready' ? 'healthy' : syncStatus === 'disconnected' || syncStatus === 'error' ? 'failed' : 'pending'} measuringLabel={t('connectionHealth.measuring')} /> : null}
           </div>
-          <ConnectionHealthCurve key={workspaceId ?? 'chat'} samples={history} executorRequired={executorRequired} now={history[history.length - 1]?.at ?? Date.now()} t={t} />
+          {history.some((sample) => sample.hostRttMs !== null || sample.executorRttMs !== null)
+            ? <ConnectionHealthCurve key={workspaceId ?? 'chat'} samples={history} executorRequired={executorRequired} now={history[history.length - 1]?.at ?? Date.now()} t={t} />
+            : <p className="py-6 text-center text-caption text-muted-foreground" data-testid="connection-health-unmeasured">{t('connectionHealth.historyEmpty')}</p>}
           <div className="mt-3 flex items-center gap-2"><Button size="sm" variant="outline" className="h-8" disabled={checking || !socket?.connected} onClick={measure}>{t(checking ? 'connectionHealth.measuring' : 'connectionHealth.measureAgain')}</Button><Button size="sm" variant="ghost" className="h-8" onClick={onResync}>{t('connectionHealth.resync')}</Button></div>
           <div className="mt-2 flex min-w-0 items-center justify-between gap-3 text-caption text-muted-foreground" data-testid="connection-transport-row">
             <span className="min-w-0 truncate">{t('connectionHealth.transport')} · {transport ?? t('connectionHealth.unknown')}</span>

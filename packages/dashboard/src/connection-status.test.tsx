@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { ConnectionStatus, ConnectionStatusEntry, ConnectionStatusProvider } from './app.js'
+import { ConnectionStatus, ConnectionStatusEntry, ConnectionStatusProvider, connectionHealthSocket, connectionStatusForTransport } from './app.js'
 import { SidebarBrand } from './app-shell/AppShellNav.js'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from './components/ui/dialog.js'
 
@@ -120,7 +120,7 @@ describe('ConnectionStatus', () => {
 
   it('softens single host probe failures while keeping session synchronization errors visible for Chats', () => {
     const view = render(<ConnectionStatus socket={timedOutSocket() as never} status="ready" cursor={0} executorConnected onResync={() => {}} />)
-    expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('ready')
+    expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('connecting')
     view.rerender(<ConnectionStatus socket={socketWithRtt() as never} status="error" cursor={0} executorConnected onResync={() => {}} />)
     expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('error')
     view.rerender(<ConnectionStatus socket={null} status="disconnected" cursor={0} executorConnected onResync={() => {}} />)
@@ -161,6 +161,27 @@ describe('ConnectionStatus', () => {
     expect(screen.getByTestId('connection-headline-latency').textContent).toBe('46 ms')
   })
 
+  it('keeps Workspace health on the control connection while a new Session route connects', () => {
+    const control = socketWithRtt()
+    const firstSession = { connected: true }
+    const nextSession = { connected: false }
+    const initial = connectionHealthSocket(control, firstSession, true, 'w1')
+    const view = render(<ConnectionStatus socket={initial as never} status="ready" workspaceId="w1" cursor={1} executorConnected onResync={() => {}} />)
+    fireEvent.click(screen.getByTestId('connection-status'))
+
+    const retained = connectionHealthSocket(control, nextSession, true, 'w1')
+    view.rerender(<ConnectionStatus socket={retained as never}
+      status={connectionStatusForTransport(retained, 'connecting', true)}
+      sessionSyncStatus={connectionStatusForTransport(nextSession, 'connecting', true)}
+      workspaceId="w1" cursor={2} executorConnected onResync={() => {}} />)
+    expect(retained).toBe(control)
+    expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('ready')
+    expect(screen.getByTestId('connection-status-popover')).toBeTruthy()
+    expect(screen.getByTestId('connection-headline-latency').textContent).toBe('46 ms')
+    expect(screen.getByText('Session sync').closest('div')?.textContent).toContain('Disconnected')
+    expect(connectionHealthSocket(control, nextSession, true)).toBe(nextSession)
+  })
+
   it('presents the complete Device to Service to Executor RTT as the headline', async () => {
     const socket = socketWithRtt()
     render(<ConnectionStatus socket={socket as never} status="ready" transport="websocket" cursor={9} workspaceId="w1" executorConnected onResync={() => {}} />)
@@ -183,6 +204,20 @@ describe('ConnectionStatus', () => {
     render(<ConnectionStatus socket={socket as never} status="ready" transport="websocket" cursor={9} workspaceId="w1" executorConnected onResync={() => {}} />)
 
     await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('—'))
+    expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('connecting')
+    fireEvent.click(screen.getByTestId('connection-status'))
+    expect(screen.queryByText('Healthy')).toBeNull()
+    expect(screen.getByTestId('connection-health-chart')).toBeTruthy()
+  })
+
+  it('does not show an unmeasured connection as healthy or draw a fabricated latency chart', () => {
+    const socket = { connected: true, timeout: () => ({ emit: () => undefined }) }
+    render(<ConnectionStatus socket={socket as never} status="ready" workspaceId="w1" cursor={0} executorConnected onResync={() => {}} />)
+    fireEvent.click(screen.getByTestId('connection-status'))
+    expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('connecting')
+    expect(screen.queryByText('Healthy')).toBeNull()
+    expect(screen.getByTestId('connection-health-unmeasured')).toBeTruthy()
+    expect(screen.queryByTestId('connection-health-chart')).toBeNull()
   })
 
   it('distinguishes offline from an unknown or timed-out latency', () => {
@@ -314,7 +349,7 @@ describe('ConnectionStatus', () => {
   it('marks the overall connection as failed after repeated latency probe timeouts', async () => {
     render(<ConnectionStatus socket={timedOutSocket() as never} status="ready" transport="websocket" cursor={9} workspaceId="w1" executorConnected onResync={() => {}} />)
 
-    await waitFor(() => expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('ready'))
+    await waitFor(() => expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('connecting'))
     fireEvent.click(screen.getByTestId('connection-status'))
     expect(screen.queryByText('Connection issue')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Measure again' }))
@@ -464,7 +499,7 @@ describe('ConnectionStatus', () => {
     expect(screen.getByRole('tooltip').textContent).toContain('Host: 89 ms')
   })
 
-  it('shows a labeled empty chart while the first measurement is pending', () => {
+  it('shows a labeled placeholder instead of an empty latency chart while measuring', () => {
     const socket = {
       connected: true,
       timeout: vi.fn(() => ({ emit: vi.fn() })),
@@ -473,8 +508,8 @@ describe('ConnectionStatus', () => {
     render(<ConnectionStatus socket={socket as never} status="ready" cursor={0} executorConnected={false} onResync={() => {}} />)
     fireEvent.click(screen.getByTestId('connection-status'))
 
-    expect(screen.getByTestId('connection-health-empty').textContent).toBe('Waiting for the first measurement…')
-    expect(screen.getByRole('group', { name: 'Last 10 minutes connection health chart' })).toBeTruthy()
+    expect(screen.getByTestId('connection-health-unmeasured').textContent).toBe('Waiting for the first measurement…')
+    expect(screen.queryByRole('group', { name: 'Last 10 minutes connection health chart' })).toBeNull()
     expect(screen.queryByTestId('connection-health-sample-hit')).toBeNull()
   })
 })

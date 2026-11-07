@@ -146,6 +146,25 @@ describe('DashboardConnectionManager', () => {
     releaseAAgain()
   })
 
+  it('keeps visited Workspace rooms warm when changing Sessions and evicts them within the shared cap', async () => {
+    let now = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => ++now)
+    try {
+      const socket = new SocketMock()
+      const manager = new DashboardConnectionManager(socket as never, { sessionWarmthMs: () => 60_000, maxWarmSessions: 2 })
+      manager.acquire('workspace:w1')()
+      await vi.waitFor(() => expect(manager.snapshot().get('workspace:w1')?.state).toBe('active'))
+      manager.acquire('workspace:w2')()
+      expect(socket.emits.filter(({ event }) => event === 'client:unsubscribe_channels')).toHaveLength(0)
+      manager.acquire('workspace:w1')()
+      expect(socket.emits.filter(({ event, payload }) => event === 'client:subscribe_channels' && payload.channels.includes('workspace:w1'))).toHaveLength(1)
+      manager.acquire('workspace:w3')()
+      expect(manager.snapshot().has('workspace:w2')).toBe(false)
+      expect(manager.snapshot().has('workspace:w1')).toBe(true)
+      expect(manager.snapshot().has('workspace:w3')).toBe(true)
+    } finally { clock.mockRestore() }
+  })
+
   it('refreshes a warm session expiry when it is reentered', async () => {
     vi.useFakeTimers()
     try {

@@ -54,16 +54,19 @@ equivalent. Use the existing protected Dashboard API key, not its browser token.
 Keep the origin on the private deployment network; no additional browser-facing
 port is required.
 
-The authenticated Dedicated Owner then sees **Management & observability** in
-the homepage sidebar. Its read-only snapshot uses the existing Kala browser
-session. Gateway fetches three fixed, size/time-bounded Aspire API resources;
-API credentials and arbitrary telemetry attributes are never returned to the
-browser. Private Cloud tenants and non-Owners cannot use this instance-wide
-endpoint. Identity-console access is still separately authorized by the IdP.
+The authenticated Dedicated Owner can find the native Aspire URL under
+**Settings → Deployment → Management tools → Aspire** and reveal the browser
+login token there. This is a separate, loopback-only browser UI, not an
+embedded Kala observability page. A remote browser needs an authorized tunnel
+to the operator host; its own `127.0.0.1` does not refer to that host. The
+standalone Aspire sidebar offers Structured logs, Traces, and Metrics, but
+not the AppHost-only Resources view. Kala does not expose a substitute
+`/organization/observability` snapshot endpoint. Identity-console access is
+separately authorized by the IdP.
 
-Refresh is manual. Recent logs and at most 500 recent spans are a sample, not a
-complete request-rate measurement or billing ledger. This view does not replace
-the complete local Aspire UI or expose its administration/API credentials.
+Telemetry is best-effort and sampled/bounded, not a complete request-rate
+measurement or billing ledger. Aspire's API credentials are not returned to
+the browser.
 Successful static assets contribute HTTP and database metrics without one trace
 tree per font/script/image. Failed assets retain their HTTP span. Tabs, settings,
 models, browser activity and organization APIs have distinct fixed route labels.

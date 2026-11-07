@@ -9,6 +9,9 @@ type DashboardConnectionManagerOptions = { sessionWarmthMs?: () => number; maxWa
 
 const DEFAULT_SESSION_WARMTH_MS = 60 * 60_000
 const DEFAULT_MAX_WARM_SESSIONS = 16
+function warmable(channel: DashboardChannel): boolean {
+  return channel.startsWith('session:') || channel.startsWith('workspace:')
+}
 
 export class DashboardConnectionManager {
   private readonly channels = new Map<DashboardChannel, ChannelRecord>()
@@ -59,7 +62,7 @@ export class DashboardConnectionManager {
       if (options.onError) record?.errorListeners.delete(options.onError)
       if (!record || --record.refs > 0) return
       if (options.retainWarm !== false
-        && channel.startsWith('session:')
+        && warmable(channel)
         && record.state !== 'rejected'
         && this.retainWarm(channel, record)) return
       this.remove(channel, record)
@@ -138,7 +141,7 @@ export class DashboardConnectionManager {
     }
     record.warmTimer = window.setTimeout(expire, duration)
     const warm = [...this.channels.entries()]
-      .filter(([candidate, candidateRecord]) => candidate.startsWith('session:') && candidateRecord.refs === 0 && candidateRecord.warmUntil !== undefined)
+      .filter(([candidate, candidateRecord]) => warmable(candidate) && candidateRecord.refs === 0 && candidateRecord.warmUntil !== undefined)
       .sort((left, right) => left[1].lastUsed - right[1].lastUsed)
     for (const [candidate, candidateRecord] of warm.slice(0, Math.max(0, warm.length - this.maxWarmSessions))) this.remove(candidate, candidateRecord)
     return this.channels.get(channel) === record
