@@ -118,7 +118,6 @@ export class PostgresSessionAuthority implements SessionAuthority, ChildCommandI
   readonly #localReplicaId?: string
   readonly messageQueue: PostgresMessageQueueStore
   readonly currentOwnerCacheKey?: (sessionId: string) => string | undefined
-  readonly #projectionReadActivity = new Map<string, { startedAt: number; count: number }>()
 
   async storageEntries(): Promise<readonly {
     sessionId: string
@@ -1583,14 +1582,6 @@ export class PostgresSessionAuthority implements SessionAuthority, ChildCommandI
   }
 
   async #projection(sessionId: string): Promise<ProjectionRow | undefined> {
-    const caller = new Error().stack?.split('\n').slice(2, 10).map((line) => line.trim()).join(' | ') ?? 'unknown'
-    const now = Date.now()
-    const activity = this.#projectionReadActivity.get(caller)
-    if (!activity || now - activity.startedAt >= 30_000) {
-      this.#projectionReadActivity.set(caller, { startedAt: now, count: 1 })
-    } else if (++activity.count === 64) {
-      process.emitWarning(`Frequent full Session projection reads: ${caller}`, { code: 'KALA_SESSION_PROJECTION_READS' })
-    }
     const result = await this.hotState.database.query<ProjectionRow>(`SELECT version, document
       FROM ${this.#projectionTable} WHERE tenant_id = $1 AND session_id = $2`, [this.tenantId, sessionId])
     const row = result.rows[0]

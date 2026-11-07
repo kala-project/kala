@@ -2872,6 +2872,47 @@ describe('wire protocol', () => {
     }
   })
 
+  it('synchronizes desktop policy for a read-only Session snapshot without an owner cache hit', async () => {
+    let prompt = 'before'
+    const slots = (value: string) => [
+      { id: 'slot-1' as const, name: 'One', prompt: value },
+      { id: 'slot-2' as const, name: 'Two', prompt: value },
+      { id: 'slot-3' as const, name: 'Three', prompt: value },
+    ]
+    const settings = (): ServerSettingsPayload => ({
+      providers: [], defaultModel: '', hooks: [],
+      agentPrompt: { selectedSlotId: 'slot-1', slots: slots(prompt), configPath: '/tmp/agent.json' },
+      paths: { claudeSettings: '', codexConfig: '', manualModels: '', hooksConfig: '', sessionsDir: '' },
+      mcp: { supported: false, note: '' },
+    })
+    const localSessionsDir = mkdtempSync(join(tmpdir(), 'agent-kernel-desktop-policy-read-only-'))
+    const localServer = await startHostServer({
+      port: 0, sessionsDir: localSessionsDir, llm: scriptedLlm(),
+      defaultConfig: () => createConfig({ tools: [], systemPrompt: prompt }),
+      desktopFeaturePolicy: () => ({ computerUseEnabled: false, desktopPreviewEnabled: false }),
+      settings,
+      updateAgentPrompt: () => {
+        prompt = 'after'
+        return settings()
+      },
+    })
+    try {
+      await localServer.store.create({ sessionId: 'read-only-policy', config: createConfig({ tools: [], systemPrompt: prompt }) })
+      const get = localServer.store.get.bind(localServer.store)
+      vi.spyOn(localServer.store, 'get').mockImplementation((sessionId) =>
+        sessionId === 'read-only-policy' ? undefined : get(sessionId))
+      const response = await fetch(`http://localhost:${localServer.port}/settings/agent-prompt`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ selectedSlotId: 'slot-1', slots: slots('after') }),
+      })
+      expect(response.status).toBe(200)
+      expect((await localServer.store.load('read-only-policy')).config.systemPrompt).toBe('after')
+    } finally {
+      await localServer.close()
+      rmSync(localSessionsDir, { recursive: true, force: true })
+    }
+  })
+
   it('persists desktop authorization and applies it to an old Session after restart and administrator updates', async () => {
     const localSessionsDir = mkdtempSync(join(tmpdir(), 'agent-kernel-desktop-policy-'))
     const path = join(localSessionsDir, 'agent.json')

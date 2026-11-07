@@ -817,6 +817,15 @@ export async function startHostServer(
     if (changed) publishSystemPromptChanged(record)
     return changed
   }
+  const refreshDesktopFeaturePolicy = async (record: SessionRecord): Promise<void> => {
+    const actor = actorForRecord(record)
+    const policy = options.desktopFeaturePolicy?.(actor)
+    if (!policy) return
+    await executors.updateDesktopFeaturePolicy?.(record.sessionId, {
+      ...policy,
+      manualAuthorizationRequired: options.desktopManualAuthorizationRequired?.(actor) ?? true,
+    })
+  }
   const synchronizeOrganizationPrompt = async (actor: DashboardActor): Promise<void> => {
     const organizationId = organizationIdForActor(actor)
     let ids: string[]
@@ -835,7 +844,7 @@ export async function startHostServer(
       try {
         const record = store.get(sessionId) ?? await store.load(sessionId, { recoverDangling: false, runtimeConfig: getDefaultConfig(actor) })
         await ensureEffectiveSystemPrompt(record)
-        await executors.updateDesktopFeaturePolicy?.(sessionId)
+        await refreshDesktopFeaturePolicy(record)
         pendingPromptSynchronizations.delete(sessionId)
       } catch (error) {
         pendingPromptSynchronizations.add(sessionId)
@@ -884,13 +893,11 @@ export async function startHostServer(
         try {
           const record = store.get(sessionId) ?? await store.load(sessionId, { recoverDangling: false })
           await ensureEffectiveSystemPrompt(record)
-          await executors.updateDesktopFeaturePolicy?.(sessionId)
+          await refreshDesktopFeaturePolicy(record)
           pendingPromptSynchronizations.delete(sessionId)
         } catch (error) {
           // Settings or Session storage may be temporarily unreadable. Retain it.
-          const name = error instanceof Error
-            ? `${error.name} at ${error.stack?.split('\n')[1]?.trim() ?? 'unknown'}`
-            : 'UnknownError'
+          const name = error instanceof Error ? error.name : 'UnknownError'
           failedByType.set(name, (failedByType.get(name) ?? 0) + 1)
         }
       }

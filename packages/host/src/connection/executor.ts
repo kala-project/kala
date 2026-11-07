@@ -147,7 +147,11 @@ type PublishLocalImageResponse = { requestId: string; path: string; base64?: str
 export type ExecutorLookup = {
   queryExecutionReceipt(query: ExecutionReceiptQuery): Promise<ExecutionReceiptQueryResult>
   cancelExecution(request: ExecutionCancelRequest): Promise<ExecutionCancelAck>
-  updateDesktopFeaturePolicy?(sessionId: string): Promise<void>
+  updateDesktopFeaturePolicy?(sessionId: string, policy: {
+    computerUseEnabled: boolean
+    desktopPreviewEnabled: boolean
+    manualAuthorizationRequired: boolean
+  }): Promise<void>
   computerRequest(payload: ComputerRequest, owner: string): Promise<ComputerResponse>
   executorForSession(sessionId: string): AttachedExecutor | undefined
   listDirs(workspaceId: string, path: string | undefined, requestId: string): Promise<DirListResult>
@@ -1427,9 +1431,7 @@ export function createExecutorRegistry(
       const bind = findBindByWorkspace(payload.workspaceId)
       if (bind) ignoreAsync(runTerminalOperation(bind, () => undefined, () => { bind.socket.emit('terminal:close_session', payload) }))
     },
-    async updateDesktopFeaturePolicy(sessionId) {
-      const policy = resolver.desktopFeaturePolicy?.(sessionId)
-      if (!policy) return
+    async updateDesktopFeaturePolicy(sessionId, policy) {
       for (const bind of allPendingBinds()) {
         for (const [key, pending] of bind.pending) {
           if (pending.sessionId !== sessionId || pending.name !== 'computer_use' || policy.computerUseEnabled) continue
@@ -1445,7 +1447,7 @@ export function createExecutorRegistry(
       const fail = (message: string): ComputerResponse => ({ requestId: 'desktop-policy-refresh', error: { code: 'unavailable', message } })
       const response = await callInternalTool<ComputerResponse>(bind.bind, bind.bind.announcement.workspaceId, '__computer_use', {
         owner: 'host-policy', request: { operation: 'status', requestId: 'desktop-policy-refresh', workspaceId: bind.bind.announcement.workspaceId, sessionId, policyStatusVersion: 2 },
-        desktopManualAuthorizationRequired: resolver.desktopManualAuthorizationRequired?.(sessionId) ?? true,
+        desktopManualAuthorizationRequired: policy.manualAuthorizationRequired,
         desktopComputerUseEnabled: policy.computerUseEnabled, desktopPreviewEnabled: policy.desktopPreviewEnabled,
       }, fail)
       if (response.error) throw new Error(response.error.message)

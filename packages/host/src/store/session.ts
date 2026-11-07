@@ -457,7 +457,6 @@ export class SessionStore {
   private readonly inFlight = new Map<string, Promise<SessionRecord>>()
   private readonly runtimeRecoveries = new Map<string, Promise<void>>()
   private readonly sessionLoadTails = new Map<string, Promise<SessionRecord>>()
-  private readonly projectionLoadActivity = new Map<string, { startedAt: number; count: number }>()
   private readonly storageTombstones = new Set<string>()
   private readonly locallyProjectedExternalSessions = new Set<string>()
   /**
@@ -1225,14 +1224,6 @@ export class SessionStore {
   }
 
   async load(sessionId: string, options: { recoverDangling?: boolean; runtimeConfig?: AgentConfig } = {}): Promise<SessionRecord> {
-    const caller = new Error().stack?.split('\n').slice(2, 8).map((line) => line.trim()).join(' | ') ?? 'unknown'
-    const now = Date.now()
-    const activity = this.projectionLoadActivity.get(caller)
-    if (!activity || now - activity.startedAt >= 30_000) {
-      this.projectionLoadActivity.set(caller, { startedAt: now, count: 1 })
-    } else if (++activity.count === 64) {
-      process.emitWarning(`Frequent SessionStore.load calls: ${caller}`, { code: 'KALA_SESSION_LOADS' })
-    }
     this.assertStorageWritable(sessionId)
     const previous = this.sessionLoadTails.get(sessionId) ?? Promise.resolve()
     const load = previous.catch(() => undefined).then(async () => await this.loadUnlocked(sessionId, options))
