@@ -382,6 +382,10 @@ export function useSession({
   const [reconnectGeneration, setReconnectGeneration] = useState(0)
   const reconnect = useCallback(() => setReconnectGeneration((generation) => generation + 1), [])
   const socketRef = useRef<DashboardSocket | null>(null)
+  const selectedSessionRef = useRef(sessionId)
+  selectedSessionRef.current = sessionId
+  const warmSockets = useRef(new Map<string, { socket: DashboardSocket; timer: number }>())
+  const warmRefreshGeneration = useRef(0)
   const generationRef = useRef(0)
   // Streaming smoother: token_delta events land in `streamBufferRef`, and a
   // requestAnimationFrame loop drains a chunk per frame into React state. This
@@ -392,6 +396,14 @@ export function useSession({
   const onForkedRef = useRef(onForked)
   onForkedRef.current = onForked
   const pendingCacheCheckpointRef = useRef<{ sessionId: string; view: CachedSessionViewInput } | null>(null)
+
+  useEffect(() => () => {
+    for (const { socket, timer } of warmSockets.current.values()) {
+      window.clearTimeout(timer)
+      socket.close()
+    }
+    warmSockets.current.clear()
+  }, [cache, host, token, sessionScoped, sessionRouteTickets])
 
   useEffect(() => {
     if (!cache || !projection.sessionId || projection.hydratedSessionId !== projection.sessionId) return
@@ -673,6 +685,16 @@ export function useSession({
       setBoundSocket((current) => current?.socket === previous ? null : current)
     }
 
+    const takeWarmSocket = (): DashboardSocket | null => {
+      const retained = warmSockets.current.get(sessionId)
+      if (!retained) return null
+      warmSockets.current.delete(sessionId)
+      window.clearTimeout(retained.timer)
+      if (retained.socket.connected) return retained.socket
+      retained.socket.close()
+      return null
+    }
+
     const connectSharedSocket = (): void => {
       if (sharedSocket == null) return
       socket = sharedSocket
@@ -790,6 +812,27 @@ export function useSession({
     }
 
     const connect = (): void => {
+      if (cache && (sessionScoped || sessionRouteTickets)) {
+        const retained = takeWarmSocket()
+        if (retained) {
+          socket = retained
+          socketRef.current = socket
+          bindSocket(socket)
+          setBoundSocket({ sessionId, socket })
+          const channel = `session:${sessionId}` as const
+          const generation = ++warmRefreshGeneration.current
+          socket.emit('client:refresh_channels', {
+            requestId: `warm-session-${generation}`,
+            generation,
+            channels: [channel],
+          }, (result) => {
+            if (disposed || socketRef.current !== retained || result.accepted.includes(channel)) return
+            closeOwnedSocket()
+            connect()
+          })
+          return
+        }
+      }
       if (sessionRouteTickets) {
         void connectRoutedSocket()
         return
@@ -1095,7 +1138,34 @@ export function useSession({
       reconnectCleanup?.()
       socketListenerCleanup?.()
       socketListenerCleanup = null
-      if (socket && socket !== sharedSocket) socket.close()
+      if (socket && socket !== sharedSocket) {
+        if (cache && selectedSessionRef.current !== sessionId && socket.connected && (sessionScoped || sessionRouteTickets)) {
+          const previous = warmSockets.current.get(sessionId)
+          if (previous) { window.clearTimeout(previous.timer); previous.socket.close() }
+          const warmthMs = readNumberPref(
+            PREF_SESSION_SUBSCRIPTION_WARMTH_MINUTES,
+            DEFAULT_SESSION_SUBSCRIPTION_WARMTH_MINUTES,
+            numberPreferenceOptions(DASHBOARD_PREFERENCES.sessionSubscriptionWarmthMinutes),
+          ) * 60_000
+          if (warmthMs > 0) {
+            const timer = window.setTimeout(() => {
+              const retained = warmSockets.current.get(sessionId)
+              if (retained?.socket === socket) {
+                warmSockets.current.delete(sessionId)
+                socket?.close()
+              }
+            }, warmthMs)
+            warmSockets.current.set(sessionId, { socket, timer })
+            while (warmSockets.current.size > 16) {
+              const oldest = warmSockets.current.entries().next().value
+              if (!oldest) break
+              warmSockets.current.delete(oldest[0])
+              window.clearTimeout(oldest[1].timer)
+              oldest[1].socket.close()
+            }
+          } else socket.close()
+        } else socket.close()
+      }
       if (socketRef.current === socket) socketRef.current = null
       setBoundSocket((current) => current?.socket === socket ? null : current)
     }

@@ -2,6 +2,8 @@ import { createElement } from 'react'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { createInitialState } from '@agent-kernel/kernel'
+
 import { createSessionWithAck, runSessionCommand, SessionInspectionContext, useDashboardControlSocket, useSession } from './session.js'
 import { useSubAgentSession } from './features/chat/useSubAgentSession.js'
 import { workspaceExec } from './lib/workspace-exec.js'
@@ -290,6 +292,110 @@ describe('routed Session hook', () => {
     expect(sockets[1]!.closed).toBe(true)
     expect(control.closed).toBe(false)
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('keeps visited Dedicated Session transports warm only within the same cache identity', () => {
+    const cacheA = { get: () => null, set: () => null } as never
+    const cacheB = { get: () => null, set: () => null } as never
+    const control = new FakeSocket()
+    const options = { host: window.location.origin, socket: control as never, sessionScoped: true }
+    const view = renderHook(({ sessionId, cache }) => useSession({ ...options, sessionId, cache }), {
+      initialProps: { sessionId: 'session-one', cache: cacheA },
+    })
+    const first = sockets[0]!
+    first.connected = true
+    act(() => first.serverEmit('session:ready', {
+      sessionId: 'session-one', reason: 'load', agentRuntime: 'copilot', cursor: 0,
+      state: createInitialState({ sessionId: 'session-one' }), config: { tools: [] },
+    }))
+    view.rerender({ sessionId: 'session-two', cache: cacheA })
+    expect(first.closed).toBe(false)
+    const second = sockets[1]!
+    second.connected = true
+    view.rerender({ sessionId: 'session-one', cache: cacheA })
+    expect(sockets).toHaveLength(2)
+    expect(view.result.current.socket).toBe(first)
+    expect(first.emit).toHaveBeenCalledWith('client:refresh_channels',
+      expect.objectContaining({ channels: ['session:session-one'] }), expect.any(Function))
+    expect(view.result.current.status).toBe('connecting')
+    const [, refresh, acknowledge] = first.emit.mock.calls.find(([event]) => event === 'client:refresh_channels')!
+    act(() => {
+      first.serverEmit('session:ready', {
+        sessionId: 'session-one', reason: 'load', agentRuntime: 'copilot', cursor: 1,
+        state: { ...createInitialState({ sessionId: 'session-one' }), status: 'done' },
+        config: { tools: [] },
+      })
+      acknowledge({ requestId: refresh.requestId, generation: refresh.generation, accepted: refresh.channels, rejected: [], cursors: {} })
+    })
+    expect(view.result.current.status).toBe('ready')
+    expect(view.result.current.state?.status).toBe('done')
+    expect(second.closed).toBe(false)
+    view.rerender({ sessionId: 'session-one', cache: cacheB })
+    expect(first.closed).toBe(true)
+    expect(second.closed).toBe(true)
+    expect(sockets).toHaveLength(3)
+    view.unmount()
+    expect(sockets[2]!.closed).toBe(true)
+  })
+
+  it('reopens a Session transport when a warm baseline refresh is rejected', () => {
+    const cache = { get: () => null, set: () => null } as never
+    const view = renderHook(({ sessionId }) => useSession({
+      host: window.location.origin, sessionId, cache, sessionScoped: true,
+    }), { initialProps: { sessionId: 'session-one' } })
+    const first = sockets[0]!
+    first.connected = true
+    view.rerender({ sessionId: 'session-two' })
+    view.rerender({ sessionId: 'session-one' })
+    const [, refresh, acknowledge] = first.emit.mock.calls.find(([event]) => event === 'client:refresh_channels')!
+    act(() => acknowledge({
+      requestId: refresh.requestId, generation: refresh.generation,
+      accepted: [], rejected: [{ channel: 'session:session-one', code: 'not_subscribed' }], cursors: {},
+    }))
+    expect(first.closed).toBe(true)
+    expect(sockets).toHaveLength(3)
+    expect(view.result.current.socket).toBe(sockets[2])
+    view.unmount()
+  })
+
+  it('reuses a routed Session ticket transport only while connected', async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(routeResponse('ticket-one'))
+      .mockResolvedValueOnce(routeResponse('ticket-two'))
+      .mockResolvedValueOnce(routeResponse('ticket-one-new'))
+    vi.stubGlobal('fetch', fetchMock)
+    const cache = { get: () => null, set: () => null } as never
+    const view = renderHook(({ sessionId }) => useSession({
+      host: window.location.origin, sessionId, cache, sessionRouteTickets: true,
+    }), { initialProps: { sessionId: 'session-one' } })
+    await waitFor(() => expect(sockets).toHaveLength(1))
+    const first = sockets[0]!
+    first.connected = true
+    view.rerender({ sessionId: 'session-two' })
+    await waitFor(() => expect(sockets).toHaveLength(2))
+    first.connected = false
+    view.rerender({ sessionId: 'session-one' })
+    await waitFor(() => expect(sockets).toHaveLength(3))
+    expect(first.closed).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(socketOptions[2]).toMatchObject({ query: { runtimeRouteTicket: 'ticket-one-new' } })
+    view.unmount()
+  })
+
+  it('closes a Session transport on switch when warmth is disabled', () => {
+    window.localStorage.setItem('ak-session-subscription-warmth-minutes', '0')
+    try {
+      const cache = { get: () => null, set: () => null } as never
+      const view = renderHook(({ sessionId }) => useSession({
+        host: window.location.origin, sessionId, cache, sessionScoped: true,
+      }), { initialProps: { sessionId: 'session-one' } })
+      sockets[0]!.connected = true
+      view.rerender({ sessionId: 'session-two' })
+      expect(sockets[0]!.closed).toBe(true)
+      view.unmount()
+    } finally {
+      window.localStorage.removeItem('ak-session-subscription-warmth-minutes')
+    }
   })
 
   it('waits for its ticket, binds an independent websocket, then refreshes the ticket on disconnect', async () => {

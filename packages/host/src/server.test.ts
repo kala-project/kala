@@ -733,6 +733,30 @@ describe('wire protocol', () => {
     dashboard.close()
   })
 
+  it('refreshes the initial Session on a bound socket without adding another subscription', async () => {
+    const sessionId = 'refresh-bound-room'
+    await server.store.ensure({ sessionId, defaultConfig: config })
+    const dashboard: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(`${url}/dashboard`, {
+      transports: ['websocket'],
+      auth: { sessionId, role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+      reconnection: false,
+    })
+    try {
+      await new Promise<SessionReadyEvent>((resolve) => dashboard.on('session:ready', resolve))
+      const ready = new Promise<SessionReadyEvent>((resolve) => dashboard.once('session:ready', resolve))
+      const acknowledged = dashboard.timeout(1000).emitWithAck('client:refresh_channels', {
+        requestId: 'refresh-bound', generation: 1, channels: [`session:${sessionId}`],
+      })
+      expect(await ready).toMatchObject({ sessionId, reason: 'load' })
+      expect(await acknowledged).toMatchObject({ accepted: [`session:${sessionId}`], rejected: [] })
+      expect(await dashboard.timeout(1000).emitWithAck('client:refresh_channels', {
+        requestId: 'refresh-other', generation: 2, channels: ['session:another-session'],
+      })).toMatchObject({ accepted: [], rejected: [{ channel: 'session:another-session', code: 'not_subscribed' }] })
+    } finally {
+      dashboard.close()
+    }
+  })
+
   it('acknowledges approval-mode changes and persists the authoritative mode', async () => {
     const sessionId = 'approval-mode-ack'
     await server.store.ensure({ sessionId, defaultConfig: config })

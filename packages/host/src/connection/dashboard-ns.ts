@@ -1249,7 +1249,9 @@ export function configureDashboardNamespace(
           const latestGeneration = channelGenerations.get(channel) ?? Number.NEGATIVE_INFINITY
           if (parsed.generation < latestGeneration) { rejected.push({ channel, code: 'stale_generation' }); return }
           channelGenerations.set(channel, parsed.generation)
-          if (!subscribedSessions.has(id)) { rejected.push({ channel, code: 'not_subscribed' }); return }
+          if (multiplexed ? !subscribedSessions.has(id) : id !== sessionId) {
+            rejected.push({ channel, code: 'not_subscribed' }); return
+          }
           try {
             // Emit the ready event before acknowledging, but do not join again:
             // this socket's existing room and all shared preview refs stay live.
