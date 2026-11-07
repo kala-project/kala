@@ -2250,13 +2250,14 @@ export function App(): JSX.Element {
   }
   if (runtimeDeployment.error || authSession.error || runtimeDeployment.unauthorized || (platformMode && authSession.session?.authenticated !== true)) {
     const detail = runtimeDeployment.error ?? authSession.error ?? t('app.accessErrorDefault')
+    const needsSignIn = runtimeDeployment.unauthorized || (platformMode && authSession.checked && authSession.session?.authenticated === false)
     return (
       <main className="fixed inset-0 grid place-items-center bg-background p-4 text-foreground" data-testid="product-access-error">
         <section className="w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-xl" role="alert">
           <h1 className="text-xl font-semibold">{t('app.accessErrorTitle')}</h1>
           <p className="mt-2 text-sm text-muted-foreground">{detail}</p>
           <div className="mt-5 flex flex-wrap gap-2">
-            <Button onClick={() => { window.location.href = '/auth/login?prompt=login' }}>{t('app.signInAgain')}</Button>
+            {needsSignIn ? <Button onClick={() => { window.location.href = '/auth/login?prompt=login' }}>{t('app.signInAgain')}</Button> : null}
             <Button variant="outline" onClick={() => window.location.reload()}>{t('common.retry')}</Button>
           </div>
         </section>

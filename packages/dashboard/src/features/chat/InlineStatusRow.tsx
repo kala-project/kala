@@ -64,7 +64,7 @@ export function InlineStatusRow({ state, fallbackStatus, hydrated = true, stream
   }
   // Bridge the socket round-trip between user submit and the kernel's first
   // `thinking` status push — otherwise the transcript looks frozen.
-  if (awaitingAck && !streamingActive) return <ThinkingRow progress={progress} />
+  if (awaitingAck && !streamingActive && status !== 'error') return <ThinkingRow progress={progress} />
   return null
 }
 

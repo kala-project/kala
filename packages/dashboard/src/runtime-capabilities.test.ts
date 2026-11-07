@@ -1,6 +1,13 @@
-import { describe, expect, it, vi } from 'vitest'
+import { act, renderHook } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { loadRuntimeDeployment } from './runtime-capabilities.js'
+import { loadRuntimeDeployment, useRuntimeDeployment } from './runtime-capabilities.js'
+
+const authoritativePayload = {
+  product: 'private-cloud',
+  deployment: { schemaVersion: 1, architecture: 'platform', tenancy: 'multi-tenant', runtimeProfile: 'agent' },
+  capabilities: { agent: true, workspace: true, operations: true, artifacts: true, pipeline: true },
+}
 
 describe('loadRuntimeDeployment', () => {
   it('accepts a valid authoritative payload', async () => {
@@ -15,6 +22,7 @@ describe('loadRuntimeDeployment', () => {
       capabilities: { agent: true, workspace: true, operations: true, artifacts: true, pipeline: true },
       evaluationUrl: 'https://evaluation.example.test',
     })
+
   })
 
   it.each([
@@ -36,6 +44,39 @@ describe('loadRuntimeDeployment', () => {
     await expect(loadRuntimeDeployment('http://host', undefined, fetcher)).resolves.toEqual({
       product: 'private-cloud', deployment: null, loaded: true, unauthorized: true,
       capabilities: { agent: true, workspace: true, operations: false, artifacts: false, pipeline: false },
+    })
+  })
+
+  describe('useRuntimeDeployment', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    })
+
+    it('recovers automatically when the Runtime briefly returns 503', async () => {
+      vi.useFakeTimers()
+      const fetcher = vi.fn()
+        .mockResolvedValueOnce(new Response('{}', { status: 503 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify(authoritativePayload), { status: 200 }))
+      vi.stubGlobal('fetch', fetcher)
+      const { result } = renderHook(() => useRuntimeDeployment())
+      await act(async () => { await Promise.resolve() })
+      expect(result.current.error).toBe('Runtime capabilities request failed (503)')
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000) })
+      expect(result.current.product).toBe('private-cloud')
+      expect(result.current.error).toBeUndefined()
+      expect(fetcher).toHaveBeenCalledTimes(2)
+    })
+
+    it('does not retry a real authentication failure', async () => {
+      vi.useFakeTimers()
+      const fetcher = vi.fn().mockResolvedValue(new Response('{}', { status: 401 }))
+      vi.stubGlobal('fetch', fetcher)
+      const { result } = renderHook(() => useRuntimeDeployment())
+      await act(async () => { await Promise.resolve() })
+      expect(result.current.unauthorized).toBe(true)
+      await act(async () => { await vi.advanceTimersByTimeAsync(35_000) })
+      expect(fetcher).toHaveBeenCalledTimes(1)
     })
   })
 })

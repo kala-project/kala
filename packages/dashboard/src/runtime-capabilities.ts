@@ -64,8 +64,24 @@ export function useRuntimeDeployment(): RuntimeDeploymentState {
   const [deployment, setDeployment] = useState<RuntimeDeploymentState>({ capabilities: SAFE_CAPABILITIES, product: null, deployment: null, loaded: false })
   useEffect(() => {
     const controller = new AbortController()
-    void loadRuntimeDeployment(host, controller.signal).then(setDeployment)
-    return () => controller.abort()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let failures = 0
+    const refresh = async () => {
+      const next = await loadRuntimeDeployment(host, controller.signal)
+      if (controller.signal.aborted) return
+      setDeployment(next)
+      if (next.error) {
+        timer = setTimeout(() => {
+          failures++
+          void refresh()
+        }, Math.min(1_000 * 2 ** failures, 30_000))
+      }
+    }
+    void refresh()
+    return () => {
+      controller.abort()
+      if (timer) clearTimeout(timer)
+    }
   }, [host])
   return deployment
 }

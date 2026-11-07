@@ -36,6 +36,14 @@ describe('agent activity card', () => {
     expect(screen.queryByTestId('inline-status-intention')).toBeNull()
   })
 
+  it('stops showing optimistic activity when the turn fails', () => {
+    const { rerender } = render(<InlineStatusRow state={{ ...state, status: 'idle' }} awaitingAck streamingActive={false} />)
+    expect(screen.getByTestId('inline-status-thinking')).toBeTruthy()
+    rerender(<InlineStatusRow state={{ ...state, status: 'error' }} awaitingAck streamingActive={false}
+      progress={{ phase: 'error', label: 'Message failed. Check the error before retrying.' }} />)
+    expect(screen.queryByTestId('inline-status-thinking')).toBeNull()
+  })
+
   it('keeps breathing and authoritative elapsed feedback live and yields to streaming', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-09-25T12:00:00.000Z'))

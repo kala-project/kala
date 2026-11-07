@@ -60,7 +60,7 @@ export function deriveAgentProgress(
     }
   }
 
-  if (status === 'error') return { phase: 'error', label: 'The turn needs attention' }
+  if (status === 'error') return { phase: 'error', label: 'Message failed. Check the error before retrying.' }
   if (status === 'done') return { phase: 'done', label: 'Turn complete' }
   return { phase: 'idle', label: 'Ready' }
 }
