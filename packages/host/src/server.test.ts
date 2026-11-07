@@ -2999,6 +2999,7 @@ describe('wire protocol', () => {
     await server.store.create({ sessionId: 'stable-policy-child', parentSessionId: 'stable-policy-root', config: { ...base(), tools: [shell], systemPrompt: 'delegated instructions' } })
     const dagConfig = deriveSessionConfig(base(), undefined, 'dag')
     await server.store.create({ sessionId: 'stable-policy-dag', executionMode: 'dag', config: dagConfig })
+    const load = vi.spyOn(server.store, 'load')
     const send = async () => {
       const before = snapshots.length
       const response = await fetch(`http://localhost:${server.port}/api/v1/sessions/stable-policy-root/messages`, {
@@ -3010,6 +3011,7 @@ describe('wire protocol', () => {
       await vi.waitFor(() => expect(server.store.get('stable-policy-root')?.state.status).toBe('done'))
     }
     await send()
+    expect(load.mock.calls.filter(([sessionId]) => sessionId === 'stable-policy-root')).toHaveLength(0)
     enabled = true
     await send()
     expect(server.store.get('stable-policy-root')?.config.contextLimit).toBe(99_999)

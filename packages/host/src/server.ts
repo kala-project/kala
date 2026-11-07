@@ -789,9 +789,10 @@ export async function startHostServer(
   }
   let startupPromptDiscoveryPending = true
   let promptSynchronizationRunning = false
+  let promptSynchronizationFailures = 0
   const ensureEffectiveSystemPrompt = async (record: SessionRecord): Promise<boolean> => {
     const config = deriveSessionConfig(await getEffectiveDefaultConfig(actorForRecord(record)), undefined, record.executionMode)
-    if (options.desktopFeaturePolicy) await store.load(record.sessionId, { recoverDangling: false, runtimeConfig: config })
+    if (options.desktopFeaturePolicy) store.refreshRuntimeConfig(record, config)
     // A child owns its delegated instructions, not the organization's root prompt.
     if (effectiveDelegationDepth(record) > 0) return false
     const prompt = config.systemPrompt ?? ''
@@ -857,7 +858,7 @@ export async function startHostServer(
     promptSynchronizationTimer = setTimeout(() => {
       promptSynchronizationTimer = undefined
       void retryPromptSynchronizations()
-    }, options.promptSynchronizationRetryMs ?? 1_000)
+    }, Math.min((options.promptSynchronizationRetryMs ?? 1_000) * 2 ** Math.min(Math.max(0, promptSynchronizationFailures - 1), 6), 60_000))
     promptSynchronizationTimer.unref?.()
   }
   const retryPromptSynchronizations = async (): Promise<void> => {
@@ -878,15 +879,30 @@ export async function startHostServer(
           // Session storage may not be mounted yet. Keep discovery pending.
         }
       }
+      const failedByType = new Map<string, number>()
       for (const sessionId of [...pendingPromptSynchronizations]) {
         try {
           const record = store.get(sessionId) ?? await store.load(sessionId, { recoverDangling: false })
           await ensureEffectiveSystemPrompt(record)
           await executors.updateDesktopFeaturePolicy?.(sessionId)
           pendingPromptSynchronizations.delete(sessionId)
-        } catch {
+        } catch (error) {
           // Settings or Session storage may be temporarily unreadable. Retain it.
+          const name = error instanceof Error
+            ? `${error.name} at ${error.stack?.split('\n')[1]?.trim() ?? 'unknown'}`
+            : 'UnknownError'
+          failedByType.set(name, (failedByType.get(name) ?? 0) + 1)
         }
+      }
+      if (startupPromptDiscoveryPending || pendingPromptSynchronizations.size > 0) {
+        promptSynchronizationFailures++
+        if (promptSynchronizationFailures === 1 || promptSynchronizationFailures === 6) {
+          process.emitWarning(`Session prompt synchronization pending: ${pendingPromptSynchronizations.size}; failure types: ${JSON.stringify(Object.fromEntries(failedByType))}`, {
+            code: 'KALA_PROMPT_SYNCHRONIZATION_PENDING',
+          })
+        }
+      } else {
+        promptSynchronizationFailures = 0
       }
     } finally {
       promptSynchronizationRunning = false

@@ -1178,6 +1178,13 @@ export class SessionStore {
     ;(rec as { config: AgentConfig }).config = update(rec.config)
   }
 
+  refreshRuntimeConfig(record: SessionRecord, runtimeConfig: AgentConfig): void {
+    if (this.records.get(record.sessionId) !== record) {
+      throw new Error(`Session ${record.sessionId} changed while refreshing runtime configuration`)
+    }
+    this.applyRuntimeConfig(record, runtimeConfig)
+  }
+
   async updatePreferences(sessionId: string, patch: SessionPreferencesPatch): Promise<SessionPreferences> {
     const rec = this.records.get(sessionId) ?? (await this.load(sessionId))
     this.assertStorageWritable(sessionId)
