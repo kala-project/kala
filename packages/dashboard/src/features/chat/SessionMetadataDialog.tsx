@@ -409,7 +409,12 @@ export function SessionMetadataDialog({
         <div className="border-t border-border/50 pt-3" />
 
         <section className="space-y-2 text-sm" aria-label={t('sessionMetadata.contextExport')}>
-          <Button type="button" variant="outline" size="sm" data-testid="session-export-context" onClick={() => setContextExportReview(true)}>{t('sessionMetadata.contextExport')}</Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="button" variant="outline" size="sm" data-testid="session-export-context" onClick={() => setContextExportReview(true)}>{t('sessionMetadata.contextExport')}</Button>
+            <Button type="button" variant="outline" size="sm" data-testid="session-export-task-candidate" onClick={() => void exportTaskCandidate()}>{t('sessionMetadata.exportCandidate')}</Button>
+            <HelpHint label={t('sessionMetadata.exportCandidate')}>{t('sessionMetadata.evaluationDescription')}</HelpHint>
+            {evaluationReference && evaluationUrl ? <Button type="button" variant="outline" size="sm" asChild><a data-testid="session-open-evaluation-reference" href={evaluationReferenceUrl(evaluationReference, evaluationUrl)} target="_blank" rel="noreferrer">{t('sessionMetadata.openEvidence')}</a></Button> : null}
+          </div>
           {contextExportReview ? (
             <div className="rounded-md border border-border/60 bg-muted/40 p-3">
               <p>{t('sessionMetadata.contextExportWarning')}</p>
@@ -419,14 +424,6 @@ export function SessionMetadataDialog({
               </div>
             </div>
           ) : null}
-        </section>
-
-        <div className="border-t border-border/50 pt-3" />
-
-        <section className="flex flex-wrap items-center gap-2 text-sm" aria-label={t('sessionMetadata.evaluation')}>
-            <Button type="button" variant="outline" size="sm" data-testid="session-export-task-candidate" onClick={() => void exportTaskCandidate()}>{t('sessionMetadata.exportCandidate')}</Button>
-            <HelpHint label={t('sessionMetadata.exportCandidate')}>{t('sessionMetadata.evaluationDescription')}</HelpHint>
-            {evaluationReference && evaluationUrl ? <Button type="button" variant="outline" size="sm" asChild><a data-testid="session-open-evaluation-reference" href={evaluationReferenceUrl(evaluationReference, evaluationUrl)} target="_blank" rel="noreferrer">{t('sessionMetadata.openEvidence')}</a></Button> : null}
         </section>
 
         <div className="border-t border-border/50 pt-3" />
@@ -448,7 +445,7 @@ export function SessionMetadataDialog({
               placeholder={t('dialogs.clearOverridePlaceholder')}
             />
           </FieldRow>
-          <FieldRow label={t('dialogs.workingDirectory')} htmlFor="session-metadata-cwd">
+          <FieldRow label={t('dialogs.workingDirectory')} htmlFor="session-metadata-cwd" stacked>
             <div className="flex items-center gap-2">
               <div
                 id="session-metadata-cwd"
@@ -475,13 +472,13 @@ export function SessionMetadataDialog({
               </Button>
             </div>
           </FieldRow>
-          <FieldRow label={t('dialogs.approvals')}>
+          <FieldRow label={t('dialogs.approvals')} htmlFor="session-metadata-approval">
             <Select
               value={approvalDraft}
               onValueChange={(v) => setApprovalDraft(v as ApprovalMode)}
               disabled={!canChangeApprovalMode}
             >
-              <SelectTrigger className="h-11 text-base sm:h-8 sm:text-sm" data-testid="session-metadata-approval">
+              <SelectTrigger id="session-metadata-approval" className="h-11 text-base sm:h-8 sm:text-sm" data-testid="session-metadata-approval">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -493,9 +490,9 @@ export function SessionMetadataDialog({
               </SelectContent>
             </Select>
           </FieldRow>
-          <FieldRow label={t('dialogs.toolCardMode')}>
+          <FieldRow label={t('dialogs.toolCardMode')} htmlFor="session-metadata-tool-card-mode">
             <Select value={toolCardModeDraft} onValueChange={(value) => setToolCardModeDraft(value as ToolCardMode)}>
-              <SelectTrigger className="h-11 text-base sm:h-8 sm:text-sm" data-testid="session-metadata-tool-card-mode">
+              <SelectTrigger id="session-metadata-tool-card-mode" className="h-11 text-base sm:h-8 sm:text-sm" data-testid="session-metadata-tool-card-mode">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -869,13 +866,15 @@ function FieldRow({
   label,
   htmlFor,
   children,
+  stacked = false,
 }: {
   label: string
   htmlFor?: string
   children: React.ReactNode
+  stacked?: boolean
 }): JSX.Element {
   return (
-    <div className="grid gap-1.5">
+    <div className={stacked ? 'grid gap-1.5' : 'grid grid-cols-[minmax(0,6rem)_minmax(0,1fr)] items-center gap-3 sm:grid-cols-[minmax(0,8rem)_minmax(0,1fr)]'}>
       <label
         htmlFor={htmlFor}
         className="text-xs uppercase tracking-wider text-muted-foreground"

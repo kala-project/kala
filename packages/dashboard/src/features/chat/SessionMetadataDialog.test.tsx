@@ -234,6 +234,19 @@ describe('SessionMetadataDialog', () => {
     expect(screen.queryByText(/Exports a private, reference-only task candidate/)).toBeNull()
   })
 
+  it('keeps short metadata fields and export actions on one row, leaving long paths stacked', () => {
+    render(<SessionMetadataDialog open onOpenChange={() => {}} sessionId={baseSummary.sessionId}
+      summary={baseSummary} state={baseState} selectedModel={null}
+      onRename={() => {}} onOpenChangeCwdDialog={() => {}}
+      onChangeApprovalMode={() => {}} onChangeToolCardMode={() => {}} />)
+
+    expect(screen.getByTestId('session-export-context').parentElement)
+      .toBe(screen.getByTestId('session-export-task-candidate').parentElement)
+    expect(screen.getByTestId('session-metadata-label').parentElement?.className).toContain('grid-cols-')
+    expect(screen.getByTestId('session-metadata-approval').parentElement?.className).toContain('grid-cols-')
+    expect(screen.getByTestId('session-metadata-cwd').parentElement?.parentElement?.className).not.toContain('grid-cols-')
+  })
+
   it('does not infer an evaluation link without an explicit session-scoped reference', () => {
     history.replaceState({}, '', '/?evaluationRunId=run-one')
     render(<SessionMetadataDialog open onOpenChange={() => {}} sessionId={baseSummary.sessionId} summary={baseSummary} state={baseState} selectedModel={null} onRename={() => {}} onOpenChangeCwdDialog={() => {}} onChangeApprovalMode={() => {}} onChangeToolCardMode={() => {}} />)

@@ -21,6 +21,10 @@ Kala is a focused working environment, not a decorative landing page.
 
 - Build from semantic page, panel, section, row, and control patterns rather
   than one-off dimensions.
+- Keep short labels and their values or controls on the same row. Stack only
+  when the value is likely to be long (such as a path or identifier), or when
+  the available width genuinely requires it; do not spend a whole row on a
+  short field name.
 - Preserve touch targets even when visual chrome is compact.
 - A collapsed navigation surface must retain an obvious restore control.
 - Truncation is allowed only when the complete value remains accessible.
@@ -258,6 +262,14 @@ by Git.
 
 ## Content design and localization
 
+- Avoid unnecessary secondary labels and descriptions; let layout and action
+  names explain the interface. Do not repeat a section title beside its
+  controls or put related short actions on separate rows merely to make room
+  for explanatory copy.
+- If an explanation is useful but not needed to act safely, put it in one
+  contextual info hint rather than repeating it under fields and actions.
+  The hint must work with keyboard, touch, and screen readers, not only hover.
+  Keep errors, risks, and required confirmations visible when they matter.
 - Use specific verbs for actions. Prefer “Deploy Dashboard” or “Retry upload”
   over context-dependent labels such as “Continue” or “OK”.
 - Status text describes the current fact; action text describes what will
