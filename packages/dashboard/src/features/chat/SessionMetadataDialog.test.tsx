@@ -86,6 +86,31 @@ describe('SessionMetadataDialog', () => {
     }
   })
 
+  it('requires explicit review before downloading unredacted context from the selected host', async () => {
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(new Blob(['{"format":"kala.session-context-snapshot.v1"}'], { type: 'application/json' }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      }),
+    )
+    render(<SessionMetadataDialog open onOpenChange={() => {}} sessionId={baseSummary.sessionId}
+      host="https://kala.example" token="sample-token" state={baseState} selectedModel={null}
+      onRename={() => {}} onOpenChangeCwdDialog={() => {}} onChangeApprovalMode={() => {}} onChangeToolCardMode={() => {}} />)
+    fireEvent.click(screen.getByTestId('session-export-context'))
+    expect(fetcher).not.toHaveBeenCalled()
+    expect(screen.getByText(/unredacted conversation content/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Download unredacted JSON' }))
+    await waitFor(() => expect(saveFile).toHaveBeenCalledOnce())
+    expect(fetcher).toHaveBeenCalledWith(
+      `https://kala.example/runtime/sessions/${baseSummary.sessionId}/context-export`,
+      expect.objectContaining({ credentials: 'include', cache: 'no-store', headers: { authorization: 'Bearer sample-token' } }),
+    )
+    expect(vi.mocked(saveFile).mock.calls[0]![0]).toMatchObject({
+      suggestedName: `kala-session-context-${baseSummary.sessionId}.json`,
+      mimeType: 'application/json',
+    })
+    vi.mocked(saveFile).mockClear()
+  })
+
   it('explains unavailable storage without claiming measurement is pending', async () => {
     const emit = vi.fn((event: string, _payload: unknown, ack: (result: unknown) => void) => {
       if (event === 'client:get_session_storage') ack({ ok: false, error: 'storage inventory unavailable' })

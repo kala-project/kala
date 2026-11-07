@@ -59,6 +59,8 @@ type Props = {
   onOpenChange(open: boolean): void
   initialTab?: 'overview' | 'tools'
   sessionId: string
+  host?: string
+  token?: string
   summary?: SessionSummary & { costUsd?: number | null }
   state: AgentState | null
   contextSnapshot?: ContextUsageSnapshot | null
@@ -86,6 +88,8 @@ export function SessionMetadataDialog({
   onOpenChange,
   initialTab = 'overview',
   sessionId,
+  host = '',
+  token,
   summary,
   state,
   contextSnapshot,
@@ -141,8 +145,12 @@ export function SessionMetadataDialog({
   const [toolUpgradeBusy, setToolUpgradeBusy] = useState(false)
   const [toolUpgradeLoading, setToolUpgradeLoading] = useState(false)
   const [toolUpgradeError, setToolUpgradeError] = useState<string | null>(null)
+  const [contextExportReview, setContextExportReview] = useState(false)
+  const [contextExportBusy, setContextExportBusy] = useState(false)
   const toolUpgradeSessionRef = useRef(sessionId)
   toolUpgradeSessionRef.current = sessionId
+
+  useEffect(() => { setContextExportReview(false) }, [sessionId])
 
   useEffect(() => {
     setToolUpgrades([])
@@ -289,6 +297,32 @@ export function SessionMetadataDialog({
     const candidate = governedSessionTaskCandidate(sessionId, summary, selectedModel)
     await saveFile({ suggestedName: 'agent-eval-task-candidate-' + sessionId.replace(/[^A-Za-z0-9._:-]/gu, '-') + '.json', blob: new Blob([JSON.stringify(candidate, null, 2) + '\n'], { type: 'application/json' }), mimeType: 'application/json' })
   }
+  const exportContext = async (): Promise<void> => {
+    setContextExportBusy(true)
+    try {
+      const response = await fetch(`${host.replace(/\/$/u, '')}/runtime/sessions/${encodeURIComponent(sessionId)}/context-export`, {
+        credentials: 'include',
+        cache: 'no-store',
+        headers: token ? { authorization: `Bearer ${token}` } : {},
+      })
+      if (!response.ok) throw new Error(`Session context export failed (${response.status})`)
+      if (!response.headers.get('content-type')?.toLowerCase().startsWith('application/json')) {
+        throw new Error('Session context export returned a non-JSON response')
+      }
+      const result = await saveFile({
+        suggestedName: `kala-session-context-${sessionId.replace(/[^A-Za-z0-9._-]/gu, '-')}.json`,
+        blob: await response.blob(),
+        mimeType: 'application/json',
+      })
+      if (result !== 'cancelled') setContextExportReview(false)
+    } catch (error) {
+      notify.error(t('sessionMetadata.contextExportError'), {
+        description: error instanceof Error ? error.message : String(error),
+      })
+    } finally {
+      setContextExportBusy(false)
+    }
+  }
 
   const save = (): void => {
     const nextLabel = labelDraft.trim()
@@ -371,6 +405,21 @@ export function SessionMetadataDialog({
             mono
           />
         </div>
+
+        <div className="border-t border-border/50 pt-3" />
+
+        <section className="space-y-2 text-sm" aria-label={t('sessionMetadata.contextExport')}>
+          <Button type="button" variant="outline" size="sm" data-testid="session-export-context" onClick={() => setContextExportReview(true)}>{t('sessionMetadata.contextExport')}</Button>
+          {contextExportReview ? (
+            <div className="rounded-md border border-border/60 bg-muted/40 p-3">
+              <p>{t('sessionMetadata.contextExportWarning')}</p>
+              <div className="mt-2 flex gap-2">
+                <Button type="button" size="sm" disabled={contextExportBusy} onClick={() => void exportContext()}>{t('sessionMetadata.contextExportConfirm')}</Button>
+                <Button type="button" size="sm" variant="ghost" disabled={contextExportBusy} onClick={() => setContextExportReview(false)}>{t('common.cancel')}</Button>
+              </div>
+            </div>
+          ) : null}
+        </section>
 
         <div className="border-t border-border/50 pt-3" />
 

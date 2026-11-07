@@ -1082,6 +1082,7 @@ describe('Private Cloud edge request path', () => {
       ['GET', '/runtime/sessions/session_a/tool-result/call_a'],
       ['HEAD', '/runtime/sessions/session_a/tool-result/call_a'],
       ['GET', '/runtime/sessions/session%5Fa/tool-lock'],
+      ['GET', '/runtime/sessions/session%5Fa/context-export'],
     ]
     for (const [method, path, body] of sessionRequests) {
       const result = await httpCall(method, path, body)
@@ -1103,6 +1104,7 @@ describe('Private Cloud edge request path', () => {
     expect((await httpCall('POST', '/runtime/admission/messages', '{')).status).toBe(400)
     expect((await httpCall('GET', '/runtime/attachments/a?sessionId=session_a&sessionId=session_b')).status).toBe(400)
     expect((await httpCall('GET', '/runtime/sessions/session%2Fa/tool-lock')).status).toBe(400)
+    expect((await httpCall('GET', '/runtime/sessions/session%2Fa/context-export')).status).toBe(400)
     resolveSessionRouteState.mockRejectedValueOnce(new Error('postgres unavailable'))
     expect((await httpCall('POST', '/runtime/admission/messages', raw)).status).toBe(503)
     expect(httpCalls).toHaveLength(callsBeforeDenied)

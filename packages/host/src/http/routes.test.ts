@@ -5,6 +5,81 @@ import { attachJsonRoutes } from './routes.js'
 import { DEDICATED_DEPLOYMENT, PRIVATE_CLOUD_DEPLOYMENT } from '@agent-kernel/shared'
 
 describe('HTTP route ownership', () => {
+  it('exports only the requesting tenant’s saved context after authentication, without logging its contents', async () => {
+    const secret = 'private unredacted tool input'
+    const load = vi.fn(async () => ({
+      sessionId: 'session-one', organizationId: 'org_one', agentRuntime: 'copilot',
+      state: { messages: [{ role: 'tool', content: [{ type: 'tool_result', callId: 'call-one', content: secret }] }] },
+      config: { systemPrompt: 'system secret', tools: ['scheduled_task'] },
+      toolLock: { scheduled_task: { version: '1', schemaHash: null } },
+      preferences: { selectedModel: 'model-one' },
+    }))
+    const audit = { log: vi.fn() }
+    const server = createServer()
+    attachJsonRoutes(server, {
+      sessions: { load } as never, auth: { requireIngressIdentity: true }, audit: audit as never,
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('missing address')
+      const url = `http://127.0.0.1:${address.port}/runtime/sessions/session-one/context-export`
+      const denied = await fetch(url)
+      expect(denied.status).toBe(401)
+      expect(load).not.toHaveBeenCalled()
+      const headers = {
+        'x-agent-runlab-principal': 'viewer',
+        'x-agent-runlab-organization-role': 'viewer',
+        'x-agent-runlab-organization-id': 'org_other',
+      }
+      const wrongTenant = await fetch(url, { headers })
+      expect(wrongTenant.status).toBe(403)
+      const allowed = await fetch(url, { headers: { ...headers, 'x-agent-runlab-organization-id': 'org_one' } })
+      expect(allowed.status).toBe(200)
+      expect(allowed.headers.get('cache-control')).toBe('no-store')
+      expect(allowed.headers.get('content-disposition')).toContain('attachment;')
+      const snapshot = await allowed.json()
+      expect(snapshot).toMatchObject({
+        exactProviderRequest: false, messageSource: 'host_projection_not_sdk_model_history',
+        messages: [{ content: [{ content: secret }] }],
+        configuredInputs: { systemPrompt: 'system secret', selectedModel: 'model-one' },
+      })
+      expect(snapshot.notCaptured).toContain('sdk_private_model_message_history_and_internal_context')
+      expect(audit.log).not.toHaveBeenCalledWith(expect.objectContaining({ target: expect.objectContaining({ content: secret }) }))
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
+  it('refuses oversized context rather than returning a partial or mislabeled export', async () => {
+    const server = createServer()
+    attachJsonRoutes(server, {
+      sessions: { load: async () => ({
+        sessionId: 'session-one', organizationId: 'org_one', agentRuntime: 'kernel',
+        state: { messages: [] },
+        config: { systemPrompt: 'x'.repeat(16 * 1024 * 1024), tools: [] },
+        preferences: {}, toolLock: {},
+      }) } as never,
+      auth: { requireIngressIdentity: true },
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const address = server.address()
+      if (!address || typeof address === 'string') throw new Error('missing address')
+      const response = await fetch(`http://127.0.0.1:${address.port}/runtime/sessions/session-one/context-export`, {
+        headers: {
+          'x-agent-runlab-principal': 'viewer',
+          'x-agent-runlab-organization-role': 'viewer',
+          'x-agent-runlab-organization-id': 'org_one',
+        },
+      })
+      expect(response.status).toBe(413)
+      expect(await response.text()).not.toContain('x'.repeat(100))
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()))
+    }
+  })
+
   it('requires an owner or admin for Dedicated model writes before invoking callbacks', async () => {
     const server = createServer()
     const mutate = vi.fn(() => ({ providers: [] } as never))

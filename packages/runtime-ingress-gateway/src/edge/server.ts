@@ -165,6 +165,7 @@ async function sessionHttpScope(request: IncomingMessage, url: URL): Promise<{ s
     || (read && (/^\/runtime\/attachments\/[^/]+$/u.test(url.pathname) || /^\/session-artifacts\/[^/]+$/u.test(url.pathname)))
   const path = (read && /^\/runtime\/sessions\/([^/]+)\/tool-result\/[^/]+$/u.exec(url.pathname))
     || (request.method === 'GET' && /^\/runtime\/sessions\/([^/]+)\/tool-lock$/u.exec(url.pathname))
+    || (request.method === 'GET' && /^\/runtime\/sessions\/([^/]+)\/context-export$/u.exec(url.pathname))
   if (!json && !query && !path) return undefined
   let sessionId: unknown
   let body: Buffer | undefined

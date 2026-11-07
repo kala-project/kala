@@ -3112,6 +3112,8 @@ export function App(): JSX.Element {
         </Suspense>
       ) : null}
       <SessionMetadataDialog
+        host={hostEndpoint.url}
+        {...(config.token ? { token: config.token } : {})}
         evaluationUrl={runtimeDeployment.evaluationUrl}
         open={metadataOpen}
         initialTab={metadataInitialTab}

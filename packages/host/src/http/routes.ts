@@ -52,6 +52,7 @@ import {
 import { verifyReward } from '../rl-reward.js'
 import { exportSessionTraceArtifacts } from '../session-export.js'
 import { exportDurableSession } from '../durable-session-export.js'
+import { sessionContextSnapshot } from '../session-context-export.js'
 import { profileSession } from '../session-profile.js'
 import { exportTraceOtlp, loadHeadersFile } from '../trace-otlp-export.js'
 import { buildMemoryIndex } from '../memory-index.js'
@@ -357,6 +358,33 @@ export function attachJsonRoutes(
       }
     }
     const sessionToolLockMatch = path.match(/^\/runtime\/sessions\/([^/]+)\/tool-lock$/u)
+    const sessionContextMatch = path.match(/^\/runtime\/sessions\/([^/]+)\/context-export$/u)
+    if (sessionContextMatch && req.method === 'GET') {
+      claimRoute(req)
+      const auth = authorizeDashboardHttp(req, payloads.auth)
+      if (!auth.ok) { sendError(res, 401, auth.reason); return }
+      if (!payloads.sessions) { sendError(res, 503, 'session storage unavailable'); return }
+      void (async () => {
+        const sessionId = decodeURIComponent(sessionContextMatch[1]!)
+        const record = await payloads.sessions!.load(sessionId, { recoverDangling: false })
+        const accessError = httpSessionAccessError(req, record)
+        if (accessError) throw new HttpRouteError(accessError.status, accessError.message)
+        const json = JSON.stringify(sessionContextSnapshot(record))
+        if (Buffer.byteLength(json) > 16 * 1024 * 1024) throw new HttpRouteError(413, 'session context export exceeds 16 MiB')
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'content-disposition': `attachment; filename="kala-session-context-${encodeURIComponent(sessionId)}.json"`,
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+        })
+        res.end(json)
+      })().catch((error: unknown) => {
+        if (res.headersSent) return
+        sendError(res, error instanceof HttpRouteError ? error.status : error instanceof SessionNotFoundError ? 404 : 500,
+          error instanceof HttpRouteError ? error.message : 'session context export unavailable')
+      })
+      return
+    }
     if (sessionToolLockMatch && req.method === 'GET' && payloads.sessions) {
       claimRoute(req)
       const record = payloads.sessions.get(decodeURIComponent(sessionToolLockMatch[1] ?? ''))
