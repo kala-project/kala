@@ -441,10 +441,11 @@ describe('executor idempotency', () => {
     expect(firstAuth.args[0]).toEqual({
       sessionId: 'session', callId: 'shell-1', name: 'bash', command: 'git reset --hard HEAD',
     })
-    ;(firstAuth.args[1] as (error: Error | undefined, reply?: { authorized: boolean }) => void)(undefined, { authorized: false })
+    ;(firstAuth.args[1] as (error: Error | undefined, reply?: { authorized: boolean; reason?: string }) => void)(undefined, { authorized: false, reason: 'workspace_mismatch' })
     await vi.waitFor(() => expect(denied).toHaveBeenCalled())
     expect(duplicate).toHaveBeenCalledWith(denied.mock.calls[0]![0])
     expect(denied.mock.calls[0]![0]).toMatchObject({ ok: false, content: expect.stringContaining('EACCES') })
+    expect(denied.mock.calls[0]![0].content).toContain('reconnect the selected workspace Executor')
     expect(runs).not.toHaveBeenCalled()
 
     const allowed = vi.fn()

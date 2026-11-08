@@ -684,19 +684,31 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
           return
         }
         if (report.risk === 'high_risk') {
-          const authorized = await new Promise<boolean>((resolve) => {
+          const authorization = await new Promise<{ authorized: boolean; reason?: string }>((resolve) => {
             socket.timeout(5_000).emit('executor:shell_authorize', {
               sessionId: payload.sessionId,
               callId: payload.callId,
               name: shellName,
               command,
-            }, (error, result) => resolve(!error && result?.authorized === true))
-          }).catch(() => false)
-          if (!authorized) {
+            }, (error, result) => resolve(error ? { authorized: false, reason: 'host_unavailable' }
+              : result ?? { authorized: false, reason: 'host_unavailable' }))
+          })
+          if (!authorization.authorized) {
+            const guidance: Record<string, string> = {
+              workspace_mismatch: 'The Executor is not bound to this Session workspace; reconnect the selected workspace Executor.',
+              call_not_dispatched: 'The Host has no matching dispatched shell call; retry only after the Session recovers, and report repeated failures.',
+              approval_required: 'Approve this exact pending shell call in the Session before retrying.',
+              session_unavailable: 'The Host cannot load this Session; wait for its Runtime owner to recover.',
+              identity_unavailable: 'The Executor identity could not be verified; reconnect its existing service.',
+              risk_mismatch: 'Host and Executor disagree on shell risk; update this Executor from its signed update source.',
+              invalid_request: 'The Host rejected the authorization request; update this Executor.',
+              host_unavailable: 'Host authorization is unavailable; retry after the Executor reconnects.',
+            }
+            const reason = authorization.reason ?? 'unknown'
             replyResult = {
               callId: payload.callId,
               ok: false,
-              content: 'ERROR: EACCES: High-risk shell call has no verified, matching user approval from the Host',
+              content: `ERROR: EACCES: High-risk shell authorization denied (${reason}). ${guidance[reason] ?? 'Report this authorization failure; do not bypass it.'}`,
               failure: failureForToolError('EACCES'),
             }
             return

@@ -22,7 +22,7 @@ import {
   createExecutorRegistry,
   type WorkspaceResolver,
 } from './executor.js'
-import { authorizeExecutorShellCall } from './executor-ns.js'
+import { authorizeExecutorShellCall, shellAuthorizationDenial } from './executor-ns.js'
 import { executionRequestDigest } from '../../../executor/src/execution-receipts.js'
 
 type EmittedCall = {
@@ -206,6 +206,80 @@ describe('ExecutorRegistry', () => {
     await expect(running).resolves.toMatchObject({ ok: true })
     approved = true
     expect(authorization(command)).toBe(false)
+  })
+
+  it('authorizes only the exact dispatched Host-owned bang shell, never a similarly named model call', async () => {
+    const reg = createExecutorRegistry(fakeIo() as never, makeResolver({ session: 'ws-default' }))
+    const socket = makeFakeSocket('host-shell')
+    reg.attach(socket as never, announceOf('host-shell'))
+    const command = 'node -e "require(\'fs\').writeFileSync(\'marker\',\'ok\')"'
+    const effect = callEffect(`bang-shell-call-${'a'.repeat(32)}`, 'bash', '/workspace', {
+      command, capture_separate_streams: true,
+    })
+    const record = { sessionId: 'session', workspaceId: 'ws-default', state: { pendingCalls: [], approvalMode: 'ask' } } as never
+    const authorization = (callId = effect.callId, requestedCommand = command, workspace = 'ws-default') =>
+      authorizeExecutorShellCall(record, workspace, {
+        sessionId: 'session', callId, name: 'bash', command: requestedCommand,
+      }, reg.authorizeHostShell('session', callId, requestedCommand, workspace))
+    expect(authorization()).toBe(false)
+    const modelCall = reg.callTool('session', effect)
+    await vi.waitFor(() => expect(socket.emitted).toHaveLength(1))
+    expect(authorization()).toBe(false)
+    socket.emitted[0]!.ack!({ callId: effect.callId, ok: true, content: 'model result' })
+    await modelCall
+
+    const hostCall = reg.callHostShell('session', effect)
+    await vi.waitFor(() => expect(socket.emitted).toHaveLength(2))
+    expect(socket.emitted[1]!.payload).toMatchObject({ origin: 'host', name: 'bash' })
+    expect(authorization()).toBe(true)
+    expect(authorization('forged')).toBe(false)
+    expect(authorization(effect.callId, command + ' extra')).toBe(false)
+    expect(authorization(effect.callId, command, 'other-workspace')).toBe(false)
+    const replacement = makeFakeSocket('host-shell-reconnected')
+    reg.attach(replacement as never, announceOf('host-shell'))
+    await vi.waitFor(() => expect(replacement.emitted).toHaveLength(1))
+    expect(replacement.emitted[0]!.payload).toMatchObject({ origin: 'host', name: 'bash' })
+    expect(authorization()).toBe(true)
+    replacement.emitted[0]!.ack!({ callId: effect.callId, ok: true, content: 'host result' })
+    await hostCall
+    expect(authorization()).toBe(false)
+  })
+
+  it('distinguishes a missing Session owner from a known unbound Session instead of dispatching to any Executor', async () => {
+    const reg = createExecutorRegistry(fakeIo() as never, {
+      workspaceIdFor: sid => sid === 'missing-owner' ? null : undefined,
+    })
+    const socket = makeFakeSocket('other-workspace')
+    reg.attach(socket as never, announceOf('other-executor', 'other-workspace'))
+    await expect(reg.callTool('missing-owner', callEffect('unsafe-fallback'))).resolves.toMatchObject({
+      ok: false,
+      content: expect.stringContaining('Session workspace binding is unavailable'),
+    })
+    expect(reg.executorForSession('missing-owner')).toBeUndefined()
+    expect(await reg.waitForSessionExecutor('missing-owner', 1)).toBe(false)
+    expect(socket.emitted).toHaveLength(0)
+
+    const unbound = reg.callTool('known-unbound', callEffect('legacy-fallback'))
+    expect(socket.emitted).toHaveLength(1)
+    socket.emitted[0]!.ack!({ callId: 'legacy-fallback', ok: true, content: 'ok' })
+    await expect(unbound).resolves.toMatchObject({ ok: true })
+  })
+
+  it('explains high-risk authorization failures without disclosing the command', () => {
+    const command = 'git reset --hard HEAD'
+    const request = { sessionId: 's', callId: 'call', name: 'shell' as const, command }
+    const state = {
+      approvalMode: 'allow_all',
+      pendingCalls: [{ callId: 'call', name: 'shell', input: { command }, status: 'dispatched' }],
+    }
+    const record = { sessionId: 's', workspaceId: 'ws', state }
+    expect(shellAuthorizationDenial(record as never, 'ws', request)).toBeNull()
+    expect(authorizeExecutorShellCall(record as never, 'ws', request)).toBe(true)
+    expect(shellAuthorizationDenial(record as never, 'other', request)).toBe('workspace_mismatch')
+    expect(shellAuthorizationDenial(record as never, 'ws', { ...request, callId: 'other' })).toBe('call_not_dispatched')
+    expect(shellAuthorizationDenial(record as never, 'ws', { ...request, command: 'git status' })).toBe('risk_mismatch')
+    state.approvalMode = 'ask'
+    expect(shellAuthorizationDenial(record as never, 'ws', request)).toBe('approval_required')
   })
 
   it('routes Stop to the authenticated child workspace, and never accepts a disconnected or fenced cancellation ACK', async () => {

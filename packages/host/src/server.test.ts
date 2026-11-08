@@ -6969,6 +6969,7 @@ describe('wire protocol', () => {
     })
     await new Promise<void>((resolve) => executor.on('connect', resolve))
     let toolCalls = 0
+    const shellAuthorizations: Array<Promise<{ authorized: boolean }>> = []
     let resolveTool!: (payload: ToolCallMessage) => void
     const toolCalled = new Promise<ToolCallMessage>((resolve) => { resolveTool = resolve })
     let releaseTool!: () => void
@@ -6976,6 +6977,10 @@ describe('wire protocol', () => {
     executor.on('tool:call', (payload: ToolCallMessage, ack: (result: ToolResultAck) => void) => {
       if (payload.name === 'bash') {
         toolCalls += 1
+        shellAuthorizations.push(executor.timeout(500).emitWithAck('executor:shell_authorize', {
+          sessionId: payload.sessionId, callId: payload.callId, name: 'bash',
+          command: String(payload.input.command),
+        }))
         resolveTool(payload)
         void toolRelease.then(() => ack({
           callId: payload.callId,
@@ -7000,12 +7005,13 @@ describe('wire protocol', () => {
       const shell = payload.items.find((item) => item.id === 'bang-shell-operation')?.shell
       if (shell) shellQueueStates.push(shell.state)
     })
+    const operatorCommand = `node -e "require('fs').writeFileSync('marker.txt','hello')"`
     expect(await dashboard.timeout(500).emitWithAck('client:user_message', { intent: 'text',
       sessionId, text: 'hold the turn', mode: 'steer', operationId: 'bang-shell-first',
     })).toEqual({ ok: true })
     await firstCallStarted
     expect(await dashboard.timeout(500).emitWithAck('client:user_message', { intent: 'shell',
-      sessionId, text: '!printf hello', mode: 'queue', operationId: 'bang-shell-operation',
+      sessionId, text: `!${operatorCommand}`, mode: 'queue', operationId: 'bang-shell-operation',
     })).toEqual({ ok: true })
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(toolCalls).toBe(0)
@@ -7020,9 +7026,10 @@ describe('wire protocol', () => {
     await expect(toolCalled).resolves.toMatchObject({
       sessionId,
       name: 'bash',
-      input: { command: 'printf hello', capture_separate_streams: true },
+      input: { command: operatorCommand, capture_separate_streams: true },
       cwd: '/workspace/project',
     })
+    await expect(shellAuthorizations[0]).resolves.toEqual({ authorized: true })
     expect(await dashboard.timeout(500).emitWithAck('client:user_message', { intent: 'text',
       sessionId, text: 'steer after claimed shell', mode: 'steer', operationId: 'bang-shell-following-steer',
     })).toEqual({ ok: true })
@@ -7031,7 +7038,7 @@ describe('wire protocol', () => {
     await expect(resultEvent).resolves.toMatchObject({
       event: {
         kind: 'user_message',
-        text: expect.stringContaining('Command: printf hello'),
+        text: expect.stringContaining(`Command: ${operatorCommand}`),
       },
     })
     const event = await resultEvent

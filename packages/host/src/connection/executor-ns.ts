@@ -37,20 +37,43 @@ import type { ExecutorInstallationStorage } from '../store/executor-installation
 import { validateMcpToolDescriptors } from '../mcp-tools.js'
 import { analyzeShellCommand, guardShellToolDispatch } from '../extensions/shell-ast-safety.js'
 
+export type ShellAuthorizationDenial =
+  | 'session_unavailable' | 'workspace_mismatch' | 'risk_mismatch'
+  | 'call_not_dispatched' | 'approval_required'
+
+export function shellAuthorizationDenial(
+  record: import('../store/session.js').SessionRecord | undefined,
+  workspaceId: string,
+  request: ShellAuthorizationRequest,
+  hostDispatchAuthorized = false,
+): ShellAuthorizationDenial | null {
+  if (!record || record.sessionId !== request.sessionId) return 'session_unavailable'
+  if (record.workspaceId !== workspaceId) return 'workspace_mismatch'
+  if (analyzeShellCommand(request.command).risk !== 'high_risk') return 'risk_mismatch'
+  if (hostDispatchAuthorized) return null
+  const pending = record.state.pendingCalls.find(call => {
+    const tool = record.config?.tools.find(configured => configured.name === call.name)
+    return call.callId === request.callId
+      && (call.name === 'shell' || call.name === 'bash')
+      && (tool?.executionKind ?? 'executor') === 'executor'
+      && (tool?.executionHandler ?? call.name) === request.name
+      && call.status === 'dispatched'
+      && call.input.command === request.command
+  })
+  if (!pending) return 'call_not_dispatched'
+  if (record.state.approvalMode !== 'allow_all' && pending.explicitlyApproved !== true) return 'approval_required'
+  return guardShellToolDispatch(record, {
+    callId: request.callId, name: pending.name, input: { command: request.command },
+  }) === null ? null : 'call_not_dispatched'
+}
+
 export function authorizeExecutorShellCall(
   record: import('../store/session.js').SessionRecord | undefined,
   workspaceId: string,
   request: ShellAuthorizationRequest,
-  arenaParentAuthorized = false,
+  hostDispatchAuthorized = false,
 ): boolean {
-  return record?.sessionId === request.sessionId
-    && record.workspaceId === workspaceId
-    && analyzeShellCommand(request.command).risk === 'high_risk'
-    && (arenaParentAuthorized || guardShellToolDispatch(record, {
-      callId: request.callId,
-      name: request.name,
-      input: { command: request.command },
-    }) === null)
+  return shellAuthorizationDenial(record, workspaceId, request, hostDispatchAuthorized) === null
 }
 
 export type ExecutorNs = Namespace<
@@ -334,18 +357,26 @@ export function configureExecutorNamespace(
         channel: 'executor:shell_authorize',
         peer: socket.id,
       })
-      if (!request || !await authorizeSocket(socket)) { ack({ authorized: false }); return }
+      if (!request) { ack({ authorized: false, reason: 'invalid_request' }); return }
+      if (!await authorizeSocket(socket)) { ack({ authorized: false, reason: 'identity_unavailable' }); return }
       const announcement = executorAnnouncements.get(socket)
-      if (!announcement) { ack({ authorized: false }); return }
+      if (!announcement) { ack({ authorized: false, reason: 'identity_unavailable' }); return }
       try {
         const record = deps.store.get(request.sessionId)
           ?? await deps.store.load(request.sessionId, { recoverDangling: false })
-        ack({ authorized: authorizeExecutorShellCall(record, announcement.workspaceId, request,
+        const reason = shellAuthorizationDenial(record, announcement.workspaceId, request,
           request.name === 'bash'
-          && deps.executors.authorizeArenaShell(request.sessionId, request.callId, request.command,
-            announcement.workspaceId)) })
-      } catch {
-        ack({ authorized: false })
+          && (deps.executors.authorizeArenaShell(request.sessionId, request.callId, request.command,
+            announcement.workspaceId)
+            || deps.executors.authorizeHostShell(request.sessionId, request.callId, request.command,
+              announcement.workspaceId)))
+        if (reason) deps.audit?.log({ action: 'executor.shell_authorize', actor: { kind: 'executor', executorId: announcement.executorId, workspaceId: announcement.workspaceId },
+          target: { sessionId: request.sessionId, callId: request.callId }, outcome: 'denied', metadata: { reason } })
+        ack(reason ? { authorized: false, reason } : { authorized: true })
+      } catch (error) {
+        deps.audit?.log({ action: 'executor.shell_authorize', actor: { kind: 'executor', executorId: announcement.executorId, workspaceId: announcement.workspaceId },
+          target: { sessionId: request.sessionId, callId: request.callId }, outcome: 'error', error: error instanceof Error ? error.name : 'unknown' })
+        ack({ authorized: false, reason: 'session_unavailable' })
       }
     })
     socket.on('executor:bg_task_updated', async (rawPayload: ServerBgTaskUpdated) => {

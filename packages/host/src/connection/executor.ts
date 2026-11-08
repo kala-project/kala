@@ -100,6 +100,7 @@ type Pending = {
   resolve: (result: { ok: boolean; content: string; failure?: import('@agent-kernel/kernel').ToolFailure }) => void
   timer: NodeJS.Timeout
   deadlineAt: number
+  hostShell?: boolean
 }
 
 export type ExecutorChangeListener = (change: ServerExecutorChangedPayload) => void
@@ -110,7 +111,8 @@ export type ExecutorChangeListener = (change: ServerExecutorChangedPayload) => v
  * `SessionStore.get(sessionId)?.workspaceId`.
  */
 export type WorkspaceResolver = {
-  workspaceIdFor(sessionId: string): string | undefined
+  /** null means the Session has no current owner/cache; undefined means a known unbound Session. */
+  workspaceIdFor(sessionId: string): string | undefined | null
   approvedArenaReadParent?(sessionId: string, parentCallId: string, action: 'probe' | 'status' | 'diff' | 'init' | 'apply' | 'cleanup', effectCallId: string, parentAction?: string): boolean
   approvedArenaShellParent?(sessionId: string, parentCallId: string): boolean
   desktopManualAuthorizationRequired?(sessionId: string): boolean
@@ -177,6 +179,8 @@ type ExecutorInvalidationReason = 'credential_revoked' | 'identity_authority_una
 
 export type ExecutorRegistry = ToolDispatcher & ExecutorLookup & {
   authorizeArenaShell(sessionId: string, callId: string, command: string, workspaceId: string): boolean
+  authorizeHostShell(sessionId: string, callId: string, command: string, workspaceId: string): boolean
+  callHostShell(sessionId: string, effect: CallToolEffect): Promise<{ ok: boolean; content: string; failure?: import('@agent-kernel/kernel').ToolFailure }>
   inspectArenaReceipt(sessionId: string, callId: string): Promise<{
     state: 'absent' | 'started' | 'completed' | 'denied' | 'unavailable'
     ownerGeneration?: string; requestDigest?: string; result?: ToolResultAck
@@ -385,6 +389,7 @@ export function createExecutorRegistry(
         resolve: p.resolve,
         timer,
         deadlineAt: p.deadlineAt,
+        ...(p.hostShell ? { hostShell: true } : {}),
       })
       let ownerGeneration: string | undefined
       const emit = (authorized: boolean): void => {
@@ -417,7 +422,7 @@ export function createExecutorRegistry(
             callId: p.callId,
             name: p.name,
             input: p.input,
-            ...(p.name.startsWith('arena_git_') || p.name === 'skill_file' && p.input.action !== 'read'
+            ...(p.hostShell || p.name.startsWith('arena_git_') || p.name === 'skill_file' && p.input.action !== 'read'
               || p.name === 'memory' && p.input.ownerGeneration
               ? { origin: 'host' as const } : {}),
             ...(p.cwd !== undefined ? { cwd: p.cwd } : {}),
@@ -506,6 +511,9 @@ export function createExecutorRegistry(
     | { ok: true; bind: Bind }
     | { ok: false; reason: string } {
     const targetWorkspace = resolver.workspaceIdFor(sessionId)
+    if (targetWorkspace === null) {
+      return { ok: false, reason: 'Session workspace binding is unavailable; wait for its Runtime owner before retrying the tool call' }
+    }
     if (targetWorkspace === undefined) {
       const any = pickAnyBind()
       if (!any) return { ok: false, reason: 'no executor connected' }
@@ -609,7 +617,23 @@ export function createExecutorRegistry(
   }
 
   const trustedAttachmentTransfers = new WeakSet<CallToolEffect>()
+  const trustedHostShellCalls = new WeakSet<CallToolEffect>()
   return {
+    authorizeHostShell(sessionId, callId, command, workspaceId) {
+      const bind = findBindByWorkspace(workspaceId)
+      const pending = bind?.pending.get(JSON.stringify([sessionId, callId]))
+      return Boolean(bind?.socket.connected && resolver.workspaceIdFor(sessionId) === workspaceId
+        && pending?.hostShell && pending.name === 'bash' && pending.input.command === command)
+    },
+    async callHostShell(sessionId, effect) {
+      if (effect.name !== 'bash' || !/^bang-shell-call-[0-9a-f]{32}$/u.test(effect.callId)
+        || typeof effect.input.command !== 'string' || effect.input.capture_separate_streams !== true) {
+        return { ok: false, content: 'Host shell requires an exact operator command' }
+      }
+      trustedHostShellCalls.add(effect)
+      try { return await this.callTool(sessionId, effect) }
+      finally { trustedHostShellCalls.delete(effect) }
+    },
     authorizeArenaShell(sessionId, callId, command, workspaceId) {
       const admission = arenaShellAdmissions.get(JSON.stringify([sessionId, callId]))
       return Boolean(admission && admission.command === command && admission.workspaceId === workspaceId
@@ -927,6 +951,7 @@ export function createExecutorRegistry(
       }
     },
     async callTool(sessionId, eff: CallToolEffect, turnId?: string) {
+      const hostShell = eff.name === 'bash' && trustedHostShellCalls.has(eff)
       const trustedAttachmentTransfer = eff.name === '__workspace_attachment_transfer'
         && trustedAttachmentTransfers.has(eff)
       if (eff.name === '__workspace_attachment_transfer' && !trustedAttachmentTransfer) {
@@ -1072,6 +1097,7 @@ export function createExecutorRegistry(
           resolve,
           timer,
           deadlineAt,
+          ...(hostShell ? { hostShell: true } : {}),
         })
         bind.socket.emit(
           'tool:call',
@@ -1082,7 +1108,7 @@ export function createExecutorRegistry(
             callId: eff.callId,
             name: eff.name,
             input: eff.input,
-            ...(arenaAction || fencedSkill || fencedMemory || trustedAttachmentTransfer ? { origin: 'host' as const } : {}),
+            ...(hostShell || arenaAction || fencedSkill || fencedMemory || trustedAttachmentTransfer ? { origin: 'host' as const } : {}),
             ...(eff.cwd !== undefined ? { cwd: eff.cwd } : {}),
             ackTimeoutMs,
             ...(turnId ? { turnId } : {}),
@@ -1584,6 +1610,7 @@ export function createExecutorRegistry(
     async waitForSessionExecutor(sessionId, timeoutMs = PLANNED_CONTINUATION_EXECUTOR_WAIT_MS) {
       if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error('Executor wait timeout must be a positive integer')
       const workspaceId = resolver.workspaceIdFor(sessionId)
+      if (workspaceId === null) return false
       if (workspaceId === undefined ? pickAnyBind() !== undefined : findBindByWorkspace(workspaceId) !== undefined) return true
       const key = workspaceId ?? '*'
       return await new Promise<boolean>((resolve) => {

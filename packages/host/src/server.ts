@@ -679,7 +679,10 @@ export async function startHostServer(
   const executors = createExecutorRegistry(
     io,
     {
-      workspaceIdFor: (sid) => store.get(sid)?.workspaceId,
+      workspaceIdFor: (sid) => {
+        const record = store.get(sid)
+        return record ? record.workspaceId : null
+      },
       approvedArenaShellParent: (sid, callId) => {
         if (options.requireArenaEffectBarrier) return false
         const record = store.get(sid)
@@ -1569,7 +1572,7 @@ export async function startHostServer(
       // before dispatch; a stale process must never execute based on local state.
       if (persistentQueue && (!persistentClaim || !await persistentQueue.confirmClaim(persistentClaim))) return undefined
       const toolResult = record.workspaceId
-        ? await executors.callTool(sessionId, {
+        ? await executors.callHostShell(sessionId, {
             kind: 'call_tool',
             callId: bangShellCallId(claimed.operationId),
             name: 'bash',

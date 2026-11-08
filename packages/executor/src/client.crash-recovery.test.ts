@@ -204,7 +204,7 @@ describe('executor process crash recovery', () => {
       },
     }
     const denied = await dispatch(firstSocket, unresolvedCall)
-    expect(denied).toMatchObject({ ok: false, content: expect.stringContaining('no verified, matching user approval') })
+    expect(denied).toMatchObject({ ok: false, content: expect.stringContaining('authorization denied') })
     expect(await readIfPresent(markerPath)).toBe('')
     approvedParent = { sessionId: unresolvedCall.sessionId, callId: unresolvedCall.callId,
       name: 'shell', command: String(unresolvedCall.input.command), explicitlyApproved: true }

@@ -488,10 +488,36 @@ describe('multi-deployment runtime & executor integration', () => {
     const authorization = {
       sessionId: workspaceRecord.sessionId,
       callId: 'unapproved',
-      name: 'shell' as const,
+      name: 'bash' as const,
       command: 'git reset --hard HEAD',
     }
     expect(authorizeExecutorShellCall(workspaceRecord, 'workspace-proof', authorization)).toBe(true)
+    expect(authorizeExecutorShellCall(workspaceRecord, 'workspace-proof', { ...authorization, name: 'shell' })).toBe(false)
+    const dispatched = await dispatchRuntimeTool({
+      store,
+      llm: { name: 'unused', async call() { throw new Error('unused') } },
+      tools: {
+        async callTool(sessionId, effect) {
+          expect(effect.name).toBe('bash')
+          if (effect.name !== 'bash') throw new Error('Expected the configured Executor handler')
+          expect(authorizeExecutorShellCall(store.get(sessionId), 'workspace-proof', {
+            ...authorization, name: effect.name,
+          })).toBe(true)
+          return { ok: true, content: 'authorized' }
+        },
+        cancelPending() {},
+      },
+      broadcast: {
+        onEvent() {},
+        onTokenDelta() {},
+        onApprovalRequired() {},
+        onError() {},
+      },
+    }, workspaceRecord.sessionId, {
+      kind: 'call_tool', callId: authorization.callId, name: 'shell',
+      input: { command: authorization.command },
+    }, new Map())
+    expect(dispatched).toEqual({ ok: true, content: 'authorized' })
     expect(authorizeExecutorShellCall(workspaceRecord, 'workspace-proof', { ...authorization, sessionId: 'other-session' })).toBe(false)
     expect(authorizeExecutorShellCall(workspaceRecord, 'other-workspace', authorization)).toBe(false)
     expect(authorizeExecutorShellCall(workspaceRecord, 'workspace-proof', { ...authorization, callId: 'forged' })).toBe(false)
