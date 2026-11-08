@@ -1,4 +1,4 @@
-const repository = 'xingsy97/kala'
+const repository = 'kala-project/kala'
 const releasesEndpoint = `https://api.github.com/repos/${repository}/releases?per_page=100`
 const releaseBaseUrl = `https://github.com/${repository}/releases`
 

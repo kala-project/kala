@@ -3,58 +3,58 @@
     "tag": "v0.2.0",
     "prerelease": false,
     "publishedAt": "2026-10-01T20:42:17.000Z",
-    "url": "https://github.com/xingsy97/kala/releases/tag/v0.2.0",
+    "url": "https://github.com/kala-project/kala/releases/tag/v0.2.0",
     "assets": [
-      { "name": "run.sh", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0/run.sh", "size": 9764 },
-      { "name": "SHA256SUMS", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0/SHA256SUMS", "size": 2944 },
-      { "name": "kala-host-linux-x64", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0/kala-host-linux-x64", "size": 355404992 },
-      { "name": "kala-host-darwin-x64", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0/kala-host-darwin-x64", "size": 334566480 },
-      { "name": "kala-host-darwin-arm64", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0/kala-host-darwin-arm64", "size": 328712064 },
-      { "name": "kala-dedicated-support.tar.gz", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0/kala-dedicated-support.tar.gz", "size": 37524 },
-      { "name": "kala-private-cloud-0.2.0-linux-x64.tar.gz", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0/kala-private-cloud-0.2.0-linux-x64.tar.gz", "size": 41846184 }
+      { "name": "run.sh", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0/run.sh", "size": 9764 },
+      { "name": "SHA256SUMS", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0/SHA256SUMS", "size": 2944 },
+      { "name": "kala-host-linux-x64", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0/kala-host-linux-x64", "size": 355404992 },
+      { "name": "kala-host-darwin-x64", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0/kala-host-darwin-x64", "size": 334566480 },
+      { "name": "kala-host-darwin-arm64", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0/kala-host-darwin-arm64", "size": 328712064 },
+      { "name": "kala-dedicated-support.tar.gz", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0/kala-dedicated-support.tar.gz", "size": 37524 },
+      { "name": "kala-private-cloud-0.2.0-linux-x64.tar.gz", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0/kala-private-cloud-0.2.0-linux-x64.tar.gz", "size": 41846184 }
     ]
   },
   {
     "tag": "v0.2.0-rc.20",
     "prerelease": true,
     "publishedAt": "2026-09-30T21:35:40.000Z",
-    "url": "https://github.com/xingsy97/kala/releases/tag/v0.2.0-rc.20",
+    "url": "https://github.com/kala-project/kala/releases/tag/v0.2.0-rc.20",
     "assets": [
-      { "name": "run.sh", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.20/run.sh", "size": 9770 },
-      { "name": "SHA256SUMS", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.20/SHA256SUMS", "size": 2944 },
-      { "name": "kala-host-linux-x64", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.20/kala-host-linux-x64", "size": 355404992 },
-      { "name": "kala-host-darwin-x64", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.20/kala-host-darwin-x64", "size": 334533456 },
-      { "name": "kala-host-darwin-arm64", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.20/kala-host-darwin-arm64", "size": 328679040 },
-      { "name": "kala-dedicated-support.tar.gz", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.20/kala-dedicated-support.tar.gz", "size": 37524 },
-      { "name": "kala-private-cloud-0.2.0-rc.20-linux-x64.tar.gz", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.20/kala-private-cloud-0.2.0-rc.20-linux-x64.tar.gz", "size": 41845532 }
+      { "name": "run.sh", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.20/run.sh", "size": 9770 },
+      { "name": "SHA256SUMS", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.20/SHA256SUMS", "size": 2944 },
+      { "name": "kala-host-linux-x64", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.20/kala-host-linux-x64", "size": 355404992 },
+      { "name": "kala-host-darwin-x64", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.20/kala-host-darwin-x64", "size": 334533456 },
+      { "name": "kala-host-darwin-arm64", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.20/kala-host-darwin-arm64", "size": 328679040 },
+      { "name": "kala-dedicated-support.tar.gz", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.20/kala-dedicated-support.tar.gz", "size": 37524 },
+      { "name": "kala-private-cloud-0.2.0-rc.20-linux-x64.tar.gz", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.20/kala-private-cloud-0.2.0-rc.20-linux-x64.tar.gz", "size": 41845532 }
     ]
   },
   {
     "tag": "v0.2.0-rc.18",
     "prerelease": true,
     "publishedAt": "2026-09-28T17:45:58.000Z",
-    "url": "https://github.com/xingsy97/kala/releases/tag/v0.2.0-rc.18",
+    "url": "https://github.com/kala-project/kala/releases/tag/v0.2.0-rc.18",
     "assets": [
-      { "name": "run.sh", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.18/run.sh", "size": 9147 },
-      { "name": "SHA256SUMS", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.18/SHA256SUMS", "size": 2944 },
-      { "name": "kala-host-linux-x64", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.18/kala-host-linux-x64", "size": 355011776 },
-      { "name": "kala-host-darwin-x64", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.18/kala-host-darwin-x64", "size": 334153680 },
-      { "name": "kala-host-darwin-arm64", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.18/kala-host-darwin-arm64", "size": 328299264 },
-      { "name": "kala-dedicated-support.tar.gz", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.18/kala-dedicated-support.tar.gz", "size": 36685 }
+      { "name": "run.sh", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.18/run.sh", "size": 9147 },
+      { "name": "SHA256SUMS", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.18/SHA256SUMS", "size": 2944 },
+      { "name": "kala-host-linux-x64", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.18/kala-host-linux-x64", "size": 355011776 },
+      { "name": "kala-host-darwin-x64", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.18/kala-host-darwin-x64", "size": 334153680 },
+      { "name": "kala-host-darwin-arm64", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.18/kala-host-darwin-arm64", "size": 328299264 },
+      { "name": "kala-dedicated-support.tar.gz", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.18/kala-dedicated-support.tar.gz", "size": 36685 }
     ]
   },
   {
     "tag": "v0.2.0-rc.17",
     "prerelease": true,
     "publishedAt": "2026-09-28T11:42:41.000Z",
-    "url": "https://github.com/xingsy97/kala/releases/tag/v0.2.0-rc.17",
+    "url": "https://github.com/kala-project/kala/releases/tag/v0.2.0-rc.17",
     "assets": [
-      { "name": "run.sh", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.17/run.sh", "size": 9147 },
-      { "name": "SHA256SUMS", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.17/SHA256SUMS", "size": 2944 },
-      { "name": "kala-host-linux-x64", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.17/kala-host-linux-x64", "size": 355011776 },
-      { "name": "kala-host-darwin-x64", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.17/kala-host-darwin-x64", "size": 330308196 },
-      { "name": "kala-host-darwin-arm64", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.17/kala-host-darwin-arm64", "size": 324523736 },
-      { "name": "kala-dedicated-support.tar.gz", "url": "https://github.com/xingsy97/kala/releases/download/v0.2.0-rc.17/kala-dedicated-support.tar.gz", "size": 36685 }
+      { "name": "run.sh", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.17/run.sh", "size": 9147 },
+      { "name": "SHA256SUMS", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.17/SHA256SUMS", "size": 2944 },
+      { "name": "kala-host-linux-x64", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.17/kala-host-linux-x64", "size": 355011776 },
+      { "name": "kala-host-darwin-x64", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.17/kala-host-darwin-x64", "size": 330308196 },
+      { "name": "kala-host-darwin-arm64", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.17/kala-host-darwin-arm64", "size": 324523736 },
+      { "name": "kala-dedicated-support.tar.gz", "url": "https://github.com/kala-project/kala/releases/download/v0.2.0-rc.17/kala-dedicated-support.tar.gz", "size": 36685 }
     ]
   }
 ]

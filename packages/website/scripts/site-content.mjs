@@ -50,12 +50,12 @@ export function renderPage({ version, page, title, description, content, origin,
         <nav class="site-navigation" aria-label="Main navigation" data-site-navigation>
           <div class="nav-links">
             <a class="nav-link" href="/#features">Features</a>
-            <a class="nav-link" href="https://github.com/xingsy97/kala/tree/main/docs">Docs</a>
+            <a class="nav-link" href="https://github.com/kala-project/kala/tree/main/docs">Docs</a>
             <a class="nav-link" href="/releases/"${current('releases')}>Releases</a>
             <a class="nav-link" href="/deploy/"${current('deploy')}>Deploy</a>
           </div>
           <div class="nav-actions">
-            <a class="nav-link nav-github" href="https://github.com/xingsy97/kala">
+            <a class="nav-link nav-github" href="https://github.com/kala-project/kala">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5a9.5 9.5 0 0 0-3 18.51c.48.09.66-.2.66-.46v-1.68c-2.69.58-3.26-1.14-3.26-1.14-.44-1.12-1.08-1.42-1.08-1.42-.88-.6.07-.59.07-.59.97.07 1.48 1 1.48 1 .87 1.48 2.27 1.05 2.82.8.09-.63.34-1.05.62-1.29-2.15-.24-4.41-1.07-4.41-4.78 0-1.06.38-1.92 1-2.6-.1-.24-.43-1.23.09-2.56 0 0 .81-.26 2.66.99A9.25 9.25 0 0 1 12 6.95a9.2 9.2 0 0 1 2.42.33c1.84-1.25 2.65-.99 2.65-.99.52 1.33.19 2.32.1 2.56.62.68.99 1.54.99 2.6 0 3.72-2.27 4.53-4.42 4.77.35.3.65.89.65 1.8v2.53c0 .26.18.56.66.46A9.5 9.5 0 0 0 12 2.5Z" fill="currentColor"/></svg>
               <span>GitHub</span>
             </a>
@@ -93,7 +93,7 @@ export function homePage(version) {
           <p class="hero-lede">Operate one deterministic agent system across the models, workspaces, machines, and tenants you choose.</p>
           <div class="hero-actions">
             <a class="button button-primary" href="/download/" data-platform-label>Download Kala</a>
-            <a class="button button-secondary" href="https://github.com/xingsy97/kala">View on GitHub</a>
+            <a class="button button-secondary" href="https://github.com/kala-project/kala">View on GitHub</a>
           </div>
         </div>
         ${sceneCarousel('hero-scenes', heroScenes, 'hero-carousel')}
@@ -222,6 +222,8 @@ export function homePage(version) {
 export function downloadPage(catalog) {
   const release = catalog.stable ?? catalog.current
   const version = release.version
+  const portableCjs = Boolean(releaseAsset(release, 'kala-dashboard-with-runtime.cjs'))
+  if (portableCjs) requirePortableManagerAssets(release)
   const runUrl = requiredAssetUrl(release, 'run.sh')
   const command = `set -o pipefail; curl --proto '=https' --tlsv1.2 -fsSL ${runUrl} | bash`
   const dedicatedUrl = requiredAssetUrl(release, 'kala-dedicated-support.tar.gz')
@@ -241,14 +243,21 @@ export function downloadPage(catalog) {
         </div>
         <section class="download-mode-panel" id="download-panel-portable" role="tabpanel" data-download-panel="portable">
           <div class="download-platform-grid">
-            ${downloadPlatformCard('linux', 'Linux', 'x64', 'Portable', [{ label: 'x64', asset: 'kala-host-linux-x64' }], release, command)}
-            ${downloadPlatformCard('apple', 'macOS', 'macOS 13+', 'Portable', [{ label: 'Intel', asset: 'kala-host-darwin-x64' }, { label: 'Apple silicon', asset: 'kala-host-darwin-arm64' }], release, command)}
-            <article class="download-platform is-unavailable">
+            ${downloadPlatformCard('linux', 'Linux', portableCjs ? 'x64 · Node.js 22+' : 'x64', portableCjs ? 'Asset' : 'Portable', portableCjs ? [{ label: 'Host CJS', asset: 'kala-dashboard-with-runtime.cjs' }] : [{ label: 'x64', asset: 'kala-host-linux-x64' }], release, command)}
+            ${downloadPlatformCard('apple', 'macOS', portableCjs ? 'macOS 13+ · Intel / Apple silicon · Node.js 22+' : 'macOS 13+', portableCjs ? 'Asset' : 'Portable', portableCjs ? [{ label: 'Host CJS', asset: 'kala-dashboard-with-runtime.cjs' }] : [{ label: 'Intel', asset: 'kala-host-darwin-x64' }, { label: 'Apple silicon', asset: 'kala-host-darwin-arm64' }], release, command)}
+            ${portableCjs ? `<article class="download-platform">
+              ${machineIcon('windows')}
+              <h2>Windows</h2>
+              <p class="download-platform-requirement">x64 · Node.js 22+</p>
+              <p><a href="${escapeAttribute(requiredAssetUrl(release, 'kala-portable.ps1'))}">Download Portable PowerShell manager</a></p>
+              <p>Verify the download against SHA256SUMS before running it.</p>
+            </article>` : `<article class="download-platform is-unavailable">
               ${machineIcon('windows')}
               <h2>Windows</h2>
               <p class="download-not-supported">Not supported yet</p>
-            </article>
+            </article>`}
           </div>
+          ${portableCjs ? '<p>To use Copilot sessions, install the official Copilot CLI separately on this machine; Kala does not distribute it.</p>' : ''}
         </section>
         <section class="download-mode-panel deployment-download-panel deployment-download-panel-compact" id="download-panel-dedicated" role="tabpanel" data-download-panel="dedicated" hidden>
           <div>
@@ -257,7 +266,7 @@ export function downloadPage(catalog) {
             <p>Download the immutable Dedicated bundle, prepare the target configuration, then run the bundled systemd operator from an external administrative shell.</p>
             <div class="download-mode-actions">
               <a class="button button-primary" href="${escapeAttribute(dedicatedUrl)}">Download bundle</a>
-              <a class="button button-secondary" href="https://github.com/xingsy97/kala/blob/main/docs/operations/dedicated-operator-cli.md">Operator runbook</a>
+              <a class="button button-secondary" href="https://github.com/kala-project/kala/blob/main/docs/operations/dedicated-operator-cli.md">Operator runbook</a>
             </div>
           </div>
         </section>
@@ -268,7 +277,7 @@ export function downloadPage(catalog) {
             <p>Download the versioned Compose bundle, provide operator-owned configuration and secrets, then run the bundled lifecycle CLI.</p>
             <div class="download-mode-actions">
               <a class="button button-primary" href="${escapeAttribute(privateCloudUrl)}">Download bundle</a>
-              <a class="button button-secondary" href="https://github.com/xingsy97/kala/blob/main/docs/operations/private-cloud-release.md">Operator runbook</a>
+              <a class="button button-secondary" href="https://github.com/kala-project/kala/blob/main/docs/operations/private-cloud-release.md">Operator runbook</a>
             </div>
           </div>
         </section>
@@ -333,7 +342,7 @@ export function securityPage() {
           <section id="report">
             <h2>Report a vulnerability</h2>
             <p>Do not open a public issue containing an undisclosed vulnerability, credentials, private installation data, or customer content.</p>
-            <a class="button button-primary" href="https://github.com/xingsy97/kala/security/policy">Read the security policy</a>
+            <a class="button button-primary" href="https://github.com/kala-project/kala/security/policy">Read the security policy</a>
           </section>
         </div>
       </div>
@@ -344,6 +353,8 @@ export function securityPage() {
 export function releasesPage(catalog) {
   const current = catalog.current
   const version = current.version
+  const portableCjs = Boolean(releaseAsset(current, 'kala-dashboard-with-runtime.cjs'))
+  if (portableCjs) requirePortableManagerAssets(current)
   const improvements = current.notes.improvements
   const fixes = current.notes.fixes
   const knownIssues = current.notes.knownIssues
@@ -351,9 +362,11 @@ export function releasesPage(catalog) {
   const archive = catalog.releases.map((release) => release.tag === current.tag
     ? `<li class="is-current"><a href="/releases/" aria-current="page"><span>${escapeHtml(release.version)}</span><small>${releaseStatus(release)} · ${releaseDate(release)}</small></a></li>`
     : `<li><a href="${escapeAttribute(release.url)}"><span>${escapeHtml(release.version)}</span><small>${releaseStatus(release)} · ${releaseDate(release)}</small></a></li>`).join('')
-  const linuxUrl = requiredAssetUrl(current, 'kala-host-linux-x64')
-  const macIntelUrl = requiredAssetUrl(current, 'kala-host-darwin-x64')
-  const macArmUrl = requiredAssetUrl(current, 'kala-host-darwin-arm64')
+  const linuxUrl = portableCjs ? null : requiredAssetUrl(current, 'kala-host-linux-x64')
+  const macIntelUrl = portableCjs ? null : requiredAssetUrl(current, 'kala-host-darwin-x64')
+  const macArmUrl = portableCjs ? null : requiredAssetUrl(current, 'kala-host-darwin-arm64')
+  const portableManagerUrl = portableCjs ? requiredAssetUrl(current, 'kala-portable.sh') : null
+  const windowsManagerUrl = portableCjs ? requiredAssetUrl(current, 'kala-portable.ps1') : null
   const checksumsUrl = requiredAssetUrl(current, 'SHA256SUMS')
   return `
     <section class="release-docs">
@@ -374,11 +387,13 @@ export function releasesPage(catalog) {
           <details class="release-downloads">
             <summary><h2>Downloads for ${escapeHtml(version)}</h2></summary>
             <dl>
-              <div><dt>Linux</dt><dd><a href="${escapeAttribute(linuxUrl)}">x64</a></dd></div>
-              <div><dt>macOS</dt><dd><a href="${escapeAttribute(macIntelUrl)}">Intel</a><a href="${escapeAttribute(macArmUrl)}">Apple silicon</a></dd></div>
-              <div><dt>Windows</dt><dd>Not available</dd></div>
+              ${portableCjs ? `<div><dt>Portable Host</dt><dd><a href="${escapeAttribute(requiredAssetUrl(current, 'kala-dashboard-with-runtime.cjs'))}">CJS · Node.js 22+</a><a href="${escapeAttribute(portableManagerUrl)}">POSIX manager</a></dd></div>` : ''}
+              ${portableCjs ? '' : `<div><dt>Linux</dt><dd><a href="${escapeAttribute(linuxUrl)}">x64</a></dd></div>
+              <div><dt>macOS</dt><dd><a href="${escapeAttribute(macIntelUrl)}">Intel</a><a href="${escapeAttribute(macArmUrl)}">Apple silicon</a></dd></div>`}
+              <div><dt>Windows</dt><dd>${windowsManagerUrl ? `<a href="${escapeAttribute(windowsManagerUrl)}">Portable PowerShell manager</a>` : 'Not available'}</dd></div>
             </dl>
           </details>
+          ${portableCjs ? '<p>Copilot sessions require the official Copilot CLI, installed separately by the operator on the Host machine.</p>' : ''}
           <p class="release-update-guidance">Already installed? Use the verified stable bootstrapper to update the Portable installation.</p>
           <section id="highlights" class="release-highlights">
             <h2>Release highlights</h2>
@@ -394,7 +409,7 @@ export function releasesPage(catalog) {
           <hr><section id="evidence">
             <h2>Release evidence</h2>
             <p>The release publishes checksums, Sigstore evidence, a versioned asset manifest, and Portable acceptance records bound to the release revision.</p>
-            <p><a href="${escapeAttribute(checksumsUrl)}">Download SHA256SUMS</a> · <a href="https://github.com/xingsy97/kala/actions">Inspect public workflow evidence</a></p>
+            <p><a href="${escapeAttribute(checksumsUrl)}">Download SHA256SUMS</a> · <a href="https://github.com/kala-project/kala/actions">Inspect public workflow evidence</a></p>
           </section>
         </article>
         <aside class="release-on-this-page">
@@ -565,6 +580,12 @@ function requiredAssetUrl(release, name) {
   return asset.url
 }
 
+function requirePortableManagerAssets(release) {
+  for (const name of [
+    'kala-portable.sh', 'kala-portable.ps1',
+  ]) requiredAssetUrl(release, name)
+}
+
 function releaseDate(release) {
   return new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeZone: 'UTC' }).format(new Date(release.publishedAt))
 }
@@ -618,10 +639,10 @@ function footer() {
       <nav class="footer-links" aria-label="Footer navigation">
         <a href="/download/">Download</a>
         <a href="/releases/">Releases</a>
-        <a href="https://github.com/xingsy97/kala/tree/main/docs">Docs</a>
-        <a href="https://github.com/xingsy97/kala">GitHub</a>
+        <a href="https://github.com/kala-project/kala/tree/main/docs">Docs</a>
+        <a href="https://github.com/kala-project/kala">GitHub</a>
         <a href="/security/">Security</a>
-        <a href="https://github.com/xingsy97/kala/blob/main/LICENSE">License</a>
+        <a href="https://github.com/kala-project/kala/blob/main/LICENSE">License</a>
       </nav>
     </div>
   </footer>`

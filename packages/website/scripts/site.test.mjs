@@ -109,23 +109,28 @@ test('release catalog filters unpublished entries, parses public notes, and fall
     draft: false,
     prerelease: true,
     published_at: '2026-09-01T00:00:00Z',
-    html_url: 'https://github.com/xingsy97/kala/releases/tag/v3.5.7-rc.1',
+    html_url: 'https://github.com/kala-project/kala/releases/tag/v3.5.7-rc.1',
     body: '## Improvements\n\n- Public release note\n\n## Fixes\n\n- Public fix',
     assets: [],
   }
+  let catalogUrl
   const resolved = await resolveReleaseCatalog({
     configuredVersion: 'v3.5.7-rc.1',
     fallbackCatalog,
     releaseNotes: notes,
-    fetchImpl: async () => ({
-      ok: true,
-      json: async () => [
-        { ...published, draft: true, tag_name: 'v9.9.9', html_url: 'https://github.com/xingsy97/kala/releases/tag/v9.9.9' },
-        { ...published, published_at: null, tag_name: 'v8.8.8', html_url: 'https://github.com/xingsy97/kala/releases/tag/v8.8.8' },
-        published,
-      ],
-    }),
+    fetchImpl: async (url) => {
+      catalogUrl = url
+      return {
+        ok: true,
+        json: async () => [
+          { ...published, draft: true, tag_name: 'v9.9.9', html_url: 'https://github.com/kala-project/kala/releases/tag/v9.9.9' },
+          { ...published, published_at: null, tag_name: 'v8.8.8', html_url: 'https://github.com/kala-project/kala/releases/tag/v8.8.8' },
+          published,
+        ],
+      }
+    },
   })
+  assert.equal(catalogUrl, 'https://api.github.com/repos/kala-project/kala/releases?per_page=100')
   assert.equal(resolved.current.tag, 'v3.5.7-rc.1')
   assert.equal(resolved.current.notes.improvements[0], 'Public release note')
   assert.equal(resolved.current.notes.fixes[0], 'Public fix')
@@ -158,6 +163,38 @@ test('download guidance matches the supported stable matrix', () => {
   assert.doesNotMatch(page, /scanned preview artifacts/)
   assert.match(page, /releases\/download\/v0\.2\.0\/run\.sh/)
   assert.match(page, /releases\/download\/v0\.2\.0\/kala-host-linux-x64/)
+})
+
+test('published CJS releases offer the Portable manager and platform runtimes without inventing native Host binaries', () => {
+  const assetNames = [
+    'run.sh', 'SHA256SUMS', 'kala-dashboard-with-runtime.cjs', 'kala-portable.sh', 'kala-portable.ps1',
+    'kala-copilot-runtime-linux-x64', 'kala-copilot-runtime-darwin-x64',
+    'kala-copilot-runtime-darwin-arm64', 'kala-copilot-runtime-win32-x64',
+    'kala-copilot-runtime-node-linux-x64.node', 'kala-copilot-runtime-node-darwin-x64.node',
+    'kala-copilot-runtime-node-darwin-arm64.node', 'kala-copilot-runtime-node-win32-x64.node',
+    'kala-dedicated-support.tar.gz',
+    'kala-private-cloud-0.3.0-linux-x64.tar.gz',
+  ]
+  const release = {
+    ...catalog.stable,
+    tag: 'v0.3.0',
+    version: '0.3.0',
+    assets: assetNames.map((name) => ({
+      name,
+      url: `https://github.com/kala-project/kala/releases/download/v0.3.0/${name}`,
+    })),
+  }
+  const cjsCatalog = { ...catalog, stable: release, current: release, releases: [release] }
+  const download = downloadPage(cjsCatalog)
+  const notesPage = releasesPage(cjsCatalog)
+  assert.match(download, /releases\/download\/v0\.3\.0\/kala-dashboard-with-runtime\.cjs/)
+  assert.match(download, /releases\/download\/v0\.3\.0\/kala-copilot-runtime-darwin-arm64/)
+  assert.match(download, /releases\/download\/v0\.3\.0\/kala-portable\.ps1/)
+  assert.doesNotMatch(download, /kala-host-linux-x64|Not supported yet/)
+  assert.match(notesPage, /Portable Host[\s\S]*kala-portable\.sh/)
+  assert.match(notesPage, /Windows[\s\S]*kala-portable\.ps1/)
+  assert.throws(() => downloadPage({ ...cjsCatalog, stable: { ...release, assets: release.assets.filter((asset) => asset.name !== 'kala-copilot-runtime-linux-x64') } }), /missing required website asset kala-copilot-runtime-linux-x64/)
+  assert.throws(() => releasesPage({ ...cjsCatalog, current: { ...release, assets: release.assets.filter((asset) => asset.name !== 'kala-copilot-runtime-node-win32-x64.node') } }), /missing required website asset kala-copilot-runtime-node-win32-x64.node/)
 })
 
 test('deploy page compares operating models without repeating homepage cards', () => {
