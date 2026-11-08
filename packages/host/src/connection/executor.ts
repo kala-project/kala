@@ -966,6 +966,13 @@ export function createExecutorRegistry(
       if (!picked.ok) return arenaAction || fencedSkill ? preDispatchDenied(picked.reason)
         : { ok: false, content: picked.reason, failure: { code: 'workspace_offline', category: 'precondition', outcome: 'blocked', retryable: true, responsibility: 'workspace' } }
       const bind = picked.bind
+      if (trustedAttachmentTransfer && bind.announcement.attachmentTransferVersion !== 1) {
+        return {
+          ok: false,
+          content: 'Update the Executor for this workspace to save Session attachments.',
+          failure: { code: 'executor_update_required', category: 'precondition', outcome: 'blocked', retryable: true, responsibility: 'workspace' },
+        }
+      }
       if (arenaAction && bind.announcement.arenaKeeperVersion !== 1) {
         return preDispatchDenied('Named Arena Git requires an updated Executor with an independent PID-namespace keeper')
       }

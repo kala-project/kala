@@ -1072,11 +1072,14 @@ describe('Copilot runtime custom tools', () => {
   it('lets Copilot read oversized text attachments in bounded chunks without sending an omitted SDK blob', async () => {
     const messageAttachments = new MessageAttachmentStore(join(dir, 'message-attachments'))
     const savedChunks: Buffer[] = []
+    let executorAvailable = true
     const executorTools: ToolDispatcher = {
       async callTool() {
         throw new Error('internal transfers must not use the model tool dispatch entry')
       },
       async callHostAttachmentTransfer(_sessionId, effect) {
+        if (!executorAvailable) return { ok: false, content: 'Update the Executor for this workspace to save Session attachments.',
+          failure: { code: 'executor_update_required', category: 'precondition', outcome: 'blocked', retryable: true, responsibility: 'workspace' } }
         expect(effect.name).toBe('__workspace_attachment_transfer')
         const { action, offset, data, path, bytes, sha256 } = effect.input
         if (action === 'chunk') {
@@ -1168,6 +1171,15 @@ describe('Copilot runtime custom tools', () => {
     await runtime.reject(record, 'save-awaiting-approval')
     expect((await pendingSave).textResultForLlm).toContain('rejected')
     expect(savedChunks).toHaveLength(0)
+    executorAvailable = false
+    const failedSave = tool!.handler({
+      action: 'save', attachmentId: reference.source.attachmentId, path: '/workspace/snapshot.json',
+    }, { toolCallId: 'save-outdated-executor' })
+    await vi.waitFor(() => expect(store.get(record.sessionId)?.state.pendingCalls)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ callId: 'save-outdated-executor', status: 'awaiting_approval' })])))
+    await runtime.approve(record, 'save-outdated-executor')
+    expect((await failedSave).textResultForLlm).toContain('Update the Executor')
+    expect(store.get(record.sessionId)?.state.pendingCalls).toHaveLength(0)
     await runtime.close()
   })
 

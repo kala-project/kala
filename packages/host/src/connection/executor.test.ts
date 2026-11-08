@@ -129,7 +129,7 @@ describe('ExecutorRegistry', () => {
       assertSessionEffectOwner: async () => ({ ownerGeneration: '9' }),
     })
     const socket = makeFakeSocket('attachment-executor')
-    registry.attach(socket as never, announceOf('attachment-executor'))
+    registry.attach(socket as never, { ...announceOf('attachment-executor'), attachmentTransferVersion: 1 })
     const effect = callEffect('transfer-1', '__workspace_attachment_transfer', undefined, {
       action: 'begin', transferId: 'transfer-1', path: '/workspace/file.bin', bytes: 1,
       sha256: 'a'.repeat(64), ownerGeneration: '9',
@@ -143,6 +143,20 @@ describe('ExecutorRegistry', () => {
     })
     socket.emitted[0]!.ack!({ callId: effect.callId, ok: true, content: '{"ok":true}' })
     await expect(pending).resolves.toMatchObject({ ok: true })
+  })
+
+  it('rejects attachment import before dispatch when the workspace Executor is outdated', async () => {
+    const registry = createExecutorRegistry(fakeIo() as never, makeResolver({ x: 'ws-default' }))
+    const socket = makeFakeSocket('old-attachment-executor')
+    registry.attach(socket as never, announceOf('old-attachment-executor'))
+    const result = await registry.callHostAttachmentTransfer('x',
+      callEffect('transfer-old', '__workspace_attachment_transfer', undefined, { action: 'begin' }))
+    expect(result).toMatchObject({
+      ok: false,
+      failure: { code: 'executor_update_required', outcome: 'blocked' },
+      content: expect.stringContaining('Update the Executor'),
+    })
+    expect(socket.emitted).toHaveLength(0)
   })
 
   it('does not send a named Arena effect to an old Executor without keeper enforcement', async () => {

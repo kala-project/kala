@@ -23,6 +23,21 @@ async function setup() {
 }
 
 describe('host attachment transfer', () => {
+  it('creates missing workspace parents only for begin and publishes the original bytes', async () => {
+    const { root, run } = await setup()
+    const data = Buffer.from([0, 1, 255])
+    const req = { transferId: 'nested', path: join(root, 'project', '.kala-context', 'snapshot.json'),
+      bytes: data.length, sha256: createHash('sha256').update(data).digest('hex') }
+    expect(await run({ ...req, action: 'status' })).toMatchObject({ ok: false })
+    await expect(lstat(join(root, 'project'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await run({ ...req, action: 'begin' })).toMatchObject({ ok: true, state: 'active' })
+    expect((await lstat(join(root, 'project', '.kala-context'))).mode & 0o777).toBe(0o700)
+    expect(await run({ ...req, action: 'chunk', offset: 0, data: data.toString('base64') }))
+      .toMatchObject({ ok: true, nextOffset: data.length })
+    expect(await run({ ...req, action: 'finish' })).toMatchObject({ ok: true, state: 'completed' })
+    expect(await readFile(req.path)).toEqual(data)
+  })
+
   it('imports binary data, supports duplicate chunks and repeated finish/status without overwrite', async () => {
     const { root, run } = await setup()
     const data = Buffer.alloc(300_000)

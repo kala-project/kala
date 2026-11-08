@@ -9,6 +9,7 @@ import { isReferencedFileContent, isTextAttachment } from '../message-attachment
 const MAX_EXCERPT_CHARS = 12_000
 const TRANSFER_CHUNK_BYTES = 128 * 1024
 type AttachmentToolDeps = Pick<HostLoopDeps, 'store' | 'messageAttachments' | 'tools' | 'assertSessionEffectOwner'>
+class AttachmentPreDispatchError extends Error {}
 
 export async function runSessionAttachmentTool(
   deps: AttachmentToolDeps, sessionId: string, effect: CallToolEffect,
@@ -51,7 +52,12 @@ export async function runSessionAttachmentTool(
       || (effect.input.overwrite !== undefined && typeof effect.input.overwrite !== 'boolean')) {
       return { ok: false, content: 'An absolute workspace path and optional boolean overwrite are required' }
     }
-    return await saveSessionAttachment(deps, sessionId, effect.callId, path, file, effect.input.overwrite === true)
+    try {
+      return await saveSessionAttachment(deps, sessionId, effect.callId, path, file, effect.input.overwrite === true)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return { ok: false, content: `Attachment save failed: ${message}. Check the destination before retrying; the transfer outcome may be incomplete.` }
+    }
   }
   if (!isTextAttachment(file.mediaType, file.name)) {
     return { ok: false, content: 'This attachment is not text; save its original bytes to the Executor workspace instead' }
@@ -108,7 +114,10 @@ async function saveSessionAttachment(
       input: { action, transferId, path, bytes: file.bytes, sha256: file.sha256, overwrite,
         ...(ownerGeneration ? { ownerGeneration } : {}), ...extra },
     })
-    if (!response.ok) throw new Error(response.content)
+    if (!response.ok) {
+      if (response.failure?.outcome === 'blocked') throw new AttachmentPreDispatchError(response.content)
+      throw new Error(response.content)
+    }
     const result: unknown = JSON.parse(response.content)
     if (!result || typeof result !== 'object' || !('ok' in result) || result.ok !== true) {
       throw new Error('Executor rejected attachment transfer')
@@ -135,6 +144,7 @@ async function saveSessionAttachment(
     }
     return receipt()
   } catch (error) {
+    if (error instanceof AttachmentPreDispatchError) throw error
     try {
       if (receiptMatches(await transfer('status'))) return receipt()
     } catch (statusError) { console.warn('[session-attachment] transfer status unavailable', statusError) }

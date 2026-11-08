@@ -906,6 +906,8 @@ export type ExecutorMcpConfigStatusAck = {
 export type ExecutorAnnounce = {
   skillFileEffectVersion?: 1 | 2
   memoryEffectVersion?: 1 | 2
+  /** Host-only Session attachment import capability. */
+  attachmentTransferVersion?: 1
   /** Named Arena Git actions recheck an independent Linux keeper before admission. */
   arenaKeeperVersion?: 1
   computerUsePolicyVersion?: 1

@@ -86,7 +86,7 @@ async function optionalStat(path: string) {
   }
 }
 
-async function targetPath(input: string, sandbox: Sandbox): Promise<{ root: string; path: string }> {
+async function targetPath(input: string, sandbox: Sandbox, createParents = false): Promise<{ root: string; path: string }> {
   const root = await realpath(sandbox.roots[0] ?? process.cwd())
   const absolute = isAbsolute(input) ? resolve(input) : resolve(root, input)
   if (!isPathInsideRoot(absolute, root) || absolute === root
@@ -98,6 +98,12 @@ async function targetPath(input: string, sandbox: Sandbox): Promise<{ root: stri
   let cursor = root
   for (const part of parts.slice(0, -1)) {
     cursor = join(cursor, part)
+    if (createParents && !await optionalStat(cursor)) {
+      try { await mkdir(cursor, { mode: 0o700 }) }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      }
+    }
     const info = await lstat(cursor)
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('target parent must be a real directory')
   }
@@ -182,7 +188,7 @@ export function createAttachmentTransferTool(): Tool {
         const generation = ctx.ownerGeneration ?? ''
         return JSON.stringify(await serialized(async (): Promise<Result> => {
           if (ctx.signal.aborted) throw new Error('transfer canceled')
-          const { root, path } = await targetPath(req.path, ctx.sandbox)
+          const { root, path } = await targetPath(req.path, ctx.sandbox, req.action === 'begin')
           const key = `${root}\0${req.transferId}`
           const existing = active.get(key) ?? finished.get(key)
           if (existing && (existing.sessionId !== ctx.sessionId || existing.generation !== generation

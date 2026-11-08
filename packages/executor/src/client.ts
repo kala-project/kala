@@ -313,6 +313,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
   const createAnnouncement = (keeperHealthy: boolean): AnnounceWithMcp => ({
     ...(receiptStore && keeperHealthy && tools.get('skill_file') === skillFileTool ? { skillFileEffectVersion: 2 as const } : {}),
     ...(receiptStore && keeperHealthy && tools.get('memory') === memoryTool ? { memoryEffectVersion: 2 as const } : {}),
+    attachmentTransferVersion: 1,
     ...(keeperHealthy ? { arenaKeeperVersion: 1 as const } : {}),
     appDebugVersion: 1,
     ...(options.tools === undefined && tools.has('computer_use') ? { computerUsePolicyVersion: 1 as const, computerUseFeaturePolicyVersion: 1 as const } : {}),
