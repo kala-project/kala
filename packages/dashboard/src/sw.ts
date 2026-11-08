@@ -34,10 +34,11 @@ const RUNTIME_ICON_CACHE = 'ak-icons-v1'
 // vite-plugin-pwa at build time with the actual file list.
 cleanupOutdatedCaches()
 
-// Host RPC and same-origin identity pages must never use the cached SPA shell.
+// Host RPC and external consoles must never use the cached SPA shell.
 const NETWORK_NAVIGATION_DENYLIST: RegExp[] = [
   /^\/socket\.io(\/|$)/,
   /^\/admin\/socket\.io(\/|$)/,
+  /^\/silo(\/|$)/,
   /^\/auth(\/|$)/,
   /^\/models(\/|$)/,
   /^\/settings(\/|$)/,
