@@ -571,6 +571,35 @@ describe('wire protocol', () => {
     } finally { routed.close() }
   })
 
+  it('probes a Workspace from its Session route when the control connection has no Session subscription', async () => {
+    const sessionId = 'health-route-session'
+    const workspaceId = 'health-route-workspace'
+    await server.store.create({ sessionId, workspaceId, config })
+    const control: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(`${url}/dashboard`, {
+      transports: ['websocket'], reconnection: false,
+      auth: { clientId: 'health-route-control', role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+    })
+    const routed: ClientSocket<DashboardServerToClientEvents, DashboardClientToServerEvents> = clientIO(`${url}/dashboard`, {
+      transports: ['websocket'], reconnection: false,
+      auth: { sessionId, role: 'dashboard', clientVersion: PROTOCOL_VERSION },
+    })
+    try {
+      await Promise.all([control, routed].map((socket) => new Promise<void>((resolve, reject) => {
+        if (socket.connected) { resolve(); return }
+        socket.once('connect', resolve)
+        socket.once('connect_error', reject)
+      })))
+      const subscribed = await control.timeout(2_000).emitWithAck('client:subscribe_channels', {
+        requestId: 'health-workspace', generation: 1, channels: [`workspace:${workspaceId}`],
+      })
+      expect(subscribed.accepted).toContain(`workspace:${workspaceId}`)
+      expect(await control.timeout(2_000).emitWithAck('client:executor_ping', workspaceId))
+        .toEqual({ error: 'workspace has no subscribed session' })
+      expect(await routed.timeout(2_000).emitWithAck('client:executor_ping', workspaceId))
+        .toEqual({ error: 'workspace offline' })
+    } finally { control.close(); routed.close() }
+  })
+
   it('prepares owner only for an existing Session in the authenticated control connection organization', async () => {
     const localSessionsDir = mkdtempSync(join(tmpdir(), 'kala-owner-preparation-'))
     const acquired: string[] = []

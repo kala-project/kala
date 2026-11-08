@@ -2334,7 +2334,7 @@ export function App(): JSX.Element {
 
   return (
     <PwaLifecycleHost>
-    <ConnectionStatusProvider socket={connectionSocket} status={connectionStatus} sessionSyncStatus={sessionSyncStatus} transport={connectionSocket?.io.engine?.transport.name} cursor={session.state?.cursor ?? 0} workspaceId={currentSession?.workspaceId} executorConnected={sessionWorkspaceOnline} sessionSelected={hasSelectedSession} onResync={resyncSession}>
+    <ConnectionStatusProvider socket={connectionSocket} executorSocket={transportSocket} status={connectionStatus} sessionSyncStatus={sessionSyncStatus} transport={connectionSocket?.io.engine?.transport.name} cursor={session.state?.cursor ?? 0} workspaceId={currentSession?.workspaceId} executorConnected={sessionWorkspaceOnline} sessionSelected={hasSelectedSession} onResync={resyncSession}>
     <div className="ak-app-shell ak-workspace-canvas flex flex-row text-foreground">
       {wideLayout && (section !== 'agent' || !explorerOpen) ? (
         <DesktopSessionRail
@@ -3940,7 +3940,7 @@ export function connectionStatusForTransport(socket: { connected: boolean } | nu
   return sessionStatus === 'error' ? 'error' : 'connecting'
 }
 
-type ConnectionStatusProps = { socket: DashboardSocket | null; status: string; sessionSyncStatus?: string; transport?: string; cursor: number; workspaceId?: string; executorConnected: boolean; sessionSelected?: boolean; onResync(): void; compact?: boolean; appearance?: 'default' | 'brand'; triggerId?: string }
+type ConnectionStatusProps = { socket: DashboardSocket | null; executorSocket?: DashboardSocket | null; status: string; sessionSyncStatus?: string; transport?: string; cursor: number; workspaceId?: string; executorConnected: boolean; sessionSelected?: boolean; onResync(): void; compact?: boolean; appearance?: 'default' | 'brand'; triggerId?: string }
 type ConnectionStatusEntryOptions = Pick<ConnectionStatusProps, 'compact' | 'appearance' | 'triggerId'>
 type ConnectionStatusRenderer = (options: ConnectionStatusEntryOptions) => JSX.Element
 
@@ -3956,7 +3956,7 @@ export function ConnectionStatusEntry(options: ConnectionStatusEntryOptions): JS
   return sharedRenderer(options)
 }
 
-export function ConnectionStatusProvider({ socket, status, sessionSyncStatus, transport, cursor, workspaceId, executorConnected, sessionSelected = true, onResync, children, enabled = true }: ConnectionStatusProps & { children: ReactNode; enabled?: boolean }): JSX.Element {
+export function ConnectionStatusProvider({ socket, executorSocket, status, sessionSyncStatus, transport, cursor, workspaceId, executorConnected, sessionSelected = true, onResync, children, enabled = true }: ConnectionStatusProps & { children: ReactNode; enabled?: boolean }): JSX.Element {
   const { t } = useTranslation()
   const [openTrigger, setOpenTrigger] = useState<string | null>(null)
   const [hostRtt, setHostRtt] = useState<number | null>(null)
@@ -3968,6 +3968,8 @@ export function ConnectionStatusProvider({ socket, status, sessionSyncStatus, tr
   const [checking, setChecking] = useState(false)
   const [copied, setCopied] = useState(false)
   const executorRequired = Boolean(workspaceId)
+  const executorProbeSocket = executorSocket === undefined ? socket : executorSocket
+  const executorRouteReady = Boolean(executorProbeSocket?.connected && (executorProbeSocket === socket || sessionSyncStatus === 'ready'))
   const probeGeneration = useRef(0)
 
   const appendSample = useCallback((sample: ConnectionHealthSample) => {
@@ -3989,14 +3991,14 @@ export function ConnectionStatusProvider({ socket, status, sessionSyncStatus, tr
       return
     }
     setChecking(true)
-    let pending = workspaceId && executorConnected ? 2 : 1
+    let pending = workspaceId && executorConnected && executorRouteReady ? 2 : 1
     const sample: ConnectionHealthSample = { at: Date.now(), hostRttMs: null, executorRttMs: null, hostOk: false, executorOk: false, executorRequired }
     const finish = (): void => {
       pending -= 1
       if (pending === 0) {
         appendSample(sample)
         setProbeFailureStreak((previous) => {
-          const failed = !sample.hostOk || (sample.executorRequired && executorConnected && !sample.executorOk)
+          const failed = !sample.hostOk || (sample.executorRequired && executorConnected && executorRouteReady && !sample.executorOk)
           return failed ? previous + 1 : 0
         })
         setChecking(false)
@@ -4012,8 +4014,8 @@ export function ConnectionStatusProvider({ socket, status, sessionSyncStatus, tr
       setHostError(err ? t('connectionHealth.timedOut') : null)
       finish()
     })
-    if (workspaceId && executorConnected) {
-      socket.timeout(3500).emit('client:executor_ping', workspaceId, (err: unknown, result?: { rttMs?: number; error?: string }) => {
+    if (workspaceId && executorConnected && executorRouteReady && executorProbeSocket) {
+      executorProbeSocket.timeout(3500).emit('client:executor_ping', workspaceId, (err: unknown, result?: { rttMs?: number; error?: string }) => {
         if (generation !== probeGeneration.current) return
         if (err || result?.error) {
           sample.executorRttMs = null
@@ -4031,9 +4033,9 @@ export function ConnectionStatusProvider({ socket, status, sessionSyncStatus, tr
     } else {
       sample.executorOk = false
       setExecutorRtt(null)
-      setExecutorError(executorRequired ? t('connectionHealth.offline') : null)
+      setExecutorError(executorRequired && !executorConnected ? t('connectionHealth.offline') : null)
     }
-  }, [appendSample, executorConnected, executorRequired, socket, t, workspaceId])
+  }, [appendSample, executorConnected, executorProbeSocket, executorRequired, executorRouteReady, socket, t, workspaceId])
 
   useEffect(() => {
     setHostRtt(null)
@@ -4121,7 +4123,7 @@ export function ConnectionStatusProvider({ socket, status, sessionSyncStatus, tr
               serviceLabel={t('connectionHealth.service')}
               executorLabel={t('connectionHealth.executor')}
               hostSegment={{ label: t('connectionHealth.deviceHost'), state: status === 'ready' ? hostError ?? t('common.connected') : label, tone: hostTone, latency: hostRtt, measuring: checking && hostRtt === null && !hostError }}
-              executorSegment={executorRequired ? { label: t('connectionHealth.hostExecutor'), state: !executorConnected ? t('connectionHealth.offline') : executorError ?? t('common.connected'), tone: executorTone, latency: executorRtt, measuring: checking && executorConnected && executorRtt === null && !executorError } : undefined}
+              executorSegment={executorRequired ? { label: t('connectionHealth.hostExecutor'), state: !executorConnected ? t('connectionHealth.offline') : !executorRouteReady ? t('connectionHealth.notMeasured') : executorError ?? t('common.connected'), tone: executorTone, latency: executorRtt, measuring: checking && executorConnected && executorRouteReady && executorRtt === null && !executorError } : undefined}
               measuringLabel={t('connectionHealth.measuring')}
             />
             {sessionSelected ? <HealthRow label={t('connectionHealth.sessionSync')} state={syncStatus === 'ready' ? t('connectionHealth.synchronized') : hostStatusLabel(syncStatus, t)} tone={syncStatus === 'ready' ? 'healthy' : syncStatus === 'disconnected' || syncStatus === 'error' ? 'failed' : 'pending'} measuringLabel={t('connectionHealth.measuring')} /> : null}

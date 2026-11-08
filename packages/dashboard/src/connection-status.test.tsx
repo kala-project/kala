@@ -182,6 +182,40 @@ describe('ConnectionStatus', () => {
     expect(connectionHealthSocket(control, nextSession, true)).toBe(nextSession)
   })
 
+  it('probes Executor through the Session route even when the control connection cannot access its Workspace', async () => {
+    const control = socketWithRtt(8)
+    const session = socketWithRtt(8, 24)
+    render(<ConnectionStatus socket={control as never} executorSocket={session as never}
+      status="ready" sessionSyncStatus="ready" cursor={1} workspaceId="w1" executorConnected onResync={() => {}} />)
+
+    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('32 ms'))
+    expect(control.timeout.mock.calls.map(([timeout]) => timeout)).toEqual([3000])
+    expect(session.timeout.mock.calls.map(([timeout]) => timeout)).toEqual([3500])
+    fireEvent.click(screen.getByTestId('connection-status'))
+    fireEvent.click(screen.getByRole('button', { name: 'Measure again' }))
+    await waitFor(() => expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('ready'))
+    expect(control.timeout.mock.calls.map(([timeout]) => timeout)).toEqual([3000, 3000])
+    expect(session.timeout.mock.calls.map(([timeout]) => timeout)).toEqual([3500, 3500])
+  })
+
+  it('waits for a new Session route instead of reporting an Executor failure, then probes it', async () => {
+    const control = socketWithRtt(8)
+    const route = socketWithRtt(8, 24)
+    const view = render(<ConnectionStatus socket={control as never} executorSocket={null}
+      status="ready" sessionSyncStatus="connecting" cursor={1} workspaceId="w1" executorConnected onResync={() => {}} />)
+    fireEvent.click(screen.getByTestId('connection-status'))
+    fireEvent.click(screen.getByRole('button', { name: 'Measure again' }))
+    expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('connecting')
+    expect(screen.queryByText('Connection issue')).toBeNull()
+    expect(control.timeout.mock.calls.every(([timeout]) => timeout === 3000)).toBe(true)
+
+    view.rerender(<ConnectionStatus socket={control as never} executorSocket={route as never}
+      status="ready" sessionSyncStatus="ready" cursor={2} workspaceId="w1" executorConnected onResync={() => {}} />)
+    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('32 ms'))
+    expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('ready')
+    expect(route.timeout.mock.calls.map(([timeout]) => timeout)).toEqual([3500])
+  })
+
   it('presents the complete Device to Service to Executor RTT as the headline', async () => {
     const socket = socketWithRtt()
     render(<ConnectionStatus socket={socket as never} status="ready" transport="websocket" cursor={9} workspaceId="w1" executorConnected onResync={() => {}} />)
