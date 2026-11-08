@@ -371,15 +371,18 @@ describe('Copilot runtime custom tools', () => {
   it('uses an admitted POSIX mount and dedicated SDK client without the whole-file string transport', async () => {
     store = new SessionStore(join(dir, 'sessions'), { authority: new SqliteSessionAuthority(join(dir, 'state.sqlite')) })
     await store.initialize()
-    vi.spyOn(store, 'initializeEmptyCopilotNativePosixSession').mockResolvedValue()
+    const admit = vi.spyOn(store, 'initializeEmptyCopilotNativePosixSession').mockResolvedValue()
     vi.spyOn(store, 'copilotNativePosixSessionFs').mockReturnValue({
       stat: async () => ({ kind: 'directory', bytes: 0, mode: 0o700, modifiedAt: 0, createdAt: 0 }),
       readdir: async () => [], create: async () => {}, mkdir: async () => {}, read: async () => Buffer.alloc(0),
       write: async () => {}, truncate: async () => {}, remove: async () => {}, rename: async () => {},
       chmod: async () => {}, touch: async () => {}, sync: async () => {},
     })
-    nativeMount.mount.mockResolvedValue({ baseDirectory: join(dir, 'mounted-home'), close: nativeMount.close,
-      assertReady: nativeMount.assertReady })
+    nativeMount.mount.mockImplementation(async () => {
+      expect(admit).toHaveBeenCalledWith('native-posix-sdk')
+      return { baseDirectory: join(dir, 'mounted-home'), close: nativeMount.close,
+        assertReady: nativeMount.assertReady }
+    })
     const runtime = new CopilotAgentRuntime({
       store, tools: { async callTool() { return { ok: true, content: 'unused' } }, cancelPending() {} },
       broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError() {} },
@@ -388,6 +391,9 @@ describe('Copilot runtime custom tools', () => {
     sdk.resumeSucceeds = true
     sdk.responses.push({ type: 'assistant.message', id: 'mounted-one', data: { content: 'mounted answer' } })
     await runtime.start()
+    await runtime.setModel(record, 'gpt-new')
+    expect(sdk.setModel).toHaveBeenCalledWith('gpt-new')
+    expect(admit).toHaveBeenCalledOnce()
     await runtime.send(record, { text: 'one', operationId: 'native-posix-one' })
     await vi.waitFor(() => expect(record.state.status).toBe('done'))
     expect(sdk.clientOptions).toHaveLength(2)

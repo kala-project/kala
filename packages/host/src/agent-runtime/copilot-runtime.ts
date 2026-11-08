@@ -242,9 +242,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
     // fence every event from the SDK Session configured with this prompt.
     const turnSystemPrompt = record.config.systemPrompt ?? 'You are an AI coding agent.'
     const canCreateNativeSession = !record.state.messages.some((message) => message.role !== 'system')
-    if (this.options.nativePosixRoot && canCreateNativeSession) {
-      await this.context.store.initializeEmptyCopilotNativePosixSession(record.sessionId)
-    }
+    await this.admitEmptyNativeSession(record)
     const generation = (this.turnGenerations.get(record.sessionId) ?? 0) + 1
     const requestId = randomUUID()
     const timing = {
@@ -355,6 +353,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
   }
 
   async setModel(record: SessionRecord, model: string): Promise<void> {
+    await this.admitEmptyNativeSession(record)
     const session = await this.ensureSession(record)
     await session.setModel(model)
   }
@@ -388,6 +387,7 @@ export class CopilotAgentRuntime implements AgentRuntime {
         scope: active.scope,
         ...(active.startSnapshot ? { startSnapshot: active.startSnapshot } : {}),
       })
+      await this.admitEmptyNativeSession(record)
       await this.projectCompactionStart(record, active)
       const session = await this.ensureSession(record, record.preferences?.selectedModel)
       const result = await session.rpc.history.compact({ trigger: 'manual' })
@@ -524,6 +524,13 @@ export class CopilotAgentRuntime implements AgentRuntime {
       } catch (error) { failures.push(error) }
     }
     if (failures.length) throw new AggregateError(failures, 'Failed to close native Copilot mounts')
+  }
+
+  private async admitEmptyNativeSession(record: SessionRecord): Promise<void> {
+    if (this.options.nativePosixRoot && !this.nativeClients.has(record.sessionId)
+      && !record.state.messages.some((message) => message.role !== 'system')) {
+      await this.context.store.initializeEmptyCopilotNativePosixSession(record.sessionId)
+    }
   }
 
   private async ensureSession(
