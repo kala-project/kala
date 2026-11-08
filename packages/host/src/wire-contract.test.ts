@@ -106,6 +106,22 @@ describe('wire contract — round-trip parses', () => {
     expect(out.workspaceId).toBe('ws-1')
   })
 
+  it('preserves the advertised attachment transfer capability through Executor and Dashboard wire parsing', () => {
+    const announcement = {
+      executorId: 'ex-1',
+      workspaceId: 'ws-1',
+      workspaceName: 'Devbox',
+      attachmentTransferVersion: 1,
+      tools: [],
+      runtime: 'node',
+      runtimeVersion: '22',
+    }
+    expect(schema.ExecutorAnnounceSchema.parse(announcement)).toHaveProperty('attachmentTransferVersion', 1)
+    expect(schema.AttachedExecutorSchema.parse({ ...announcement, attachedAt: '2026-11-09T00:00:00Z' }))
+      .toHaveProperty('attachmentTransferVersion', 1)
+    expect(schema.ExecutorAnnounceSchema.safeParse({ ...announcement, attachmentTransferVersion: 2 }).success).toBe(false)
+  })
+
   it('parses ClientCreateSession with and without cwd', () => {
     expect(schema.ClientCreateSessionSchema.parse({
       sessionId: 's', workspaceId: 'ws',

@@ -5,6 +5,17 @@ Versioning while pre-1.0 and uses one product version across release artifacts.
 
 ## [Unreleased]
 
+## [0.4.2]
+
+### Fixed
+
+- Runtime preserves the attachment transfer capability sent by current Devbox
+  Executors instead of incorrectly requiring an Executor upgrade.
+- Failed tools report actionable diagnostics without redundant generic text;
+  attachment transfers rejected before dispatch no longer imply an uncertain write.
+- The Windows Portable download instructions verify the manager signature and
+  checksum, then install and start the Host.
+
 ### Added for v0.3.0
 
 - Dedicated fenced Runtime ownership, durable Session and Executor recovery,

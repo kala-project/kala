@@ -1,7 +1,7 @@
 {
   "license": "MIT",
   "name": "@agent-kernel/eval-benchmark-custom-task-pack",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Public custom task-pack adapter for the Agent Evaluation Platform.",
   "repository": { "type": "git", "url": "git+https://github.com/xingsy97/kala.git" }, "homepage": "https://github.com/xingsy97/kala#readme", "bugs": { "url": "https://github.com/xingsy97/kala/issues" },
   "type": "module",

@@ -1,4 +1,18 @@
 {
+  "v0.4.2": {
+    "previousTag": "v0.4.1",
+    "improvements": [],
+    "fixes": [
+      "Dedicated and Private Cloud Runtime now retain the attachment transfer capability advertised by current Devbox Executors, so Session attachment saves no longer incorrectly request an Executor upgrade.",
+      "Failed tool calls show their actionable diagnostic without generic duplicate explanations; attachment saves rejected before dispatch no longer claim that a transfer may have occurred.",
+      "The Windows Portable download command verifies the release signature and manager checksum before installing and starting Kala."
+    ],
+    "knownIssues": [
+      "External Workspace Executor upgrades and authenticated production console interactions require separate device-level acceptance.",
+      "The Windows Portable command requires separately installed Node.js 22+ and Cosign from trusted sources."
+    ],
+    "desktopViaDashboard": true
+  },
   "v0.4.1": {
     "previousTag": "v0.4.0",
     "improvements": [

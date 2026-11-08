@@ -57,14 +57,18 @@ describe('model-facing tool failure feedback', () => {
     expect(cancelled).toContain('Do not restart automatically')
   })
 
-  it('preserves unknown diagnostics without inventing a cause or treating embedded codes as status', () => {
+  it('shows actionable unknown diagnostics directly without generic failure guidance', () => {
     for (const input of [{ content: 'custom diagnostic quoting EPARTIAL: as data' }, { content: '', failure: { code: 'toString', category: 'execution', outcome: 'failed', retryable: false, responsibility: 'system' } } as const]) {
       const result = formatToolFailureForAgent(input)
-      expect(result).toContain('If the cause remains unclear, report the blocker')
+      expect(result).not.toContain('What happened:')
+      expect(result).not.toContain('Next step:')
+      expect(result).not.toContain('Details:')
       expect(result).not.toContain('The batch was not fully successful')
       expect(result).not.toContain('undefined')
-      if (input.content) expect(result.endsWith(input.content)).toBe(true)
-      else expect(result).toContain('No further diagnostic details were returned.')
+      if (input.content) expect(result).toBe(input.content)
+      else expect(result).toBe('Tool failed (toString); no diagnostic details were returned.')
     }
+    expect(formatToolFailureForAgent({ content: 'Update the Executor for this workspace to save Session attachments.' }))
+      .toBe('Update the Executor for this workspace to save Session attachments.')
   })
 })

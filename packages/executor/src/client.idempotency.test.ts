@@ -18,6 +18,7 @@ import { lstat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { schema } from '@agent-kernel/shared'
 import { createExecutorSharedExecution, startExecutor } from './client.js'
 import { ExecutionReceiptStore, executionRequestDigest } from './execution-receipts.js'
 import type { Tool } from './tools/registry.js'
@@ -80,6 +81,22 @@ function makeMockSocket() {
 }
 
 describe('executor idempotency', () => {
+  it('preserves every field of the emitted announcement through the Host wire schema', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kala-announcement-wire-'))
+    const socket = makeMockSocket()
+    const handle = startExecutor({
+      host: 'http://localhost', workspaceId: 'ws-announcement', executorId: 'executor-announcement',
+      sandboxRoots: [root], tools: [], receiptStorePath: false, ioFactory: (() => socket) as never,
+    })
+    try {
+      socket.__trigger('connect')
+      await vi.waitFor(() => expect(socket.__emitted.some((entry) => entry.event === 'executor:announce')).toBe(true))
+      const announcement = socket.__emitted.find((entry) => entry.event === 'executor:announce')!.args[0]
+      expect(schema.ExecutorAnnounceSchema.parse(announcement)).toEqual(announcement)
+      expect(announcement).toMatchObject({ attachmentTransferVersion: 1, appDebugVersion: 1 })
+    } finally { await handle.close(); await rm(root, { recursive: true, force: true }) }
+  })
+
   it('requires both attachment generations to be absent in Portable mode', async () => {
     const root = await mkdtemp(join(process.cwd(), '.attachment-generation-test-'))
     const socket = makeMockSocket()
@@ -174,6 +191,8 @@ describe('executor idempotency', () => {
       socket.__trigger('connect')
       await vi.waitFor(() => expect(socket.__emitted.find((entry) => entry.event === 'executor:announce')?.args[0])
         .toMatchObject({ skillFileEffectVersion: 2, memoryEffectVersion: 2, arenaKeeperVersion: 1 }))
+      const announcement = socket.__emitted.find((entry) => entry.event === 'executor:announce')!.args[0]
+      expect(schema.ExecutorAnnounceSchema.parse(announcement)).toEqual(announcement)
     } finally { await handle.close(); await keeper.stop(); await rm(root, { recursive: true, force: true }) }
   })
 

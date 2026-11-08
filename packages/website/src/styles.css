@@ -1223,6 +1223,12 @@ a {
   color: var(--blue-strong);
 }
 
+.download-platform-note {
+  margin: 0.8rem 0 0;
+  color: var(--ink-faint);
+  font-size: 0.75rem;
+}
+
 .download-platform-requirement {
   margin: 0;
   color: var(--ink-faint);
@@ -1279,8 +1285,7 @@ a {
   grid-template-columns: 1fr;
 }
 
-.deployment-download-panel h2,
-.download-evidence-section h2 {
+.deployment-download-panel h2 {
   margin: 0;
   color: var(--navy);
   font-size: clamp(2rem, 3.7vw, 3rem);
@@ -1301,37 +1306,6 @@ a {
 
 .deployment-download-panel > .command-block {
   margin-top: 0;
-}
-
-.download-evidence-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 1rem;
-}
-
-.download-evidence-grid article {
-  padding: 1.5rem;
-  border-top: 2px solid var(--blue);
-  background: linear-gradient(180deg, rgba(22, 118, 232, 0.055), transparent);
-}
-
-.download-evidence-grid span {
-  color: var(--blue-strong);
-  font-family: "JetBrains Mono Variable", monospace;
-  font-size: 0.72rem;
-  font-weight: 700;
-}
-
-.download-evidence-grid h3 {
-  margin: 0.6rem 0 0;
-  color: var(--navy);
-  font-size: 1.05rem;
-}
-
-.download-evidence-grid p {
-  margin: 0.5rem 0 0;
-  color: var(--ink-soft);
-  font-size: 0.9rem;
 }
 
 .download-other-modes {
@@ -2189,8 +2163,7 @@ a {
     width: 100%;
   }
 
-  .download-platform-grid,
-  .download-evidence-grid {
+  .download-platform-grid {
     grid-template-columns: 1fr;
   }
 

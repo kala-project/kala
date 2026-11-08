@@ -270,17 +270,21 @@ async function verifyPages(browserInstance) {
       overflow: document.documentElement.scrollWidth - window.innerWidth,
       downloadCards: document.querySelectorAll('.download-platform').length,
       downloadCommands: document.querySelectorAll('.download-platform .command-block').length,
+      windowsVerifiedInstall: ['Invoke-WebRequest', 'cosign verify-blob', 'Get-FileHash', 'kala-portable.ps1 install', 'kala-portable.ps1 start']
+        .every((step) => document.querySelector('#windows-portable-command')?.textContent?.includes(step)),
       downloadModes: document.querySelectorAll('[data-download-mode]').length,
       releaseHighlights: document.querySelectorAll('.release-highlights li').length,
       releaseTocLinks: document.querySelectorAll('.release-on-this-page a').length,
       releaseArchiveLinks: document.querySelectorAll('.release-archive nav a').length,
+      releaseChanges: document.querySelectorAll('#changes a[href*="/compare/"], #previous-changes a[href*="/compare/"]').length,
+      priorRelease: Boolean(document.querySelector('#previous-release')),
       releaseOnPageVisible: document.querySelector('.release-on-this-page')?.getBoundingClientRect().width ?? 0,
     }))
     assert(state.h1 && state.main, `${path} lacks semantic page content`)
     assert(state.overflow <= 1, `${path} overflows by ${state.overflow}px`)
     if (path === 'download/') {
       assert(
-        state.downloadCards === 3 && state.downloadCommands === 2 && state.downloadModes === 3,
+        state.downloadCards === 3 && state.downloadCommands === 3 && state.windowsVerifiedInstall && state.downloadModes === 3,
         'download platform or deployment mode support is unclear',
       )
       for (const mode of ['dedicated', 'private-cloud', 'portable']) {
@@ -294,9 +298,11 @@ async function verifyPages(browserInstance) {
     }
     if (path === 'releases/') {
       assert(
-        state.releaseHighlights === 3
-          && state.releaseTocLinks === 5
+        state.releaseHighlights === 2
+          && state.releaseTocLinks === 7
           && state.releaseArchiveLinks >= 4
+          && state.releaseChanges === 2
+          && state.priorRelease
           && state.releaseOnPageVisible > 0,
         'release notes structure is incomplete',
       )
