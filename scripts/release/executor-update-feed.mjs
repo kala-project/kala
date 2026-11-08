@@ -13,8 +13,6 @@ const LINUX_STAGE_ASSETS = [
   UPDATE_ARTIFACT,
   'kala-dedicated-ingress.cjs',
   'kala-dedicated-deploy-supervisor.cjs',
-  'kala-copilot-runtime-linux-x64',
-  'kala-copilot-runtime-node-linux-x64.node',
 ]
 
 export function executorProtocolMajor() {
@@ -44,7 +42,6 @@ function verifyLinuxStage(directory, manifest) {
   if (process.platform !== 'linux' || process.arch !== 'x64'
     || manifest.component !== 'all'
     || JSON.stringify(manifest.nativeTargets) !== '[]'
-    || JSON.stringify(manifest.copilotRuntimeTargets) !== '["linux-x64"]'
     || !LINUX_STAGE_ASSETS.every((name) => manifest.assets.includes(name))
     || manifest.assets.some((name) => /(?:win32|windows)/iu.test(name))
     || readdirSync(directory).some((name) => /(?:win32|windows|sigstore)/iu.test(name))) {
@@ -144,7 +141,6 @@ export function assertLocalDedicatedVerification({ enabled, privateCloudRuntime,
   if (privateCloudRuntime || requireSigned || process.platform !== 'linux' || process.arch !== 'x64'
     || manifest.component !== 'all'
     || JSON.stringify(manifest.nativeTargets) !== '[]'
-    || JSON.stringify(manifest.copilotRuntimeTargets) !== '["linux-x64"]'
     || !hasUpdateFeed || hasWindowsPayload || signaturePresent) {
     throw new Error('local Dedicated verification requires a signed Linux x64 all-component CJS stage without Windows assets or a Sigstore bundle; cannot combine with --private-cloud-runtime or --require-signed')
   }

@@ -14,13 +14,9 @@ function job(source, name, nextName) {
   return source.slice(start, end)
 }
 
-test('Windows Host CJS stages only a matching Windows x64 Copilot runtime', async () => {
+test('Windows Host CJS does not redistribute Copilot runtime binaries', async () => {
   const builder = await read('scripts/release/build-release-assets.mjs')
-  assert.match(builder, /const copilotRuntimeTargets = nativeTargets/u)
-  assert.match(builder, /const packageName = `@github\/copilot-sdk-\$\{target\}`/u)
-  assert.match(builder, /const wrapperName = process\.platform === 'win32' \? 'copilot-runtime\.exe' : 'copilot-runtime'/u)
-  assert.match(builder, /stageCopilotRuntime\(nativeTarget \?\? detectNativeTarget\(\)\)/u)
-  assert.doesNotMatch(builder, /stageCopilotRuntime\(['"]linux-x64['"]\)/u)
+  assert.doesNotMatch(builder, /stageCopilotRuntime|kala-copilot-runtime-/u)
 })
 
 test('hosted Windows acceptance keeps Host CJS and Windows companion stages separate and never uses Box', async () => {
@@ -57,8 +53,6 @@ test('Windows verifier fails closed on missing payloads, missing ConPTY, and uns
   assert.match(verifier, /KALA_RELEASE_ASSETS_DIR: hostRelease/u)
   for (const required of [
     'kala-dashboard-with-runtime.cjs',
-    'kala-copilot-runtime-win32-x64',
-    'kala-copilot-runtime-node-win32-x64.node',
     'kala-executor.cjs',
     'kala-executor-service-host-win32-x64.exe',
     'conpty.node',

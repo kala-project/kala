@@ -10,7 +10,6 @@ import { DEDICATED_SUPPORT_ARCHIVE, DEDICATED_SUPPORT_ASSETS, extractDedicatedSu
 const localAssets = [
   'kala-dashboard-with-runtime.cjs', 'kala-runtime.cjs', 'kala-executor.cjs',
   'kala-dedicated-ingress.cjs', 'kala-dedicated-deploy-supervisor.cjs',
-  'kala-copilot-runtime-linux-x64', 'kala-copilot-runtime-node-linux-x64.node',
   'kala-dashboard.tar.gz', 'kala-docs.tar.gz', DEDICATED_SUPPORT_ARCHIVE,
   'kala-release-metadata.tar.gz', 'run.sh', 'kala-dedicated.mjs', 'kala-model-catalog-seed.json',
 ]

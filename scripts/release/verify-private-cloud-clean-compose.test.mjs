@@ -123,6 +123,16 @@ test('fresh mode requires no predecessor and proves candidate checks without upg
   assert.doesNotMatch(freshBranch, /upgrade|rollback/u)
 })
 
+test('fresh external restore uses the provisioned PostgreSQL image, not the absent legacy Compose file', () => {
+  const source = readFileSync(resolve(root, script), 'utf8')
+  const provisioner = readFileSync(join(root, 'scripts/release/provision-private-cloud-hosted-authorities.mjs'), 'utf8')
+  assert.match(provisioner, /'external-postgres': \{\s*image: postgres/u)
+  assert.match(provisioner, /PRIVATE_CLOUD_EXTERNAL_POSTGRES_IMAGE: postgres/u)
+  assert.match(source, /postgresImage: requiredEnv\('PRIVATE_CLOUD_EXTERNAL_POSTGRES_IMAGE'\)/u)
+  assert.match(readFileSync(join(root, 'scripts/release/private-cloud-external-restore.mjs'), 'utf8'),
+    /if \(!\/\^postgres@sha256:\[0-9a-f\]\{64\}\$\/u\.test\(postgresImage\)\)/u)
+})
+
 test('fresh acceptance fails before creating a configuration or certifying unsupported legacy storage', () => {
   for (const flags of [['--fresh-candidate'], ['--fresh-candidate', '--ephemeral-bundled-acceptance']]) {
     const result = spawnSync(process.execPath, [script, ...flags], { cwd: root, encoding: 'utf8' })

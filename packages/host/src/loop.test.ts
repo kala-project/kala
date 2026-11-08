@@ -1587,7 +1587,7 @@ describe('host loop', () => {
     await new Promise<void>((resolve, reject) => {
       const start = Date.now()
       const tick = (): void => {
-        if (store.get(sessionId)?.state.status === 'thinking') return resolve()
+        if (store.get(sessionId)?.state.status === 'thinking' && release) return resolve()
         if (Date.now() - start > 1000) return reject(new Error('never thinking'))
         setTimeout(tick, 10)
       }

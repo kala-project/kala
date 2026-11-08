@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { accessSync, constants, mkdirSync, statSync } from 'node:fs'
+import { delimiter, join, resolve } from 'node:path'
 import { PerformanceObserver } from 'node:perf_hooks'
 
 import { parseComputerScreenshotResult } from '@agent-kernel/shared'
@@ -99,7 +99,6 @@ export type CopilotAgentRuntimeOptions = {
   enabled: boolean
   sessionsDir: string
   gitHubToken?: string
-  runtimeEntryPath?: string
   backgroundCompactionThreshold?: number
   bufferExhaustionThreshold?: number
   nativePosixRoot?: string
@@ -162,23 +161,15 @@ export class CopilotAgentRuntime implements AgentRuntime {
       // Missing npm/platform dependencies must make the adapter unavailable,
       // not prevent the entire Host from starting before it can report why.
       const { CopilotClient, RuntimeConnection } = this.sdk = await import('@github/copilot-sdk')
-      const configuredCliPath = process.env.COPILOT_CLI_PATH?.trim()
+      const cliPath = process.env.COPILOT_CLI_PATH?.trim() || findCopilotOnPath()
       const baseDirectory = join(this.options.sessionsDir, '..', 'copilot-runtime')
-      // PG-backed Units may have no local tree at all. A shared image CLI skips
-      // materialization, so scratch creation must not depend on copying code.
       mkdirSync(baseDirectory, { recursive: true, mode: 0o700 })
-      const packagedCliPath = configuredCliPath
-        ? undefined
-        : materializePackagedCopilotRuntime(
-            this.options.runtimeEntryPath ?? process.argv[1] ?? process.execPath,
-            baseDirectory,
-          )
-      this.cliPath = configuredCliPath ?? packagedCliPath
+      this.cliPath = cliPath
       this.client = new CopilotClient({
         mode: 'empty',
         connection: RuntimeConnection.forStdio({
           args: ['--no-remote-export'],
-          ...(configuredCliPath || packagedCliPath ? { path: configuredCliPath ?? packagedCliPath } : {}),
+          path: cliPath,
         }),
         baseDirectory,
         ...(this.context.store.usesExternalAuthority && !this.options.nativePosixRoot ? {
@@ -1883,55 +1874,34 @@ function requiresApproval(mode: ApprovalMode, toolRequiresApproval: boolean): bo
   return toolRequiresApproval
 }
 
-function materializePackagedCopilotRuntime(runtimeEntryPath: string, cacheRoot: string): string | undefined {
-  const target = copilotRuntimeTarget()
-  if (!target) return undefined
-  const releaseDir = dirname(runtimeEntryPath)
-  const sourceWrapper = join(releaseDir, `kala-copilot-runtime-${target}`)
-  const sourceLibrary = join(releaseDir, `kala-copilot-runtime-node-${target}.node`)
-  if (!existsSync(sourceWrapper) || !existsSync(sourceLibrary)) return undefined
-
-  const installDir = join(cacheRoot, `sdk-1.0.14-${target}`)
-  const installedWrapper = join(installDir, process.platform === 'win32' ? 'copilot-runtime.exe' : 'copilot-runtime')
-  const installedLibrary = join(installDir, 'runtime.node')
-  if (sameSize(sourceWrapper, installedWrapper) && sameSize(sourceLibrary, installedLibrary)) return installedWrapper
-
-  mkdirSync(cacheRoot, { recursive: true })
-  const stagingDir = join(cacheRoot, `.sdk-runtime-${randomUUID()}`)
-  mkdirSync(stagingDir, { mode: 0o700 })
-  try {
-    const stagedWrapper = join(stagingDir, process.platform === 'win32' ? 'copilot-runtime.exe' : 'copilot-runtime')
-    copyFileSync(sourceWrapper, stagedWrapper)
-    copyFileSync(sourceLibrary, join(stagingDir, 'runtime.node'))
-    chmodSync(stagedWrapper, 0o700)
-    rmSync(installDir, { recursive: true, force: true })
-    renameSync(stagingDir, installDir)
-  } finally {
-    rmSync(stagingDir, { recursive: true, force: true })
-  }
-  return installedWrapper
-}
-
-function copilotRuntimeTarget(): string | undefined {
-  if ((process.arch !== 'x64' && process.arch !== 'arm64')
-    || (process.platform !== 'linux' && process.platform !== 'darwin' && process.platform !== 'win32')) return undefined
-  return `${process.platform}-${process.arch}`
-}
-
-function sameSize(source: string, target: string): boolean {
-  return existsSync(target) && statSync(source).size === statSync(target).size
-}
-
 function copilotStartupFailureReason(error: unknown): string {
   const detail = error instanceof Error && error.cause instanceof Error
     ? error.cause.message : error instanceof Error ? error.message : String(error)
   if (/cannot find package ['"]?@github\/copilot-sdk|cannot find module ['"]?@github\/copilot-sdk/i.test(detail)) {
     return `Copilot SDK unavailable: ${detail} Install @github/copilot-sdk in the Host installation directory and restart the Host.`
   }
+
   if (/could not (?:find|resolve).*@github\/copilot|copilot cli not found|path to copilot cli is required|\bENOENT\b/i.test(detail)) {
-    return `Copilot CLI unavailable: ${detail} Install the complete @github/copilot-sdk npm dependencies or set COPILOT_CLI_PATH to a compatible Copilot CLI executable.`
+    return `Copilot CLI unavailable: ${detail} Install the official Copilot CLI on PATH or set COPILOT_CLI_PATH to its executable.`
   }
   return detail
+}
+
+function findCopilotOnPath(): string {
+  const executable = process.platform === 'win32' ? 'copilot.exe' : 'copilot'
+  for (const directory of (process.env.PATH ?? '').split(delimiter)) {
+    if (!directory) continue
+    const candidate = resolve(directory, executable)
+    try {
+      if (statSync(candidate).isFile()) {
+        accessSync(candidate, constants.X_OK)
+        return candidate
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && (error as NodeJS.ErrnoException).code !== 'EACCES') throw error
+    }
+  }
+  throw new Error('Copilot CLI not found on PATH')
 }
 
 function approvalKey(sessionId: string, callId: string): string {

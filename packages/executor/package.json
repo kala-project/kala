@@ -1,6 +1,6 @@
 {
   "name": "@agent-kernel/executor",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "description": "Kala workspace executor: sandboxed tool runner that connects to the Kala Host.",
   "repository": { "type": "git", "url": "git+https://github.com/xingsy97/kala.git" },
   "homepage": "https://github.com/xingsy97/kala#readme",

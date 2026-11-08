@@ -12,22 +12,30 @@ export const WINDOWS_SERVICE_HOST = Object.freeze({
   sha256: '05b82d46ad331cc16bdc00de5c6332c1ef818df8ceefcd49c726553209b3a0da',
 })
 
-export async function stageWindowsServiceHost(outputPath, { fetchImpl = globalThis.fetch } = {}) {
+export async function stageWindowsServiceHost(outputPath, { fetchImpl = globalThis.fetch, delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('fetch is required to download the pinned Windows service host')
-  let response
-  try {
-    response = await fetchImpl(WINDOWS_SERVICE_HOST.sourceUrl, { redirect: 'follow', signal: AbortSignal.timeout(60_000) })
-  } catch (error) {
-    throw new Error(`failed to download pinned WinSW ${WINDOWS_SERVICE_HOST.version}: ${error.message}`)
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    let response
+    try {
+      response = await fetchImpl(WINDOWS_SERVICE_HOST.sourceUrl, { redirect: 'follow', signal: AbortSignal.timeout(60_000) })
+    } catch (error) {
+      throw new Error(`failed to download pinned WinSW ${WINDOWS_SERVICE_HOST.version}: ${error.message}`)
+    }
+    if (!response.ok) {
+      if ([502, 503, 504].includes(response.status) && attempt < 3) {
+        await delay(attempt * 10_000)
+        continue
+      }
+      throw new Error(`failed to download pinned WinSW ${WINDOWS_SERVICE_HOST.version}: HTTP ${response.status}`)
+    }
+    if (new URL(response.url || WINDOWS_SERVICE_HOST.sourceUrl).protocol !== 'https:') {
+      throw new Error('pinned WinSW download redirected away from HTTPS')
+    }
+    const bytes = Buffer.from(await response.arrayBuffer())
+    verifyWindowsServiceHostBytes(bytes)
+    writeFileSync(outputPath, bytes, { mode: 0o755 })
+    return WINDOWS_SERVICE_HOST
   }
-  if (!response.ok) throw new Error(`failed to download pinned WinSW ${WINDOWS_SERVICE_HOST.version}: HTTP ${response.status}`)
-  if (new URL(response.url || WINDOWS_SERVICE_HOST.sourceUrl).protocol !== 'https:') {
-    throw new Error('pinned WinSW download redirected away from HTTPS')
-  }
-  const bytes = Buffer.from(await response.arrayBuffer())
-  verifyWindowsServiceHostBytes(bytes)
-  writeFileSync(outputPath, bytes, { mode: 0o755 })
-  return WINDOWS_SERVICE_HOST
 }
 
 export function verifyWindowsServiceHost(path) {

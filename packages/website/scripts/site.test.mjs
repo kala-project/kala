@@ -165,13 +165,9 @@ test('download guidance matches the supported stable matrix', () => {
   assert.match(page, /releases\/download\/v0\.2\.0\/kala-host-linux-x64/)
 })
 
-test('published CJS releases offer the Portable manager and platform runtimes without inventing native Host binaries', () => {
+test('published CJS releases offer the Portable Host without redistributing Copilot binaries', () => {
   const assetNames = [
     'run.sh', 'SHA256SUMS', 'kala-dashboard-with-runtime.cjs', 'kala-portable.sh', 'kala-portable.ps1',
-    'kala-copilot-runtime-linux-x64', 'kala-copilot-runtime-darwin-x64',
-    'kala-copilot-runtime-darwin-arm64', 'kala-copilot-runtime-win32-x64',
-    'kala-copilot-runtime-node-linux-x64.node', 'kala-copilot-runtime-node-darwin-x64.node',
-    'kala-copilot-runtime-node-darwin-arm64.node', 'kala-copilot-runtime-node-win32-x64.node',
     'kala-dedicated-support.tar.gz',
     'kala-private-cloud-0.3.0-linux-x64.tar.gz',
   ]
@@ -188,13 +184,13 @@ test('published CJS releases offer the Portable manager and platform runtimes wi
   const download = downloadPage(cjsCatalog)
   const notesPage = releasesPage(cjsCatalog)
   assert.match(download, /releases\/download\/v0\.3\.0\/kala-dashboard-with-runtime\.cjs/)
-  assert.match(download, /releases\/download\/v0\.3\.0\/kala-copilot-runtime-darwin-arm64/)
+  assert.doesNotMatch(download, /kala-copilot-runtime-/)
   assert.match(download, /releases\/download\/v0\.3\.0\/kala-portable\.ps1/)
   assert.doesNotMatch(download, /kala-host-linux-x64|Not supported yet/)
   assert.match(notesPage, /Portable Host[\s\S]*kala-portable\.sh/)
   assert.match(notesPage, /Windows[\s\S]*kala-portable\.ps1/)
-  assert.throws(() => downloadPage({ ...cjsCatalog, stable: { ...release, assets: release.assets.filter((asset) => asset.name !== 'kala-copilot-runtime-linux-x64') } }), /missing required website asset kala-copilot-runtime-linux-x64/)
-  assert.throws(() => releasesPage({ ...cjsCatalog, current: { ...release, assets: release.assets.filter((asset) => asset.name !== 'kala-copilot-runtime-node-win32-x64.node') } }), /missing required website asset kala-copilot-runtime-node-win32-x64.node/)
+  assert.throws(() => downloadPage({ ...cjsCatalog, stable: { ...release, assets: release.assets.filter((asset) => asset.name !== 'kala-portable.sh') } }), /missing required website asset kala-portable.sh/)
+  assert.throws(() => releasesPage({ ...cjsCatalog, current: { ...release, assets: release.assets.filter((asset) => asset.name !== 'kala-portable.ps1') } }), /missing required website asset kala-portable.ps1/)
 })
 
 test('deploy page compares operating models without repeating homepage cards', () => {

@@ -377,7 +377,8 @@ test('download entry exposes only existing validated local artifacts', async () 
   assert.doesNotMatch(nodes.get('commands').textContent, /\n|ignore-missing|; exit "\$status"/)
   assert.match(nodes.get('commands').textContent, /Cloudflare Access/)
   assert.equal(nodes.get('manifest').href, `/downloads/desktop/${good.dependencies.file}`)
-  assert.equal(requests.filter(({ options }) => options.method === 'HEAD').length, 3)
+  assert.equal(requests.filter(({ options }) => options.method === 'HEAD').length, 7)
+  assert.equal(requests.filter(({ url }) => url.startsWith('/install/assets/')).length, 4)
 })
 
 test('unpublished, incomplete or unsafe releases never expose a download link', async () => {

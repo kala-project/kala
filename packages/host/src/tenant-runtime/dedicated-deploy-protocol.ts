@@ -11,15 +11,16 @@ export const DEDICATED_DEPLOY_TOPOLOGY = 'dedicated-slots' as const
 
 const releaseMetadataArchive = 'kala-release-metadata.tar.gz'
 const releaseChecksumSignature = 'SHA256SUMS.sigstore.json'
-const modernReleaseFileCount = 33
+const modernReleaseFileCount = 27
 const localDevelopmentAssets = [
   'kala-dashboard-with-runtime.cjs', 'kala-runtime.cjs', 'kala-executor.cjs',
   'kala-dedicated-ingress.cjs', 'kala-dedicated-deploy-supervisor.cjs',
-  'kala-copilot-runtime-linux-x64', 'kala-copilot-runtime-node-linux-x64.node',
   'kala-dashboard.tar.gz', 'kala-docs.tar.gz', 'kala-dedicated-support.tar.gz',
   'kala-release-metadata.tar.gz', 'run.sh', 'kala-dedicated.mjs', 'kala-model-catalog-seed.json',
 ] as const
-const legacyLocalDevelopmentAssets = localDevelopmentAssets.filter((asset) => !asset.startsWith('kala-copilot-runtime-'))
+const legacyLocalDevelopmentAssets = [
+  ...localDevelopmentAssets, 'kala-copilot-runtime-linux-x64', 'kala-copilot-runtime-node-linux-x64.node',
+]
 const dedicatedSupportArchive = 'kala-dedicated-support.tar.gz'
 const dedicatedSupportManifest = 'dedicated-support-manifest.json'
 const dedicatedSupportAssets = [
@@ -522,7 +523,9 @@ function releaseLayout(manifest: Record<string, unknown>, assets: string[], allo
   }
   if (assets.includes(releaseMetadataArchive)) {
     const files = [...assets, 'manifest.json', 'SHA256SUMS', releaseChecksumSignature].sort()
-    if (files.length !== modernReleaseFileCount) throw new Error(`modern release must contain exactly ${modernReleaseFileCount} files`)
+    if (files.length !== modernReleaseFileCount && !(allowLegacyPredecessor && files.length === 33)) {
+      throw new Error(`modern release must contain exactly ${modernReleaseFileCount} files`)
+    }
     return { files, checksummed: [...assets, 'manifest.json'].sort() }
   }
   if (!allowLegacyPredecessor) throw new Error(`modern release manifest is missing ${releaseMetadataArchive}`)

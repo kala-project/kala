@@ -72,7 +72,7 @@ test('rejects diagnostics, private locations, URLs, and sensitive fields', () =>
 function create(category, target) {
   const windowsNames = [
     'kala-dashboard-with-runtime.cjs', 'kala-executor.cjs', 'node-pty-win32-x64.tar.gz',
-    'kala-executor-service-host-win32-x64.exe', 'install-executor.ps1', 'kala-copilot-runtime-win32-x64', 'kala-copilot-runtime-node-win32-x64.node',
+    'kala-executor-service-host-win32-x64.exe', 'install-executor.ps1',
   ]
   const windows = category === 'portable' && target === 'win32-x64'
   const artifact = windows ? { name: windowsNames[0], sha256: 'b'.repeat(64) } : { name: category + '-' + target + '.tar.gz', sha256: 'b'.repeat(64) }

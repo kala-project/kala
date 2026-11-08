@@ -4,8 +4,6 @@ import { join } from 'node:path'
 export const EXTERNAL_RELEASE_ASSETS = Object.freeze([
   ...['kala-host', 'kala-executor', 'kala-dedicated-ingress', 'kala-dedicated-deploy-supervisor']
     .flatMap((name) => ['linux-x64', 'darwin-x64', 'darwin-arm64'].map((target) => `${name}-${target}`)),
-  ...['linux-x64', 'darwin-x64', 'darwin-arm64']
-    .flatMap((target) => [`kala-copilot-runtime-${target}`, `kala-copilot-runtime-node-${target}.node`]),
   'kala-dashboard-with-runtime.cjs',
   'kala-runtime.cjs',
   'kala-executor.cjs',

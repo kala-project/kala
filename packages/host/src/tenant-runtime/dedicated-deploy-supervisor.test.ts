@@ -16,8 +16,6 @@ const digest = (value: string | Uint8Array): string => createHash('sha256').upda
 const modernAssets = [
   ...['kala-host', 'kala-executor', 'kala-dedicated-ingress', 'kala-dedicated-deploy-supervisor']
     .flatMap((name) => ['linux-x64', 'darwin-x64', 'darwin-arm64'].map((target) => `${name}-${target}`)),
-  ...['linux-x64', 'darwin-x64', 'darwin-arm64']
-    .flatMap((target) => [`kala-copilot-runtime-${target}`, `kala-copilot-runtime-node-${target}.node`]),
   'kala-dashboard-with-runtime.cjs', 'kala-runtime.cjs', 'kala-executor.cjs', 'kala-dedicated-ingress.cjs',
   'kala-dedicated-deploy-supervisor.cjs', 'kala-dashboard.tar.gz', 'kala-docs.tar.gz', 'kala-dedicated-support.tar.gz',
   'kala-release-metadata.tar.gz', 'run.sh', 'kala-dedicated.mjs', 'kala-model-catalog-seed.json',
@@ -25,7 +23,6 @@ const modernAssets = [
 const localDevelopmentAssets = [
   'kala-dashboard-with-runtime.cjs', 'kala-runtime.cjs', 'kala-executor.cjs',
   'kala-dedicated-ingress.cjs', 'kala-dedicated-deploy-supervisor.cjs',
-  'kala-copilot-runtime-linux-x64', 'kala-copilot-runtime-node-linux-x64.node',
   'kala-dashboard.tar.gz', 'kala-docs.tar.gz', 'kala-dedicated-support.tar.gz',
   'kala-release-metadata.tar.gz', 'run.sh', 'kala-dedicated.mjs', 'kala-model-catalog-seed.json',
 ]
@@ -245,14 +242,14 @@ describe('Dedicated Deploy Supervisor protocol', () => {
     await expect(supervisor.accept({ ...input, bundleSha256: digest('different') })).rejects.toThrow('conflicts')
   })
 
-  it('publishes the exact modern 33-file release with archived metadata and no standalone notes', async () => {
+  it('publishes the exact modern 27-file release with archived metadata and no standalone notes', async () => {
     const root = await mkdtemp(join(tmpdir(), 'deploy-protocol-publish-')); roots.push(root)
     const old = await release(root, 'old', 'old')
     const next = await submission(root, 'operation-deploy-0001', 'next')
     const h = harness(); const supervisor = new DedicatedDeploySupervisor(root, h.adapter)
     const staged = await supervisor.accept(request(next, { sourceReleaseDigest: old.release }))
     expect(staged.releaseDir).toBe(join(root, 'releases', 'next'))
-    expect(await readdir(staged.releaseDir)).toHaveLength(33)
+    expect(await readdir(staged.releaseDir)).toHaveLength(27)
     expect(await readFile(join(staged.releaseDir, 'kala-release-metadata.tar.gz'), 'utf8')).toBe('kala-release-metadata.tar.gz:next')
     await expect(readFile(join(staged.releaseDir, 'RELEASE_NOTES.md'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
@@ -284,7 +281,7 @@ describe('Dedicated Deploy Supervisor protocol', () => {
     await writeFile(join(unmarked.dir, 'manifest.json'), JSON.stringify(unmarkedManifest)); unmarked.release = await rehashRelease(unmarked.dir)
     await expect(new DedicatedDeploySupervisor(root, harness().adapter, options).accept(request(unmarked, {
       operationId: 'operation-local-unmarked', deploymentId: 'deployment-local-unmarked', sourceReleaseDigest: old.release,
-    }))).rejects.toThrow('exactly 33 files')
+    }))).rejects.toThrow('exactly 27 files')
 
     const extra = await localDevelopmentRelease(join(root, 'submissions', 'operation-local-extra'), 'extra')
     const extraManifest = JSON.parse(await readFile(join(extra.dir, 'manifest.json'), 'utf8'))

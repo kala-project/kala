@@ -76,7 +76,7 @@ jobs:
           node scripts/release/verify-rc-evidence.mjs \
             --input acceptance/evidence --tag "$TAG" --revision "$(git rev-parse HEAD)" \
             --output release-evidence/rc-evidence.json
-      - uses: sigstore/cosign-installer@v3
+      - uses: ./.github/actions/install-verified-cosign
       - name: Revalidate the current closed draft and leave draft state
         env: { GH_TOKEN: '${{ github.token }}', TAG: '${{ inputs.tag }}' }
         run: |
@@ -127,9 +127,7 @@ jobs:
           for asset in manifest.json SHA256SUMS kala-executor.cjs \
             executor-update-manifest.json executor-update-public-key.pem \
             node-pty-win32-x64.tar.gz kala-executor-service-host-win32-x64.exe install-executor.ps1 \
-            kala-dashboard-with-runtime.cjs \
-            kala-copilot-runtime-win32-x64 \
-            kala-copilot-runtime-node-win32-x64.node; do
+            kala-dashboard-with-runtime.cjs; do
             gh attestation verify "$CANDIDATE/$asset" --repo "$GITHUB_REPOSITORY"
           done
           cosign verify-blob \

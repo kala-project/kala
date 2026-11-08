@@ -73,15 +73,13 @@ jobs:
       - run: pnpm run build
       - name: Build the platform-neutral Portable Host on Windows Node.js 22
         run: pnpm run build:release-assets -- --component all --tag ${{ needs.resolve.outputs.tag }} --repo ${{ github.repository }} --no-native
-      - name: Capture the Windows-built Host and Copilot runtime
+      - name: Capture the Windows-built Host
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $capture = Join-Path $env:RUNNER_TEMP 'private-cloud-windows-captured'
           New-Item -ItemType Directory -Force $capture | Out-Null
           Copy-Item release/kala-dashboard-with-runtime.cjs $capture/
-          Copy-Item release/kala-copilot-runtime-win32-x64 $capture/
-          Copy-Item release/kala-copilot-runtime-node-win32-x64.node $capture/
           $hostRelease = Join-Path $env:RUNNER_TEMP 'private-cloud-windows-host-release'
           Copy-Item release $hostRelease -Recurse
           "PRODUCT_E2E_WINDOWS_HOST_RELEASE_DIR=$hostRelease" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -162,7 +160,7 @@ jobs:
           const root = process.env.WINDOWS_CAPTURE_DIR
           const output = '.private-cloud-runtime-windows-assets'
           const manifest = JSON.parse(readFileSync(join(root, 'windows-capture-manifest.json'), 'utf8'))
-          const expected = ['kala-copilot-runtime-node-win32-x64.node', 'kala-copilot-runtime-win32-x64', 'kala-dashboard-with-runtime.cjs', 'kala-executor.cjs', 'kala-executor-service-host-win32-x64.exe', 'node-pty-win32-x64.tar.gz']
+          const expected = ['kala-dashboard-with-runtime.cjs', 'kala-executor.cjs', 'kala-executor-service-host-win32-x64.exe', 'node-pty-win32-x64.tar.gz']
           const required = ['kala-executor-service-host-win32-x64.exe', 'node-pty-win32-x64.tar.gz']
           if (manifest.schemaVersion !== 1 || manifest.revision !== process.env.EXPECTED_REVISION) throw new Error('Windows capture revision mismatch')
           if (JSON.stringify(Object.keys(manifest.assets).sort()) !== JSON.stringify([...expected].sort())) throw new Error('Windows capture manifest inventory is not exact')
@@ -198,7 +196,7 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           provenance: mode=max
           sbom: true
-      - uses: sigstore/cosign-installer@v3
+      - uses: ./.github/actions/install-verified-cosign
       - run: cosign sign --yes ghcr.io/${{ github.repository }}-private-cloud-runtime@${{ steps.build.outputs.digest }}
       - uses: actions/attest-build-provenance@v3
         with:
@@ -234,7 +232,7 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           provenance: mode=max
           sbom: true
-      - uses: sigstore/cosign-installer@v3
+      - uses: ./.github/actions/install-verified-cosign
       - run: cosign sign --yes ghcr.io/${{ github.repository }}-private-cloud-ingress@${{ steps.build.outputs.digest }}
       - uses: actions/attest-build-provenance@v3
         with:
@@ -270,7 +268,7 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           provenance: mode=max
           sbom: true
-      - uses: sigstore/cosign-installer@v3
+      - uses: ./.github/actions/install-verified-cosign
       - run: cosign sign --yes ghcr.io/${{ github.repository }}-private-cloud-dashboard@${{ steps.build.outputs.digest }}
       - uses: actions/attest-build-provenance@v3
         with:
@@ -379,7 +377,7 @@ jobs:
             --operator release/kala-private-cloud-linux-x64 \
             --archive "release/kala-private-cloud-${{ needs.resolve.outputs.version }}-${{ matrix.target }}.tar.gz"
           node scripts/release/verify-private-cloud-bundle.mjs --release release/private-cloud
-      - uses: sigstore/cosign-installer@v3
+      - uses: ./.github/actions/install-verified-cosign
       - run: cosign sign-blob --yes --bundle release/private-cloud-${{ matrix.target }}.sigstore.json release/kala-private-cloud-${{ needs.resolve.outputs.version }}-${{ matrix.target }}.tar.gz
       - uses: actions/attest-build-provenance@v3
         with:
@@ -425,7 +423,7 @@ jobs:
       VERSION: ${{ needs.resolve.outputs.version }}
     steps:
       - uses: actions/checkout@v5
-      - uses: sigstore/cosign-installer@v3
+      - uses: ./.github/actions/install-verified-cosign
       - name: Stage signed draft bundle and exact CJS Executor
         run: |
           set -euo pipefail
@@ -525,7 +523,7 @@ jobs:
       - uses: actions/download-artifact@v5
         with:
           name: private-cloud-beta-draft-assets-${{ github.run_id }}-${{ github.run_attempt }}
-      - uses: sigstore/cosign-installer@v3
+      - uses: ./.github/actions/install-verified-cosign
       - name: Require anonymous full-layer pulls of the exact signed candidate images
         run: |
           set -euo pipefail
@@ -645,7 +643,7 @@ jobs:
       - uses: actions/download-artifact@v5
         with:
           name: private-cloud-beta-draft-assets-${{ github.run_id }}-${{ github.run_attempt }}
-      - uses: sigstore/cosign-installer@v3
+      - uses: ./.github/actions/install-verified-cosign
       - name: Restore private acceptance template on this disposable VM
         run: |
           set -euo pipefail

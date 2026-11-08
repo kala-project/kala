@@ -157,7 +157,7 @@ try {
     const runtimeGates = await verifyCandidateRuntimeGates({ candidate, config, alicePassword, bobPassword: credentials.bob })
     assertRuntimeGateReport(runtimeGates)
     await verifyExternalRestore({
-      config, backup, postgresImage: infrastructureImage(candidate, 'postgres'),
+      config, backup, postgresImage: requiredEnv('PRIVATE_CLOUD_EXTERNAL_POSTGRES_IMAGE'),
       stop: () => { const invocation = composeInvocation(candidate, config, ['stop', 'runtime-host', 'runtime-ingress']); run(invocation.command, invocation.args, false, invocation.env, invocation.cwd) },
       start: () => { const invocation = composeInvocation(candidate, config, ['start', 'runtime-host', 'runtime-ingress']); run(invocation.command, invocation.args, false, invocation.env, invocation.cwd) },
       verifyRead: async () => {

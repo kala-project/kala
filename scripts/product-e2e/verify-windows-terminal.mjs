@@ -12,8 +12,6 @@ const hostRelease = resolve(process.env.PRODUCT_E2E_WINDOWS_HOST_RELEASE_DIR ?? 
 const executorRelease = resolve(process.env.PRODUCT_E2E_WINDOWS_EXECUTOR_RELEASE_DIR ?? join(root, 'release'))
 const target = process.env.PRODUCT_E2E_WINDOWS_TARGET ?? 'executor'
 const hostBundle = join(hostRelease, 'kala-dashboard-with-runtime.cjs')
-const hostRuntime = join(hostRelease, 'kala-copilot-runtime-win32-x64')
-const hostRuntimeNode = join(hostRelease, 'kala-copilot-runtime-node-win32-x64.node')
 const executor = join(executorRelease, 'kala-executor.cjs')
 const serviceHost = join(executorRelease, 'kala-executor-service-host-win32-x64.exe')
 const executorPrebuild = join(executorRelease, 'prebuilds', 'win32-x64')
@@ -33,7 +31,7 @@ let serviceOwned = false
 try {
   if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('verify-windows-terminal.mjs requires a real Windows x64 runner')
   if (!['host', 'executor'].includes(target)) throw new Error(`unsupported Windows acceptance target ${target}`)
-  assertFiles([hostBundle, hostRuntime, hostRuntimeNode], 'Windows Host CJS and native Copilot runtime')
+  assertFiles([hostBundle], 'Windows Host CJS')
 
   host = start(process.execPath, [hostBundle], {
     KALA_BIND_HOST: '127.0.0.1', KALA_PORT: String(port), KALA_STATE_DIR: join(stateRoot, 'state'),

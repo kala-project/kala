@@ -8,32 +8,49 @@ the major version of the shared wire protocol. The Portable Host must also
 embed both feed files because `/install/assets` can be served without an
 adjacent release directory.
 
-Provision one **persistent**, operator-controlled Ed25519 PKCS#8 private PEM
-as the encrypted Actions secret `EXECUTOR_UPDATE_PRIVATE_KEY_PEM` before
-running `release.yml`. Keep the private key off Git, release artifacts and logs.
-Do not regenerate it for each release: installed Executors retain the
-verification key they received at install time. Key rotation needs an explicit
-installed-client migration plan. Example local commands (use an existing
-operator-managed key file, never a key in the repository):
+Keep the **persistent**, operator-controlled Ed25519 PKCS#8 private PEM local.
+The tracked `executor-update-public-key.pem` matches the verification key of
+the current local Dedicated Executor. Check that other existing installations
+trust this key before advertising this update to them. Do not regenerate the
+private key for each release: key rotation needs an explicit installed-client
+migration plan.
+Build the complete Linux x64 CJS stage from the final clean revision, verify it,
+then sign its `kala-executor.cjs` with the existing key. Put the base64 encoding
+of the resulting public `executor-update-manifest.json` into the annotated
+release tag message, in this exact form:
 
-```sh
-node scripts/release/sign-executor-update-feed.mjs --directory release --private-key-file /secure/operator/executor-update-private.pem
-node scripts/release/embed-windows-assets-in-portable-host.mjs --directory release --repo OWNER/REPO --tag v0.3.1 --expected-revision "$(git rev-parse HEAD)" --canonical-dashboard
-pnpm run build:release-assets -- --component all --tag v0.3.1 --repo OWNER/REPO --finalize-only
-cosign sign-blob --yes --bundle release/SHA256SUMS.sigstore.json release/SHA256SUMS
-pnpm run verify:release-assets -- --require-signed
-cosign verify-blob --bundle release/SHA256SUMS.sigstore.json \
-  --certificate-identity "https://github.com/OWNER/REPO/.github/workflows/release.yml@refs/tags/v0.3.1" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com release/SHA256SUMS
+```text
+Kala release candidate
+Executor-Update-Manifest-Base64: <base64 of signed manifest JSON>
 ```
 
-Sign only **after** the canonical CJS and Windows assets are staged, **before**
-embedding the final Host and finalizing checksums. The CI final job does this
-automatically, then signs `SHA256SUMS` with Sigstore and runs the required
-signed gate before uploading. The promotion workflow independently verifies
-the signed feed and exact candidate inventory. Unsigned local partial builds
-remain supported; `--private-cloud-runtime` deliberately rejects a signed
-feed and cannot satisfy `--require-signed`.
+The tag must point to the exact commit used for the CJS build. CI stages the
+envelope only after checking the tag object and revision, then verifies its
+Ed25519 signature with the tracked public key and checks the canonical CJS
+artifact size, hash, release version and protocol. The private key never goes
+to GitHub or the published tag. Example local signing command for the verified Linux-only stage (use an
+existing operator-managed key file, never a key in the repository):
+
+```sh
+pnpm run verify:release-assets -- --private-cloud-runtime
+node scripts/release/sign-executor-update-feed.mjs --directory release \
+  --private-key-file /secure/operator/executor-update-private.pem --local-dedicated
+pnpm run verify:release-assets -- --local-dedicated
+```
+
+Base64-encode the resulting `release/executor-update-manifest.json` into the
+annotated tag message shown above, with no other message lines. CI fetches the
+complete tag object and fails if its commit, format, key, signature or Executor
+CJS hash differs. CI alone embeds Windows assets and creates/verifies the
+Sigstore checksum signature; a local Dedicated signature is not a public release.
+
+CI verifies the offline signature only **after** the canonical CJS and Windows
+assets are staged, **before** embedding the final Host and finalizing checksums.
+It then signs `SHA256SUMS` with Sigstore and runs the required signed gate before
+uploading. The promotion workflow independently verifies the signed feed and
+exact candidate inventory. Unsigned local partial builds remain supported;
+`--private-cloud-runtime` deliberately rejects a signed feed and cannot
+satisfy `--require-signed`.
 
 For a **local Dedicated** deployment using the Linux x64 all-component CJS
 stage, verify the unsigned stage first and sign its existing `/app/release`

@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
-import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { createHash, createPublicKey, generateKeyPairSync, sign } from 'node:crypto'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join } from 'node:path'
 import test from 'node:test'
 import { assertLocalDedicatedVerification, executorProtocolMajor, signExecutorUpdateFeed, UPDATE_FEED_FILES, verifyExecutorUpdateFeed } from './executor-update-feed.mjs'
+import { stageSignedExecutorUpdateFeed } from './stage-signed-executor-update-feed.mjs'
 import { verifyReleaseChecksums } from './release-checksums.mjs'
 
 function fixture() {
@@ -63,6 +64,36 @@ test('rejects missing, tampered, and semantically incorrect signed feeds', () =>
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
+test('stages an offline-signed feed only for the exact tag, revision, artifact, and operator key', () => {
+  const { directory, keyFile, privateKey } = fixture()
+  const revision = 'a'.repeat(40)
+  try {
+    const unsigned = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8'))
+    unsigned.source = { revision, dirty: false }
+    writeFileSync(join(directory, 'manifest.json'), JSON.stringify(unsigned))
+    signExecutorUpdateFeed(directory, keyFile, executorProtocolMajor())
+    const envelope = readFileSync(join(directory, UPDATE_FEED_FILES[0]))
+    const publicKey = createPublicKey(privateKey).export({ type: 'spki', format: 'pem' })
+    rmSync(join(directory, UPDATE_FEED_FILES[0]))
+    rmSync(join(directory, UPDATE_FEED_FILES[1]))
+    writeFileSync(join(directory, 'manifest.json'), JSON.stringify(unsigned))
+    const tagObject = `object ${revision}\ntype commit\ntag v0.3.1\ntagger Operator <operator@example.test> 0 +0000\n\nKala release candidate\nExecutor-Update-Manifest-Base64: ${envelope.toString('base64')}\n`
+    const stage = (object = tagObject, key = publicKey) =>
+      stageSignedExecutorUpdateFeed(directory, 'v0.3.1', revision, object, key, executorProtocolMajor())
+    assert.throws(() => stage(tagObject.replace(revision, 'b'.repeat(40))), /exact release commit/u)
+    assert.throws(() => stage(tagObject.replace('Kala release candidate', 'Unverified candidate')), /offline-signed/u)
+    const alternateKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' })
+    assert.throws(() => stage(tagObject, alternateKey), /signature verification/u)
+    rmSync(join(directory, UPDATE_FEED_FILES[0]))
+    rmSync(join(directory, UPDATE_FEED_FILES[1]))
+    writeFileSync(join(directory, 'manifest.json'), JSON.stringify(unsigned))
+    stage()
+    assert.equal(verifyExecutorUpdateFeed(directory, executorProtocolMajor(), { required: true }), true)
+    writeFileSync(join(directory, 'kala-executor.cjs'), 'changed')
+    assert.throws(() => verifyExecutorUpdateFeed(directory, executorProtocolMajor(), { required: true }), /does not match/u)
+  } finally { rmSync(directory, { recursive: true, force: true }) }
+})
+
 test('local Dedicated CLI signs a verified Linux-only CJS stage without embedding Host assets', async () => {
   const { directory, keyFile } = fixture()
   const operatorKey = `${directory}.operator.pem`
@@ -74,11 +105,9 @@ test('local Dedicated CLI signs a verified Linux-only CJS stage without embeddin
     }
     const manifest = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8'))
     manifest.nativeTargets = []
-    manifest.copilotRuntimeTargets = ['linux-x64']
     manifest.assets.push(
       'kala-dashboard-with-runtime.cjs', 'kala-runtime.cjs',
       'kala-dedicated-ingress.cjs', 'kala-dedicated-deploy-supervisor.cjs',
-      'kala-copilot-runtime-linux-x64', 'kala-copilot-runtime-node-linux-x64.node',
     )
     for (const name of manifest.assets.filter((name) => name !== 'kala-executor.cjs')) {
       writeFileSync(join(directory, name), `Linux CJS stage ${name}`)
@@ -115,7 +144,7 @@ test('local Dedicated CLI signs a verified Linux-only CJS stage without embeddin
       { signaturePresent: true },
       { requireSigned: true },
       { privateCloudRuntime: true },
-      { manifest: { ...signedManifest, copilotRuntimeTargets: ['linux-x64', 'win32-x64'] } },
+      { manifest: { ...signedManifest, nativeTargets: ['linux-x64'] } },
       { manifest: { ...signedManifest, component: 'host' } },
     ]) {
       assert.throws(() => assertLocalDedicatedVerification({ ...localMode, ...change }), /local Dedicated verification/u)

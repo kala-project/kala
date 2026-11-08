@@ -1,7 +1,7 @@
 {
   "license": "MIT",
   "name": "@agent-kernel/eval-benchmark-swe-bench",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "description": "SWE-bench task adapter and grader integration for the Agent Evaluation Platform.",
   "repository": { "type": "git", "url": "git+https://github.com/xingsy97/kala.git" }, "homepage": "https://github.com/xingsy97/kala#readme", "bugs": { "url": "https://github.com/xingsy97/kala/issues" },
   "type": "module",

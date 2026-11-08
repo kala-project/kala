@@ -73,7 +73,7 @@ describe('deploy plan', () => {
   })
 
   it('defines the exact 33-file external release and archives Dedicated support and metadata', () => {
-    expect(EXTERNAL_RELEASE_ASSETS).toHaveLength(33)
+    expect(EXTERNAL_RELEASE_ASSETS).toHaveLength(27)
     expect(EXTERNAL_RELEASE_ASSETS).toEqual(expect.arrayContaining(['kala-dashboard.tar.gz', 'kala-dedicated-support.tar.gz', 'kala-release-metadata.tar.gz']))
     expect(EXTERNAL_RELEASE_ASSETS).not.toEqual(expect.arrayContaining(['RELEASE_NOTES.md', 'dashboard-release.json', 'kala-dashboard-dist.tar.gz', 'update-dedicated-control-plane.mjs']))
     const fs = fakeFs([...new Set([...REQUIRED, ...EXTERNAL_RELEASE_ASSETS])])

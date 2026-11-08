@@ -90,7 +90,8 @@ test('Windows Portable manager installs the exact release and retains user data 
     corruptRuntime = false
     const status = await runManager(join(root, 'bin', manager), 'status')
     assert.equal(status.status, 3, status.stderr)
-    assert.match(status.stdout, /stopped tag=v0\.3\.0/u)
+    const releaseTag = JSON.parse(readFileSync(join(assets, 'manifest.json'), 'utf8')).tag
+    assert.equal(status.stdout.trim(), `stopped tag=${releaseTag}`)
     writeFileSync(join(data, 'retain-me'), 'yes')
     const uninstall = await runManager(join(root, 'bin', manager), 'uninstall')
     assert.equal(uninstall.status, 0, uninstall.stderr)

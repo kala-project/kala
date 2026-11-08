@@ -297,10 +297,12 @@ describe('wire protocol', () => {
   let dir: string
   let url: string
   let config: AgentConfig
+  const originalCopilotCliPath = process.env.COPILOT_CLI_PATH
 
   beforeEach(async () => {
     copilotSdk.createSession = undefined
     dir = mkdtempSync(join(tmpdir(), 'agent-kernel-wire-'))
+    process.env.COPILOT_CLI_PATH = join(dir, 'mocked-copilot')
     config = createConfig({ tools: [WRITE], systemPrompt: 'sys' })
     const http = createServer()
     await new Promise<void>((resolve) => http.listen(0, resolve))
@@ -325,6 +327,8 @@ describe('wire protocol', () => {
     // their durable writes; keep the temporary Session directory until they do.
     await server.loop.waitForQuiescence()
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    if (originalCopilotCliPath === undefined) delete process.env.COPILOT_CLI_PATH
+    else process.env.COPILOT_CLI_PATH = originalCopilotCliPath
   })
 
   it('terminates unknown Runtime routes without stealing API requests or Socket.IO acknowledgements', async () => {

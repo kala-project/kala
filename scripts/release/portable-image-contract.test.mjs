@@ -77,8 +77,9 @@ test('isolated Docker acceptance matches the Portable Host public-origin gate wi
 test('portable candidate workflow binds the manual dispatch to signed tag assets and full revision', () => {
   const workflow = readFileSync(join(root, '.github/workflows/portable-image-release.yml'), 'utf8')
   assert.match(workflow, /workflow_dispatch:/u)
-  assert.match(workflow, /ACCEPTED_TAG: v0\.3\.0/u)
-  assert.match(workflow, /test "\$TAG" = "\$ACCEPTED_TAG"/u)
+  assert.doesNotMatch(workflow, /ACCEPTED_TAG:/u)
+  assert.match(workflow, /node scripts\/release\/version-policy\.mjs --tag "\$TAG"/u)
+  assert.match(workflow, /git rev-parse "\$TAG\^\{commit\}"\)" = "\$REVISION"/u)
   assert.match(workflow, /test "\$GITHUB_REF" = "refs\/tags\/\$TAG"/u)
   assert.match(workflow, /GITHUB_WORKFLOW_REF" = "\$GITHUB_REPOSITORY\/\.github\/workflows\/portable-image-release\.yml@refs\/tags\/\$TAG"/u)
   assert.match(workflow, /\^\[0-9a-f\]\{40\}\$/u)

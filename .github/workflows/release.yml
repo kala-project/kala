@@ -15,7 +15,7 @@ on:
         type: boolean
         default: false
       native_targets:
-        description: 'Matching-runner Copilot SDK runtime targets: Linux x64, macOS x64/arm64, and Windows x64; no standalone native Executor.'
+        description: 'Optional Host native qualification targets; no standalone native Executor is published.'
         required: false
         # Linux arm64 is paused for the current release.
         default: 'linux-x64,darwin-x64,darwin-arm64,win32-x64'
@@ -28,7 +28,6 @@ jobs:
       component: ${{ steps.release.outputs.component }}
       native_targets: ${{ steps.release.outputs.native_targets }}
       native_matrix: ${{ steps.release.outputs.native_matrix }}
-      has_native: ${{ steps.release.outputs.has_native }}
     steps:
       - uses: actions/checkout@v5
       - name: Resolve release target
@@ -51,7 +50,7 @@ jobs:
           fi
           REQUIRED_NATIVE_TARGETS="linux-x64,darwin-x64,darwin-arm64,win32-x64"
           if [ "$NATIVE_TARGETS" != "$REQUIRED_NATIVE_TARGETS" ]; then
-            echo "native_targets must include exactly the four matching-runner Copilot SDK runtimes: $REQUIRED_NATIVE_TARGETS; partial four-platform releases are not supported" >&2
+            echo "native_targets must include exactly the supported optional Host qualification targets: $REQUIRED_NATIVE_TARGETS" >&2
             exit 1
           fi
           MATRIX_ENTRIES=""
@@ -62,7 +61,7 @@ jobs:
               darwin-x64) OS="macos-15-intel" ;;
               darwin-arm64) OS="macos-15" ;;
               win32-x64) continue ;; # Built with the Windows-captured Portable Host in windows-assets.
-              *) echo "Unsupported Copilot SDK runtime target: $t" >&2; exit 1 ;;
+              *) echo "Unsupported optional Host qualification target: $t" >&2; exit 1 ;;
             esac
             ENTRY="{\"os\":\"$OS\",\"target\":\"$t\"}"
             if [ -z "$MATRIX_ENTRIES" ]; then
@@ -72,45 +71,11 @@ jobs:
             fi
           done
           NATIVE_MATRIX="{\"include\":[$MATRIX_ENTRIES]}"
-          if [ -n "$MATRIX_ENTRIES" ]; then
-            HAS_NATIVE="true"
-          else
-            HAS_NATIVE="false"
-          fi
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "component=$COMPONENT" >> "$GITHUB_OUTPUT"
           echo "native_targets=$NATIVE_TARGETS" >> "$GITHUB_OUTPUT"
           echo "native_matrix=$NATIVE_MATRIX" >> "$GITHUB_OUTPUT"
-          echo "has_native=$HAS_NATIVE" >> "$GITHUB_OUTPUT"
-
-  native-assets:
-    needs: resolve
-    if: needs.resolve.outputs.has_native == 'true'
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.resolve.outputs.native_matrix) }}
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v5
-        with: { ref: '${{ needs.resolve.outputs.tag }}' }
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 22
-          package-manager-cache: false
-      - name: Enable pnpm via Corepack
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.3.0 --activate
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm run verify:version -- --tag ${{ needs.resolve.outputs.tag }}
-      - run: pnpm run build
-      - run: pnpm run build:release-assets -- --component executor --tag ${{ needs.resolve.outputs.tag }} --repo ${{ github.repository }} --native-only --native-target ${{ matrix.target }}
-      - uses: actions/upload-artifact@v5
-        with:
-          name: native-${{ matrix.target }}
-          path: release/kala-*-${{ matrix.target }}*
-          if-no-files-found: error
 
   optional-host-native:
     needs: resolve
@@ -224,15 +189,13 @@ jobs:
         run: pnpm run build:release-assets -- --component all --tag ${{ needs.resolve.outputs.tag }} --repo ${{ github.repository }} --no-native
       - name: Install and uninstall the generated Windows Portable manager
         run: node --test scripts/release/portable-manager-windows.test.mjs
-      - name: Capture the Windows-built Host and Copilot runtime
+      - name: Capture the Windows-built Host
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $capture = Join-Path $env:RUNNER_TEMP 'windows-captured'
           New-Item -ItemType Directory -Force $capture | Out-Null
           Copy-Item release/kala-dashboard-with-runtime.cjs $capture/
-          Copy-Item release/kala-copilot-runtime-win32-x64 $capture/
-          Copy-Item release/kala-copilot-runtime-node-win32-x64.node $capture/
           $hostRelease = Join-Path $env:RUNNER_TEMP 'windows-host-release'
           Copy-Item release $hostRelease -Recurse
           "PRODUCT_E2E_WINDOWS_HOST_RELEASE_DIR=$hostRelease" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -281,8 +244,8 @@ jobs:
           if-no-files-found: error
 
   native-release:
-    needs: [resolve, cjs-release, native-assets, windows-assets]
-    if: always() && needs.resolve.result == 'success' && needs.cjs-release.result == 'success' && needs.native-assets.result == 'success' && needs.windows-assets.result == 'success' && needs.resolve.outputs.has_native == 'true'
+    needs: [resolve, cjs-release, windows-assets]
+    if: always() && needs.resolve.result == 'success' && needs.cjs-release.result == 'success' && needs.windows-assets.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -290,7 +253,7 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v5
-        with: { ref: '${{ needs.resolve.outputs.tag }}' }
+        with: { ref: '${{ needs.resolve.outputs.tag }}', fetch-depth: 0 }
 
       - uses: actions/setup-node@v5
         with:
@@ -310,11 +273,6 @@ jobs:
           path: release
       - uses: actions/download-artifact@v5
         with:
-          pattern: native-*
-          path: release
-          merge-multiple: true
-      - uses: actions/download-artifact@v5
-        with:
           name: windows-captured-assets
           path: ${{ runner.temp }}/windows-captured
       - name: Validate and stage the exact Windows-captured revision
@@ -328,7 +286,7 @@ jobs:
           import { join } from 'node:path'
           const root = process.env.WINDOWS_CAPTURE_DIR
           const manifest = JSON.parse(readFileSync(join(root, 'windows-capture-manifest.json'), 'utf8'))
-          const expected = ['kala-copilot-runtime-node-win32-x64.node', 'kala-copilot-runtime-win32-x64', 'kala-dashboard-with-runtime.cjs', 'kala-executor.cjs', 'kala-executor-service-host-win32-x64.exe', 'node-pty-win32-x64.tar.gz']
+          const expected = ['kala-dashboard-with-runtime.cjs', 'kala-executor.cjs', 'kala-executor-service-host-win32-x64.exe', 'node-pty-win32-x64.tar.gz']
           if (manifest.schemaVersion !== 1 || manifest.revision !== process.env.EXPECTED_REVISION) throw new Error('Windows capture revision mismatch')
           if (JSON.stringify(Object.keys(manifest.assets).sort()) !== JSON.stringify([...expected].sort())) throw new Error('Windows capture manifest inventory is not exact')
           if (JSON.stringify(readdirSync(root).sort()) !== JSON.stringify([...expected, 'windows-capture-manifest.json'].sort())) throw new Error('Windows capture artifact inventory is not closed')
@@ -346,17 +304,11 @@ jobs:
         run: |
           find release -maxdepth 1 -type f \( -name 'kala-*' -o -name '*.cjs' -o -name '*.sh' \) -print0 \
             | xargs -0 -r chmod +x
-      - name: Sign Executor update feed with the persistent operator key
-        env:
-          EXECUTOR_UPDATE_PRIVATE_KEY_PEM: ${{ secrets.EXECUTOR_UPDATE_PRIVATE_KEY_PEM }}
+      - name: Verify the exact-tag offline-signed Executor update feed
         run: |
           set -euo pipefail
-          umask 077
-          key_file=.executor-update-signing-key.pem
-          trap 'rm -f -- "$key_file"' EXIT
-          node -e 'const {writeFileSync}=require("node:fs"); const pem=process.env.EXECUTOR_UPDATE_PRIVATE_KEY_PEM; if (!pem) throw new Error("configure the persistent EXECUTOR_UPDATE_PRIVATE_KEY_PEM secret"); writeFileSync(".executor-update-signing-key.pem",pem,{flag:"wx",mode:0o600})'
-          unset EXECUTOR_UPDATE_PRIVATE_KEY_PEM
-          node scripts/release/sign-executor-update-feed.mjs --directory release --private-key-file "$key_file"
+          node scripts/release/stage-signed-executor-update-feed.mjs \
+            --directory release --tag ${{ needs.resolve.outputs.tag }}
       - name: Embed the verified Windows installer payload in the Portable Host
         run: >-
           node scripts/release/embed-windows-assets-in-portable-host.mjs
@@ -372,15 +324,13 @@ jobs:
           test -f release/node-pty-win32-x64.tar.gz
           test -f release/kala-executor-service-host-win32-x64.exe
           test -f release/install-executor.ps1
-          test -f release/kala-copilot-runtime-win32-x64
-          test -f release/kala-copilot-runtime-node-win32-x64.node
           ! find release -maxdepth 1 -type f \( -name 'kala-executor-linux-*' -o -name 'kala-executor-darwin-*' -o -name 'kala-executor-win32-*.exe' \) -print -quit | grep -q .
           ! find release -maxdepth 1 -type f \( -iname '*.msi' -o -iname '*.dll' -o -iname '*win32-arm64*' -o -iname '*windows-arm64*' -o -iname '*linux-arm64*' \) -print -quit | grep -q .
       - run: pnpm run verify:release-assets
       - run: pnpm run verify:version -- --tag ${{ needs.resolve.outputs.tag }} --manifest release/manifest.json
       - name: Smoke standalone and adjacent-directory Portable Host installs
         run: pnpm run verify:release-install
-      - uses: sigstore/cosign-installer@v3
+      - uses: ./.github/actions/install-verified-cosign
       - name: Sign the checksum index with Sigstore keyless identity
         run: |
           for attempt in 1 2 3; do

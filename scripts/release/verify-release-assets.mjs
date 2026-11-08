@@ -19,7 +19,6 @@ const manifestPath = join(releaseDir, 'manifest.json')
 if (!existsSync(manifestPath)) fail('missing release/manifest.json')
 
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-const supportedCopilotRuntimeTargets = ['linux-x64', 'darwin-x64', 'darwin-arm64', 'win32-x64']
 const privateCloudRuntime = process.argv.includes('--private-cloud-runtime')
 const localDedicated = process.argv.includes('--local-dedicated')
 const requireSigned = process.argv.includes('--require-signed')
@@ -66,23 +65,11 @@ const expectedNativeAssets = {
 if (JSON.stringify(manifest.nativeAssets) !== JSON.stringify(expectedNativeAssets)) {
   fail('manifest.nativeAssets must contain no standalone native Executor assets')
 }
-const actualCopilotRuntimeTargets = Array.isArray(manifest.copilotRuntimeTargets)
-  ? [...manifest.copilotRuntimeTargets].sort()
-  : undefined
-const expectedCopilotRuntimeTargets = privateCloudRuntime || !hasWindowsPayload
-  ? [`${process.platform}-${process.arch}`]
-  : supportedCopilotRuntimeTargets
-if (!actualCopilotRuntimeTargets
-  || JSON.stringify(actualCopilotRuntimeTargets) !== JSON.stringify([...expectedCopilotRuntimeTargets].sort())) {
-  fail('manifest.copilotRuntimeTargets must contain the build platform for a CJS stage or all supported release targets')
+if (manifest.copilotRuntimeTargets !== undefined || manifest.assets.some((asset) => /^kala-copilot-runtime-/u.test(asset))) {
+  fail('Copilot CLI binaries must not be published in Kala release assets')
 }
-const copilotRuntimeAssets = actualCopilotRuntimeTargets.flatMap((target) => [
-  `kala-copilot-runtime-${target}`,
-  `kala-copilot-runtime-node-${target}.node`,
-])
 const expectedManifestAssets = [
   ...expectedNativeAssets['kala-executor'],
-  ...copilotRuntimeAssets,
   ...(hasWindowsPayload ? ['node-pty-win32-x64.tar.gz', WINDOWS_SERVICE_HOST.asset, 'install-executor.ps1'] : []),
   'kala-dashboard-with-runtime.cjs',
   'kala-runtime.cjs',
@@ -109,9 +96,8 @@ const sbom = JSON.parse(metadata.get('sbom.cdx.json'))
 const notices = metadata.get('THIRD_PARTY_NOTICES.txt').toString('utf8')
 const notes = metadata.get('RELEASE_NOTES.md').toString('utf8')
 const copilotDependency = sbom.components.find((component) => component.name === '@github/copilot-sdk')
-const copilotRuntimeDependency = sbom.components.find((component) => component.name === `@github/copilot-sdk-${process.platform}-${process.arch}`)
-if (!copilotDependency || !copilotRuntimeDependency || !notices.includes('@github/copilot-sdk@')) {
-  fail('release metadata must retain the upstream Copilot SDK and platform runtime dependencies')
+if (!copilotDependency || !notices.includes('@github/copilot-sdk@')) {
+  fail('release metadata must retain the upstream Copilot SDK dependency')
 }
 if (hasWindowsPayload) {
   const serviceHostDependency = sbom.components.find((component) => component.name === WINDOWS_SERVICE_HOST.product && component.version === WINDOWS_SERVICE_HOST.version)
@@ -128,8 +114,8 @@ if (privateCloudRuntime && signaturePresent) fail('Private Cloud runtime image s
 try {
   assertLocalDedicatedVerification({ enabled: localDedicated, privateCloudRuntime, requireSigned, manifest, hasUpdateFeed, hasWindowsPayload, signaturePresent })
 } catch (error) { fail(error.message) }
-if (process.argv.includes('--require-signed') && (!signaturePresent || manifest.component !== 'all' || !hasWindowsPayload || actualCopilotRuntimeTargets.length !== supportedCopilotRuntimeTargets.length)) {
-  fail('signed final release requires the signature bundle, Windows CJS installer, and all four Copilot runtimes')
+if (process.argv.includes('--require-signed') && (!signaturePresent || manifest.component !== 'all' || !hasWindowsPayload)) {
+  fail('signed final release requires the signature bundle and Windows CJS installer')
 }
 const expectedReleaseFiles = [...manifest.assets, 'manifest.json', 'SHA256SUMS', ...(signaturePresent ? ['SHA256SUMS.sigstore.json'] : [])].sort()
 const actualReleaseEntries = readdirSync(releaseDir, { withFileTypes: true })
@@ -151,10 +137,6 @@ if (includesHost) {
     DEDICATED_SUPPORT_ARCHIVE,
   ]) {
     if (!manifest.assets.includes(asset)) fail(`manifest missing Dedicated asset ${asset}`)
-  }
-  for (const asset of copilotRuntimeAssets) {
-    if (!manifest.assets.includes(asset)) fail(`manifest missing Copilot runtime asset ${asset}`)
-    accessSync(join(releaseDir, asset), constants.R_OK)
   }
   try { inspectDedicatedSupportBundle(join(releaseDir, DEDICATED_SUPPORT_ARCHIVE)) } catch (error) { fail(error.message) }
   const hostBundle = readFileSync(join(releaseDir, 'kala-dashboard-with-runtime.cjs'), 'utf8')
@@ -476,8 +458,6 @@ function assertSupportedReleaseAssetName(name, location) {
     WINDOWS_SERVICE_HOST.asset,
     'install-executor.ps1',
     WINDOWS_PORTABLE_MANAGER,
-    'kala-copilot-runtime-win32-x64',
-    'kala-copilot-runtime-node-win32-x64.node',
   ])
   if (typeof name !== 'string'
     || /linux-arm64/iu.test(name)

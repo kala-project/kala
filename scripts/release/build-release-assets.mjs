@@ -55,7 +55,7 @@ if (!repo && component !== 'dashboard') {
   throw new Error('release repo is required; pass --repo owner/name or set GITHUB_REPOSITORY')
 }
 if (nativeOnly && noNative) throw new Error('--native-only and --no-native are mutually exclusive')
-// Matching runners stage platform-specific Copilot and Windows companion
+// Matching runners stage optional native Host and Windows companion
 // dependencies separately from the platform-neutral CJS Executor.
 const wantsNativeBuild = !finalizeOnly && nativeOnly
 const currentNativeTarget = wantsNativeBuild ? detectNativeTarget() : undefined
@@ -102,9 +102,6 @@ const entries = allEntries.filter((entry) => component === 'all' || entry.compon
 const includeDashboard = component === 'all' || component === 'host' || component === 'dashboard'
 const nativeTargets = ['linux-x64', 'darwin-x64', 'darwin-arm64', WINDOWS_EXECUTOR_TARGET]
 const supportedNativeBuildTargets = nativeTargets
-// Portable Host CJS is platform-neutral, but each supported OS must contribute
-// its adjacent Copilot SDK wrapper and native runtime from a matching runner.
-const copilotRuntimeTargets = nativeTargets
 if (finalizeOnly) {
   finalizeRelease()
   process.exit(0)
@@ -136,10 +133,6 @@ if (includeDashboard && !skipDashboardBuild) {
 if (includeDashboard && skipDashboardBuild) {
   assertDashboardDistReady(dashboardDist)
 }
-if (component === 'all' || component === 'host') {
-  stageCopilotRuntime(nativeTarget ?? detectNativeTarget())
-}
-
 // The host bundle is built before finalizeRelease(), so every asset that must be
 // served from an embedded-only deployment has to exist before the host banner is
 // generated. Keep this in front of buildEntries; moving it back below the host
@@ -198,12 +191,6 @@ for (const item of buildEntries) {
   }
 }
 
-// Host CJS still needs the platform Copilot SDK runtime files for agent turns.
-// Stage those dependencies without building a self-contained native Host.
-if (nativeOnly && component === 'executor' && copilotRuntimeTargets.includes(nativeTarget)) {
-  stageCopilotRuntime(nativeTarget)
-}
-
 if (nativeOnly && nativeTarget === WINDOWS_EXECUTOR_TARGET && entries.some((entry) => entry.role === 'executor')) {
   const executorRequire = createRequire(join(root, 'packages/executor/package.json'))
   const nodePtyRoot = dirname(executorRequire.resolve('node-pty/package.json'))
@@ -221,9 +208,6 @@ if (nativeOnly) {
   if (nativeTarget === WINDOWS_EXECUTOR_TARGET && entries.some((entry) => entry.role === 'executor')) {
     console.log(` - ${windowsNodePtyCompanionAssetName(nativeTarget)}`)
     console.log(` - ${WINDOWS_SERVICE_HOST.asset}`)
-  }
-  if (copilotRuntimeTargets.includes(nativeTarget)) {
-    for (const asset of copilotRuntimeAssetNames(nativeTarget)) console.log(` - ${asset}`)
   }
   process.exit(0)
 }
@@ -295,11 +279,8 @@ function finalizeRelease() {
       .filter((asset) => exists(asset))
     return { ...entry, cjs: exists(cjs) ? cjs : undefined, natives }
   })
-  const packagedCopilotRuntimeTargets = copilotRuntimeTargets
-    .filter((target) => copilotRuntimeAssetNames(target).every((asset) => exists(asset)))
   writeDependencyMetadata()
   const assets = builtEntries.flatMap((entry) => [entry.cjs, ...entry.natives].filter(Boolean))
-    .concat(packagedCopilotRuntimeTargets.flatMap(copilotRuntimeAssetNames))
     .concat(includeDashboard && exists(dashboardArchiveName) ? [dashboardArchiveName] : [])
     .concat(includeDashboard && exists('kala-docs.tar.gz') ? ['kala-docs.tar.gz'] : [])
     .concat((component === 'all' || component === 'host') && exists(DEDICATED_SUPPORT_ARCHIVE) ? [DEDICATED_SUPPORT_ARCHIVE] : [])
@@ -318,7 +299,6 @@ function finalizeRelease() {
     tag,
     node: '>=22',
     nativeTargets: nativeTargets.filter((target) => builtEntries.some((entry) => entry.natives.includes(nativeAssetName(entry.name, target)))),
-    copilotRuntimeTargets: packagedCopilotRuntimeTargets,
     windowsServiceHost: exists(WINDOWS_SERVICE_HOST.asset) ? windowsServiceHostManifestMetadata() : undefined,
     assets,
     nativeAssets: {
@@ -490,24 +470,6 @@ function detectNativeTarget() {
 function nativeAssetName(name, target) {
   if (!supportedNativeBuildTargets.includes(target)) throw new Error(`unsupported native release target ${target}`)
   return `${name}-${target}${target === WINDOWS_EXECUTOR_TARGET ? '.exe' : ''}`
-}
-
-function copilotRuntimeAssetNames(target) {
-  if (!copilotRuntimeTargets.includes(target)) throw new Error(`unsupported Copilot runtime target ${target}`)
-  return [`kala-copilot-runtime-${target}`, `kala-copilot-runtime-node-${target}.node`]
-}
-
-function stageCopilotRuntime(target) {
-  const hostRequire = createRequire(join(root, 'packages/host/package.json'))
-  const sdkRequire = createRequire(hostRequire.resolve('@github/copilot-sdk'))
-  const packageName = `@github/copilot-sdk-${target}`
-  const packageRoot = dirname(sdkRequire.resolve(`${packageName}/package.json`))
-  const sourceDir = join(packageRoot, 'prebuilds', target)
-  const wrapperName = process.platform === 'win32' ? 'copilot-runtime.exe' : 'copilot-runtime'
-  const [wrapperAsset, libraryAsset] = copilotRuntimeAssetNames(target)
-  copyFileSync(join(sourceDir, wrapperName), join(outDir, wrapperAsset))
-  copyFileSync(join(sourceDir, 'runtime.node'), join(outDir, libraryAsset))
-  chmodSync(join(outDir, wrapperAsset), 0o755)
 }
 
 function cjsAssetName(entry) {

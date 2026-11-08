@@ -50,7 +50,7 @@ describe('deploy:dedicated client', () => {
     expectFailure([script, 'stage', '--local', '--lxd', 'candidate', '--skip-build'], 'choose exactly one transport')
   })
 
-  it('stages an unsigned 16-file local-development release without changing release/', () => {
+  it('stages an unsigned local-development release without changing release/', () => {
     const root = mkdtempSync(join(tmpdir(), 'deploy-dedicated-local-dev-')); roots.push(root)
     const deployRoot = createDeployRoot(root)
     const sourceCheckout = createSourceCheckout(root)
@@ -194,7 +194,7 @@ describe('deploy:dedicated client', () => {
   })
 })
 
-const localDevelopmentAssets = ['kala-dashboard-with-runtime.cjs', 'kala-runtime.cjs', 'kala-executor.cjs', 'kala-dedicated-ingress.cjs', 'kala-dedicated-deploy-supervisor.cjs', 'kala-copilot-runtime-linux-x64', 'kala-copilot-runtime-node-linux-x64.node', 'kala-dashboard.tar.gz', 'kala-docs.tar.gz', 'kala-dedicated-support.tar.gz', 'kala-model-catalog-seed.json', 'run.sh', 'kala-dedicated.mjs', 'kala-release-metadata.tar.gz']
+const localDevelopmentAssets = ['kala-dashboard-with-runtime.cjs', 'kala-runtime.cjs', 'kala-executor.cjs', 'kala-dedicated-ingress.cjs', 'kala-dedicated-deploy-supervisor.cjs', 'kala-dashboard.tar.gz', 'kala-docs.tar.gz', 'kala-dedicated-support.tar.gz', 'kala-model-catalog-seed.json', 'run.sh', 'kala-dedicated.mjs', 'kala-release-metadata.tar.gz']
 const supportAssets = ['cutover-dedicated-systemd.mjs', 'dedicated-data-migration.mjs', 'dedicated-settings-fingerprint.mjs', 'deploy-dashboard.mjs', 'deploy-dedicated.mjs', 'deployment.json', 'install-dedicated-systemd.mjs', 'kala-dedicated-control-updater.service', 'kala-dedicated-deploy-supervisor.service', 'kala-dedicated-ingress.service', 'kala-dedicated-migration-finalizer.service', 'kala-dedicated-unit@.service', 'rollback-dedicated-systemd.mjs', 'update-dedicated-control-plane.mjs']
 
 function createSourceCheckout(root) {

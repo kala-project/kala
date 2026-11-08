@@ -1,0 +1,36 @@
+name: Install verified cosign
+description: Retry the official Sigstore installer when its release download fails
+runs:
+  using: composite
+  steps:
+    - id: first
+      uses: sigstore/cosign-installer@v3
+      continue-on-error: true
+    - if: steps.first.outcome == 'failure'
+      shell: bash
+      run: sleep 15
+    - id: second
+      if: steps.first.outcome == 'failure'
+      uses: sigstore/cosign-installer@v3
+      continue-on-error: true
+    - if: steps.first.outcome == 'failure' && steps.second.outcome == 'failure'
+      shell: bash
+      run: sleep 45
+    - id: third
+      if: steps.first.outcome == 'failure' && steps.second.outcome == 'failure'
+      uses: sigstore/cosign-installer@v3
+      continue-on-error: true
+    - if: steps.third.outcome == 'failure'
+      shell: bash
+      run: |
+        set -euo pipefail
+        image=ghcr.io/sigstore/cosign/cosign@sha256:cd934061aabb2b7715558adb1ad192d569d355f2ad1f56202b028adaa30a690c
+        docker pull --platform linux/amd64 "$image"
+        test "$(docker image inspect --format '{{json .Config.Entrypoint}}' "$image")" = '["/ko-app/cosign"]'
+        container=$(docker create "$image")
+        trap 'docker rm -f "$container" >/dev/null' EXIT
+        install -d "$HOME/.cosign"
+        docker cp "$container:/ko-app/cosign" "$HOME/.cosign/cosign"
+        chmod 755 "$HOME/.cosign/cosign"
+        "$HOME/.cosign/cosign" version | grep -F 'v2.5.2'
+        echo "$HOME/.cosign" >> "$GITHUB_PATH"

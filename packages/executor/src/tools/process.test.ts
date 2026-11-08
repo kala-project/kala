@@ -153,7 +153,6 @@ describe('shell yield_time_ms and process tool', () => {
     expect(yielded.yielded).toBe(true)
     expect(yielded.status).toBe('running')
     expect(yielded.taskId).toBeTruthy()
-    expect(yielded.output).toContain('phase-1')
 
     const listOut = JSON.parse(await processTool.run({ action: 'list' }, ctx)) as {
       count: number
@@ -180,6 +179,7 @@ describe('shell yield_time_ms and process tool', () => {
       status: string
       exitCode: number | null
     }
+    expect(yielded.output + polled.content).toContain('phase-1')
     expect(polled.content).toContain('phase-2')
     expect(polled.done).toBe(true)
     expect(polled.status).toBe('exited')

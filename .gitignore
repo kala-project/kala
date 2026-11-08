@@ -37,6 +37,7 @@ deploy/identity/backups/
 deploy/**/release-manifest.local.json
 deploy/**/deployment.env
 *.pem
+!scripts/release/executor-update-public-key.pem
 secrets*
 
 # Logs

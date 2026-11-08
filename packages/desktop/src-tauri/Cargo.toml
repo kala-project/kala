@@ -1,6 +1,6 @@
 [package]
 name = "kala-desktop"
-version = "0.3.4"
+version = "0.4.0"
 description = "Linux desktop client for an existing Kala Dashboard"
 authors = ["Kala contributors"]
 license = "MIT"

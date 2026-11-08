@@ -14,11 +14,31 @@ const reconcile = join(import.meta.dirname, 'reconcile-github-release-assets.mjs
 const verifyPromotion = join(import.meta.dirname, 'verify-promotion-candidate.mjs')
 const digest = (value) => createHash('sha256').update(value).digest('hex')
 
+test('all release gates use official verified cosign sources and fail closed', () => {
+  const action = readFileSync(join(import.meta.dirname, '../../.github/actions/install-verified-cosign/action.yml'), 'utf8')
+  assert.equal((action.match(/uses: sigstore\/cosign-installer@v3/gu) ?? []).length, 3)
+  assert.equal((action.match(/continue-on-error: true/gu) ?? []).length, 3)
+  assert.match(action, /if: steps\.first\.outcome == 'failure'\n\s+shell: bash\n\s+run: sleep 15/u)
+  assert.match(action, /if: steps\.first\.outcome == 'failure' && steps\.second\.outcome == 'failure'\n\s+shell: bash\n\s+run: sleep 45/u)
+  assert.match(action, /id: third\n\s+if: steps\.first\.outcome == 'failure' && steps\.second\.outcome == 'failure'\n\s+uses: sigstore\/cosign-installer@v3\n\s+continue-on-error: true/u)
+  assert.match(action, /if: steps\.third\.outcome == 'failure'\n\s+shell: bash\n\s+run: \|[\s\S]*?image=ghcr\.io\/sigstore\/cosign\/cosign@sha256:cd934061aabb2b7715558adb1ad192d569d355f2ad1f56202b028adaa30a690c/u)
+  assert.match(action, /docker pull --platform linux\/amd64 "\$image"[\s\S]*?docker image inspect --format '[^']+'[\s\S]*?docker cp "\$container:\/ko-app\/cosign"[\s\S]*?"\$HOME\/\.cosign\/cosign" version \| grep -F 'v2\.5\.2'/u)
+  for (const name of ['release', 'private-cloud-release', 'rc-acceptance', 'promote-rc', 'portable-image-release']) {
+    const workflow = readFileSync(join(import.meta.dirname, `../../.github/workflows/${name}.yml`), 'utf8')
+    assert.match(workflow, /uses: \.\/\.github\/actions\/install-verified-cosign/u)
+    assert.doesNotMatch(workflow, /uses: sigstore\/cosign-installer@v3/u)
+  }
+})
+
 test('tag orchestrator promotes only after exact-revision asset, image, and hosted acceptance gates', () => {
   const workflow = readFileSync(join(import.meta.dirname, '../../.github/workflows/release-orchestrator.yml'), 'utf8')
-  assert.match(workflow, /tags: \['v0\.3\.0'\]/u)
+  assert.match(workflow, /tags: \['v0\.4\.0'\]/u)
   assert.match(workflow, /test "\$GITHUB_REF" = "refs\/tags\/\$TAG"/u)
   assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$\(git rev-parse "\$TAG\^\{commit\}"\)"/u)
+  assert.match(workflow, /group: complete-v0\.4\.0-release-\$\{\{ github\.sha \}\}/u)
+  assert.match(workflow, /test "\$\(gh api "repos\/\$GITHUB_REPOSITORY\/git\/ref\/tags\/\$TAG" --jq \.object\.sha\)" = "\$\(git rev-parse "refs\/tags\/\$TAG"\)"/u)
+  assert.match(workflow, /for \(\(attempt=0; attempt<660; attempt\+\+\)\); do\n\s+require_current_tag \|\| return 1/u)
+  assert.match(workflow, /require_current_tag\n\s+gh workflow run (?:rc-acceptance|promote-rc)\.yml/gu)
   assert.match(workflow, /jq -c --arg revision "\$revision" --arg tag "\$TAG" --argjson minimum "\$minimum"[\s\S]*\.head_sha == \$revision and \.head_branch == \$tag and \.id > \$minimum/u)
   const stages = [
     'wait_for_run release.yml push 0',
@@ -79,6 +99,7 @@ test('Windows acceptance builds real workspace dependencies instead of a quoted 
   }
   const workflow = readFileSync(join(import.meta.dirname, '../../.github/workflows/rc-acceptance.yml'), 'utf8')
   assert.match(workflow, /windows-portable-conpty:[\s\S]*pnpm --filter @agent-kernel\/shared\.\.\. run build[\s\S]*Prove Windows Node\.js 22 Host/u)
+  assert.match(workflow, /\$assets = @\([\s\S]*?'install-executor\.ps1'\s*\)/u)
 })
 
 test('Private Cloud Windows invite fixture uses the same OIDC authentication contract as the Gateway', () => {
@@ -122,10 +143,13 @@ test('Private Cloud runtime image receives an exact-tag sealed Windows Executor 
 })
 
 test('Platform images keep the matched Copilot executable outside noexec tenant scratch', () => {
+  const sdkVersion = JSON.parse(readFileSync(join(import.meta.dirname, '../../packages/host/package.json'), 'utf8')).dependencies['@github/copilot-sdk']
+  const sdkPrebuild = `/app/node_modules/.pnpm/@github+copilot-sdk-linux-x64@${sdkVersion}/node_modules/@github/copilot-sdk-linux-x64/prebuilds/linux-x64/`
   for (const path of ['deploy/private-cloud/images/Dockerfile.runtime-service', 'deploy/aspire/Dockerfile.runtime-linux-e2e']) {
     const dockerfile = readFileSync(join(import.meta.dirname, '../..', path), 'utf8')
-    assert.match(dockerfile, /COPY --from=build --chown=root:root --chmod=0555 \/app\/release\/kala-copilot-runtime-linux-x64 \/app\/copilot-runtime\/copilot-runtime/u)
-    assert.match(dockerfile, /COPY --from=build --chown=root:root --chmod=0444 \/app\/release\/kala-copilot-runtime-node-linux-x64\.node \/app\/copilot-runtime\/runtime\.node/u)
+    assert.ok(dockerfile.includes(`COPY --from=build --chown=root:root --chmod=0555 ${sdkPrebuild}copilot-runtime /app/copilot-runtime/copilot-runtime`))
+    assert.ok(dockerfile.includes(`COPY --from=build --chown=root:root --chmod=0444 ${sdkPrebuild}runtime.node /app/copilot-runtime/runtime.node`))
+    assert.doesNotMatch(dockerfile, /COPY --from=build [^\n]*\/app\/release\/kala-copilot-runtime-/u)
     assert.match(dockerfile, /^ENV COPILOT_CLI_PATH=\/app\/copilot-runtime\/copilot-runtime$/mu)
   }
   for (const path of ['compose.storage-postgres-s3.yaml', 'compose.storage-postgres-s3.parallel.yaml']) {
@@ -165,7 +189,8 @@ test('Private Cloud images derive a minimal Node runtime and exclude unused Open
     assert.doesNotMatch(dockerfile, /^COPY --from=node-runtime-source .*status\.d\/libssl/mu)
     assert.match(dockerfile, /^USER 65532:65532$/mu)
     const runtimeStage = dockerfile.slice(dockerfile.indexOf('FROM gcr.io/distroless/'))
-    assert.doesNotMatch(runtimeStage, /\b(?:groupadd|useradd|apt-get|corepack|pnpm)\b/u)
+    assert.doesNotMatch(runtimeStage, /^RUN\b/mu)
+    assert.doesNotMatch(runtimeStage, /^COPY .*\/(?:bin|sbin)\/(?:groupadd|useradd|apt-get|corepack|pnpm)(?:\s|$)/mu)
     assert.doesNotMatch(dockerfile, /^COPY --from=build --chown=runlab:runlab \/app \/app$/mu)
   }
   for (const name of ['runtime-service', 'runtime-ingress-gateway']) {
@@ -242,7 +267,7 @@ test('release workflow publishes archived metadata and verifies the signed CJS E
   assert.match(workflow, /pnpm run test:extended\n\s+- run: KALA_RUN_POSTGRES_INTEGRATION=1 pnpm --dir packages\/host exec vitest run src\/store\/postgres-session\.integration\.test\.ts/u)
   assert.match(workflow, /test "\$GITHUB_REF" = "refs\/tags\/\$TAG"/u)
   assert.match(workflow, /optional-host-native:[\s\S]*workflow_dispatch[\s\S]*--component host[\s\S]*name: optional-host-qualification-/u)
-  assert.match(workflow, /native-assets:[\s\S]*--component executor[\s\S]*name: native-/u)
+  assert.doesNotMatch(workflow, /^  native-assets:/mu)
   assert.match(workflow, /test -f release\/kala-executor\.cjs[\s\S]*test -f release\/kala-executor-service-host-win32-x64\.exe[\s\S]*-name 'kala-executor-win32-\*\.exe'/u)
   assert.match(workflow, /windows-assets:[\s\S]*runs-on: windows-latest[\s\S]*Require GNU tar and gzip from Git for Windows[\s\S]*--component all[\s\S]*--native-target win32-x64/u)
   assert.match(workflow, /Build the platform-neutral Portable Host on Windows Node\.js 22[\s\S]*node --test scripts\/release\/portable-manager-windows\.test\.mjs[\s\S]*Capture the Windows-built Host/u)
@@ -254,14 +279,14 @@ test('release workflow publishes archived metadata and verifies the signed CJS E
   assert.equal(workflow.match(/reconcile-github-release-assets\.mjs[^\n]+--preserve-private-cloud-assets/g)?.length, 2)
   const nativeRelease = workflow.slice(workflow.indexOf('  native-release:'))
   const captureValidation = nativeRelease.indexOf('Validate and stage the exact Windows-captured revision')
-  const feedSigning = nativeRelease.indexOf('sign-executor-update-feed.mjs')
+  const feedSigning = nativeRelease.indexOf('stage-signed-executor-update-feed.mjs')
   const hostEmbedding = nativeRelease.indexOf('embed-windows-assets-in-portable-host.mjs')
   const finalize = nativeRelease.indexOf('--finalize-only')
   const installSmoke = nativeRelease.indexOf('pnpm run verify:release-install')
   const signing = nativeRelease.indexOf('cosign sign-blob')
   assert.ok(captureValidation >= 0 && captureValidation < feedSigning && feedSigning < hostEmbedding)
-  assert.match(nativeRelease, /EXECUTOR_UPDATE_PRIVATE_KEY_PEM: \$\{\{ secrets\.EXECUTOR_UPDATE_PRIVATE_KEY_PEM \}\}[\s\S]*sign-executor-update-feed\.mjs/u)
-  assert.match(nativeRelease, /sign-executor-update-feed\.mjs[\s\S]*embed-windows-assets-in-portable-host\.mjs[\s\S]*--finalize-only[\s\S]*--require-signed/u)
+  assert.doesNotMatch(nativeRelease, /EXECUTOR_UPDATE_PRIVATE_KEY_PEM/u)
+  assert.match(nativeRelease, /stage-signed-executor-update-feed\.mjs[\s\S]*--tag \$\{\{ needs\.resolve\.outputs\.tag \}\}[\s\S]*embed-windows-assets-in-portable-host\.mjs[\s\S]*--finalize-only[\s\S]*--require-signed/u)
   assert.match(readFileSync(join(import.meta.dirname, '../../.github/workflows/promote-rc.yml'), 'utf8'), /verify-promotion-candidate\.mjs[\s\S]*executor-update-manifest\.json executor-update-public-key\.pem/u)
   assert.ok(hostEmbedding < finalize && finalize < installSmoke && installSmoke < signing)
   assert.match(nativeRelease, /embed-windows-assets-in-portable-host\.mjs[\s\S]*--repo \$\{\{ github\.repository \}\}[\s\S]*--tag \$\{\{ needs\.resolve\.outputs\.tag \}\}[\s\S]*--expected-revision \$\{\{ github\.sha \}\}/u)
@@ -270,13 +295,17 @@ test('release workflow publishes archived metadata and verifies the signed CJS E
   assert.doesNotMatch(workflow, /release\/sbom\.cdx\.json/u)
 })
 
-test('Portable OCI v0.3.0 dispatch requires immutable Node and isolated-VM acceptance', () => {
+test('Portable OCI dispatch binds the exact tag and requires immutable Node and isolated-VM acceptance', () => {
   const workflow = readFileSync(join(import.meta.dirname, '../../.github/workflows/portable-image-release.yml'), 'utf8')
-  assert.match(workflow, /ACCEPTED_TAG: v0\.3\.0/u)
-  assert.doesNotMatch(workflow, /ACCEPTED_TAG: v0\.3\.0-beta\./u)
+  assert.doesNotMatch(workflow, /ACCEPTED_TAG:/u)
+  assert.match(workflow, /test "\$GITHUB_REF" = "refs\/tags\/\$TAG"/u)
+  assert.match(workflow, /git rev-parse "\$TAG\^\{commit\}"\)" = "\$REVISION"/u)
+  assert.match(workflow, /GITHUB_WORKFLOW_REF" = "\$GITHUB_REPOSITORY\/\.github\/workflows\/portable-image-release\.yml@refs\/tags\/\$TAG"/u)
   assert.match(workflow, /node_22_amd64_digest:\n\s+description: [^\n]*digest[^\n]*sha256:\.\.\.\)\n\s+required: true\n\s+type: string/u)
   assert.match(workflow, /\[\[ "\$NODE_DIGEST" =~ \^sha256:\[0-9a-f\]\{64\}\$ \]\]/u)
   assert.match(workflow, /NODE_IMAGE=node:22-bookworm-slim@\$\{\{ inputs\.node_22_amd64_digest \}\}/u)
+  assert.match(workflow, /if curl -sSfL --retry 3 -o \/tmp\/syft\.tar\.gz[\s\S]*?echo "\$\{SYFT_SHA256\}  \/tmp\/syft\.tar\.gz" \| sha256sum -c -[\s\S]*?else\n\s+image=ghcr\.io\/anchore\/syft@sha256:10959a01773b3b2e5ce9fb3f33b6accf5091ebdd62a8f3c255b2e0b43d2aa03a/u)
+  assert.match(workflow, /docker pull --platform linux\/amd64 "\$image"[\s\S]*?docker image inspect --format '[^']+'[\s\S]*?docker cp "\$container:\/syft" \/usr\/local\/bin\/syft[\s\S]*?syft version \| grep -F "\$\{SYFT_VERSION#v\}"/u)
   assert.match(workflow, /require_isolated_vm_acceptance:\n\s+description: [^\n]+\n\s+required: true\n\s+type: boolean\n\s+default: true/u)
   assert.equal((workflow.match(/test "\$ACCEPTANCE_REQUIRED" = true/gu) ?? []).length, 2)
   assert.match(workflow, /test "\$ACCEPTANCE_RESULT" = success/u)
@@ -351,7 +380,6 @@ test('promotion verifier binds the closed current draft to four accepted Portabl
     const windowsAssets = ['node-pty-win32-x64.tar.gz', 'kala-executor-service-host-win32-x64.exe', 'install-executor.ps1']
     const assets = [
       ...windowsAssets,
-      ...targets.flatMap((target) => [`kala-copilot-runtime-${target}`, `kala-copilot-runtime-node-${target}.node`]),
       'kala-dashboard-with-runtime.cjs', 'kala-runtime.cjs', 'kala-executor.cjs', 'kala-dedicated-ingress.cjs', 'kala-dedicated-deploy-supervisor.cjs',
       'kala-dashboard.tar.gz', 'kala-docs.tar.gz', 'kala-dedicated-support.tar.gz', 'kala-release-metadata.tar.gz',
       'run.sh', POSIX_PORTABLE_MANAGER, WINDOWS_PORTABLE_MANAGER, 'kala-dedicated.mjs', 'kala-model-catalog-seed.json',
@@ -372,7 +400,7 @@ test('promotion verifier binds the closed current draft to four accepted Portabl
     writeChecksums(candidate, [...assets, 'manifest.json'])
     for (const target of targets) {
       const name = 'kala-dashboard-with-runtime.cjs'
-      const windowsNames = [name, 'kala-executor.cjs', 'node-pty-win32-x64.tar.gz', 'kala-executor-service-host-win32-x64.exe', 'install-executor.ps1', 'kala-copilot-runtime-win32-x64', 'kala-copilot-runtime-node-win32-x64.node']
+      const windowsNames = [name, 'kala-executor.cjs', 'node-pty-win32-x64.tar.gz', 'kala-executor-service-host-win32-x64.exe', 'install-executor.ps1']
       const checkNames = requiredReleaseEvidence.portable.targetChecks?.[target] ?? requiredReleaseEvidence.portable.checks
       const checks = Object.fromEntries(checkNames.map((check) => [check, true]))
       writeFileSync(join(evidence, `${target}.rc-evidence.json`), JSON.stringify({

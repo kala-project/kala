@@ -383,13 +383,7 @@ async function main(): Promise<void> {
           unitId: id,
         }),
         sessionsDir: join(unitRoot, 'sessions'),
-        // The container entrypoint is in /app/packages/host/dist, while the
-        // verified Copilot CLI platform pair is in /app/release. Discover it
-        // from the published release, not the service script directory.
-        ...(releaseAssetsDir ? { copilot: {
-          runtimeEntryPath: join(releaseAssetsDir, 'kala-runtime.cjs'),
-          ...(id === publicInstallerUnitId ? { enabled: false } : {}),
-        } } : {}),
+        ...(releaseAssetsDir && id === publicInstallerUnitId ? { copilot: { enabled: false } } : {}),
         // Trace/message-assembly captures currently write only to the local
         // artifact tree; do not publish disposable captures in PG/S3 mode.
         artifactRootDir: persistentStorage ? false : join(unitRoot, 'artifacts'),

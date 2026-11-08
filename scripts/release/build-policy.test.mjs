@@ -52,7 +52,7 @@ test('release builders remove native scratch files and verification rejects unde
 test('only explicitly requested SEA Executor builds resolve adjacent native addons', () => {
   const builder = read('scripts/release/build-release-assets.mjs')
   assert.match(builder, /const wantsNativeBuild = !finalizeOnly && nativeOnly/)
-  assert.match(builder, /nativeOnly && component === 'executor' && copilotRuntimeTargets\.includes\(nativeTarget\)[\s\S]*stageCopilotRuntime\(nativeTarget\)/)
+  assert.doesNotMatch(builder, /stageCopilotRuntime|kala-copilot-runtime-/)
   assert.match(builder, /const nativeRequire = wantsNativeBuild && item\.role === 'executor'/)
   assert.match(builder, /createRequire\(__filename\)/)
   assert.match(builder, /\$\{nativeRequire\}\$\{buildInfo\}/)
@@ -94,7 +94,7 @@ test('release verification rejects embedded Dashboard assignment without rejecti
   assert.ok(!verifier.includes("platformRuntime.includes('__KALA_EMBEDDED_DASHBOARD__')"))
 })
 
-test('release verifier requires four Copilot runtimes and no native Executor while retaining Windows dependencies', () => {
+test('release verifier excludes Copilot binaries and native Executor while retaining Windows dependencies', () => {
   const builder = read('scripts/release/build-release-assets.mjs')
   const verifier = read('scripts/release/verify-release-assets.mjs')
   assert.match(builder, /const nativeTargets = \['linux-x64', 'darwin-x64', 'darwin-arm64', WINDOWS_EXECUTOR_TARGET\]/)
@@ -102,7 +102,7 @@ test('release verifier requires four Copilot runtimes and no native Executor whi
   assert.match(builder, /generateExecutorInstallerPowerShell/)
   assert.match(builder, /packageWindowsNodePtyCompanion/)
   assert.doesNotMatch(builder, /name: '(?:agent-kernel|agent-runlab|runlab)-|cjsName: 'bundle-dashboard-with-runtime'/)
-  assert.match(builder, /stageCopilotRuntime/)
+  assert.doesNotMatch(builder, /stageCopilotRuntime|kala-copilot-runtime-/)
   assert.doesNotMatch(builder, /generateExecutorInstallerSh|COPILOT_CLI_PATH/)
   assert.match(builder, /Release downloads require HTTPS except for loopback URLs/)
   assert.match(builder, /cosign verify-blob/)
@@ -114,7 +114,7 @@ test('release verifier requires four Copilot runtimes and no native Executor whi
   assert.match(builder, /\[ "\$BASE_URL" != "\$host_asset_base" \]/)
   assert.match(builder, /if \[ "\$VERIFY_SIGSTORE" = "1" \]; then require_cmd cosign; fi/)
   for (const section of ['Improvements', 'Fixes', 'Known issues', 'Installation', 'Supported platforms', 'Verification', 'Full changelog']) assert.match(builder, new RegExp(section))
-  assert.match(verifier, /supportedCopilotRuntimeTargets = \['linux-x64', 'darwin-x64', 'darwin-arm64', 'win32-x64'\]/)
+  assert.match(verifier, /Copilot CLI binaries must not be published/)
   assert.match(verifier, /standalone native Executor binaries are not release assets/)
   assert.match(verifier, /acceptedWindows/)
   assert.match(verifier, /const acceptedWindows = new Set\(\[[\s\S]*?\n    WINDOWS_PORTABLE_MANAGER,/u)

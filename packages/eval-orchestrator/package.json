@@ -1,6 +1,6 @@
 {
   "name": "@agent-kernel/eval-orchestrator",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "description": "Standalone durable Control Plane for the Agent Evaluation Platform.",
   "repository": { "type": "git", "url": "git+https://github.com/xingsy97/kala.git" },
   "homepage": "https://github.com/xingsy97/kala#readme",

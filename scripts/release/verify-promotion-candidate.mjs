@@ -18,7 +18,6 @@ const targets = [...requiredReleaseEvidence.portable.targets]
 const windowsAssets = ['node-pty-win32-x64.tar.gz', 'kala-executor-service-host-win32-x64.exe', 'install-executor.ps1']
 const expectedAssets = [
   ...windowsAssets,
-  ...targets.flatMap((target) => [`kala-copilot-runtime-${target}`, `kala-copilot-runtime-node-${target}.node`]),
   'kala-dashboard-with-runtime.cjs', 'kala-runtime.cjs', 'kala-executor.cjs', 'kala-dedicated-ingress.cjs', 'kala-dedicated-deploy-supervisor.cjs',
   'kala-dashboard.tar.gz', 'kala-docs.tar.gz', 'kala-dedicated-support.tar.gz', 'kala-release-metadata.tar.gz',
   'run.sh', POSIX_PORTABLE_MANAGER, WINDOWS_PORTABLE_MANAGER, 'kala-dedicated.mjs', 'kala-model-catalog-seed.json',

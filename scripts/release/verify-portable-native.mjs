@@ -228,8 +228,6 @@ function verifyWindowsPortableAndConpty() {
     'node-pty-win32-x64.tar.gz',
     'kala-executor-service-host-win32-x64.exe',
     'install-executor.ps1',
-    'kala-copilot-runtime-win32-x64',
-    'kala-copilot-runtime-node-win32-x64.node',
   ]
   for (const name of names) if (!existsSync(join(releaseDir, name))) throw new Error(`Windows release acceptance asset is missing: ${name}`)
   if (resolve(asset) !== resolve(releaseDir, 'kala-dashboard-with-runtime.cjs')) throw new Error('Windows Portable asset must come from the accepted release directory')

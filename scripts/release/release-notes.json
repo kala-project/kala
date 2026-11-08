@@ -1,4 +1,33 @@
 {
+  "v0.4.0": {
+    "previousTag": "v0.3.0",
+    "improvements": [
+      "Dedicated operations gain owner-gated operator consoles, native Aspire telemetry shortcuts, and more explicit Workspace and organization controls.",
+      "Signed Executor update feeds and release-asset checks support in-place upgrades without replacing an enrolled Workspace identity.",
+      "Session tools gain safer attachment transfers, bounded Git context inspection, and clearer controls for scheduled tasks and long-running processes."
+    ],
+    "fixes": [
+      "High-risk shell authorization keeps Executor dispatch bound to the Session Workspace and reports the actual denial reason without weakening exact-call checks.",
+      "Native Session compaction shows progress promptly, and empty Sessions admit model changes and compaction without an unrelated filesystem text-admission error.",
+      "Workspace attachment saves fail promptly when the Executor lacks transfer support; existing Executor services are detected before a new invitation is consumed."
+    ],
+    "knownIssues": [
+      "Owner-authenticated Session operations still require an authenticated production acceptance run; local tests alone do not establish that acceptance.",
+      "Release assets must pass exact-tag qualification and signature checks before publication."
+    ],
+    "desktopViaDashboard": true
+  },
+  "v0.3.4": {
+    "previousTag": "v0.3.0",
+    "improvements": [],
+    "fixes": [
+      "Empty native Copilot Sessions admit model changes and compaction before POSIX mount and event projection, avoiding a spurious text-admission denial."
+    ],
+    "knownIssues": [
+      "This local Dedicated update does not itself constitute an authenticated Owner UI acceptance run."
+    ],
+    "desktopViaDashboard": true
+  },
   "v0.3.0": {
     "previousTag": "v0.3.0-beta.19",
     "improvements": [

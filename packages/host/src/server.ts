@@ -210,7 +210,6 @@ export type HostServerOptions = {
   copilot?: {
     enabled?: boolean
     gitHubToken?: string
-    runtimeEntryPath?: string
     backgroundCompactionThreshold?: number
     bufferExhaustionThreshold?: number
   }
@@ -2488,7 +2487,6 @@ export async function startHostServer(
     enabled: options.copilot?.enabled ?? !['0', 'false'].includes((process.env.KALA_COPILOT_ENABLED ?? '').trim().toLowerCase()),
     sessionsDir: options.sessionsDir,
     ...(options.copilot?.enabled !== false && process.env.KALA_NATIVE_POSIX_ROOT ? { nativePosixRoot: process.env.KALA_NATIVE_POSIX_ROOT } : {}),
-    ...(options.copilot?.runtimeEntryPath ? { runtimeEntryPath: options.copilot.runtimeEntryPath } : {}),
     ...(options.copilot?.gitHubToken ?? process.env.COPILOT_GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN
       ? { gitHubToken: options.copilot?.gitHubToken ?? process.env.COPILOT_GITHUB_TOKEN ?? process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN }
       : {}),

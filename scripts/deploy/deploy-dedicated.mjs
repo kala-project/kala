@@ -16,8 +16,8 @@ const repositoryRoot = existsSync(join(sourceRepositoryRoot, 'scripts', 'release
   : undefined
 const defaultReleaseDir = repositoryRoot ? join(repositoryRoot, 'release') : packagedReleaseRoot
 const supportArchive = 'kala-dedicated-support.tar.gz'
-const localDevelopmentAssets = ['kala-dashboard-with-runtime.cjs', 'kala-runtime.cjs', 'kala-executor.cjs', 'kala-dedicated-ingress.cjs', 'kala-dedicated-deploy-supervisor.cjs', 'kala-copilot-runtime-linux-x64', 'kala-copilot-runtime-node-linux-x64.node', 'kala-dashboard.tar.gz', 'kala-docs.tar.gz', supportArchive, 'kala-model-catalog-seed.json', 'run.sh', 'kala-dedicated.mjs', 'kala-release-metadata.tar.gz']
-const legacyLocalDevelopmentAssets = localDevelopmentAssets.filter((asset) => !asset.startsWith('kala-copilot-runtime-'))
+const localDevelopmentAssets = ['kala-dashboard-with-runtime.cjs', 'kala-runtime.cjs', 'kala-executor.cjs', 'kala-dedicated-ingress.cjs', 'kala-dedicated-deploy-supervisor.cjs', 'kala-dashboard.tar.gz', 'kala-docs.tar.gz', supportArchive, 'kala-model-catalog-seed.json', 'run.sh', 'kala-dedicated.mjs', 'kala-release-metadata.tar.gz']
+const legacyLocalDevelopmentAssets = [...localDevelopmentAssets, 'kala-copilot-runtime-linux-x64', 'kala-copilot-runtime-node-linux-x64.node']
 const supportManifest = 'dedicated-support-manifest.json'
 const supportAssets = ['cutover-dedicated-systemd.mjs', 'dedicated-data-migration.mjs', 'dedicated-settings-fingerprint.mjs', 'deploy-dashboard.mjs', 'deploy-dedicated.mjs', 'deployment.json', 'install-dedicated-systemd.mjs', 'kala-dedicated-control-updater.service', 'kala-dedicated-deploy-supervisor.service', 'kala-dedicated-ingress.service', 'kala-dedicated-migration-finalizer.service', 'kala-dedicated-unit@.service', 'rollback-dedicated-systemd.mjs', 'update-dedicated-control-plane.mjs']
 const args = process.argv.slice(2)

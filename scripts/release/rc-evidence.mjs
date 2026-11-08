@@ -41,8 +41,6 @@ const windowsPortableArtifacts = Object.freeze([
   'node-pty-win32-x64.tar.gz',
   'kala-executor-service-host-win32-x64.exe',
   'install-executor.ps1',
-  'kala-copilot-runtime-win32-x64',
-  'kala-copilot-runtime-node-win32-x64.node',
 ])
 const sensitiveKey = /(?:token|secret|password|credential|api.?key|private.?key|session.?log|receipt|screenshot|domain|endpoint|origin|address|ip|path|directory|root)$/iu
 const absolutePath = /(?:^|[\s=:])(?:[A-Za-z]:[\\/]|\/(?:home|Users|var|etc|opt|srv|tmp|run)\/)/u

@@ -35,6 +35,32 @@ test('fails closed on unavailable, resized, or changed service-host content', as
   assert.throws(() => verifyWindowsServiceHostBytes(wrong), /SHA-256 mismatch/u)
 })
 
+test('retries temporary WinSW gateway failures without accepting unverified bytes', async () => {
+  let attempts = 0
+  const delays = []
+  await assert.rejects(
+    stageWindowsServiceHost('/unused', {
+      fetchImpl: async () => { attempts++; return { ok: false, status: 504 } },
+      delay: async (ms) => { delays.push(ms) },
+    }),
+    /failed to download pinned WinSW 2\.12\.0: HTTP 504/u,
+  )
+  assert.equal(attempts, 3)
+  assert.deepEqual(delays, [10_000, 20_000])
+
+  attempts = 0
+  await assert.rejects(
+    stageWindowsServiceHost('/unused', {
+      fetchImpl: async () => ++attempts === 1
+        ? { ok: false, status: 503 }
+        : { ok: true, url: WINDOWS_SERVICE_HOST.sourceUrl, arrayBuffer: async () => Buffer.from('MZ') },
+      delay: async () => {},
+    }),
+    /WinSW size mismatch/u,
+  )
+  assert.equal(attempts, 2)
+})
+
 test('accepts the separately acquired official WinSW fixture when available', (t) => {
   const fixture = process.env.KALA_TEST_WINSW_PATH || '/tmp/kala-winsw-v2.12.0-x64.exe'
   if (!existsSync(fixture)) return t.skip('official WinSW fixture is not present')

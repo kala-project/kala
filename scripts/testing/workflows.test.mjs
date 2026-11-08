@@ -87,7 +87,7 @@ test('security and release workflows fail closed without automatic npm publishin
   assert.match(release, /verify:public-packages/u)
   assert.match(release, /default: 'linux-x64,darwin-x64,darwin-arm64,win32-x64'/u)
   assert.match(release, /if \[ "\$NATIVE_TARGETS" != "\$REQUIRED_NATIVE_TARGETS" \]/u)
-  assert.match(release, /partial four-platform releases are not supported/u)
+  assert.match(release, /native_targets must include exactly the supported optional Host qualification targets/u)
   assert.doesNotMatch(release, /startsWith\(matrix\.target, 'win32-'/u)
   assert.match(release, /Real Windows API created\.command temporary install and Host session gate[\s\S]*?verify-windows-terminal\.mjs/u)
   assert.match(release, /Real Windows API created\.command service install and Host session gate[\s\S]*?PRODUCT_E2E_WINDOWS_SERVICE: '1'/u)

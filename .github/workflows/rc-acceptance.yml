@@ -101,7 +101,7 @@ jobs:
       - run: corepack enable; corepack prepare pnpm@11.3.0 --activate
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @agent-kernel/shared... run build
-      - uses: sigstore/cosign-installer@v3
+      - uses: ./.github/actions/install-verified-cosign
       - name: Download, attest, and checksum the exact Windows candidate set
         shell: pwsh
         env: { GH_TOKEN: '${{ github.token }}' }
@@ -114,9 +114,7 @@ jobs:
             'kala-executor.cjs',
             'node-pty-win32-x64.tar.gz',
             'kala-executor-service-host-win32-x64.exe',
-            'install-executor.ps1',
-            'kala-copilot-runtime-win32-x64',
-            'kala-copilot-runtime-node-win32-x64.node'
+            'install-executor.ps1'
           )
           foreach ($asset in @($assets + 'SHA256SUMS' + 'manifest.json')) {
             gh release download '${{ inputs.tag }}' --pattern $asset --dir acceptance/candidate

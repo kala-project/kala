@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 
 import { createConfig } from '@agent-kernel/kernel'
 import type { ContextUsageSnapshot } from '@agent-kernel/shared'
@@ -186,6 +186,7 @@ vi.mock('@github/copilot-sdk', () => ({
 describe('Copilot runtime custom tools', () => {
   let dir: string
   let store: SessionStore
+  const originalPath = process.env.PATH
 
   beforeEach(() => {
     nativeMount.mount.mockReset()
@@ -212,6 +213,12 @@ describe('Copilot runtime custom tools', () => {
     sdk.getEvents.mockReset()
     sdk.getEvents.mockImplementation(async () => sdk.historyEvents)
     dir = mkdtempSync(join(tmpdir(), 'copilot-runtime-tools-'))
+    const bin = join(dir, 'bin')
+    mkdirSync(bin)
+    const cli = join(bin, process.platform === 'win32' ? 'copilot.exe' : 'copilot')
+    writeFileSync(cli, '')
+    chmodSync(cli, 0o755)
+    process.env.PATH = bin
     store = new SessionStore(dir)
   })
 
@@ -562,6 +569,7 @@ describe('Copilot runtime custom tools', () => {
   })
 
   afterEach(() => {
+    process.env.PATH = originalPath
     rmSync(dir, { recursive: true, force: true })
   })
 
@@ -574,10 +582,17 @@ describe('Copilot runtime custom tools', () => {
     throw new Error(`usage projection did not reach ${inputTokens}`)
   }
 
-  it('uses SDK platform-package discovery unless COPILOT_CLI_PATH is supplied', async () => {
+  it('uses the installed Copilot CLI on PATH unless COPILOT_CLI_PATH is supplied', async () => {
     const previous = process.env.COPILOT_CLI_PATH
+    const previousPath = process.env.PATH
     try {
       delete process.env.COPILOT_CLI_PATH
+      const bin = join(dir, 'bin')
+      const cli = join(bin, process.platform === 'win32' ? 'copilot.exe' : 'copilot')
+      mkdirSync(bin, { recursive: true })
+      writeFileSync(cli, '')
+      chmodSync(cli, 0o755)
+      process.env.PATH = bin
       const discovered = new CopilotAgentRuntime({
         store,
         tools: { async callTool() { return { ok: true, content: '' } }, cancelPending() {} },
@@ -587,6 +602,7 @@ describe('Copilot runtime custom tools', () => {
       expect(sdk.clientOptions.at(-1)?.connection).toEqual({
         kind: 'stdio',
         args: ['--no-remote-export'],
+        path: cli,
       })
       await discovered.close()
 
@@ -608,33 +624,65 @@ describe('Copilot runtime custom tools', () => {
     } finally {
       if (previous === undefined) delete process.env.COPILOT_CLI_PATH
       else process.env.COPILOT_CLI_PATH = previous
+      process.env.PATH = previousPath
     }
   })
 
-  it('materializes the packaged Copilot runtime beside writable session storage', async () => {
-    const releaseDir = join(dir, 'release')
-    const sessionsDir = join(dir, 'state', 'sessions')
-    const target = `${process.platform}-${process.arch}`
-    mkdirSync(releaseDir, { recursive: true })
-    writeFileSync(join(releaseDir, `kala-copilot-runtime-${target}`), 'runtime-wrapper')
-    writeFileSync(join(releaseDir, `kala-copilot-runtime-node-${target}.node`), 'runtime-library')
-    const runtime = new CopilotAgentRuntime({
-      store,
-      tools: { async callTool() { return { ok: true, content: '' } }, cancelPending() {} },
-      broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError() {} },
-    }, {
-      enabled: true,
-      sessionsDir,
-      runtimeEntryPath: join(releaseDir, 'kala-runtime.cjs'),
-    })
+  it('never executes packaged Copilot files beside the Host', async () => {
+    const previousPath = process.env.PATH
+    const bin = join(dir, 'bin')
+    const cli = join(bin, process.platform === 'win32' ? 'copilot.exe' : 'copilot')
+    mkdirSync(bin, { recursive: true })
+    writeFileSync(cli, '')
+    chmodSync(cli, 0o755)
+    process.env.PATH = bin
+    try {
+      const releaseDir = join(dir, 'release')
+      const sessionsDir = join(dir, 'state', 'sessions')
+      const target = `${process.platform}-${process.arch}`
+      mkdirSync(releaseDir, { recursive: true })
+      writeFileSync(join(releaseDir, `kala-copilot-runtime-${target}`), 'runtime-wrapper')
+      writeFileSync(join(releaseDir, `kala-copilot-runtime-node-${target}.node`), 'runtime-library')
+      const runtime = new CopilotAgentRuntime({
+        store,
+        tools: { async callTool() { return { ok: true, content: '' } }, cancelPending() {} },
+        broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError() {} },
+      }, {
+        enabled: true,
+        sessionsDir,
+      })
 
-    await runtime.start()
+      await runtime.start()
 
-    const materialized = sdk.clientOptions.at(-1)?.connection?.path
-    expect(materialized).toBe(join(dir, 'state', 'copilot-runtime', `sdk-1.0.14-${target}`, 'copilot-runtime'))
-    expect(existsSync(materialized!)).toBe(true)
-    expect(readFileSync(join(dirname(materialized!), 'runtime.node'), 'utf8')).toBe('runtime-library')
-    await runtime.close()
+      expect(sdk.clientOptions.at(-1)?.connection?.path).toBe(cli)
+      expect(existsSync(join(dir, 'state', 'copilot-runtime', `sdk-1.0.14-${target}`))).toBe(false)
+      await runtime.close()
+    } finally {
+      process.env.PATH = previousPath
+    }
+  })
+
+  it('reports an absent user-installed CLI instead of starting a packaged runtime', async () => {
+    const previousPath = process.env.PATH
+    const previous = process.env.COPILOT_CLI_PATH
+    try {
+      delete process.env.COPILOT_CLI_PATH
+      process.env.PATH = join(dir, 'missing-bin')
+      const runtime = new CopilotAgentRuntime({
+        store,
+        tools: { async callTool() { return { ok: true, content: '' } }, cancelPending() {} },
+        broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError() {} },
+      }, { enabled: true, sessionsDir: dir })
+      await runtime.start()
+      expect(runtime.descriptor()).toMatchObject({
+        available: false,
+        reason: expect.stringContaining('Install the official Copilot CLI'),
+      })
+    } finally {
+      process.env.PATH = previousPath
+      if (previous === undefined) delete process.env.COPILOT_CLI_PATH
+      else process.env.COPILOT_CLI_PATH = previous
+    }
   })
 
   it('stops only the local turn when even its asynchronous error projection is rejected', async () => {
@@ -672,7 +720,7 @@ describe('Copilot runtime custom tools', () => {
     expect(runtime.descriptor()).toMatchObject({
       available: false,
       status: 'unavailable',
-      reason: expect.stringContaining('set COPILOT_CLI_PATH'),
+      reason: expect.stringContaining('Install the official Copilot CLI'),
     })
   })
 
@@ -783,6 +831,7 @@ describe('Copilot runtime custom tools', () => {
     expect(sdk.clientOptions[0]?.connection).toEqual({
       kind: 'stdio',
       args: ['--no-remote-export'],
+      path: join(dir, 'bin', process.platform === 'win32' ? 'copilot.exe' : 'copilot'),
     })
     expect(sdk.configs.at(-1)?.workingDirectory).toBe(join(dir, '..'))
     expect(sdk.configs.at(-1)?.remoteSession).toBe('off')
