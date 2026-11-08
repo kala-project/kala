@@ -1,6 +1,6 @@
 {
   "name": "agent-kernel",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": true,
   "description": "Kala backend and dashboard for replayable agent sessions and RL rollout integration.",
   "packageManager": "pnpm@11.3.0",

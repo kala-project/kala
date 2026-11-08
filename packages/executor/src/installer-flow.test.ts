@@ -1,10 +1,11 @@
 import { generateKeyPairSync, sign } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { assertSupportedInstallerPrivileges, bootstrapEnvironment, downloadExecutorUpdateAssets, pinExecutorUpdateKey, reportInstallation, waitForApproval, writeInstallerSession } from './installer-flow.js'
+import { assertNoExistingPosixService, assertSupportedInstallerPrivileges, bootstrapEnvironment, downloadExecutorUpdateAssets, pinExecutorUpdateKey, reportInstallation, waitForApproval, writeInstallerSession } from './installer-flow.js'
 import { readExecutorRuntimeConfig } from './executor-config.js'
 import { readInstallerSession } from './installer-session.js'
 
@@ -12,6 +13,54 @@ const roots: string[] = []
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 describe('installer flow', () => {
+  it('explains an existing user or system service without modifying its configuration', () => {
+    const root = mkdtempSync(join(tmpdir(), 'executor-service-conflict-')); roots.push(root)
+    const config = join(root, 'config.json')
+    const managedRoot = join(root, 'managed')
+    expect(() => assertNoExistingPosixService(config, managedRoot, 'user', 'linux')).not.toThrow()
+    writeFileSync(config, '{}', { mode: 0o600 })
+    expect(() => assertNoExistingPosixService(config, managedRoot, 'user', 'linux'))
+      .toThrow(/systemctl --user status kala-executor\.service[\s\S]*service uninstall --user[\s\S]*workspace identity are preserved/u)
+    expect(() => assertNoExistingPosixService(config, managedRoot, 'system', 'linux'))
+      .toThrow(/systemctl status kala-executor\.service[\s\S]*service uninstall --system/u)
+    expect(() => assertNoExistingPosixService(config, managedRoot, 'user', 'darwin'))
+      .toThrow(/macOS uninstall stops the launchd job[\s\S]*retains its configuration/u)
+    expect(readFileSync(config, 'utf8')).toBe('{}')
+  })
+
+  it.skipIf(process.getuid?.() === 0)('rejects invite enrollment before network access when the user service already exists', () => {
+    const root = mkdtempSync(join(tmpdir(), 'executor-invite-conflict-')); roots.push(root)
+    const configDir = join(root, '.config/kala/executor')
+    mkdirSync(configDir, { recursive: true })
+    const config = join(configDir, 'config.json')
+    writeFileSync(config, '{}', { mode: 0o600 })
+    const child = spawnSync(process.execPath, ['--import', 'tsx', new URL('../bin/kala-executor.ts', import.meta.url).pathname, '--invite-installer'], {
+      encoding: 'utf8',
+      timeout: 10_000,
+      env: {
+        ...process.env, HOME: root, HOST_URL: 'http://127.0.0.1:1', EXECUTOR_INVITE: 'ak_invite_test',
+        KALA_INVITE_INSTALL_MODE: 'service', KALA_INVITE_PRIVILEGE_MODE: 'privileged',
+      },
+    })
+    expect(child.status, child.stderr).toBe(1)
+    expect(child.stderr).toContain('systemctl --user status kala-executor.service')
+    expect(child.stderr).toContain('service uninstall --user')
+    expect(child.stdout).not.toContain('Starting organization-bound invite enrollment')
+    const setup = spawnSync(process.execPath, ['--import', 'tsx', new URL('../bin/kala-executor.ts', import.meta.url).pathname, '--internal-installer'], {
+      encoding: 'utf8',
+      timeout: 10_000,
+      env: {
+        ...process.env, HOME: root, HOST_URL: 'http://127.0.0.1:1',
+        EXECUTOR_INSTALL_ID: 'fixture', EXECUTOR_INSTALL_BOOTSTRAP: 'fixture',
+        EXECUTOR_INSTALL_MODE: 'service', EXECUTOR_INSTALL_ROOT: root, EXECUTOR_PRIVILEGE_MODE: 'privileged',
+      },
+    })
+    expect(setup.status, setup.stderr).toBe(1)
+    expect(setup.stderr).toContain('service uninstall --user')
+    expect(setup.stdout).not.toContain('pairing')
+    expect(readFileSync(config, 'utf8')).toBe('{}')
+  })
+
   it('checks Windows service elevation before progress, pairing, identity creation, or token redemption', () => {
     const cli = readFileSync(new URL('../bin/kala-executor.ts', import.meta.url), 'utf8')
     const flow = cli.slice(cli.indexOf('async function runInternalInstaller()'), cli.indexOf('async function runInviteInstaller()'))

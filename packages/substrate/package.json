@@ -1,6 +1,6 @@
 {
   "name": "@agent-kernel/substrate",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Self-improvement substrate: run a meta-agent auto-evolve loop over an agent's harness, judged by an out-of-loop evaluator. Sits entirely above the host's public API.",
   "repository": { "type": "git", "url": "git+https://github.com/xingsy97/kala.git" },
   "homepage": "https://github.com/xingsy97/kala#readme",

@@ -1,6 +1,6 @@
 import { createServer } from 'node:http'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, readdirSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -96,9 +96,11 @@ describe('executor installation routes', () => {
       '  printf "%s" "${MOCK_FINAL_URL:-${@: -1}}"',
       '}',
     ].join('\n')
+    const home = join(dir, 'home')
+    mkdirSync(home)
     const run = (env: Record<string, string> = {}) => spawnSync('bash', ['-s'], {
       input: `${downloader}\n${script}`, encoding: 'utf8',
-      env: { ...process.env, HOST_URL: '', KALA_RELEASE_BASE_URL: '', EXECUTOR_INVITE: 'ak_invite_test', KALA_INVITE_INSTALL_MODE: '', KALA_INVITE_PRIVILEGE_MODE: '', TMPDIR: dir, ...env },
+      env: { ...process.env, HOME: home, HOST_URL: '', KALA_RELEASE_BASE_URL: '', EXECUTOR_INVITE: 'ak_invite_test', KALA_INVITE_INSTALL_MODE: '', KALA_INVITE_PRIVILEGE_MODE: '', TMPDIR: dir, ...env },
     })
     const defaults = run()
     expect(defaults.status).toBe(0)
@@ -115,6 +117,17 @@ describe('executor installation routes', () => {
     ]) {
       expect(run(env).status).not.toBe(0)
     }
+    const configDir = join(home, '.config/kala/executor')
+    mkdirSync(configDir, { recursive: true })
+    writeFileSync(join(configDir, 'config.json'), '{}')
+    const conflict = run({ MOCK_DOWNLOAD_FAIL: '1' })
+    expect(conflict.status).not.toBe(0)
+    expect(conflict.stderr).toContain('systemctl --user status kala-executor.service')
+    expect(conflict.stderr).toContain('service uninstall --user')
+    expect(conflict.stderr).toContain('workspace identity are preserved')
+    expect(conflict.stderr).not.toContain('Installer redirect')
+    expect(run({ KALA_INVITE_INSTALL_MODE: 'temporary' }).status).toBe(0)
+    rmSync(home, { recursive: true, force: true })
     expect(readdirSync(dir)).toEqual([])
   })
 
@@ -143,6 +156,25 @@ describe('executor installation routes', () => {
     expect(installer.status).toBe(410)
     expect(await installer.json()).toEqual({ error: 'windows_release_assets_unavailable' })
     expect((await fetch(`${url}/install/invite.ps1`)).status).toBe(410)
+  })
+
+  it.skipIf(process.getuid?.() === 0)('rejects a second Linux service before downloading or consuming a setup code', async () => {
+    const { url, dir } = await start()
+    const script = await fetch(`${url}/install`).then((response) => response.text())
+    const home = join(dir, 'existing-home')
+    mkdirSync(join(home, '.config/kala/executor'), { recursive: true })
+    writeFileSync(join(home, '.config/kala/executor/config.json'), '{}')
+    try {
+      const result = spawnSync('sh', ['-s'], {
+        input: `curl() { echo unexpected-network >&2; return 22; }\n${script}`,
+        encoding: 'utf8',
+        env: { ...process.env, HOME: home, KALA_SETUP_CODE: 'ABCDEF1234', KALA_INSTALL_MODE: 'service' },
+      })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('service uninstall --user')
+      expect(result.stderr).not.toContain('unexpected-network')
+      expect(result.stdout).not.toContain('Downloading verified installer')
+    } finally { rmSync(home, { recursive: true, force: true }) }
   })
 
   it('creates Windows sessions and serves a native-only PowerShell bootstrap when trusted assets are ready', async () => {

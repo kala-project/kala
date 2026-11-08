@@ -1,6 +1,6 @@
 {
   "name": "@agent-kernel/website",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Official Kala product website.",
   "private": true,
   "type": "module",

@@ -49,7 +49,7 @@ import { readExecutorCredential, readExecutorRuntimeConfig } from '../src/execut
 import { parseSandboxRootsEnv } from '../src/sandbox-roots-env.js'
 import { executorProfileDir, loadOrCreateWorkspaceId, normalizeExecutorProfile, resolveWorkspaceId } from '../src/workspace-id.js'
 import { acquireExecutorLock } from '../src/local-lock.js'
-import { assertSupportedInstallerPrivileges, bootstrapEnvironment, defaultManagedRoot, downloadExecutorUpdateAssets, pinExecutorUpdateKey, redeemInstallation, reportInstallation, waitForApproval, writeInstallerSession } from '../src/installer-flow.js'
+import { assertNoExistingPosixService, assertSupportedInstallerPrivileges, bootstrapEnvironment, defaultManagedRoot, downloadExecutorUpdateAssets, pinExecutorUpdateKey, redeemInstallation, reportInstallation, waitForApproval, writeInstallerSession } from '../src/installer-flow.js'
 import { createLinuxServicePlan, executeLinuxServicePlan, linuxServicePaths, type Command } from '../src/linux-service.js'
 import { installPosixService, macosServiceDefinition, manageMacosService } from '../src/posix-service.js'
 import { assertElevatedWindowsAdministrator, assertManagedWindowsInstallation, copyWindowsExecutorCjs, copyWindowsNodePtyRuntime, copyWindowsServiceHost, createWindowsSelfRemovalPlan, createWindowsServicePlan, deleteWindowsSelfRemovalTask, encodeWindowsTaskXml, executeWindowsServicePlan, registerWindowsSelfRemovalTask, renderWindowsServiceConfig, secureWindowsServiceDataDir, secureWindowsServiceInstallDir, waitForWindowsServiceStopped, windowsExecutorSourceRoot, type WindowsServiceAction } from '../src/windows-service.js'
@@ -271,6 +271,14 @@ async function runInternalInstaller(): Promise<void> {
     assertWindowsInstallerDigests()
     await assertElevatedWindowsAdministrator()
   }
+  if (env.EXECUTOR_INSTALL_MODE === 'service' && (process.platform === 'linux' || process.platform === 'darwin')) {
+    const system = process.getuid?.() === 0
+    const mode = system ? 'system' : 'user'
+    const configPath = process.platform === 'linux'
+      ? linuxServicePaths(mode, homedir()).config
+      : macosServiceDefinition(mode, posixServiceOptions()).configPath
+    assertNoExistingPosixService(configPath, defaultManagedRoot(homedir(), system), mode, process.platform)
+  }
   const updateAssets = env.EXECUTOR_INSTALL_MODE === 'service' && process.platform === 'linux'
     ? await downloadExecutorUpdateAssets(env.HOST_URL) : undefined
   await reportInstallation(env, 'asset_verified')
@@ -348,10 +356,12 @@ async function runInviteInstaller(): Promise<void> {
     assertWindowsInstallerDigests()
     await assertElevatedWindowsAdministrator()
   } else {
+    const system = process.getuid?.() === 0
+    const serviceMode = system ? 'system' : 'user'
     const servicePaths = process.platform === 'linux'
-      ? linuxServicePaths(process.getuid?.() === 0 ? 'system' : 'user', homedir())
-      : { config: macosServiceDefinition(process.getuid?.() === 0 ? 'system' : 'user', posixServiceOptions()).configPath }
-    if (existsSync(servicePaths.config)) throw new Error('Refusing to replace an existing Executor service')
+      ? linuxServicePaths(serviceMode, homedir())
+      : { config: macosServiceDefinition(serviceMode, posixServiceOptions()).configPath }
+    assertNoExistingPosixService(servicePaths.config, defaultManagedRoot(homedir(), system), serviceMode, process.platform === 'linux' ? 'linux' : 'darwin')
   }
   const updateAssets = mode === 'service' && process.platform === 'linux'
     ? await downloadExecutorUpdateAssets(host) : undefined

@@ -1,5 +1,5 @@
 import { createPublicKey, verify } from 'node:crypto'
-import { constants, chmodSync, closeSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { constants, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 import type { ExecutorInstallMode, ExecutorInstallStatusSnapshot, ExecutorPrivilegeMode } from '@agent-kernel/shared'
@@ -136,4 +136,25 @@ export function writeInstallerSession(path: string, session: InstallerSession): 
 
 export function defaultManagedRoot(home: string, system: boolean): string {
   return system ? '/var/lib/kala/executor' : join(home, '.local', 'state', 'kala', 'executor')
+}
+
+export function assertNoExistingPosixService(configPath: string, managedRoot: string, mode: 'system' | 'user', platform: 'linux' | 'darwin'): void {
+  if (!existsSync(configPath)) return
+  const executable = join(managedRoot, 'current', 'kala-executor')
+  if (platform === 'linux') {
+    const user = mode === 'user' ? ' --user' : ''
+    throw new Error([
+      `An Executor service configuration already exists at ${configPath}; this installer will not overwrite its credentials or workspace identity.`,
+      `Check the existing service: systemctl${user} status kala-executor.service`,
+      `To update it instead of reinstalling: systemctl${user} start kala-executor-update.service (if managed updates are configured).`,
+      `To deliberately replace it: ${JSON.stringify(executable)} service uninstall --${mode}, then rerun the invite installer.`,
+      'Uninstall stops the service and removes its unit, config, credential and update timer; managed generations and workspace identity are preserved.',
+      'If the installed executable is missing, inspect the service and back up its configuration before removing any stale files manually.',
+    ].join('\n'))
+  }
+  throw new Error([
+    `An Executor service configuration already exists at ${configPath}; this installer will not overwrite its credentials or workspace identity.`,
+    `Check it: ${JSON.stringify(executable)} service status --${mode}. To replace it, first run service uninstall --${mode} using the installed CLI.`,
+    'macOS uninstall stops the launchd job and removes its plist, but retains its configuration and credentials; back them up and remove them only after confirming the old service has stopped, then rerun the invite installer.',
+  ].join('\n'))
 }

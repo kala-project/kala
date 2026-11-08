@@ -276,8 +276,31 @@ function installCommand(origin: string, platform: string, mode: string, setupCod
     ? `$env:KALA_SETUP_CODE=${quotePs(setupCode)}; $env:KALA_INSTALL_MODE=${quotePs(mode)}; irm ${quotePs(`${origin}/install.ps1`)} | iex`
     : `curl -fsSL ${quoteSh(`${origin}/install`)} | KALA_SETUP_CODE=${quoteSh(setupCode)} KALA_INSTALL_MODE=${quoteSh(mode)} sh`
 }
+function renderLinuxServicePreflight(mode: string): string {
+  return `if [ "${mode}" = service ] && [ "$(uname -s)" = Linux ]; then
+  if [ "$(id -u)" -eq 0 ]; then
+    config_path=/etc/kala/executor/config.json
+    managed_root=/var/lib/kala/executor
+    mode=system
+    user_flag=
+  else
+    config_path="$HOME/.config/kala/executor/config.json"
+    managed_root="$HOME/.local/state/kala/executor"
+    mode=user
+    user_flag="--user "
+  fi
+  if [ -e "$config_path" ]; then
+    printf 'An Executor service configuration already exists at %s. This installer will not overwrite its credentials or workspace identity.\\n' "$config_path" >&2
+    printf 'Check: systemctl %sstatus kala-executor.service\\n' "$user_flag" >&2
+    printf 'Update instead: systemctl %sstart kala-executor-update.service (if configured).\\n' "$user_flag" >&2
+    printf 'Replace deliberately: "%s/current/kala-executor" service uninstall --%s, then rerun this installer.\\n' "$managed_root" "$mode" >&2
+    printf '%s\\n' 'Uninstall removes the service unit, config, credential and update timer; managed generations and workspace identity are preserved.' >&2
+    exit 1
+  fi
+fi`
+}
 function renderShellBootstrap(origin: string): string {
-  return `#!/bin/sh\nset -eu\ncode=\${KALA_SETUP_CODE:-}\nif [ -z "$code" ]; then printf 'Kala setup code: ' >&2; IFS= read -r code; fi\ncase "$code" in *[!A-Fa-f0-9-]*|'') echo 'Invalid setup code' >&2; exit 1;; esac\ncommand -v bash >/dev/null 2>&1 || { echo 'Kala installer: bash is required' >&2; exit 1; }\ncommand -v curl >/dev/null 2>&1 || { echo 'Kala installer: curl is required' >&2; exit 1; }\ninstaller=\$(mktemp)\ntrap 'rm -f "$installer"' EXIT HUP INT TERM\nprintf '\\nKala Executor setup\\n'\nprintf '[1/4] Downloading verified installer...\\n'\ncurl --fail --silent --show-error --location --retry 3 --retry-connrefused -o "$installer" ${quoteSh(`${origin}/install/assets/run.sh`)} || { echo 'Kala installer: failed to download installer asset' >&2; exit 1; }\nprintf '[2/4] Validating setup code...\\n'\nclaim=\$(curl --fail --silent --show-error --location --retry 3 --retry-connrefused -X POST -H 'content-type: application/json' -H 'accept: text/x-shellscript' --data "{\\"setupCode\\":\\"$code\\"}" ${quoteSh(`${origin}/install/session`)}) || { echo 'Kala installer: setup code is invalid, expired, or already used' >&2; exit 1; }\neval "$claim"\nprintf '[3/4] Installing Executor...\\n'\nCOMPONENT=executor bash "$installer" --internal-installer\n`
+  return `#!/bin/sh\nset -eu\ncode=\${KALA_SETUP_CODE:-}\nif [ -z "$code" ]; then printf 'Kala setup code: ' >&2; IFS= read -r code; fi\ncase "$code" in *[!A-Fa-f0-9-]*|'') echo 'Invalid setup code' >&2; exit 1;; esac\ncommand -v bash >/dev/null 2>&1 || { echo 'Kala installer: bash is required' >&2; exit 1; }\ncommand -v curl >/dev/null 2>&1 || { echo 'Kala installer: curl is required' >&2; exit 1; }\n${renderLinuxServicePreflight('${KALA_INSTALL_MODE:-}')}\ninstaller=\$(mktemp)\ntrap 'rm -f "$installer"' EXIT HUP INT TERM\nprintf '\\nKala Executor setup\\n'\nprintf '[1/4] Downloading verified installer...\\n'\ncurl --fail --silent --show-error --location --retry 3 --retry-connrefused -o "$installer" ${quoteSh(`${origin}/install/assets/run.sh`)} || { echo 'Kala installer: failed to download installer asset' >&2; exit 1; }\nprintf '[2/4] Validating setup code...\\n'\nclaim=\$(curl --fail --silent --show-error --location --retry 3 --retry-connrefused -X POST -H 'content-type: application/json' -H 'accept: text/x-shellscript' --data "{\\"setupCode\\":\\"$code\\"}" ${quoteSh(`${origin}/install/session`)}) || { echo 'Kala installer: setup code is invalid, expired, or already used' >&2; exit 1; }\neval "$claim"\nprintf '[3/4] Installing Executor...\\n'\nCOMPONENT=executor bash "$installer" --internal-installer\n`
 }
 function renderPowerShellBootstrap(origin: string): string {
   return `$ErrorActionPreference = 'Stop'
@@ -335,6 +358,7 @@ export KALA_INVITE_INSTALL_MODE="\${KALA_INVITE_INSTALL_MODE:-service}"
 export KALA_INVITE_PRIVILEGE_MODE="\${KALA_INVITE_PRIVILEGE_MODE:-privileged}"
 case "$KALA_INVITE_INSTALL_MODE" in service|temporary) ;; *) printf '%s\\n' 'Invalid invite installation mode' >&2; exit 1 ;; esac
 case "$KALA_INVITE_PRIVILEGE_MODE" in privileged|restricted) ;; *) printf '%s\\n' 'Invalid invite privilege mode' >&2; exit 1 ;; esac
+${renderLinuxServicePreflight('${KALA_INVITE_INSTALL_MODE:-}')}
 installer=$(mktemp)
 trap 'rm -f "$installer"' EXIT
 final_url=$(curl -fsSL --output "$installer" --write-out '%{url_effective}' "$expected_assets/run.sh")

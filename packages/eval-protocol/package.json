@@ -1,6 +1,6 @@
 {
   "name": "@agent-kernel/eval-protocol",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Browser-safe contracts for the standalone Agent Evaluation Platform.",
   "repository": { "type": "git", "url": "git+https://github.com/xingsy97/kala.git" },
   "homepage": "https://github.com/xingsy97/kala#readme",
