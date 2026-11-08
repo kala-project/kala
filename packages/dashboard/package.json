@@ -1,6 +1,6 @@
 {
   "name": "@agent-kernel/dashboard",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Kala Dashboard: React app that subscribes to the Kala Host over Socket.IO.",
   "private": true,
   "type": "module",

@@ -1236,7 +1236,7 @@ describe('Copilot runtime custom tools', () => {
     await vi.waitFor(() => expect(store.get(record.sessionId)?.state.pendingCalls)
       .toEqual(expect.arrayContaining([expect.objectContaining({ callId: 'save-outdated-executor', status: 'awaiting_approval' })])))
     await runtime.approve(record, 'save-outdated-executor')
-    expect((await failedSave).textResultForLlm).toContain('Update the Executor')
+    expect((await failedSave).textResultForLlm).toBe('Update the Executor for this workspace to save Session attachments.')
     expect(store.get(record.sessionId)?.state.pendingCalls).toHaveLength(0)
     await runtime.close()
   })

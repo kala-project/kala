@@ -226,6 +226,20 @@ export function downloadPage(catalog) {
   if (portableCjs) requirePortableManagerAssets(release)
   const runUrl = requiredAssetUrl(release, 'run.sh')
   const command = `set -o pipefail; curl --proto '=https' --tlsv1.2 -fsSL ${runUrl} | bash`
+  const windowsCommand = portableCjs ? [
+    "$ErrorActionPreference = 'Stop'",
+    'if ($PSVersionTable.PSVersion.Major -lt 6) { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }',
+    `$base = 'https://github.com/kala-project/kala/releases/download/${release.tag}'`,
+    'Invoke-WebRequest "$base/kala-portable.ps1" -OutFile .\\kala-portable.ps1',
+    'Invoke-WebRequest "$base/SHA256SUMS" -OutFile .\\SHA256SUMS',
+    'Invoke-WebRequest "$base/SHA256SUMS.sigstore.json" -OutFile .\\SHA256SUMS.sigstore.json',
+    `cosign verify-blob --bundle .\\SHA256SUMS.sigstore.json --certificate-identity "https://github.com/kala-project/kala/.github/workflows/release.yml@refs/tags/${release.tag}" --certificate-oidc-issuer https://token.actions.githubusercontent.com .\\SHA256SUMS`,
+    "if ($LASTEXITCODE -ne 0) { throw 'Signature verification failed' }",
+    "$entries = @(Select-String -Path .\\SHA256SUMS -Pattern '^[a-f0-9]{64}  kala-portable\\.ps1$')",
+    "if ($entries.Count -ne 1 -or (Get-FileHash .\\kala-portable.ps1 -Algorithm SHA256).Hash -ne $entries[0].Matches.Value.Substring(0, 64)) { throw 'Checksum mismatch' }",
+    '& .\\kala-portable.ps1 install',
+    '& .\\kala-portable.ps1 start',
+  ].join('\n') : ''
   const dedicatedUrl = requiredAssetUrl(release, 'kala-dedicated-support.tar.gz')
   const privateCloudUrl = requiredAssetUrl(release, `kala-private-cloud-${version}-linux-x64.tar.gz`)
   return `
@@ -245,13 +259,10 @@ export function downloadPage(catalog) {
           <div class="download-platform-grid">
             ${downloadPlatformCard('linux', 'Linux', portableCjs ? 'x64 · Node.js 22+' : 'x64', portableCjs ? 'Asset' : 'Portable', portableCjs ? [{ label: 'Host CJS', asset: 'kala-dashboard-with-runtime.cjs' }] : [{ label: 'x64', asset: 'kala-host-linux-x64' }], release, command)}
             ${downloadPlatformCard('apple', 'macOS', portableCjs ? 'macOS 13+ · Intel / Apple silicon · Node.js 22+' : 'macOS 13+', portableCjs ? 'Asset' : 'Portable', portableCjs ? [{ label: 'Host CJS', asset: 'kala-dashboard-with-runtime.cjs' }] : [{ label: 'Intel', asset: 'kala-host-darwin-x64' }, { label: 'Apple silicon', asset: 'kala-host-darwin-arm64' }], release, command)}
-            ${portableCjs ? `<article class="download-platform">
-              ${machineIcon('windows')}
-              <h2>Windows</h2>
-              <p class="download-platform-requirement">x64 · Node.js 22+</p>
-              <p><a href="${escapeAttribute(requiredAssetUrl(release, 'kala-portable.ps1'))}">Download Portable PowerShell manager</a></p>
-              <p>Verify the download against SHA256SUMS before running it.</p>
-            </article>` : `<article class="download-platform is-unavailable">
+            ${portableCjs ? downloadPlatformCard('windows', 'Windows', 'x64 · Node.js 22+ · PowerShell 5.1+', 'Asset', [
+              { label: 'Host CJS', asset: 'kala-dashboard-with-runtime.cjs' },
+              { label: 'PowerShell manager', asset: 'kala-portable.ps1' },
+            ], release, windowsCommand, 'Requires Cosign. Verifies the manager, then installs and starts the per-user Portable Host.') : `<article class="download-platform is-unavailable">
               ${machineIcon('windows')}
               <h2>Windows</h2>
               <p class="download-not-supported">Not supported yet</p>
@@ -281,19 +292,6 @@ export function downloadPage(catalog) {
             </div>
           </div>
         </section>
-      </div>
-    </section>
-    <section class="content-section download-evidence-section">
-      <div class="section-shell">
-        <div class="section-heading center">
-          <p class="eyebrow">Release evidence</p>
-          <h2>Verify before you run.</h2>
-        </div>
-        <div class="download-evidence-grid">
-          <article><span>01</span><h3>Checksums</h3><p><code>SHA256SUMS</code> detects corrupted or substituted downloads.</p></article>
-          <article><span>02</span><h3>Signed evidence</h3><p>The release includes a Sigstore bundle for publisher verification.</p></article>
-          <article><span>03</span><h3>Versioned manifest</h3><p>Every supported asset is bound to the immutable release revision.</p></article>
-        </div>
         <p class="download-other-modes">Need an always-on or multi-tenant installation? <a href="/deploy/">Compare deployment modes →</a></p>
       </div>
     </section>
@@ -350,9 +348,10 @@ export function securityPage() {
   `
 }
 
-export function releasesPage(catalog) {
+export function releasesPage(catalog, changeLog = {}) {
   const current = catalog.current
   const version = current.version
+  const previous = catalog.releases.find((release) => release.tag === current.previousTag)
   const portableCjs = Boolean(releaseAsset(current, 'kala-dashboard-with-runtime.cjs'))
   if (portableCjs) requirePortableManagerAssets(current)
   const improvements = current.notes.improvements
@@ -361,7 +360,7 @@ export function releasesPage(catalog) {
   const status = current.prerelease ? 'Preview' : 'Stable'
   const archive = catalog.releases.map((release) => release.tag === current.tag
     ? `<li class="is-current"><a href="/releases/" aria-current="page"><span>${escapeHtml(release.version)}</span><small>${releaseStatus(release)} · ${releaseDate(release)}</small></a></li>`
-    : `<li><a href="${escapeAttribute(release.url)}"><span>${escapeHtml(release.version)}</span><small>${releaseStatus(release)} · ${releaseDate(release)}</small></a></li>`).join('')
+    : `<li><a href="${escapeAttribute(release.tag === previous?.tag ? '#previous-release' : release.url)}"><span>${escapeHtml(release.version)}</span><small>${releaseStatus(release)} · ${releaseDate(release)}</small></a></li>`).join('')
   const linuxUrl = portableCjs ? null : requiredAssetUrl(current, 'kala-host-linux-x64')
   const macIntelUrl = portableCjs ? null : requiredAssetUrl(current, 'kala-host-darwin-x64')
   const macArmUrl = portableCjs ? null : requiredAssetUrl(current, 'kala-host-darwin-arm64')
@@ -378,7 +377,7 @@ export function releasesPage(catalog) {
           </nav>
           <label for="release-archive-select">Releases</label>
           <select id="release-archive-select" aria-label="Releases">
-            ${catalog.releases.map((release) => `<option value="${escapeAttribute(release.tag === current.tag ? '/releases/' : release.url)}"${release.tag === current.tag ? ' selected' : ''}>${escapeHtml(release.version)} · ${releaseStatus(release)}</option>`).join('')}
+            ${catalog.releases.map((release) => `<option value="${escapeAttribute(release.tag === current.tag ? '#highlights' : release.tag === previous?.tag ? '#previous-release' : release.url)}"${release.tag === current.tag ? ' selected' : ''}>${escapeHtml(release.version)} · ${releaseStatus(release)}</option>`).join('')}
           </select>
         </aside>
         <article class="release-article">
@@ -396,35 +395,58 @@ export function releasesPage(catalog) {
           ${portableCjs ? '<p>Copilot sessions require the official Copilot CLI, installed separately by the operator on the Host machine.</p>' : ''}
           <p class="release-update-guidance">Already installed? Use the verified stable bootstrapper to update the Portable installation.</p>
           <section id="highlights" class="release-highlights">
-            <h2>Release highlights</h2>
+            <h2>Release overview</h2>
+            <p>These are the published notes for ${escapeHtml(current.tag)}, not a cumulative feature list.${previous ? ` For the preceding release, see <a href="#previous-release">${escapeHtml(previous.tag)} below</a>.` : ''}</p>
             <ul>
-              ${improvements[0] ? `<li><a href="#improvements">Dashboard workflow</a>: ${escapeHtml(improvements[0])}</li>` : ''}
-              ${fixes[0] ? `<li><a href="#fixes">Runtime fixes</a>: ${escapeHtml(fixes[0])}</li>` : ''}
-              ${knownIssues[0] ? `<li><a href="#known">Support boundaries</a>: ${escapeHtml(knownIssues[0])}</li>` : ''}
+              <li><a href="#improvements">${improvements.length} improvement${improvements.length === 1 ? '' : 's'}</a> and <a href="#fixes">${fixes.length} fix${fixes.length === 1 ? '' : 'es'}</a> in this release</li>
+              ${current.previousTag ? `<li><a href="#changes">Full changelog since ${escapeHtml(current.previousTag)}</a></li>` : ''}
             </ul>
           </section>
           <hr><section id="improvements"><h2>Improvements</h2>${list(improvements)}</section>
           <hr><section id="fixes"><h2>Fixes</h2>${list(fixes)}</section>
           <hr><section id="known"><h2>Known boundaries</h2>${list(knownIssues)}</section>
+          ${releaseChanges(current, changeLog[current.tag], 'changes')}
           <hr><section id="evidence">
-            <h2>Release evidence</h2>
-            <p>The release publishes checksums, Sigstore evidence, a versioned asset manifest, and Portable acceptance records bound to the release revision.</p>
-            <p><a href="${escapeAttribute(checksumsUrl)}">Download SHA256SUMS</a> · <a href="https://github.com/kala-project/kala/actions">Inspect public workflow evidence</a></p>
+            <h2>Verification files</h2>
+            <p><a href="${escapeAttribute(checksumsUrl)}">SHA256SUMS</a>${releaseAsset(current, 'SHA256SUMS.sigstore.json') ? ` · <a href="${escapeAttribute(requiredAssetUrl(current, 'SHA256SUMS.sigstore.json'))}">Sigstore bundle</a>` : ''} · <a href="https://github.com/kala-project/kala/actions">Release workflows</a></p>
           </section>
+          ${previous ? `
+          <hr><section id="previous-release">
+            <h2>Kala ${escapeHtml(previous.version)}</h2>
+            <p class="release-metadata"><span>${releaseStatus(previous)}</span><time datetime="${escapeAttribute(previous.publishedAt)}">${releaseDate(previous)}</time><a href="${escapeAttribute(previous.url)}">View on GitHub</a></p>
+            <h3>Improvements</h3>${list(previous.notes.improvements)}
+            <h3>Fixes</h3>${list(previous.notes.fixes)}
+            <h3>Known boundaries</h3>${list(previous.notes.knownIssues)}
+            ${releaseChanges(previous, changeLog[previous.tag], 'previous-changes')}
+          </section>` : ''}
         </article>
         <aside class="release-on-this-page">
           <nav aria-label="On this page">
             <h2>On this page</h2>
             <ul>
-              <li><a href="#highlights">Release highlights</a></li>
+              <li><a href="#highlights">Release overview</a></li>
               <li><a href="#improvements">Improvements</a></li>
               <li><a href="#fixes">Fixes</a></li>
               <li><a href="#known">Known boundaries</a></li>
-              <li><a href="#evidence">Release evidence</a></li>
+              ${current.previousTag ? '<li><a href="#changes">Full changelog</a></li>' : ''}
+              <li><a href="#evidence">Verification files</a></li>
+              ${previous ? `<li><a href="#previous-release">${escapeHtml(previous.tag)} notes</a></li>` : ''}
             </ul>
           </nav>
         </aside>
       </div>
+    </section>
+  `
+}
+
+function releaseChanges(release, changes, id) {
+  if (!release.previousTag) return ''
+  const compareUrl = `https://github.com/kala-project/kala/compare/${release.previousTag}...${release.tag}`
+  return `
+    <hr><section id="${id}">
+      <h2>Full changelog · ${escapeHtml(release.tag)}</h2>
+      <p><a href="${escapeAttribute(compareUrl)}">Compare ${escapeHtml(release.previousTag)}...${escapeHtml(release.tag)} on GitHub</a>${changes?.commits.length ? ` · ${changes.commits.length} commits` : ''}</p>
+      ${changes?.commits.length ? `<details><summary>Show all ${changes.commits.length} commits</summary><ol>${changes.commits.map(({ sha, title }) => `<li><a href="https://github.com/kala-project/kala/commit/${sha}">${escapeHtml(title)}</a></li>`).join('')}</ol></details>` : ''}
     </section>
   `
 }
@@ -564,13 +586,14 @@ function deploymentCards() {
   </div>`
 }
 
-function downloadPlatformCard(system, name, requirement, format, architectures, release, command) {
+function downloadPlatformCard(system, name, requirement, format, architectures, release, command, note) {
   return `<article class="download-platform">
     ${machineIcon(system)}
     <h2>${escapeHtml(name)}</h2>
     <p class="download-platform-requirement">${escapeHtml(requirement)}</p>
     ${commandBlock(`${system}-portable-command`, command)}
     <dl><div><dt>Manual assets</dt><dd>${architectures.map(({ label, asset }) => `<a href="${escapeAttribute(requiredAssetUrl(release, asset))}">${escapeHtml(format)} · ${escapeHtml(label)}</a>`).join('')}</dd></div></dl>
+    ${note ? `<p class="download-platform-note">${escapeHtml(note)}</p>` : ''}
   </article>`
 }
 
@@ -582,7 +605,7 @@ function requiredAssetUrl(release, name) {
 
 function requirePortableManagerAssets(release) {
   for (const name of [
-    'kala-portable.sh', 'kala-portable.ps1',
+    'kala-portable.sh', 'kala-portable.ps1', 'SHA256SUMS.sigstore.json',
   ]) requiredAssetUrl(release, name)
 }
 

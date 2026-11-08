@@ -77,11 +77,42 @@ function normalizeRelease(release, releaseNotes) {
     publishedAt,
     url,
     assets: normalizeAssets(release.assets, tag),
+    previousTag: normalizeTag(fallbackNotes.previousTag),
     notes: {
       improvements: bodyNotes.improvements.length > 0 ? bodyNotes.improvements : normalizeList(fallbackNotes.improvements),
       fixes: bodyNotes.fixes.length > 0 ? bodyNotes.fixes : normalizeList(fallbackNotes.fixes),
       knownIssues: bodyNotes.knownIssues.length > 0 ? bodyNotes.knownIssues : normalizeList(fallbackNotes.knownIssues),
     },
+  }
+}
+
+export async function resolveReleaseChanges(release, { token = process.env.GITHUB_TOKEN, fetchImpl = fetch } = {}) {
+  if (!release.previousTag) return undefined
+  const compareUrl = `${releaseBaseUrl}/compare/${release.previousTag}...${release.tag}`
+  const response = await fetchImpl(`https://api.github.com/repos/${repository}/compare/${release.previousTag}...${release.tag}?per_page=100`, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'kala-website-build',
+      ...(token ? { Authorization: ['Bearer', token].join(' ') } : {}),
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+    signal: AbortSignal.timeout(5_000),
+  })
+  if (!response.ok) throw new Error(`GitHub compare returned HTTP ${response.status}`)
+  const comparison = await response.json()
+  const commits = comparison.commits
+  if (!Number.isSafeInteger(comparison.total_commits) || !Array.isArray(commits)) {
+    throw new Error(`GitHub compare returned invalid changes for ${release.tag}`)
+  }
+  if (commits.length !== comparison.total_commits) return { url: compareUrl, commits: [] }
+  return {
+    url: compareUrl,
+    commits: commits.map(({ sha, commit }) => {
+      if (!/^[0-9a-f]{40}$/u.test(sha) || typeof commit?.message !== 'string') {
+        throw new Error(`GitHub compare returned invalid commit for ${release.tag}`)
+      }
+      return { sha, title: commit.message.split(/\r?\n/u)[0] }
+    }),
   }
 }
 

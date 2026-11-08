@@ -10,7 +10,7 @@ import {
   renderPage,
   securityPage,
 } from './site-content.mjs'
-import { resolveReleaseCatalog } from './release-catalog.mjs'
+import { resolveReleaseCatalog, resolveReleaseChanges } from './release-catalog.mjs'
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const repositoryRoot = resolve(packageRoot, '../..')
@@ -23,6 +23,17 @@ const base = process.env.KALA_SITE_BASE ?? '/'
 const releaseNotes = JSON.parse(await readFile(resolve(repositoryRoot, 'scripts/release/release-notes.json'), 'utf8'))
 const fallbackCatalog = JSON.parse(await readFile(resolve(repositoryRoot, 'scripts/release/release-catalog.json'), 'utf8'))
 const catalog = await resolveReleaseCatalog({ fallbackCatalog, releaseNotes })
+const priorRelease = catalog.releases.find((release) => release.tag === catalog.current.previousTag)
+const changeLog = Object.fromEntries(await Promise.all(
+  [catalog.current, priorRelease].filter(Boolean).map(async (release) => {
+    try {
+      return [release.tag, await resolveReleaseChanges(release)]
+    } catch (error) {
+      console.warn(`Unable to load ${release.tag} commit history; linking to GitHub comparison instead: ${error.message}`)
+      return [release.tag, undefined]
+    }
+  }),
+))
 const version = catalog.current.version
 const stableVersion = catalog.stable?.version ?? version
 
@@ -60,7 +71,7 @@ const pages = [
     page: 'releases',
     title: `Kala ${version} release`,
     description: `Read the improvements, fixes, support boundaries, and public evidence for Kala ${version}.`,
-    content: releasesPage(catalog),
+    content: releasesPage(catalog, changeLog),
   },
 ]
 

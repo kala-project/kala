@@ -1,6 +1,6 @@
 {
   "license": "MIT",
-  "name": "@agent-kernel/eval-benchmark-memory-planning", "version": "0.4.1", "description": "Memory and planning benchmark plugin for the Agent Evaluation Platform.", "repository": { "type": "git", "url": "git+https://github.com/xingsy97/kala.git" }, "homepage": "https://github.com/xingsy97/kala#readme", "bugs": { "url": "https://github.com/xingsy97/kala/issues" }, "type": "module",
+  "name": "@agent-kernel/eval-benchmark-memory-planning", "version": "0.4.2", "description": "Memory and planning benchmark plugin for the Agent Evaluation Platform.", "repository": { "type": "git", "url": "git+https://github.com/xingsy97/kala.git" }, "homepage": "https://github.com/xingsy97/kala#readme", "bugs": { "url": "https://github.com/xingsy97/kala/issues" }, "type": "module",
   "main": "./dist/index.js", "types": "./dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } }, "files": ["dist", "README.md"],
   "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc --noEmit", "test": "vitest run --exclude '**/dist/**'" },
   "dependencies": { "@agent-kernel/eval-benchmark-common": "workspace:*", "@agent-kernel/eval-protocol": "workspace:*", "@agent-kernel/eval-sdk": "workspace:*" },

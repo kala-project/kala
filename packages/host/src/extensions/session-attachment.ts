@@ -56,7 +56,8 @@ export async function runSessionAttachmentTool(
       return await saveSessionAttachment(deps, sessionId, effect.callId, path, file, effect.input.overwrite === true)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      return { ok: false, content: `Attachment save failed: ${message}. Check the destination before retrying; the transfer outcome may be incomplete.` }
+      if (error instanceof AttachmentPreDispatchError) return { ok: false, content: message }
+      return { ok: false, content: `Attachment save failed: ${message}. Transfer outcome unknown; inspect the destination before retrying.` }
     }
   }
   if (!isTextAttachment(file.mediaType, file.name)) {
@@ -102,12 +103,13 @@ async function saveSessionAttachment(
   deps: AttachmentToolDeps, sessionId: string, callId: string, path: string,
   file: { bytes: number; sha256: string; read(): Promise<Buffer> }, overwrite: boolean,
 ): Promise<{ ok: boolean; content: string }> {
+  if (!deps.tools.callHostAttachmentTransfer) throw new AttachmentPreDispatchError('Executor attachment transfer is unavailable')
   const data = await file.read()
   const transferId = createHash('sha256').update(sessionId).update('\0').update(callId).digest('hex')
   const owner = await deps.assertSessionEffectOwner?.(sessionId)
   const ownerGeneration = owner && 'ownerGeneration' in owner ? owner.ownerGeneration : undefined
   const transfer = async (action: string, extra: Record<string, unknown> = {}) => {
-    if (!deps.tools.callHostAttachmentTransfer) throw new Error('Executor attachment transfer is unavailable')
+    if (!deps.tools.callHostAttachmentTransfer) throw new AttachmentPreDispatchError('Executor attachment transfer is unavailable')
     const response = await deps.tools.callHostAttachmentTransfer(sessionId, {
       kind: 'call_tool', callId: `${callId}:${action}:${extra.offset ?? 0}`,
       name: '__workspace_attachment_transfer',

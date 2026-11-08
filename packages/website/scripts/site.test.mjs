@@ -4,7 +4,7 @@ import { resolve } from 'node:path'
 import test from 'node:test'
 
 import { deployPage, downloadPage, homePage, releasesPage, renderPage, securityPage } from './site-content.mjs'
-import { normalizeReleases, normalizeTag, resolveReleaseCatalog } from './release-catalog.mjs'
+import { normalizeReleases, normalizeTag, resolveReleaseCatalog, resolveReleaseChanges } from './release-catalog.mjs'
 
 const root = resolve(import.meta.dirname, '../../..')
 const manifest = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'))
@@ -19,14 +19,27 @@ const catalog = {
   preview: releases.find((release) => release.prerelease),
   source: 'fallback',
 }
+const publishedVersion = catalog.stable.version
+const modernAssets = [
+  'run.sh', 'SHA256SUMS', 'SHA256SUMS.sigstore.json', 'kala-dashboard-with-runtime.cjs', 'kala-portable.sh', 'kala-portable.ps1',
+  'kala-dedicated-support.tar.gz', `kala-private-cloud-${publishedVersion}-linux-x64.tar.gz`,
+]
+const modernRelease = {
+  ...catalog.stable,
+  assets: modernAssets.map((name) => ({
+    name,
+    url: `https://github.com/kala-project/kala/releases/download/${catalog.stable.tag}/${name}`,
+  })),
+}
+const modernCatalog = { ...catalog, stable: modernRelease, current: modernRelease, releases: [modernRelease] }
 
 test('website version and release content follow repository authorities', () => {
   assert.ok(notes[`v${version}`])
   const page = releasesPage(catalog)
-  assert.match(page, /v0\.2\.0/)
+  assert.match(page, /Downloads for 0\.4\.2/)
+  assert.match(page, /v0\.4\.2/)
   assert.match(page, /Stable/)
-  assert.match(page, /preview-only/)
-  assert.match(page, /Oct 1, 2026/)
+  assert.match(page, /Nov 9, 2026/)
   assert.doesNotMatch(page, /0\.2\.0-rc\.19/)
 })
 
@@ -143,31 +156,40 @@ test('release catalog filters unpublished entries, parses public notes, and fall
     fetchImpl: async () => { throw new Error('offline') },
   })
   assert.equal(fallback.source, 'fallback')
-  assert.equal(fallback.stable.tag, 'v0.2.0')
-  assert.equal(fallback.current.tag, 'v0.2.0', 'unpublished beta versions must not replace the published stable release')
+  assert.equal(fallback.stable.tag, catalog.stable.tag)
+  assert.equal(fallback.current.tag, catalog.stable.tag, 'the published stable release must be available offline')
+  assert.equal(fallback.current.assets.length, 24)
+  assert.equal(fallback.releases.some((release) => release.tag === 'v0.4.0'), true)
   assert.equal(fallback.releases.some((release) => release.tag === 'v0.2.0-rc.19'), false)
 })
 
 test('download guidance matches the supported stable matrix', () => {
-  const page = downloadPage(catalog)
+  const page = downloadPage(modernCatalog)
   assert.match(page, /<h2>Linux<\/h2>[\s\S]*linux-portable-command/)
   assert.match(page, /macOS[\s\S]*Intel[\s\S]*Apple silicon/)
-  assert.match(page, /Windows[\s\S]*Not supported yet/)
+  assert.match(page, /<h2>Windows<\/h2>[\s\S]*windows-portable-command[\s\S]*Asset · PowerShell manager/)
+  assert.match(page, /Invoke-WebRequest[\s\S]*SHA256SUMS\.sigstore\.json[\s\S]*cosign verify-blob[\s\S]*Get-FileHash[\s\S]*&amp; \.\\kala-portable\.ps1 install[\s\S]*&amp; \.\\kala-portable\.ps1 start/)
+  assert.match(page, /release\.yml@refs\/tags\/v0\.4\.2/)
+  assert.match(page, /Checksum mismatch/)
+  assert.doesNotMatch(page, /Invoke-Expression|iex\b/)
   assert.doesNotMatch(page, /Linux arm64/)
-  assert.match(page, /Not supported yet/)
+  assert.doesNotMatch(page, /Not supported yet/)
   assert.match(page, /SHA256SUMS/)
   assert.match(page, /Portable[\s\S]*Dedicated[\s\S]*Private Cloud/)
   assert.doesNotMatch(page, /dedicated-install-command|private-cloud-install-command|kala-private-cloud install|install-dedicated-systemd/)
   assert.doesNotMatch(page, /Install the verified Kala/)
-  assert.match(page, /Signed evidence/)
+  assert.doesNotMatch(page, /Verify before you run|Signed evidence|Versioned manifest/)
   assert.doesNotMatch(page, /scanned preview artifacts/)
-  assert.match(page, /releases\/download\/v0\.2\.0\/run\.sh/)
-  assert.match(page, /releases\/download\/v0\.2\.0\/kala-host-linux-x64/)
+  assert.match(page, /releases\/download\/v0\.4\.2\/run\.sh/)
+  assert.match(page, /releases\/download\/v0\.4\.2\/kala-dashboard-with-runtime\.cjs/)
+  const legacyPage = downloadPage({ ...catalog, stable: releases.find((release) => release.tag === 'v0.2.0') })
+  assert.match(legacyPage, /Windows[\s\S]*Not supported yet/)
+  assert.match(legacyPage, /releases\/download\/v0\.2\.0\/kala-host-linux-x64/)
 })
 
 test('published CJS releases offer the Portable Host without redistributing Copilot binaries', () => {
   const assetNames = [
-    'run.sh', 'SHA256SUMS', 'kala-dashboard-with-runtime.cjs', 'kala-portable.sh', 'kala-portable.ps1',
+    'run.sh', 'SHA256SUMS', 'SHA256SUMS.sigstore.json', 'kala-dashboard-with-runtime.cjs', 'kala-portable.sh', 'kala-portable.ps1',
     'kala-dedicated-support.tar.gz',
     'kala-private-cloud-0.3.0-linux-x64.tar.gz',
   ]
@@ -190,6 +212,7 @@ test('published CJS releases offer the Portable Host without redistributing Copi
   assert.match(notesPage, /Portable Host[\s\S]*kala-portable\.sh/)
   assert.match(notesPage, /Windows[\s\S]*kala-portable\.ps1/)
   assert.throws(() => downloadPage({ ...cjsCatalog, stable: { ...release, assets: release.assets.filter((asset) => asset.name !== 'kala-portable.sh') } }), /missing required website asset kala-portable.sh/)
+  assert.throws(() => downloadPage({ ...cjsCatalog, stable: { ...release, assets: release.assets.filter((asset) => asset.name !== 'SHA256SUMS.sigstore.json') } }), /missing required website asset SHA256SUMS.sigstore.json/)
   assert.throws(() => releasesPage({ ...cjsCatalog, current: { ...release, assets: release.assets.filter((asset) => asset.name !== 'kala-portable.ps1') } }), /missing required website asset kala-portable.ps1/)
 })
 
@@ -204,11 +227,45 @@ test('deploy page compares operating models without repeating homepage cards', (
 })
 
 test('release page follows a scannable update-notes structure', () => {
-  const page = releasesPage(catalog)
+  const page = releasesPage(modernCatalog)
   assert.match(page, /release-archive/)
   assert.match(page, /On this page/)
-  assert.match(page, /Downloads for 0\.2\.0/)
-  assert.match(page, /Release highlights/)
-  assert.match(page, /Improvements[\s\S]*Fixes[\s\S]*Known boundaries[\s\S]*Release evidence/)
-  assert.match(page, /releases\/download\/v0\.2\.0\/kala-host-darwin-arm64/)
+  assert.match(page, /Downloads for 0\.4\.2/)
+  assert.match(page, /Release overview/)
+  assert.match(page, /0 improvements[\s\S]*3 fixes/)
+  assert.match(page, /Improvements[\s\S]*Fixes[\s\S]*Known boundaries[\s\S]*Full changelog[\s\S]*Verification files/)
+  assert.match(page, /Copilot sessions require the official Copilot CLI/)
+  assert.doesNotMatch(page, /kala-copilot-runtime-/)
+})
+
+test('release page exposes the preceding release and complete tagged commit history', async () => {
+  const release = catalog.current
+  const prior = releases.find((entry) => entry.tag === release.previousTag)
+  const sha = 'a'.repeat(40)
+  const changes = await resolveReleaseChanges(release, {
+    fetchImpl: async (url) => {
+      assert.match(url, /compare\/v0\.4\.1\.\.\.v0\.4\.2\?per_page=100$/)
+      return {
+        ok: true,
+        json: async () => ({ total_commits: 1, commits: [{ sha, commit: { message: 'A real change\nDetails' } }] }),
+      }
+    },
+  })
+  const page = releasesPage(catalog, { [release.tag]: changes })
+  assert.match(page, /href="#previous-release"[\s\S]*0\.4\.1/)
+  assert.match(page, /<option value="#previous-release">0\.4\.1/)
+  assert.match(page, /Dedicated Owner management presents Identity/)
+  assert.match(page, /compare\/v0\.4\.0\.\.\.v0\.4\.1/)
+  assert.match(page, new RegExp(`commit/${sha}">A real change`))
+  assert.doesNotMatch(page, /Dashboard workflow<\/a>:|Runtime fixes<\/a>:|Support boundaries<\/a>:/)
+  assert.equal(prior.tag, 'v0.4.1')
+
+  const truncated = await resolveReleaseChanges(release, {
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({ total_commits: 2, commits: [{ sha, commit: { message: 'Incomplete' } }] }),
+    }),
+  })
+  assert.deepEqual(truncated.commits, [])
+  assert.doesNotMatch(releasesPage(catalog, { [release.tag]: truncated }), /Incomplete/)
 })

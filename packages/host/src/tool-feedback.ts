@@ -120,10 +120,9 @@ export function formatToolFailureForAgent(input: FailureInput): string {
       next: 'Inspect existing task/output and effects before retrying writes. Narrow the request or use background execution with bounded polling for long commands; do not start a duplicate blindly.',
     }
   } else {
-    feedback = (code && Object.hasOwn(guidance, code) ? guidance[code] : undefined) ?? {
-      happened: 'The tool reported an unsuccessful result. This status alone does not establish completion or side effects.',
-      next: 'Read the diagnostic details and inspect current state before retrying. If the cause remains unclear, report the blocker instead of guessing, forcing an overwrite or changing permissions.',
-    }
+    const knownFeedback = code && Object.hasOwn(guidance, code) ? guidance[code] : undefined
+    if (!knownFeedback) return input.content.trim() || (code ? `Tool failed (${code}); no diagnostic details were returned.` : 'Tool failed without diagnostic details.')
+    feedback = knownFeedback
   }
   // Codes remain useful for machines, but are never the only explanation.
   const safeCode = code && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(code) ? code : undefined

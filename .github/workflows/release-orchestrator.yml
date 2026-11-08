@@ -2,7 +2,7 @@ name: Complete Verified Release
 
 on:
   push:
-    tags: ['v0.4.0', 'v0.4.1']
+    tags: ['v0.4.0', 'v0.4.1', 'v0.4.2']
 
 permissions:
   actions: write
