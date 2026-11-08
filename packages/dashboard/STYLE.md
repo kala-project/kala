@@ -121,4 +121,6 @@ Use `text-caption` for the smallest metadata, badges, graph axes and hints, or a
 
 Saved font-size indices remain compatible, but historical values below the floor are clamped when displayed. Compact density must not shrink a 12px terminal, file tree or reader below the floor. Keep the 16px root metric, larger touch targets, user-selected larger sizes and sensible line-height.
 
+The chat-size preference also scales transcript controls, thinking headers, tool labels and live status text relative to their existing type roles. Fenced code and tool payloads use the separate code-size preference; popup controls outside the transcript retain their interface sizing. Keep portal-based tool previews on the same chat display scale.
+
 The typography contract scans production **and prototypes**, CSS and inline numeric font sizes. Browser geometry checks (`scripts/style-browser.mjs`, against the local prototype server with `CHROMIUM_PATH` set to an existing browser) also check rendered text, scrollbar bounds, single-row account actions, portal focus and manual observation refresh.

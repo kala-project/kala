@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
+import postcss from 'postcss'
 import { describe, expect, it } from 'vitest'
 import { minimumTextViolations } from '../../scripts/style-rules.mjs'
 
@@ -32,6 +33,22 @@ describe('typography contract', () => {
       expect(stylesheet).toContain(`--ak-type-${role}-size:`)
       expect(stylesheet).toContain(`--ak-type-${role}-leading:`)
     }
+  })
+
+  it('scales fixed transcript and status text roles without changing the independent code size', () => {
+    const rules: { selector: string; fontSize: string }[] = []
+    postcss.parse(stylesheet).walkRules((rule) => {
+      rule.walkDecls('font-size', (decl) => rules.push({ selector: rule.selector, fontSize: decl.value }))
+    })
+    for (const role of ['text-xs', 'text-sm', 'text-meta', 'text-caption', 'text-ui', 'text-base', 'text-2xl']) {
+      expect(rules.some(({ selector, fontSize }) => selector.split(',').some((item) => item.trim() === `.ak-chat-display .${role}`) && fontSize.includes('--ak-chat-text-scale'))).toBe(true)
+    }
+    for (const size of ['0.75rem', '0.9375rem']) {
+      expect(stylesheet).toContain(`[class~="text-[${size}]"]`)
+    }
+    expect(rules.some(({ selector, fontSize }) => selector === '.ak-chat-display .ak-tool-detail-code' && fontSize === 'var(--ak-code-font-size, 0.9375rem)')).toBe(true)
+    expect(stylesheet).toMatch(/\.ak-code-lines\s*\{\s*font-size: var\(--ak-code-font-size/)
+    expect(stylesheet).toMatch(/\.ak-chat-display :is\(\[role="menu"\], \[role="dialog"\], \[role="tooltip"\]\)\s*\{\s*--ak-chat-text-scale: 1;/)
   })
 
   it('uses language-aware fallback order without forcing grayscale smoothing', () => {

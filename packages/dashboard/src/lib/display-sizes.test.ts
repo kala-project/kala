@@ -27,5 +27,6 @@ describe('expanded display sizes', () => {
 
   it('applies the actual maximum chat size in scalable units', () => {
     expect(chatDisplayStyle({ fontSize: CHAT_FONT_SIZE_PX.indexOf(48), contentWidth: 1, sideSpace: 1, lineHeight: 1 })).toHaveProperty('--ak-chat-font-size', '3rem')
+    expect(chatDisplayStyle({ fontSize: CHAT_FONT_SIZE_PX.indexOf(48), contentWidth: 1, sideSpace: 1, lineHeight: 1 })).toHaveProperty('--ak-chat-text-scale', String(48 / 15))
   })
 })

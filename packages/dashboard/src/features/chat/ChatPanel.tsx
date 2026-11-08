@@ -187,6 +187,7 @@ const AttachmentAccessContext = createContext<{ host?: string; token?: string }>
 type MessageTimestampVisibility = 'auto' | 'always' | 'hidden'
 const MessageTimestampContext = createContext<MessageTimestampVisibility>('auto')
 const ThinkingExpandedByDefaultContext = createContext(false)
+const ChatDisplayStyleContext = createContext<ReturnType<typeof chatDisplayStyle> | null>(null)
 
 type RenderTranscriptItem = TranscriptItem | {
   kind: 'compact_feedback'
@@ -739,6 +740,7 @@ export function ChatPanel({
   const displayStyle = chatDisplayStyle(displayPrefs)
 
   return (
+    <ChatDisplayStyleContext.Provider value={displayStyle}>
     <ThinkingExpandedByDefaultContext.Provider value={expandThinkingByDefault}>
     <MessageTimestampContext.Provider value={timestampVisibility}>
     <ArtifactSessionContext.Provider value={sessionId ?? parentSessionId ?? null}>
@@ -771,12 +773,12 @@ export function ChatPanel({
           </div>
         ) : null}
         {loading ? (
-          <div className="ak-chat-container mx-auto w-full py-4 sm:py-6">
+          <div className="ak-chat-display ak-chat-container mx-auto w-full py-4 sm:py-6">
             <TranscriptLoadingState />
             {renderedFooterSlot ? <div className="pl-0 pt-2 sm:pl-10">{renderedFooterSlot}</div> : null}
           </div>
         ) : isEmpty ? (
-          <div className="ak-chat-container mx-auto w-full py-4 sm:py-6">
+          <div className="ak-chat-display ak-chat-container mx-auto w-full py-4 sm:py-6">
             <EmptyState onSuggest={onSuggest} />
             {renderedFooterSlot ? <div className="pl-0 pt-6 sm:pl-10">{renderedFooterSlot}</div> : null}
           </div>
@@ -793,10 +795,10 @@ export function ChatPanel({
               renderedFooterSlot ? (
                 // Status rows share the content edge used by headerless live
                 // replies and the Composer. Labelled rows add their own avatar rail.
-                <div className="w-full pt-1" data-testid="transcript-footer-content">{renderedFooterSlot}</div>
+                <div className="ak-chat-display w-full pt-1" data-testid="transcript-footer-content">{renderedFooterSlot}</div>
               ) : null
             }
-            itemClassName="ak-chat-container ak-chat-item mx-auto w-full min-w-0 overflow-x-hidden py-2 sm:py-3"
+            itemClassName="ak-chat-display ak-chat-container ak-chat-item mx-auto w-full min-w-0 overflow-x-hidden py-2 sm:py-3"
             defaultItemHeight={80}
             dataTestId="virtual-transcript"
             onViewportAnchorChange={setViewportAnchor}
@@ -830,6 +832,7 @@ export function ChatPanel({
     </ArtifactSessionContext.Provider>
     </MessageTimestampContext.Provider>
     </ThinkingExpandedByDefaultContext.Provider>
+    </ChatDisplayStyleContext.Provider>
   )
 }
 
@@ -952,7 +955,7 @@ function StickyUserPrompt({
       <button
         type="button"
         onClick={onClick}
-        className="ak-chat-container ak-sticky-user-prompt-surface pointer-events-auto mx-auto grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-lg border border-border/45 bg-card/88 px-2.5 py-1.5 text-left text-card-foreground shadow-sm backdrop-blur-lg transition-colors hover:border-border/70 sm:max-w-[min(var(--ak-chat-content-width,84rem),calc(100%-2rem))] sm:px-3"
+        className="ak-chat-display ak-chat-container ak-sticky-user-prompt-surface pointer-events-auto mx-auto grid w-full min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-lg border border-border/45 bg-card/88 px-2.5 py-1.5 text-left text-card-foreground shadow-sm backdrop-blur-lg transition-colors hover:border-border/70 sm:max-w-[min(var(--ak-chat-content-width,84rem),calc(100%-2rem))] sm:px-3"
         aria-label={t('chat.transcript.currentPromptJump')}
       >
         <span className="flex h-5 w-5 flex-none items-center justify-center self-center text-primary/80">
@@ -1160,7 +1163,7 @@ function ShellResultMessage({ text, ts }: { text: string; ts?: string }): JSX.El
             {label}
           </span>
         </div>
-        <pre className="max-h-[32rem] overflow-auto whitespace-pre-wrap break-words px-3 py-2 text-xs leading-relaxed" data-testid="shell-result-output">{text}</pre>
+        <pre className="ak-code-lines max-h-[32rem] overflow-auto whitespace-pre-wrap break-words px-3 py-2 leading-relaxed" data-testid="shell-result-output">{text}</pre>
         <InlineTimestamp ts={ts} className="px-3 pb-2 text-muted-foreground" />
       </div>
     </div>
@@ -2840,7 +2843,7 @@ function ThinkingBlock({
         }
       }}
     >
-      <div className="flex min-w-0 items-center px-2 py-1.5 text-meta text-muted-foreground">
+      <div className="ak-chat-text flex min-w-0 items-center px-2 py-1.5 text-muted-foreground">
         <button
           type="button"
           onClick={() => setOpen((value) => !value)}
@@ -4129,6 +4132,7 @@ function ToolCallGroupBlock({
   badgeIntentionCallId?: string
 }): JSX.Element {
   const { t } = useTranslation()
+  const displayStyle = useContext(ChatDisplayStyleContext)
   const [open, setOpen] = useState(false)
   const [expandedCallId, setExpandedCallId] = useState<string | null>(null)
   const [hoveredCallId, setHoveredCallId] = useState<string | null>(null)
@@ -4391,11 +4395,11 @@ function ToolCallGroupBlock({
                 <div
                   ref={setPreviewElement}
                   className={cn(
-                    'fixed z-[100] flex min-h-0 flex-col overflow-hidden border border-border/80 bg-popover p-2 text-popover-foreground shadow-2xl',
+                    'ak-chat-display fixed z-[100] flex min-h-0 flex-col overflow-hidden border border-border/80 bg-popover p-2 text-popover-foreground shadow-2xl',
                     previewPosition.mobile ? 'rounded-t-2xl rounded-b-xl' : 'rounded-xl',
                     pinnedCallId === previewCallId ? 'pointer-events-auto' : 'pointer-events-none',
                   )}
-                  style={{ left: previewPosition.left, top: previewPosition.top, width: previewPosition.width, maxHeight: previewPosition.maxHeight }}
+                  style={{ ...displayStyle, left: previewPosition.left, top: previewPosition.top, width: previewPosition.width, maxHeight: previewPosition.maxHeight }}
                   data-placement={`${previewPosition.horizontal}-${previewPosition.vertical}`}
                   data-mobile={previewPosition.mobile ? 'true' : 'false'}
                   data-testid={`tool-card-preview-layer-${previewCallId}`}

@@ -28,6 +28,7 @@ export function chatDisplayStyle(displayPrefs: ChatDisplayPrefs | undefined): CS
   const sideSpace = CHAT_SIDE_SPACE[clampIndex(displayPrefs?.sideSpace, CHAT_SIDE_SPACE, 1)] ?? CHAT_SIDE_SPACE[1]
   return {
     '--ak-chat-font-size': `${readableFontSize(CHAT_FONT_SIZE_PX[fontSize] ?? 15) / 16}rem`,
+    '--ak-chat-text-scale': String(readableFontSize(CHAT_FONT_SIZE_PX[fontSize] ?? 15) / 15),
     '--ak-code-font-size': `${readableFontSize(displayPrefs?.codeBlockFontSize ?? 15) / 16}rem`,
     '--ak-chat-line-height': String(CHAT_LINE_HEIGHT[lineHeight]),
     '--ak-chat-content-width': `${CHAT_CONTENT_WIDTH_REM[contentWidth]}rem`,

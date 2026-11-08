@@ -707,7 +707,7 @@ describe('ChatPanel', () => {
       'stderr:',
       'warning',
     ].join('\n')
-    rerender(<ChatPanel messages={[{ role: 'user', content: [{ type: 'text', text: result }] }]} />)
+    rerender(<ChatPanel messages={[{ role: 'user', content: [{ type: 'text', text: result }] }]} displayPrefs={{ fontSize: 6, codeBlockFontSize: 22, contentWidth: 1, sideSpace: 1, lineHeight: 1 }} />)
 
     const card = screen.getByTestId('shell-result-message')
     expect(card.getAttribute('data-operation-id')).toBe('shell-operation')
@@ -715,6 +715,8 @@ describe('ChatPanel', () => {
     expect(screen.getByText('Completed with nonzero exit')).toBeTruthy()
     expect(screen.getByTestId('shell-result-output').textContent).toContain('stdout:\nhello')
     expect(screen.getByTestId('shell-result-output').textContent).toContain('stderr:\nwarning')
+    expect(screen.getByTestId('shell-result-output').className).toContain('ak-code-lines')
+    expect(screen.getByTestId('shell-result-output').closest('[style*="--ak-code-font-size"]')?.getAttribute('style')).toContain('--ak-code-font-size: 1.375rem')
   })
 
   it('renders the thinking status row even when the transcript is empty', () => {
@@ -846,10 +848,52 @@ describe('ChatPanel', () => {
     const root = container.querySelector('[style*="--ak-chat-font-size"]') as HTMLElement | null
 
     expect(root?.style.getPropertyValue('--ak-chat-font-size')).toBe('1.25rem')
+    expect(root?.style.getPropertyValue('--ak-chat-text-scale')).toBe(String(20 / 15))
     expect(root?.style.getPropertyValue('--ak-code-font-size')).toBe('1.375rem')
     expect(root?.style.getPropertyValue('--ak-chat-content-width')).toBe('104rem')
     expect(root?.style.getPropertyValue('--ak-chat-line-height')).toBe('1.95')
     expect(root?.style.getPropertyValue('--ak-chat-math-scale')).toBe('3em')
+  })
+
+  it('scales thinking headers, tool labels and the live footer from the same chat preference', () => {
+    const messages = [
+      { role: 'assistant' as const, content: [
+        { type: 'thinking' as const, text: '## Researching definitions\n\nChecking terms.' },
+        { type: 'thinking' as const, text: '## Final checks\n\nReviewing.' },
+      ] },
+      { role: 'assistant' as const, content: [
+        { type: 'tool_call' as const, callId: 'size-tool', name: 'read', input: { path: '/repo/file' }, intent: 'Check the definition.' },
+      ] },
+    ]
+    const prefs = (fontSize: number) => ({ fontSize, contentWidth: 1, sideSpace: 1, lineHeight: 1 })
+    const { container, rerender } = render(<ChatPanel messages={messages} displayPrefs={prefs(6)} footerSlot={<span className="text-xs">Live status</span>} />)
+    const root = container.querySelector('[style*="--ak-chat-font-size"]') as HTMLElement
+    const heading = screen.getByTestId('thinking-title')
+    expect(heading.parentElement?.textContent).toContain('2 Thinkings')
+    expect(heading.parentElement?.textContent).toContain('Final checks')
+    expect(screen.getByTestId('thinking-navigation').parentElement?.className).toContain('ak-chat-text')
+    expect(screen.getByTestId('tool-call-intent-size-tool').className).toContain('text-meta')
+    expect(screen.getByText('Live status').closest('.ak-chat-display')?.getAttribute('data-testid')).toBe('transcript-footer-content')
+    expect(root.style.getPropertyValue('--ak-chat-text-scale')).toBe(String(20 / 15))
+    rerender(<ChatPanel messages={messages} displayPrefs={prefs(0)} footerSlot={<span className="text-xs">Live status</span>} />)
+    expect(root.style.getPropertyValue('--ak-chat-text-scale')).toBe(String(12 / 15))
+  })
+
+  it('keeps fenced code tied to the code-size setting and scopes popup controls separately', () => {
+    const { container } = render(<ChatPanel
+      messages={[{ role: 'assistant', content: [{ type: 'text', text: '```js\nconst answer = 42\n```\n\n## First\n\n' + 'Long chapter. '.repeat(120) + '\n\n## Second\n\n' + 'More text. '.repeat(120) }] }]}
+      displayPrefs={{ fontSize: 6, codeBlockFontSize: 22, contentWidth: 1, sideSpace: 1, lineHeight: 1 }}
+    />)
+    const code = screen.getByTestId('code-block-raw')
+    const root = container.querySelector('[style*="--ak-code-font-size"]') as HTMLElement
+    expect(root.style.getPropertyValue('--ak-chat-text-scale')).toBe(String(20 / 15))
+    expect(root.style.getPropertyValue('--ak-code-font-size')).toBe('1.375rem')
+    expect(code.classList.contains('ak-code-lines')).toBe(true)
+    expect(code.closest('.ak-chat-display')).toBeTruthy()
+    expect(code.className).not.toMatch(/\btext-(?:xs|sm|meta|ui|base)\b/)
+    fireEvent.click(screen.getByTestId('chapter-toc-trigger'))
+    expect(screen.getByRole('menu').closest('.ak-chat-display')).toBeTruthy()
+    expect(screen.getAllByRole('menuitem')[0]?.className).toContain('text-xs')
   })
 
   it('opens workspace file links from assistant Markdown', () => {
@@ -1028,6 +1072,7 @@ describe('ChatPanel', () => {
   it('previews intent and tool summary on hover or click without expanding the group', () => {
     render(
       <DashboardChatPanel
+        displayPrefs={{ fontSize: 6, codeBlockFontSize: 22, contentWidth: 1, sideSpace: 1, lineHeight: 1 }}
         messages={[
           {
             role: 'assistant',
@@ -1071,6 +1116,10 @@ describe('ChatPanel', () => {
     const secondDot = screen.getByTestId('tool-card-dot-dot-2')
     fireEvent.mouseEnter(firstDot)
     const hoverCard = screen.getByTestId('tool-card-preview-layer-dot-1')
+    expect(hoverCard.className).toContain('ak-chat-display')
+    expect(hoverCard.style.getPropertyValue('--ak-chat-text-scale')).toBe(String(20 / 15))
+    expect(hoverCard.style.getPropertyValue('--ak-code-font-size')).toBe('1.375rem')
+    expect(hoverCard.querySelector('.ak-tool-detail-code')).toBeTruthy()
     expect(screen.getByTestId('tool-call-detail-intent-dot-1').textContent).toBe('Inspect the implementation before changing it.')
     expect(hoverCard.className).toContain('fixed')
     expect(hoverCard.style.width).toBe('384px')
@@ -2146,6 +2195,7 @@ describe('ChatPanel', () => {
   it('opens a markdown summary modal from compact boundaries', () => {
     render(
       <ChatPanel
+        displayPrefs={{ fontSize: 6, contentWidth: 1, sideSpace: 1, lineHeight: 1 }}
         items={[
           {
             kind: 'compact_boundary',
@@ -2162,6 +2212,7 @@ describe('ChatPanel', () => {
 
     fireEvent.click(screen.getByTestId('compact-boundary-open'))
     const modal = screen.getByTestId('compact-summary-modal')
+    expect(modal.closest('.ak-chat-display')).toBeNull()
     expect(modal.textContent ?? '').toContain('Compacted Context')
     expect(modal.textContent ?? '').toContain('Open Work')
     expect(modal.textContent ?? '').toContain('Finish compact inspector wiring')

@@ -102,6 +102,96 @@
     line-height: var(--ak-chat-line-height, 1.7);
   }
 
+  /* Transcript controls and tool/status labels retain their type hierarchy
+     while following the message-size preference (including the live footer). */
+  .ak-chat-display .text-xs,
+  .ak-chat-display [class~="text-[0.75rem]"] {
+    font-size: max(0.75rem, calc(0.75rem * var(--ak-chat-text-scale, 1)));
+    line-height: max(1rem, calc(1rem * var(--ak-chat-text-scale, 1)));
+  }
+
+  .ak-chat-display .text-sm {
+    font-size: max(0.75rem, calc(0.875rem * var(--ak-chat-text-scale, 1)));
+    line-height: max(1.25rem, calc(1.25rem * var(--ak-chat-text-scale, 1)));
+  }
+
+  .ak-chat-display .text-ui {
+    font-size: max(0.75rem, calc(var(--ak-type-ui-size) * var(--ak-chat-text-scale, 1)));
+    line-height: max(1rem, calc(var(--ak-type-ui-leading) * var(--ak-chat-text-scale, 1)));
+  }
+
+  .ak-chat-display .text-meta {
+    font-size: max(0.75rem, calc(var(--ak-type-meta-size) * var(--ak-chat-text-scale, 1)));
+    line-height: max(1rem, calc(var(--ak-type-meta-leading) * var(--ak-chat-text-scale, 1)));
+  }
+
+  .ak-chat-display .text-caption {
+    font-size: max(0.75rem, calc(var(--ak-type-caption-size) * var(--ak-chat-text-scale, 1)));
+    line-height: max(1rem, calc(var(--ak-type-caption-leading) * var(--ak-chat-text-scale, 1)));
+  }
+
+  .ak-chat-display .text-body {
+    font-size: max(0.75rem, calc(var(--ak-type-body-size) * var(--ak-chat-text-scale, 1)));
+    line-height: max(1rem, calc(var(--ak-type-body-leading) * var(--ak-chat-text-scale, 1)));
+  }
+
+  .ak-chat-display [class~="text-[0.9375rem]"] {
+    font-size: max(0.75rem, calc(0.9375rem * var(--ak-chat-text-scale, 1)));
+  }
+
+  .ak-chat-display .text-base {
+    font-size: max(0.75rem, calc(1rem * var(--ak-chat-text-scale, 1)));
+    line-height: max(1rem, calc(1.5rem * var(--ak-chat-text-scale, 1)));
+  }
+
+  .ak-chat-display .text-title {
+    font-size: max(0.75rem, calc(var(--ak-type-title-size) * var(--ak-chat-text-scale, 1)));
+    line-height: max(1rem, calc(var(--ak-type-title-leading) * var(--ak-chat-text-scale, 1)));
+  }
+
+  .ak-chat-display .text-lg {
+    font-size: calc(1.125rem * var(--ak-chat-text-scale, 1));
+    line-height: calc(1.75rem * var(--ak-chat-text-scale, 1));
+  }
+
+  .ak-chat-display .text-heading {
+    font-size: calc(var(--ak-type-heading-size) * var(--ak-chat-text-scale, 1));
+    line-height: calc(var(--ak-type-heading-leading) * var(--ak-chat-text-scale, 1));
+  }
+
+  .ak-chat-display .text-xl {
+    font-size: calc(1.25rem * var(--ak-chat-text-scale, 1));
+    line-height: calc(1.75rem * var(--ak-chat-text-scale, 1));
+  }
+
+  .ak-chat-display .text-2xl {
+    font-size: calc(1.5rem * var(--ak-chat-text-scale, 1));
+    line-height: calc(2rem * var(--ak-chat-text-scale, 1));
+  }
+
+  .ak-chat-display .ak-tool-detail-code {
+    font-size: var(--ak-code-font-size, 0.9375rem);
+  }
+
+  .ak-chat-display :is([role="menu"], [role="dialog"], [role="tooltip"]) {
+    --ak-chat-text-scale: 1;
+  }
+
+  .ak-chat-display .leading-none { line-height: 1; }
+  .ak-chat-display .leading-relaxed { line-height: 1.625; }
+  .ak-chat-display .leading-5 { line-height: max(1.25rem, calc(1.25rem * var(--ak-chat-text-scale, 1))); }
+  .ak-chat-display .leading-6 { line-height: max(1.5rem, calc(1.5rem * var(--ak-chat-text-scale, 1))); }
+
+  @media (min-width: 640px) {
+    .ak-chat-display [class~="sm:text-base"] {
+      font-size: calc(1rem * var(--ak-chat-text-scale, 1));
+    }
+
+    .ak-chat-display [class~="sm:text-2xl"] {
+      font-size: calc(1.5rem * var(--ak-chat-text-scale, 1));
+    }
+  }
+
   .ak-chat-item .katex {
     font-size: var(--ak-chat-math-scale, 2em);
   }
