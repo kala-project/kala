@@ -163,12 +163,12 @@ describe('MCP stdio client manager', () => {
     const announcements = (): Array<{ tools: string[]; mcpTools?: McpToolDescriptor[] }> => emitted
       .filter((event) => event.event === 'executor:announce')
       .map((event) => event.args[0] as { tools: string[]; mcpTools?: McpToolDescriptor[] })
-    expect(announcements()[0]!.tools).toEqual(['dynamic__echo'])
+    expect(announcements()[0]!.tools).toEqual(['__workspace_attachment_transfer', 'dynamic__echo'])
     expect(announcements()[0]!.mcpTools?.[0]).toEqual(expect.objectContaining({ name: 'dynamic__echo', schemaHash: expect.any(String) }))
 
     inbound.emit('tool:call', { sessionId: 's', callId: 'c', name: 'dynamic__echo', input: {} }, () => undefined)
     await waitFor(() => announcements().length === 2)
-    expect(announcements().at(-1)!.tools).toEqual([])
+    expect(announcements().at(-1)!.tools).toEqual(['__workspace_attachment_transfer'])
     expect(announcements().at(-1)!.mcpTools).toBeUndefined()
     await executor.close()
   })
@@ -202,7 +202,7 @@ describe('MCP stdio client manager', () => {
     await expect(request(inbound, 'executor:mcp_configure', { requestId: 'configure-1', servers: [replacement] })).resolves.toEqual({ ok: true })
 
     const announcements = emitted.filter((item) => item.event === 'executor:announce').map((item) => item.args[0] as { tools: string[] })
-    expect(announcements.at(-1)?.tools).toEqual(['new__replacement'])
+    expect(announcements.at(-1)?.tools).toEqual(['__workspace_attachment_transfer', 'new__replacement'])
     expect(existsSync(oldClosed)).toBe(false)
     const persisted = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>
     expect(persisted.unrelated).toEqual({ retained: true })
@@ -245,7 +245,7 @@ describe('MCP stdio client manager', () => {
     })
     expect(failed).toEqual({ ok: false, error: 'one or more MCP servers could not be initialized' })
     expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual(original)
-    expect((emitted.filter((item) => item.event === 'executor:announce').at(-1)?.args[0] as { tools: string[] }).tools).toEqual(['old__echo'])
+    expect((emitted.filter((item) => item.event === 'executor:announce').at(-1)?.args[0] as { tools: string[] }).tools).toEqual(['__workspace_attachment_transfer', 'old__echo'])
     await waitFor(() => existsSync(candidateClosed))
     await executor.close()
   })

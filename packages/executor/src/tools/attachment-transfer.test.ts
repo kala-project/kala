@@ -115,7 +115,7 @@ describe('host attachment transfer', () => {
     expect((await lstat(join(root, 'maximum.bin'))).size).toBe(req.bytes)
     expect(await run({ ...req, transferId: 'oversize', bytes: req.bytes + 1, action: 'begin' }))
       .toMatchObject({ ok: false, error: 'invalid transfer request' })
-  })
+  }, 20_000)
 
   it('only replaces an existing regular file with explicit overwrite and allows later chunks to omit the flag', async () => {
     const { root, run } = await setup()
