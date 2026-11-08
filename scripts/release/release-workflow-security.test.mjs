@@ -32,10 +32,10 @@ test('all release gates use official verified cosign sources and fail closed', (
 
 test('tag orchestrator promotes only after exact-revision asset, image, and hosted acceptance gates', () => {
   const workflow = readFileSync(join(import.meta.dirname, '../../.github/workflows/release-orchestrator.yml'), 'utf8')
-  assert.match(workflow, /tags: \['v0\.4\.0'\]/u)
+  assert.match(workflow, /tags: \['v0\.4\.0', 'v0\.4\.1'\]/u)
   assert.match(workflow, /test "\$GITHUB_REF" = "refs\/tags\/\$TAG"/u)
   assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$\(git rev-parse "\$TAG\^\{commit\}"\)"/u)
-  assert.match(workflow, /group: complete-v0\.4\.0-release-\$\{\{ github\.sha \}\}/u)
+  assert.match(workflow, /group: complete-release-\$\{\{ github\.sha \}\}/u)
   assert.match(workflow, /test "\$\(gh api "repos\/\$GITHUB_REPOSITORY\/git\/ref\/tags\/\$TAG" --jq \.object\.sha\)" = "\$\(git rev-parse "refs\/tags\/\$TAG"\)"/u)
   assert.match(workflow, /for \(\(attempt=0; attempt<660; attempt\+\+\)\); do\n\s+require_current_tag \|\| return 1/u)
   assert.match(workflow, /require_current_tag\n\s+gh workflow run (?:rc-acceptance|promote-rc)\.yml/gu)

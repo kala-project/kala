@@ -1,15 +1,15 @@
-name: Complete v0.4.0 Release
+name: Complete Verified Release
 
 on:
   push:
-    tags: ['v0.4.0']
+    tags: ['v0.4.0', 'v0.4.1']
 
 permissions:
   actions: write
   contents: write
 
 concurrency:
-  group: complete-v0.4.0-release-${{ github.sha }}
+  group: complete-release-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -18,11 +18,11 @@ jobs:
     timeout-minutes: 350
     env:
       GH_TOKEN: ${{ github.token }}
-      TAG: v0.4.0
+      TAG: ${{ github.ref_name }}
       NODE_DIGEST: sha256:9f0dde62d10e7ff7a310ecaebd66225f6b46c17e6cb778449a77b05d3541bea2
     steps:
       - uses: actions/checkout@v5
-        with: { ref: 'v0.4.0', fetch-depth: 0 }
+        with: { ref: '${{ github.ref_name }}', fetch-depth: 0 }
       - name: Require the exact tag and approved official Node image
         run: |
           set -euo pipefail

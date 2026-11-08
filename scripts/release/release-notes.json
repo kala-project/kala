@@ -1,4 +1,19 @@
 {
+  "v0.4.1": {
+    "previousTag": "v0.4.0",
+    "improvements": [
+      "Dedicated Owner management presents Identity, Socket.IO Admin, SILO Console, and Aspire as peer console entries, leaving deployment health and connection diagnostics in their own settings."
+    ],
+    "fixes": [
+      "SILO Console navigations no longer fall back to the cached Kala Dashboard when the network fails.",
+      "Dedicated Socket.IO Admin serves its icon stylesheet and font locally under the Owner-gated console instead of relying on an external stylesheet."
+    ],
+    "knownIssues": [
+      "SILO Console still requires its separate administrator login; a successful proxy response is not a storage-administration login.",
+      "External Workspace Executor upgrades and authenticated production console interactions require separate device-level acceptance."
+    ],
+    "desktopViaDashboard": true
+  },
   "v0.4.0": {
     "previousTag": "v0.3.0",
     "improvements": [
@@ -13,6 +28,7 @@
     ],
     "knownIssues": [
       "Owner-authenticated Session operations still require an authenticated production acceptance run; local tests alone do not establish that acceptance.",
+      "Portable Copilot Sessions require a separately installed official Copilot CLI on PATH or configured through COPILOT_CLI_PATH; Kala does not distribute that executable.",
       "Release assets must pass exact-tag qualification and signature checks before publication."
     ],
     "desktopViaDashboard": true
