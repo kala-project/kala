@@ -8,6 +8,7 @@ import {
   Search,
   Settings,
   Mic,
+  LayoutDashboard,
   Palette,
   PlugZap,
   Rocket,
@@ -43,7 +44,7 @@ import { HelpHint } from '../../components/ui/help-hint.js'
 import { useMinWidth } from '../../app-logic/use-viewport.js'
 import { AgentSection } from './sections/AgentSection.js'
 import { ConnectionSection } from './sections/ConnectionSection.js'
-import { DeploymentSection } from './sections/DeploymentSection.js'
+import { DeploymentSection, ManagementSection } from './sections/DeploymentSection.js'
 import { ExecutorAccessSection } from './sections/ExecutorAccessSection.js'
 import { HooksSection } from './sections/HooksSection.js'
 import { InterfaceSection } from './sections/InterfaceSection.js'
@@ -76,7 +77,7 @@ type Props = {
   deploymentServices?: DeploymentServices
 }
 
-type SectionKey = 'runtime' | 'connection' | 'agent' | 'models' | 'webSearch' | 'speech' | 'security' | 'socketAdmin' | 'executorAccess' | 'mcp' | 'hooks' | 'interface' | 'deployment' | 'notifications' | 'storage'
+type SectionKey = 'runtime' | 'connection' | 'agent' | 'models' | 'webSearch' | 'speech' | 'security' | 'socketAdmin' | 'executorAccess' | 'mcp' | 'hooks' | 'interface' | 'deployment' | 'management' | 'notifications' | 'storage'
 
 type SectionGroup = 'personal' | 'administration'
 const SECTION_GROUPS: readonly SectionGroup[] = ['personal', 'administration']
@@ -86,6 +87,7 @@ const SECTIONS: readonly { key: SectionKey; label: string; hint: string; icon: L
   { key: 'connection', label: 'settings.sections.connection.label', hint: 'settings.sections.connection.hint', icon: Cable, group: 'personal' },
   { key: 'models', label: 'settings.sections.models.label', hint: 'settings.sections.models.hint', icon: Cpu, group: 'personal' },
   { key: 'executorAccess', label: 'settings.sections.executorAccess.label', hint: 'settings.sections.executorAccess.hint', icon: TerminalSquare, group: 'personal' },
+  { key: 'management', label: 'settings.sections.management.label', hint: 'settings.sections.management.hint', icon: LayoutDashboard, group: 'administration' },
   { key: 'mcp', label: 'settings.sections.mcp.label', hint: 'settings.sections.mcp.hint', icon: PlugZap, group: 'administration' },
   { key: 'agent', label: 'settings.sections.agent.label', hint: 'settings.sections.agent.hint', icon: Bot, group: 'administration' },
   { key: 'webSearch', label: 'settings.sections.webSearch.label', hint: 'settings.sections.webSearch.hint', icon: Search, group: 'administration' },
@@ -120,7 +122,7 @@ export function SettingsDialog({ open, cacheNamespace = 'default', autoHideOffli
   const payload = settingsQuery.data ?? null
   const hosted = platform || payload?.deployment?.deployment.architecture === 'platform'
   const canManage = !hosted || organizationRole === 'owner' || organizationRole === 'admin'
-  const visibleSections = SECTIONS.filter(item => item.group === 'personal' || canManage)
+  const visibleSections = SECTIONS.filter(item => (item.group === 'personal' || canManage) && (item.key !== 'management' || Boolean(deploymentServices)))
   const activeSection = visibleSections.find(item => item.key === selectedSection) ?? visibleSections[0]!
   const section = activeSection.key
   const administratorRequired = !canManage && SECTIONS.some(item => item.key === selectedSection && item.group === 'administration')
@@ -224,8 +226,10 @@ export function SettingsDialog({ open, cacheNamespace = 'default', autoHideOffli
                 <HooksSection payload={payload} />
               ) : section === 'interface' ? (
                 <InterfaceSection sessionCache={sessionCache} autoHideOfflineWorkspacesByDefault={autoHideOfflineWorkspacesByDefault} />
+              ) : section === 'management' && deploymentServices ? (
+                <ManagementSection payload={payload} host={host} token={token} services={deploymentServices} />
               ) : section === 'deployment' ? (
-                <DeploymentSection payload={payload} host={host} token={token} services={deploymentServices} />
+                <DeploymentSection payload={payload} host={host} token={token} />
               ) : (
                 <NotificationsSection />
               )}

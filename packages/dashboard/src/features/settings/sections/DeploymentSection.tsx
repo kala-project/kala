@@ -13,9 +13,8 @@ import { forcePwaRefresh } from '../../../lib/pwa.js'
 
 const DASHBOARD_VERSION = packageJson.version
 
-export function DeploymentSection({ payload, host, token, services }: { payload: ServerSettingsPayload; host: string; token?: string; services?: DeploymentServices }): JSX.Element {
+export function DeploymentSection({ payload, host, token }: { payload: ServerSettingsPayload; host: string; token?: string }): JSX.Element {
   const { t } = useTranslation()
-  const aspireUrl = services?.observabilityUrl
   const statusQuery = useQuery({
     queryKey: ['dedicated-deployment-status', host],
     queryFn: async (): Promise<DedicatedDeploymentStatus | ExternalDeploymentHealth | null> => {
@@ -46,32 +45,6 @@ export function DeploymentSection({ payload, host, token, services }: { payload:
   return (
     <div>
       <SectionHeader title={t('settings.sections.deployment.label')} subtitle={t('settings.deployment.subtitle')} />
-      {services ? <section className="mb-5 space-y-3 rounded-lg border border-border/50 bg-card/60 p-4" data-testid="settings-management-tools">
-        <h4 className="font-semibold">{t('settings.deployment.managementTools')}</h4>
-        <div className="flex flex-wrap gap-2">
-          {services.identityConsoleUrl ? <Button asChild variant="outline"><a href={services.identityConsoleUrl} target="_blank" rel="noreferrer">{t('deploymentCenter.openIdentity')}</a></Button> : null}
-          {payload.socketAdmin?.active && payload.socketAdmin.path ? <Button asChild variant="outline"><a href={payload.socketAdmin.path} target="_blank" rel="noreferrer">Socket.IO Admin</a></Button> : null}
-          {services.siloConsolePath ? <Button asChild variant="outline"><a href={services.siloConsolePath} target="_blank" rel="noreferrer" data-testid="settings-open-silo">SILO Console</a></Button> : null}
-        </div>
-        {services.siloConsolePath ? <p className="text-sm text-muted-foreground" data-testid="settings-silo-explanation">{t('settings.deployment.siloAccessHelp')}</p> : null}
-        {payload.socketAdmin?.authentication === 'gateway-owner' ? <p className="text-sm text-muted-foreground" data-testid="settings-socket-mode">
-          {t('settings.deployment.socketMode', {
-            current: t(`settings.socketAdmin.${payload.socketAdmin.runtimeMode === 'development' ? 'modeDevelopment' : 'modeProduction'}`),
-            configured: t(`settings.socketAdmin.${payload.socketAdmin.configuredMode === 'development' ? 'modeDevelopment' : 'modeProduction'}`),
-          })} <code>KALA_SOCKET_ADMIN_MODE</code>{payload.socketAdmin.restartRequired ? ` · ${t('settings.deployment.socketModeRestart')}` : null}
-          {payload.socketAdmin.runtimeMode === 'development' ? ` · ${t('settings.deployment.socketModeRedacted')}` : null}
-        </p> : null}
-        {aspireUrl ? <div data-testid="settings-native-aspire">
-          <div className="flex items-center gap-1 text-sm font-medium">Aspire<HelpHint label="Aspire">{t('settings.deployment.aspireAccessHelp')}</HelpHint></div>
-          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2"><code className="min-w-0 break-all text-sm">{aspireUrl}</code><CopyButton value={aspireUrl} /><Button asChild><a href={aspireUrl} target="_blank" rel="noreferrer">{t('settings.socketAdmin.open')}</a></Button></div>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {(['structuredlogs', 'traces', 'metrics'] as const).map((page) =>
-              <Button key={page} asChild variant="outline" size="sm"><a href={`${aspireUrl.replace(/\/$/u, '')}/${page}`} target="_blank" rel="noreferrer">{t(`deploymentCenter.${page === 'structuredlogs' ? 'logs' : page}`)}</a></Button>,
-            )}
-          </div>
-          {services.observabilityTokenAvailable ? <AspireLoginToken host={host} token={token} /> : null}
-        </div> : null}
-      </section> : null}
       <div className="mb-4 flex justify-end"><Button variant="outline" disabled={statusQuery.isFetching} onClick={() => { void statusQuery.refetch() }}>{t('settings.socketAdmin.refresh')}</Button></div>
       <div className="grid gap-2 sm:grid-cols-2" data-testid="settings-deployment-overview">
         <OverviewCard icon={verified && overallHealthy ? CheckCircle2 : CircleAlert} label={t('settings.deployment.overallStatus')} value={!verified && !statusQuery.isError ? t('settings.deployment.externalStatus') : overallHealthy ? t('settings.deployment.healthy') : t('settings.deployment.needsAttention')} tone={verified && overallHealthy ? 'good' : 'warn'} />
@@ -106,12 +79,39 @@ export function DeploymentSection({ payload, host, token, services }: { payload:
               {t('pwa.forceRefresh')}
             </button>
           </div>
-          {payload.socketConnections ? <DiagnosticBlock title={t('settings.deployment.socketConnections')} testId="settings-socket-connections"><p>{t('settings.deployment.socketConnectionsDesc', payload.socketConnections)}</p><div className="mt-2 flex flex-wrap gap-1.5">{payload.socketConnections.namespaces.map((entry) => <code key={entry.namespace} className="rounded border border-border/50 bg-background px-2 py-1">{t('settings.deployment.namespaceConnections', { namespace: entry.namespace, sockets: entry.sockets })}</code>)}</div></DiagnosticBlock> : null}
           {payload.agentModule ? <DiagnosticBlock title={t('settings.deployment.agentModule')}><p className="font-mono">{payload.agentModule.label} · {payload.agentModule.id}@{payload.agentModule.version}</p><p className="mt-1 font-mono">prompt {payload.agentModule.systemPromptHash.slice(0, 12)} · tools {payload.agentModule.toolRegistryHash.slice(0, 12)}</p></DiagnosticBlock> : null}
         </div>
       </details>
     </div>
   )
+}
+
+export function ManagementSection({ payload, host, token, services }: { payload: ServerSettingsPayload; host: string; token?: string; services: DeploymentServices }): JSX.Element {
+  const { t } = useTranslation()
+  const tools = [
+    { name: t('deploymentCenter.identity'), description: t('deploymentCenter.identityHelp'), url: services.identityConsoleUrl },
+    { name: 'Socket.IO Admin', description: t('deploymentCenter.socketHelp'), url: payload.socketAdmin?.active ? payload.socketAdmin.path : undefined },
+    { name: 'SILO Console', description: t('deploymentCenter.siloHelp'), url: services.siloConsolePath },
+    { name: 'Aspire', description: t('deploymentCenter.aspireHelp'), url: services.observabilityUrl },
+  ]
+  return <div data-testid="settings-management-tools">
+    <SectionHeader title={t('deploymentCenter.title')} subtitle={t('deploymentCenter.scope')} />
+    <div className="grid gap-3 sm:grid-cols-2">
+      {tools.map(tool => <section key={tool.name} className="flex min-w-0 flex-col gap-3 rounded-lg border border-border/50 bg-card/60 p-4">
+        <div className="min-w-0 flex-1">
+          <h4 className="font-semibold">{tool.name}</h4>
+          <p className="mt-1 text-sm text-muted-foreground">{tool.description}</p>
+        </div>
+        {tool.url ? <Button asChild variant="outline" className="self-start"><a href={tool.url} target="_blank" rel="noreferrer" data-testid={tool.name === 'SILO Console' ? 'settings-open-silo' : undefined}>{tool.name === t('deploymentCenter.identity') ? t('deploymentCenter.openIdentity') : `${t('settings.socketAdmin.open')} ${tool.name}`}</a></Button>
+          : <p className="text-sm text-muted-foreground">{t('deploymentCenter.unavailable')}</p>}
+        {tool.name === 'Aspire' && tool.url ? <div data-testid="settings-native-aspire">
+          <div className="flex min-w-0 items-center gap-2"><code className="min-w-0 break-all text-xs">{tool.url}</code><CopyButton value={tool.url} /></div>
+          <HelpHint label="Aspire">{t('settings.deployment.aspireAccessHelp')}</HelpHint>
+          {services.observabilityTokenAvailable ? <AspireLoginToken host={host} token={token} /> : null}
+        </div> : null}
+      </section>)}
+    </div>
+  </div>
 }
 
 function AspireLoginToken({ host, token }: { host: string; token?: string }): JSX.Element {

@@ -333,7 +333,7 @@ export function App(): JSX.Element {
   const [chapterModeOverrides, setChapterModeOverrides] = useState<Record<string, ChapterReadingMode | null>>({})
   const [cwdDialogOpen, setCwdDialogOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [settingsInitialSection, setSettingsInitialSection] = useState<'connection' | 'speech' | 'deployment'>('connection')
+  const [settingsInitialSection, setSettingsInitialSection] = useState<'connection' | 'speech' | 'management'>('connection')
   const [accountCenterOpen, setAccountCenterOpen] = useState(false)
   const [adminCenterOpen, setAdminCenterOpen] = useState(false)
   const [metadataOpen, setMetadataOpen] = useState(false)
@@ -1953,7 +1953,7 @@ export function App(): JSX.Element {
     setSection(next)
     // Operations, Artifacts, Pipeline, and Docs are real pages rendered inline below.
   }, [])
-  const openDeployment = useMemo(() => deploymentServices ? () => { setExplorerDrawerOpen(false); setSettingsInitialSection('deployment'); setSettingsOpen(true) } : undefined, [deploymentServices])
+  const openDeployment = useMemo(() => deploymentServices ? () => { setExplorerDrawerOpen(false); setSettingsInitialSection('management'); setSettingsOpen(true) } : undefined, [deploymentServices])
   const explorerHeaderLeading = useMemo(
     () => <ProductSwitcher section={section} onSelect={handleSectionSelect} adaptive onOpenManagement={openDeployment} />,
     [handleSectionSelect, section, openDeployment],

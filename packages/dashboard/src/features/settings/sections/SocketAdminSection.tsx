@@ -126,6 +126,13 @@ export function SocketAdminSection({ payload, onPayloadChange, socket }: { paylo
           </div>
         ) : null}
         {payload.socketAdmin?.authentication === 'gateway-owner' && !payload.socketAdmin.active ? <p role="alert" className="text-destructive">{payload.socketAdmin.unavailableReason ?? t('settings.socketAdmin.unavailable')}</p> : null}
+        {payload.socketAdmin?.authentication === 'gateway-owner' ? <p className="text-sm text-muted-foreground" data-testid="settings-socket-mode">
+          {t('settings.socketAdmin.modeSummary', {
+            current: t(`settings.socketAdmin.${payload.socketAdmin.runtimeMode === 'development' ? 'modeDevelopment' : 'modeProduction'}`),
+            configured: t(`settings.socketAdmin.${payload.socketAdmin.configuredMode === 'development' ? 'modeDevelopment' : 'modeProduction'}`),
+          })} <code>KALA_SOCKET_ADMIN_MODE</code>{payload.socketAdmin.restartRequired ? ` · ${t('settings.socketAdmin.modeSummaryRestart')}` : null}
+          {payload.socketAdmin.runtimeMode === 'development' ? ` · ${t('settings.socketAdmin.modeSummaryRedacted')}` : null}
+        </p> : null}
         <div>{connected ? t('settings.socketAdmin.connected') : t('settings.socketAdmin.disconnected')}</div>
         <div>{t('settings.socketAdmin.transport')}: <code>{socket?.io.engine?.transport.name ?? '—'}</code></div>
         {payload.storage ? <div className="break-all">{t('settings.socketAdmin.scope')}: <code>{payload.storage.organizationId}</code></div> : null}
@@ -263,6 +270,11 @@ export function SocketAdminSection({ payload, onPayloadChange, socket }: { paylo
         </div>
         <p className="mt-3 text-xs leading-5 text-muted-foreground">{t('settings.socketAdmin.modeDesc')}</p>
       </div>
+      {payload.socketConnections ? <div className="rounded-md bg-muted/30 p-3 text-sm" data-testid="settings-socket-connections">
+        <h4 className="font-medium">{t('settings.socketAdmin.connectionAudit')}</h4>
+        <p className="mt-2">{t('settings.socketAdmin.connectionAuditDesc', payload.socketConnections)}</p>
+        <div className="mt-2 flex flex-wrap gap-1.5">{payload.socketConnections.namespaces.map(entry => <code key={entry.namespace} className="rounded border border-border/50 bg-background px-2 py-1">{t('settings.socketAdmin.namespaceConnections', { namespace: entry.namespace, sockets: entry.sockets })}</code>)}</div>
+      </div> : null}
     </div>
   )
 }

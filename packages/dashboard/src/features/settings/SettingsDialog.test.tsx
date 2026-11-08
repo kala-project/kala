@@ -143,17 +143,24 @@ describe('SettingsDialog', () => {
     expect(screen.queryByTestId('settings-tab-modelProviders')).toBeNull()
     fireEvent.click(screen.getByTestId('settings-tab-socketAdmin'))
     expect(screen.getByTestId('settings-open-socket-admin').getAttribute('href')).toBe('/admin/socket.io')
-    fireEvent.click(screen.getByTestId('settings-tab-deployment'))
-    expect(screen.getByTestId('settings-open-silo').getAttribute('href')).toBe('/silo/')
-    expect(screen.getByTestId('settings-silo-explanation').textContent).toContain('separate administrator login')
     expect(screen.getByTestId('settings-socket-mode').textContent).toContain('KALA_SOCKET_ADMIN_MODE')
     expect(screen.getByTestId('settings-socket-mode').textContent).toContain('Detailed diagnostics are redacted')
     expect(screen.getByTestId('settings-socket-mode').textContent).toContain('restart Runtime to apply')
+    fireEvent.click(screen.getByTestId('settings-tab-deployment'))
+    expect(screen.queryByTestId('settings-management-tools')).toBeNull()
+    expect(screen.queryByTestId('settings-socket-mode')).toBeNull()
+    expect(screen.queryByTestId('settings-socket-connections')).toBeNull()
+    fireEvent.click(screen.getByTestId('settings-tab-management'))
+    expect(screen.getByTestId('settings-management-tools').querySelectorAll('section')).toHaveLength(4)
+    expect(screen.getByTestId('settings-open-silo').getAttribute('href')).toBe('/silo/')
+    expect(screen.getByText('Manage object storage in SILO. Requires a separate SILO administrator login.')).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Open Socket.IO Admin' }).getAttribute('href')).toBe('/admin/socket.io')
+    expect(screen.getByRole('link', { name: 'Open identity administration' }).getAttribute('href')).toBe('/ui/console/instance')
     expect(screen.getByTestId('settings-native-aspire').textContent).toContain('http://127.0.0.1:28888')
-    expect(screen.getByTestId('settings-native-aspire').querySelector('a')?.getAttribute('href')).toBe('http://127.0.0.1:28888')
-    for (const [label, path] of [['Structured logs', 'structuredlogs'], ['Traces', 'traces'], ['Metrics', 'metrics']]) {
-      expect(screen.getByRole('link', { name: label }).getAttribute('href')).toBe(`http://127.0.0.1:28888/${path}`)
-    }
+    expect(screen.getByRole('link', { name: 'Open Aspire' }).getAttribute('href')).toBe('http://127.0.0.1:28888')
+    expect(screen.queryByRole('link', { name: 'Structured logs' })).toBeNull()
+    expect(screen.queryByRole('link', { name: 'Traces' })).toBeNull()
+    expect(screen.queryByRole('link', { name: 'Metrics' })).toBeNull()
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/auth/aspire/login-token'))).toBe(false)
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ token: 'native-test-token' }), { status: 200 }))
     fireEvent.click(screen.getByRole('button', { name: 'Show token' }))
@@ -521,18 +528,20 @@ describe('SettingsDialog', () => {
     expect(screen.getByTestId('settings-tab-connection').className).toContain('md:w-full')
   })
 
-  it('shows current Socket.IO connection audit counts in deployment settings', async () => {
+  it('keeps Socket.IO connection audit in Socket Admin rather than Deployment', async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(payload), { status: 200 }))
     render(<SettingsDialog open onOpenChange={() => {}} />)
     await waitForSettingsLoaded()
 
-    fireEvent.click(screen.getByTestId('settings-tab-deployment'))
+    fireEvent.click(screen.getByTestId('settings-tab-socketAdmin'))
 
     const panel = await screen.findByTestId('settings-socket-connections')
     expect(panel.textContent).toContain('Socket.IO connections')
     expect(panel.textContent).toContain('3 active sockets')
     expect(panel.textContent).toContain('/dashboard: 2 sockets')
     expect(panel.textContent).toContain('/executor: 1 sockets')
+    fireEvent.click(screen.getByTestId('settings-tab-deployment'))
+    expect(screen.queryByTestId('settings-socket-connections')).toBeNull()
   })
 
   it('switches to Models tab and lists providers + default model', async () => {
