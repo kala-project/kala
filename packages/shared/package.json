@@ -1,6 +1,6 @@
 {
   "name": "@agent-kernel/shared",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Shared protocol types between core, executor, and dashboard.",
   "repository": { "type": "git", "url": "git+https://github.com/xingsy97/kala.git" },
   "homepage": "https://github.com/xingsy97/kala#readme",

@@ -1,7 +1,7 @@
 {
   "license": "MIT",
   "name": "@agent-kernel/eval-benchmark-common",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Shared declarative benchmark primitives for Agent Evaluation Platform adapters.",
   "repository": { "type": "git", "url": "git+https://github.com/xingsy97/kala.git" }, "homepage": "https://github.com/xingsy97/kala#readme", "bugs": { "url": "https://github.com/xingsy97/kala/issues" },
   "type": "module",
