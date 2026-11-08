@@ -49,7 +49,7 @@ import { readExecutorCredential, readExecutorRuntimeConfig } from '../src/execut
 import { parseSandboxRootsEnv } from '../src/sandbox-roots-env.js'
 import { executorProfileDir, loadOrCreateWorkspaceId, normalizeExecutorProfile } from '../src/workspace-id.js'
 import { acquireExecutorLock } from '../src/local-lock.js'
-import { assertSupportedInstallerPrivileges, bootstrapEnvironment, defaultManagedRoot, downloadExecutorUpdateAssets, redeemInstallation, reportInstallation, waitForApproval, writeInstallerSession } from '../src/installer-flow.js'
+import { assertSupportedInstallerPrivileges, bootstrapEnvironment, defaultManagedRoot, downloadExecutorUpdateAssets, pinExecutorUpdateKey, redeemInstallation, reportInstallation, waitForApproval, writeInstallerSession } from '../src/installer-flow.js'
 import { createLinuxServicePlan, executeLinuxServicePlan, linuxServicePaths, type Command } from '../src/linux-service.js'
 import { installPosixService, macosServiceDefinition, manageMacosService } from '../src/posix-service.js'
 import { assertElevatedWindowsAdministrator, assertManagedWindowsInstallation, copyWindowsExecutorCjs, copyWindowsNodePtyRuntime, copyWindowsServiceHost, createWindowsSelfRemovalPlan, createWindowsServicePlan, deleteWindowsSelfRemovalTask, encodeWindowsTaskXml, executeWindowsServicePlan, registerWindowsSelfRemovalTask, renderWindowsServiceConfig, secureWindowsServiceDataDir, secureWindowsServiceInstallDir, waitForWindowsServiceStopped, windowsExecutorSourceRoot, type WindowsServiceAction } from '../src/windows-service.js'
@@ -271,6 +271,8 @@ async function runInternalInstaller(): Promise<void> {
     assertWindowsInstallerDigests()
     await assertElevatedWindowsAdministrator()
   }
+  const updateAssets = env.EXECUTOR_INSTALL_MODE === 'service' && process.platform === 'linux'
+    ? await downloadExecutorUpdateAssets(env.HOST_URL) : undefined
   await reportInstallation(env, 'asset_verified')
   await reportInstallation(env, 'pairing_pending')
   await waitForApproval(env)
@@ -293,10 +295,6 @@ async function runInternalInstaller(): Promise<void> {
     managedInstall = installManagedGeneration(installSource, managedRoot, release, installSource === process.execPath ? undefined : process.execPath)
   }
   const executable = managedInstall?.executable ?? process.execPath
-  const updateAssets = service && process.platform === 'linux' ? await downloadExecutorUpdateAssets(env.HOST_URL) : undefined
-  if (service && !updateAssets) {
-    process.stdout.write('Kala automatic updates are unavailable for this deployment; continuing without managed updates.\n')
-  }
   const installerSession: InstallerSession = {
     version: 1, mode: service && process.getuid?.() === 0 ? 'system' : 'user', executable,
     privilegeMode: env.EXECUTOR_PRIVILEGE_MODE,
@@ -316,7 +314,7 @@ async function runInternalInstaller(): Promise<void> {
     await reportInstallation(env, 'starting')
     return await main(['--host', env.HOST_URL, '--sandbox-root', workspaceRoot, '--config', writeTemporaryConfig(installerSession)])
   }
-  if (updateAssets) writeFileSync(join(managedRoot, 'update-public-key.pem'), updateAssets.publicKey, { mode: 0o600 })
+  if (updateAssets) pinExecutorUpdateKey(managedRoot, updateAssets.publicKey)
   const sessionFile = join(managedRoot, 'installer-session.json')
   writeInstallerSession(sessionFile, installerSession)
   await reportInstallation(env, 'service_installing')
@@ -355,6 +353,8 @@ async function runInviteInstaller(): Promise<void> {
       : { config: macosServiceDefinition(process.getuid?.() === 0 ? 'system' : 'user', posixServiceOptions()).configPath }
     if (existsSync(servicePaths.config)) throw new Error('Refusing to replace an existing Executor service')
   }
+  const updateAssets = mode === 'service' && process.platform === 'linux'
+    ? await downloadExecutorUpdateAssets(host) : undefined
   process.stdout.write('Starting organization-bound invite enrollment.\n')
   const profile = normalizeExecutorProfile(process.env.KALA_EXECUTOR_PROFILE)
   const workspaceId = loadOrCreateWorkspaceId(undefined, profile)
@@ -378,9 +378,7 @@ async function runInviteInstaller(): Promise<void> {
       const managedRoot = defaultManagedRoot(homedir(), process.getuid?.() === 0)
       const installSource = managedInstallSourceExecutable(process.execPath, process.argv[1])
       const managed = installManagedGeneration(installSource, managedRoot, executorReleaseVersion(), installSource === process.execPath ? undefined : process.execPath)
-      const updateAssets = process.platform === 'linux' ? await downloadExecutorUpdateAssets(host) : undefined
-      if (!updateAssets) process.stdout.write('Automatic updates are unavailable for this deployment; the service remains manually updatable.\n')
-      if (updateAssets) writeFileSync(join(managedRoot, 'update-public-key.pem'), updateAssets.publicKey, { mode: 0o600 })
+      if (updateAssets) pinExecutorUpdateKey(managedRoot, updateAssets.publicKey)
       const session: InstallerSession = {
         version: 1, mode: process.getuid?.() === 0 ? 'system' : 'user', privilegeMode,
         executable: managed.executable, host, sandboxRoots: [workspaceRoot],

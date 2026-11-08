@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { createHash, generateKeyPairSync } from 'node:crypto'
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -8,6 +8,7 @@ import test from 'node:test'
 import { requiredReleaseEvidence } from './rc-evidence.mjs'
 import { windowsServiceHostManifestMetadata } from './windows-service-host.mjs'
 import { POSIX_PORTABLE_MANAGER, WINDOWS_PORTABLE_MANAGER } from './portable-manager.mjs'
+import { signExecutorUpdateFeed, UPDATE_FEED_FILES, executorProtocolMajor } from './executor-update-feed.mjs'
 
 const reconcile = join(import.meta.dirname, 'reconcile-github-release-assets.mjs')
 const verifyPromotion = join(import.meta.dirname, 'verify-promotion-candidate.mjs')
@@ -253,11 +254,15 @@ test('release workflow publishes archived metadata and verifies the signed CJS E
   assert.equal(workflow.match(/reconcile-github-release-assets\.mjs[^\n]+--preserve-private-cloud-assets/g)?.length, 2)
   const nativeRelease = workflow.slice(workflow.indexOf('  native-release:'))
   const captureValidation = nativeRelease.indexOf('Validate and stage the exact Windows-captured revision')
+  const feedSigning = nativeRelease.indexOf('sign-executor-update-feed.mjs')
   const hostEmbedding = nativeRelease.indexOf('embed-windows-assets-in-portable-host.mjs')
   const finalize = nativeRelease.indexOf('--finalize-only')
   const installSmoke = nativeRelease.indexOf('pnpm run verify:release-install')
   const signing = nativeRelease.indexOf('cosign sign-blob')
-  assert.ok(captureValidation >= 0 && captureValidation < hostEmbedding)
+  assert.ok(captureValidation >= 0 && captureValidation < feedSigning && feedSigning < hostEmbedding)
+  assert.match(nativeRelease, /EXECUTOR_UPDATE_PRIVATE_KEY_PEM: \$\{\{ secrets\.EXECUTOR_UPDATE_PRIVATE_KEY_PEM \}\}[\s\S]*sign-executor-update-feed\.mjs/u)
+  assert.match(nativeRelease, /sign-executor-update-feed\.mjs[\s\S]*embed-windows-assets-in-portable-host\.mjs[\s\S]*--finalize-only[\s\S]*--require-signed/u)
+  assert.match(readFileSync(join(import.meta.dirname, '../../.github/workflows/promote-rc.yml'), 'utf8'), /verify-promotion-candidate\.mjs[\s\S]*executor-update-manifest\.json executor-update-public-key\.pem/u)
   assert.ok(hostEmbedding < finalize && finalize < installSmoke && installSmoke < signing)
   assert.match(nativeRelease, /embed-windows-assets-in-portable-host\.mjs[\s\S]*--repo \$\{\{ github\.repository \}\}[\s\S]*--tag \$\{\{ needs\.resolve\.outputs\.tag \}\}[\s\S]*--expected-revision \$\{\{ github\.sha \}\}/u)
   assert.doesNotMatch(workflow.slice(workflow.indexOf('  cjs-release:'), workflow.indexOf('  windows-assets:')), /embed-windows-assets-in-portable-host/u)
@@ -334,7 +339,7 @@ fs.writeFileSync(process.env.GH_STATE, JSON.stringify(assets));
 })
 
 test('promotion verifier binds the closed current draft to four accepted Portable records and exact Windows hashes', () => {
-  const temporary = mkdtempSync(join(tmpdir(), 'promotion-candidate-'))
+  const temporary = mkdtempSync(join(import.meta.dirname, '.promotion-candidate-'))
   try {
     const candidate = join(temporary, 'candidate')
     const evidence = join(temporary, 'evidence')
@@ -356,7 +361,11 @@ test('promotion verifier binds the closed current draft to four accepted Portabl
       'kala-host': [], 'kala-runtime': [], 'kala-executor': [],
       'kala-dedicated-ingress': [], 'kala-dedicated-deploy-supervisor': [],
     }
-    writeFileSync(join(candidate, 'manifest.json'), JSON.stringify({ version: tag.slice(1), source: { revision }, nativeTargets: [], nativeAssets: nativeInventory, windowsServiceHost: windowsServiceHostManifestMetadata(), assets }, null, 2) + '\n')
+    writeFileSync(join(candidate, 'manifest.json'), JSON.stringify({ repo: 'example/kala', component: 'all', tag, version: tag.slice(1), source: { revision }, nativeTargets: [], nativeAssets: nativeInventory, windowsServiceHost: windowsServiceHostManifestMetadata(), assets }, null, 2) + '\n')
+    const keyFile = join(temporary, 'operator.pem')
+    writeFileSync(keyFile, generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }))
+    signExecutorUpdateFeed(candidate, keyFile, executorProtocolMajor())
+    assets.push(...UPDATE_FEED_FILES)
     writeFileSync(join(candidate, 'SHA256SUMS.sigstore.json'), '{}\n')
     const aggregate = join(temporary, 'rc-evidence.json')
     writeFileSync(aggregate, '{"ok":true}\n')
@@ -379,6 +388,21 @@ test('promotion verifier binds the closed current draft to four accepted Portabl
 
     const manifestPath = join(candidate, 'manifest.json')
     const originalManifest = readFileSync(manifestPath, 'utf8')
+    const feedPath = join(candidate, UPDATE_FEED_FILES[0])
+    const originalFeed = readFileSync(feedPath)
+    unlinkSync(feedPath)
+    result = spawnSync(process.execPath, args, { encoding: 'utf8' })
+    assert.notEqual(result.status, 0, 'promotion must require the signed feed file')
+    writeFileSync(feedPath, originalFeed)
+    const tamperedFeed = JSON.parse(originalFeed)
+    tamperedFeed.signature = tamperedFeed.signature.replace(/^./u, tamperedFeed.signature.startsWith('A') ? 'B' : 'A')
+    writeFileSync(feedPath, JSON.stringify(tamperedFeed))
+    writeChecksums(candidate, [...assets, 'manifest.json'])
+    result = spawnSync(process.execPath, args, { encoding: 'utf8' })
+    assert.notEqual(result.status, 0, 'promotion must reject a tampered feed even with refreshed checksums')
+    assert.match(result.stderr, /signature verification failed/u)
+    writeFileSync(feedPath, originalFeed)
+    writeChecksums(candidate, [...assets, 'manifest.json'])
     for (const manager of [POSIX_PORTABLE_MANAGER, WINDOWS_PORTABLE_MANAGER]) {
       const manifest = JSON.parse(originalManifest)
       manifest.assets = assets.filter((name) => name !== manager)

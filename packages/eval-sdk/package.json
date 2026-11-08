@@ -1,6 +1,6 @@
 {
   "name": "@agent-kernel/eval-sdk",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Public client and plugin SDK for the standalone Agent Evaluation Platform.",
   "repository": { "type": "git", "url": "git+https://github.com/xingsy97/kala.git" },
   "homepage": "https://github.com/xingsy97/kala#readme",

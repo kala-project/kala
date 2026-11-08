@@ -2187,6 +2187,16 @@ describe('ChatPanel', () => {
     }
   })
 
+  it('distinguishes a submitted compact command from confirmed progress and an error', () => {
+    const { rerender } = render(<ChatPanel compactStatus={{ kind: 'starting', startedAt: Date.now() }} />)
+    expect(screen.getByTestId('inline-compact-starting')).toBeTruthy()
+    expect(screen.getByTestId('inline-compact-progress-label').textContent).toBe('Starting compaction...')
+    rerender(<ChatPanel compactStatus={{ kind: 'running', startedAt: Date.now(), tokensBefore: 9_000 }} />)
+    expect(screen.getByTestId('inline-compact-progress-label').textContent).toBe('Compacting conversation...')
+    rerender(<ChatPanel compactStatus={{ kind: 'error', message: 'SDK resume failed' }} />)
+    expect(screen.getByTestId('inline-compact-error').textContent).toContain('SDK resume failed')
+  })
+
   it('renders Copilot compact completion as a persistent neutral result with inspectable summary', () => {
     render(
       <ChatPanel

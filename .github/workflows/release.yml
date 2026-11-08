@@ -346,6 +346,17 @@ jobs:
         run: |
           find release -maxdepth 1 -type f \( -name 'kala-*' -o -name '*.cjs' -o -name '*.sh' \) -print0 \
             | xargs -0 -r chmod +x
+      - name: Sign Executor update feed with the persistent operator key
+        env:
+          EXECUTOR_UPDATE_PRIVATE_KEY_PEM: ${{ secrets.EXECUTOR_UPDATE_PRIVATE_KEY_PEM }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key_file=.executor-update-signing-key.pem
+          trap 'rm -f -- "$key_file"' EXIT
+          node -e 'const {writeFileSync}=require("node:fs"); const pem=process.env.EXECUTOR_UPDATE_PRIVATE_KEY_PEM; if (!pem) throw new Error("configure the persistent EXECUTOR_UPDATE_PRIVATE_KEY_PEM secret"); writeFileSync(".executor-update-signing-key.pem",pem,{flag:"wx",mode:0o600})'
+          unset EXECUTOR_UPDATE_PRIVATE_KEY_PEM
+          node scripts/release/sign-executor-update-feed.mjs --directory release --private-key-file "$key_file"
       - name: Embed the verified Windows installer payload in the Portable Host
         run: >-
           node scripts/release/embed-windows-assets-in-portable-host.mjs

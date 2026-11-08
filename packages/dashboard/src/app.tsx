@@ -166,7 +166,7 @@ import { emitRpc } from './socket-rpc.js'
 import { AdmissionDeliveryFailedError, AdmissionDeliveryPendingError, admitUserMessage, releaseMessageAttachments, uploadMessageAttachment } from './admission-client.js'
 import { PendingDeliveryStorageError, readPendingDeliveries, removePendingDelivery, savePendingDelivery, type SavedPendingDelivery } from './pending-delivery.js'
 import { appendLiveTranscriptItems, appendTranscriptBaseItems, lastUserTranscriptIndex, reconcilePendingUserMessages, transcriptBaseItems, transcriptTimelineForRuntime, transcriptViewStartForItems, type TranscriptItem } from './transcript.js'
-import { compactFailureMessage, compactReasonMessage, hasCompactableContent, isCompactionSuccess, isCompactTerminalEvent, shouldShowQueuedAutoCompact } from './app-logic/compaction.js'
+import { compactFailureMessage, compactFeedbackStatus, compactReasonMessage, hasCompactableContent, isCompactionSuccess, isCompactTerminalEvent, shouldShowQueuedAutoCompact } from './app-logic/compaction.js'
 import { addQueuedMessageTombstone, mergeOptimisticQueuedMessages, nextSessionSelection, reconcileOptimisticQueuedMessages, removeQueuedMessageTombstone, removedSessionIds, sessionDisplayLabel, sessionExists, sessionIdsForCacheInvalidation } from './app-logic/session-selectors.js'
 import { coarseStatusForIndicator, deriveSelectedSessionActivity, isRunningSessionActivity } from './app-logic/session-activity.js'
 import { modelKey, resolveModelKey } from './app-logic/model-key.js'
@@ -387,6 +387,7 @@ export function App(): JSX.Element {
   const compactResetTimer = useRef<number | null>(null)
   const compactStartSeq = useRef<number | null>(null)
   const inferredCompactSeq = useRef<number | null>(null)
+  const compactRequestErrorBaseline = useRef<SessionErrorEvent | null>(null)
   const suppressNextAutoSessionSelection = useRef(false)
   const pendingCreatedSessionId = useRef<string | null>(null)
   const pendingSimpleChatHandoff = useRef<{ sessionId: string; submission: SimpleChatSubmission } | null>(null)
@@ -820,7 +821,7 @@ export function App(): JSX.Element {
     pendingCalls: session.state?.pendingCalls,
     streamingActive: session.streamingActive,
     awaitingAck,
-    compactRunning: compactStatus.kind === 'running',
+    compactRunning: compactStatus.kind === 'running' || compactStatus.kind === 'starting',
     lastError: session.lastError?.message,
   })
   const sessionHydrated = selectedSessionActivity.usesLiveProjection
@@ -884,6 +885,7 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     setCompactStatus({ kind: 'idle' })
+    compactRequestErrorBaseline.current = session.lastError
     compactStartSeq.current = null
     inferredCompactSeq.current = null
     setCancelPendingSessionId(null)
@@ -1019,6 +1021,7 @@ export function App(): JSX.Element {
   }
 
   useEffect(() => {
+    if (session.agentRuntime === 'copilot') return
     if (compactStartSeq.current === null) return
     const last = session.timeline[session.timeline.length - 1]
     if (!last || !isCompactTerminalEvent(last.event.kind)) return
@@ -1031,10 +1034,10 @@ export function App(): JSX.Element {
       setCompactStatus({ kind: 'error', message: compactFailureMessage(last.event) })
       scheduleCompactIdle(6000)
     }
-  }, [compactStatus, session.timeline])
+  }, [compactStatus, session.agentRuntime, session.timeline])
 
   useEffect(() => {
-    if (compactStatus.kind !== 'running') return
+    if (compactStatus.kind !== 'running' && compactStatus.kind !== 'starting') return
     const startSeq = inferredCompactSeq.current
     if (startSeq === null) return
     const terminal = session.timeline.find((entry) => entry.seq > startSeq && isCompactTerminalEvent(entry.event.kind))
@@ -1064,6 +1067,7 @@ export function App(): JSX.Element {
     if (!remoteCompact) return
     if (remoteCompact.scope?.kind === 'subagent') return
     if (remoteCompact.kind === 'running') {
+      compactRequestErrorBaseline.current = session.lastError
       setCompactStatus({
         kind: 'running',
         startedAt: Date.parse(remoteCompact.startedAt) || Date.now(),
@@ -1091,8 +1095,8 @@ export function App(): JSX.Element {
   }, [remoteCompact, session.agentRuntime])
 
   useEffect(() => {
-    if (compactStatus.kind !== 'running') return
-    if (!session.lastError) return
+    if (compactStatus.kind !== 'running' && compactStatus.kind !== 'starting') return
+    if (!session.lastError || session.lastError === compactRequestErrorBaseline.current) return
     compactStartSeq.current = null
     setCompactStatus({ kind: 'error', message: session.lastError.message })
     scheduleCompactIdle(6000)
@@ -1153,6 +1157,12 @@ export function App(): JSX.Element {
   const runCompactNow = (): void => {
     if (!currentAgentRuntimeCapabilities.compact) return
     if (config.sessionId === null) return
+    if (compactStatus.kind === 'running' || compactStatus.kind === 'starting') return
+    if (!session.socket?.connected) {
+      setCompactStatus({ kind: 'error', message: 'No active Session connection.' })
+      scheduleCompactIdle(6000)
+      return
+    }
     if (!hasCompactableContent(session.state)) {
       setCompactStatus({ kind: 'empty', message: t('app.compactEmpty') })
       scheduleCompactIdle(6000)
@@ -1168,17 +1178,9 @@ export function App(): JSX.Element {
       compactResetTimer.current = null
     }
     compactStartSeq.current = session.timeline.at(-1)?.seq ?? 0
-    setCompactStatus({
-      kind: 'running',
-      startedAt: Date.now(),
-      trigger: 'manual',
-      // Session state usage is lifetime/cumulative provider usage and can reach
-      // billions of tokens in a long-lived Session. Compact operates on the
-      // currently assembled context, so display the same bounded snapshot used
-      // by the context indicator and Host compaction policy.
-      tokensBefore: session.contextSnapshot?.usage.inputTokens ?? 0,
-    })
-    session.socket?.emit('client:compact', { sessionId: config.sessionId })
+    compactRequestErrorBaseline.current = session.lastError
+    setCompactStatus({ kind: 'starting', startedAt: Date.now() })
+    session.socket.emit('client:compact', { sessionId: config.sessionId })
     if (!config.explicit) setConfig((prev) => ({ ...prev, explicit: true }))
   }
 
@@ -2564,7 +2566,7 @@ export function App(): JSX.Element {
                             {wideLayout && explorerOpen && isDesktopClient() ? <DesktopWindowControlsSlot /> : null}
                           </div>
                         )}
-                        compactStatus={session.agentRuntime === 'copilot' ? { kind: 'idle' } : compactStatus}
+                        compactStatus={compactFeedbackStatus(compactStatus, session.agentRuntime, session.compactStatus, visibleChatItems)}
                         liveToolActivityTailCount={liveToolActivityTailCount}
                         toolExecutionStartedAt={session.toolExecutionStartedAt}
                         toolCardMode={currentSession?.preferences?.toolCardMode ?? 'dots'}
@@ -2682,8 +2684,8 @@ export function App(): JSX.Element {
                           state={session.state}
                           contextSnapshot={session.contextSnapshot}
                           runtimeCompactionPolicy={session.runtimeCompactionPolicy}
-                          compactRunning={compactStatus.kind === 'running'}
-                          suppressed={awaitingAck || compactStatus.kind === 'running'}
+                          compactRunning={compactStatus.kind === 'running' || compactStatus.kind === 'starting'}
+                          suppressed={awaitingAck || compactStatus.kind === 'running' || compactStatus.kind === 'starting'}
                           onCompactNow={runCompactNow}
                         /> : null}
                         <OfflineBanner />

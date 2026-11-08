@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { createHash, generateKeyPairSync } from 'node:crypto'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
@@ -11,6 +10,7 @@ import {
   WINDOWS_INSTALL_PAYLOADS,
 } from './embed-windows-assets-in-portable-host.mjs'
 import { createDashboardArchive, dashboardArchiveName } from './release-archives.mjs'
+import { executorProtocolMajor, signExecutorUpdateFeed, UPDATE_FEED_FILES } from './executor-update-feed.mjs'
 
 const revision = '1234567890abcdef1234567890abcdef12345678'
 const repo = 'example/kala'
@@ -39,6 +39,26 @@ test('embeds verified Windows payloads with a payload-only checksum index', () =
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('embeds and checksums both signed Executor feed assets for embedded-only Hosts', () => {
+  const dir = fixture()
+  try {
+    const manifest = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8'))
+    manifest.component = 'all'
+    manifest.assets.push('kala-executor.cjs')
+    writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest))
+    const keyFile = join(dir, 'operator.pem')
+    writeFileSync(keyFile, generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }))
+    signExecutorUpdateFeed(dir, keyFile, executorProtocolMajor())
+    embedWindowsAssetsInPortableHost({ directory: dir, repo, tag, expectedRevision: revision })
+    const embedded = banner(readFileSync(join(dir, PORTABLE_HOST_ASSET), 'utf8'), 'globalThis.__KALA_EMBEDDED_RELEASE_ASSETS__=')
+    const assets = new Map(embedded.map((asset) => [asset.path, Buffer.from(asset.contentBase64, 'base64')]))
+    for (const name of UPDATE_FEED_FILES) {
+      assert.deepEqual(assets.get(name), readFileSync(join(dir, name)))
+      assert.match(assets.get('SHA256SUMS').toString('utf8'), new RegExp(`^${createHash('sha256').update(assets.get(name)).digest('hex')}  ${name.replaceAll('.', '\\.')}$`, 'mu'))
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
 test('preserves the Windows-built Host while embedding the exact release Dashboard bytes', () => {
@@ -95,7 +115,7 @@ test('fails closed when manifest and Portable Host identities do not match the e
 })
 
 function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), 'kala-portable-host-assets-'))
+  const dir = mkdtempSync(join(import.meta.dirname, '.portable-host-assets-'))
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'manifest.json'), JSON.stringify({
     repo,

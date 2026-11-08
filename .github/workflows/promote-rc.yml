@@ -125,6 +125,7 @@ jobs:
             --directory "$CANDIDATE" --evidence acceptance/evidence \
             --aggregate release-evidence/rc-evidence.json --tag "$TAG" --revision "$REVISION"
           for asset in manifest.json SHA256SUMS kala-executor.cjs \
+            executor-update-manifest.json executor-update-public-key.pem \
             node-pty-win32-x64.tar.gz kala-executor-service-host-win32-x64.exe install-executor.ps1 \
             kala-dashboard-with-runtime.cjs \
             kala-copilot-runtime-win32-x64 \

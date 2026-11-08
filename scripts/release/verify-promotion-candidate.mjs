@@ -6,6 +6,7 @@ import { collectRcEvidence, requiredReleaseEvidence, verifyRcEvidenceSet } from 
 import { verifyReleaseChecksums } from './release-checksums.mjs'
 import { windowsServiceHostManifestMetadata } from './windows-service-host.mjs'
 import { POSIX_PORTABLE_MANAGER, WINDOWS_PORTABLE_MANAGER } from './portable-manager.mjs'
+import { UPDATE_FEED_FILES, executorProtocolMajor, verifyExecutorUpdateFeed } from './executor-update-feed.mjs'
 
 const directory = resolve(required('--directory'))
 const evidenceDirectory = resolve(required('--evidence'))
@@ -21,6 +22,7 @@ const expectedAssets = [
   'kala-dashboard-with-runtime.cjs', 'kala-runtime.cjs', 'kala-executor.cjs', 'kala-dedicated-ingress.cjs', 'kala-dedicated-deploy-supervisor.cjs',
   'kala-dashboard.tar.gz', 'kala-docs.tar.gz', 'kala-dedicated-support.tar.gz', 'kala-release-metadata.tar.gz',
   'run.sh', POSIX_PORTABLE_MANAGER, WINDOWS_PORTABLE_MANAGER, 'kala-dedicated.mjs', 'kala-model-catalog-seed.json',
+  ...UPDATE_FEED_FILES,
 ].sort()
 
 if (manifest.version !== tag.slice(1)) fail('current release manifest version does not match the promoted tag')
@@ -54,6 +56,7 @@ if (JSON.stringify(actualFiles) !== JSON.stringify(expectedFiles)) {
 if (aggregatePath.startsWith(`${directory}/`) || aggregatePath === directory) fail('aggregate evidence must remain outside the signed release inventory')
 
 await verifyReleaseChecksums(directory, [...manifest.assets, 'manifest.json'])
+verifyExecutorUpdateFeed(directory, executorProtocolMajor(), { required: true })
 const evidence = verifyRcEvidenceSet(collectRcEvidence(evidenceDirectory), { tag, revision })
 for (const target of targets) {
   const record = evidence.find((entry) => entry.category === 'portable' && entry.target === target)

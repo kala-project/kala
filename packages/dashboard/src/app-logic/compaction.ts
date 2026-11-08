@@ -1,5 +1,7 @@
 import type { AgentState } from '@agent-kernel/kernel'
-import type { RuntimeCompactionPolicy } from '@agent-kernel/shared'
+import type { CompactStatusEvent, RuntimeCompactionPolicy } from '@agent-kernel/shared'
+import type { CompactStatus } from '../features/chat/InlineStatusRow.js'
+import type { TranscriptItem } from '../transcript.js'
 
 /**
  * Pure helpers for reasoning about context compaction events/state. Extracted
@@ -9,6 +11,21 @@ import type { RuntimeCompactionPolicy } from '@agent-kernel/shared'
 /** Whether the session has any non-system message that could be compacted. */
 export function hasCompactableContent(state: AgentState | null): boolean {
   return state?.messages.some((m, index) => !(index === 0 && m.role === 'system')) ?? false
+}
+
+/** Copilot's persisted marker replaces the transient row only for the same attempt. */
+export function compactFeedbackStatus(
+  status: CompactStatus,
+  runtime: string,
+  remote: CompactStatusEvent | null,
+  items: readonly TranscriptItem[],
+): CompactStatus {
+  if (runtime !== 'copilot' || !remote || (status.kind !== 'running' && status.kind !== 'error')) return status
+  const phase = status.kind === 'running' ? 'running' : 'error'
+  return items.some((item) => item.kind === 'compact_progress'
+    && item.attemptId === remote.attemptId && item.phase === phase)
+    ? { kind: 'idle' }
+    : status
 }
 
 export function shouldShowQueuedAutoCompact(

@@ -26,6 +26,7 @@ import type { AgentProgress } from './agent-progress.js'
 export type CompactStatus =
   | { kind: 'idle' }
   | { kind: 'queued' }
+  | { kind: 'starting'; startedAt: number }
   | { kind: 'running'; startedAt: number; tokensBefore: number; trigger?: 'auto' | 'manual' | 'preflight' | 'tool_result' }
   | {
       kind: 'done'
@@ -106,7 +107,7 @@ export function CompactFeedbackRow({
   tokensBefore,
   onDismiss,
 }: {
-  kind: 'queued' | 'running' | 'done' | 'empty' | 'error'
+  kind: 'queued' | 'starting' | 'running' | 'done' | 'empty' | 'error'
   message?: string
   startedAt?: number
   tokensBefore?: number
@@ -114,7 +115,7 @@ export function CompactFeedbackRow({
   onDismiss?: () => void
 }): JSX.Element {
   const { t } = useTranslation()
-  const isRunning = kind === 'running'
+  const isRunning = kind === 'running' || kind === 'starting'
   const elapsedMs = useElapsedMs(isRunning, startedAt)
   if (kind === 'queued') {
     return (
@@ -134,15 +135,15 @@ export function CompactFeedbackRow({
       </div>
     )
   }
-  if (kind === 'running') {
+  if (isRunning) {
     return (
       <div
         className="mb-2 inline-flex w-fit max-w-full min-w-0 items-center gap-2 px-1 py-1 text-ui text-muted-foreground"
-        data-testid="inline-compact-running"
+        data-testid={kind === 'starting' ? 'inline-compact-starting' : 'inline-compact-running'}
         role="status"
       >
         <span className="ak-thinking-text min-w-0 truncate font-semibold leading-5" data-testid="inline-compact-progress-label">
-          {t('chatStatus.compacting')}
+          {t(kind === 'starting' ? 'chatStatus.compactStarting' : 'chatStatus.compacting')}
         </span>
         <span className="flex-none tabular-nums text-muted-foreground/75">
           {formatElapsedDuration(elapsedMs / 1000)}

@@ -8,6 +8,7 @@ import { generateExecutorInstallerPowerShell, windowsExecutorInstallerAssetName 
 import { dashboardArchiveName, readExactTarGz, verifyDashboardArchive } from './release-archives.mjs'
 import { windowsNodePtyCompanionAssetName, WINDOWS_EXECUTOR_TARGET } from './windows-executor-packager.mjs'
 import { WINDOWS_SERVICE_HOST } from './windows-service-host.mjs'
+import { UPDATE_FEED_FILES, verifyExecutorUpdateFeed, executorProtocolMajor } from './executor-update-feed.mjs'
 
 export const PORTABLE_HOST_ASSET = 'kala-dashboard-with-runtime.cjs'
 export const WINDOWS_INSTALL_PAYLOADS = Object.freeze([
@@ -73,6 +74,9 @@ export function embedWindowsAssetsInPortableHost({ directory, repo, tag, expecte
   }
   for (const name of WINDOWS_INSTALL_PAYLOADS) {
     payloads.set(name, name === installer ? installerBytes : readFileSync(join(releaseDir, name)))
+  }
+  if (verifyExecutorUpdateFeed(releaseDir, executorProtocolMajor())) {
+    for (const name of UPDATE_FEED_FILES) payloads.set(name, readFileSync(join(releaseDir, name)))
   }
 
   const checksumIndex = [...payloads]

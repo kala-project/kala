@@ -1,9 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { generateKeyPairSync, sign } from 'node:crypto'
+import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { assertSupportedInstallerPrivileges, bootstrapEnvironment, downloadExecutorUpdateAssets, reportInstallation, waitForApproval, writeInstallerSession } from './installer-flow.js'
+import { assertSupportedInstallerPrivileges, bootstrapEnvironment, downloadExecutorUpdateAssets, pinExecutorUpdateKey, reportInstallation, waitForApproval, writeInstallerSession } from './installer-flow.js'
 import { readExecutorRuntimeConfig } from './executor-config.js'
 import { readInstallerSession } from './installer-session.js'
 
@@ -20,6 +21,16 @@ describe('installer flow', () => {
     for (const operation of ['await reportInstallation(', 'await waitForApproval(', 'loadOrCreateWorkspaceId()', 'await redeemInstallation(']) {
       expect(flow.indexOf(operation)).toBeGreaterThan(check)
     }
+  })
+
+  it('requires a signed Linux update feed before pairing or invite enrollment', () => {
+    const cli = readFileSync(new URL('../bin/kala-executor.ts', import.meta.url), 'utf8')
+    const installer = cli.slice(cli.indexOf('async function runInternalInstaller()'), cli.indexOf('async function runInviteInstaller()'))
+    expect(installer.indexOf('await downloadExecutorUpdateAssets(env.HOST_URL)'))
+      .toBeLessThan(installer.indexOf("await reportInstallation(env, 'pairing_pending')"))
+    const invite = cli.slice(cli.indexOf('async function runInviteInstaller()'), cli.indexOf('function posixServiceOptions()'))
+    expect(invite.indexOf('await downloadExecutorUpdateAssets(host)'))
+      .toBeLessThan(invite.indexOf('startExecutor({ host, workspaceId'))
   })
 
   it('installs the verified CJS rather than copying Node.exe and defers removal when running the installed script', () => {
@@ -108,9 +119,10 @@ describe('installer flow', () => {
     expect(() => readExecutorRuntimeConfig(configPath)).toThrow('Invalid Executor privilege mode')
   })
 
-  it('allows deployments without managed update assets and rejects partial publication', async () => {
+  it('refuses service installs when signed update assets are missing or incomplete', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('missing', { status: 404 })))
-    await expect(downloadExecutorUpdateAssets('https://host/')).resolves.toBeUndefined()
+    await expect(downloadExecutorUpdateAssets('https://host/'))
+      .rejects.toThrow('failed to download Executor update manifest: 404')
 
     vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => (
       String(url).endsWith('.json')
@@ -121,16 +133,37 @@ describe('installer flow', () => {
       .rejects.toThrow('failed to download Executor update verification key: 404')
   })
 
-  it('downloads the complete managed update metadata pair', async () => {
+  it('checks the signed update feed before pinning its verification key', async () => {
+    const { privateKey, publicKey } = generateKeyPairSync('ed25519')
+    const pem = publicKey.export({ type: 'spki', format: 'pem' }).toString()
+    const signed = JSON.stringify({ version: 1, release: '0.3.1', channel: 'stable',
+      protocol: { min: 1, max: 1 },
+      artifact: { url: './kala-executor.cjs', file: 'kala-executor', size: 3, sha256: 'a'.repeat(64) } })
+    const signature = sign(null, Buffer.from(signed), privateKey).toString('base64')
+    let response = JSON.stringify({ signed, signature })
     vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => (
       String(url).endsWith('.pem')
-        ? new Response('PUBLIC KEY', { status: 200 })
-        : new Response('{}', { status: 200 })
+        ? new Response(pem, { status: 200 })
+        : new Response(response, { status: 200 })
     )))
     await expect(downloadExecutorUpdateAssets('https://host/')).resolves.toEqual({
       manifestUrl: 'https://host/install/assets/executor-update-manifest.json',
-      publicKey: 'PUBLIC KEY',
+      publicKey: pem,
     })
+    response = JSON.stringify({ signed: `${signed} `, signature })
+    await expect(downloadExecutorUpdateAssets('https://host/'))
+      .rejects.toThrow('signature verification failed')
+    await expect(downloadExecutorUpdateAssets('http://host.example.test/'))
+      .rejects.toThrow('require HTTPS or a loopback Host')
+    const root = mkdtempSync(join(tmpdir(), 'executor-update-key-')); roots.push(root)
+    pinExecutorUpdateKey(root, pem)
+    expect(statSync(join(root, 'update-public-key.pem')).mode & 0o777).toBe(0o600)
+    expect(() => pinExecutorUpdateKey(root, pem)).not.toThrow()
+    expect(() => pinExecutorUpdateKey(root, pem.replace('PUBLIC KEY', 'OTHER KEY')))
+      .toThrow('differs or is unsafe')
+    rmSync(join(root, 'update-public-key.pem'))
+    symlinkSync(join(root, 'missing-key'), join(root, 'update-public-key.pem'))
+    expect(() => pinExecutorUpdateKey(root, pem)).toThrow('differs or is unsafe')
   })
 
   it('reports status without exposing bootstrap in body and waits for approval', async () => {

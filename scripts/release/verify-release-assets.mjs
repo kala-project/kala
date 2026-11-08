@@ -10,6 +10,7 @@ import { dashboardArchiveName, releaseMetadataArchiveName, verifyDashboardArchiv
 import { verifyWindowsNodePtyCompanion } from './windows-executor-packager.mjs'
 import { verifyWindowsServiceHost, WINDOWS_SERVICE_HOST, windowsServiceHostManifestMetadata } from './windows-service-host.mjs'
 import { POSIX_PORTABLE_MANAGER, WINDOWS_PORTABLE_MANAGER } from './portable-manager.mjs'
+import { UPDATE_FEED_FILES, assertLocalDedicatedVerification, executorProtocolMajor, verifyExecutorUpdateFeed } from './executor-update-feed.mjs'
 
 const root = fileURLToPath(new URL('../..', import.meta.url))
 const releaseDir = join(root, 'release')
@@ -20,6 +21,8 @@ if (!existsSync(manifestPath)) fail('missing release/manifest.json')
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
 const supportedCopilotRuntimeTargets = ['linux-x64', 'darwin-x64', 'darwin-arm64', 'win32-x64']
 const privateCloudRuntime = process.argv.includes('--private-cloud-runtime')
+const localDedicated = process.argv.includes('--local-dedicated')
+const requireSigned = process.argv.includes('--require-signed')
 if (privateCloudRuntime && (manifest.component !== 'all' || process.argv.includes('--require-signed') || process.platform !== 'linux' || process.arch !== 'x64')) {
   fail('Private Cloud runtime verification requires an unsigned Linux x64 all-component image stage')
 }
@@ -44,6 +47,11 @@ for (const [product, assets] of Object.entries(manifest.nativeAssets ?? {})) {
   if (assets.length) fail(`manifest.nativeAssets.${product} must be empty for CJS-only executors`)
 }
 const hasWindowsPayload = manifest.assets.includes('node-pty-win32-x64.tar.gz')
+let hasUpdateFeed
+try {
+  hasUpdateFeed = verifyExecutorUpdateFeed(releaseDir, executorProtocolMajor(), { required: requireSigned || localDedicated })
+} catch (error) { fail(error.message) }
+if (privateCloudRuntime && hasUpdateFeed) fail('Private Cloud runtime image stage must not publish the Executor update feed')
 const expectedWindowsServiceHost = hasWindowsPayload ? windowsServiceHostManifestMetadata() : undefined
 if (JSON.stringify(manifest.windowsServiceHost) !== JSON.stringify(expectedWindowsServiceHost)) {
   fail('manifest.windowsServiceHost must identify the pinned WinSW source, license, size, and SHA-256')
@@ -90,6 +98,7 @@ const expectedManifestAssets = [
   WINDOWS_PORTABLE_MANAGER,
   'kala-dedicated.mjs',
   'kala-model-catalog-seed.json',
+  ...(hasUpdateFeed ? UPDATE_FEED_FILES : []),
 ].sort()
 if (manifest.component === 'all' && JSON.stringify([...manifest.assets].sort()) !== JSON.stringify(expectedManifestAssets)) {
   fail(`manifest assets do not match the ${hasWindowsPayload ? 'final' : 'CJS-stage'} release contract`)
@@ -116,7 +125,10 @@ if (hasWindowsPayload) {
 }
 const signaturePresent = existsSync(join(releaseDir, 'SHA256SUMS.sigstore.json'))
 if (privateCloudRuntime && signaturePresent) fail('Private Cloud runtime image stage must not contain a signature bundle')
-if (process.argv.includes('--require-signed') && (!signaturePresent || !hasWindowsPayload || actualCopilotRuntimeTargets.length !== supportedCopilotRuntimeTargets.length)) {
+try {
+  assertLocalDedicatedVerification({ enabled: localDedicated, privateCloudRuntime, requireSigned, manifest, hasUpdateFeed, hasWindowsPayload, signaturePresent })
+} catch (error) { fail(error.message) }
+if (process.argv.includes('--require-signed') && (!signaturePresent || manifest.component !== 'all' || !hasWindowsPayload || actualCopilotRuntimeTargets.length !== supportedCopilotRuntimeTargets.length)) {
   fail('signed final release requires the signature bundle, Windows CJS installer, and all four Copilot runtimes')
 }
 const expectedReleaseFiles = [...manifest.assets, 'manifest.json', 'SHA256SUMS', ...(signaturePresent ? ['SHA256SUMS.sigstore.json'] : [])].sort()
@@ -189,6 +201,13 @@ if (includesHost) {
       const bytes = embeddedByName.get(name)
       if (!bytes || !bytes.equals(readFileSync(join(releaseDir, name)))) fail(`Portable Host does not embed the final ${name}`)
       if (expected.get(name) !== createHash('sha256').update(bytes).digest('hex')) fail(`Portable Host embedded SHA256SUMS does not authenticate ${name}`)
+    }
+    if (hasUpdateFeed && !localDedicated) {
+      for (const name of UPDATE_FEED_FILES) {
+        const bytes = embeddedByName.get(name)
+        if (!bytes || !bytes.equals(readFileSync(join(releaseDir, name)))) fail(`Portable Host does not embed the final ${name}`)
+        if (expected.get(name) !== createHash('sha256').update(bytes).digest('hex')) fail(`Portable Host embedded SHA256SUMS does not authenticate ${name}`)
+      }
     }
   }
   const docsMarker = 'globalThis.__KALA_EMBEDDED_DOCS__='
@@ -463,7 +482,7 @@ function assertSupportedReleaseAssetName(name, location) {
   if (typeof name !== 'string'
     || /linux-arm64/iu.test(name)
     || ((/(?:win32|windows|conpty)/iu.test(name) || /\.(?:exe|ps1)$/iu.test(name) || /^node-pty-.*\.tar\.gz$/iu.test(name)) && !acceptedWindows.has(name))
-    || /^executor-update-(?:manifest\.json|public-key\.pem)$/u.test(name)) {
+    || (/^executor-update-/u.test(name) && !UPDATE_FEED_FILES.includes(name))) {
     fail(`${location} contains unsupported or platform-ambiguous release asset ${String(name)}`)
   }
 }

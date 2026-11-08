@@ -363,7 +363,10 @@ export class CopilotAgentRuntime implements AgentRuntime {
     if (!isRestingStatus(record.state.status)) {
       throw new Error('Copilot compaction is only available while the session is resting')
     }
-    const session = await this.ensureSession(record, record.preferences?.selectedModel)
+    const key = compactionKey(record.sessionId)
+    if (this.compactions.has(key)) {
+      throw new Error('Copilot compaction is already in progress')
+    }
     const active: ActiveCompaction = {
       attemptId: randomUUID(),
       tokensBefore: record.runtimeContextSnapshot?.usage.inputTokens ?? 0,
@@ -372,10 +375,8 @@ export class CopilotAgentRuntime implements AgentRuntime {
       ...(record.runtimeContextSnapshot ? { startSnapshot: record.runtimeContextSnapshot } : {}),
       scope: { kind: 'root' },
     }
-    const key = compactionKey(record.sessionId)
     this.compactions.set(key, active)
     try {
-      await this.projectCompactionStart(record, active)
       this.context.broadcast.onCompactStatus?.({
         sessionId: record.sessionId,
         kind: 'running',
@@ -387,6 +388,8 @@ export class CopilotAgentRuntime implements AgentRuntime {
         scope: active.scope,
         ...(active.startSnapshot ? { startSnapshot: active.startSnapshot } : {}),
       })
+      await this.projectCompactionStart(record, active)
+      const session = await this.ensureSession(record, record.preferences?.selectedModel)
       const result = await session.rpc.history.compact({ trigger: 'manual' })
       if (!result.success) throw new Error('Copilot compaction did not complete successfully')
       const completedAt = new Date().toISOString()
@@ -429,7 +432,12 @@ export class CopilotAgentRuntime implements AgentRuntime {
         this.compactions.delete(key)
         const message = error instanceof Error ? error.message : String(error)
         const endedAt = new Date().toISOString()
-        await this.projectCompactionError(record, active, message, endedAt)
+        try {
+          await this.projectCompactionError(record, active, message, endedAt)
+        } catch (projectionError) {
+          this.context.broadcast.onError(record.sessionId,
+            projectionError instanceof Error ? projectionError.message : String(projectionError))
+        }
         this.context.broadcast.onCompactStatus?.({
           sessionId: record.sessionId,
           kind: 'error',

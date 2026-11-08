@@ -14,6 +14,7 @@ import {
   windowsExecutorInstallerAssetName,
 } from './executor-installer.mjs'
 import { buildDedicatedSupportBundle, DEDICATED_SUPPORT_ARCHIVE } from './dedicated-support-bundle.mjs'
+import { UPDATE_FEED_FILES } from './executor-update-feed.mjs'
 import {
   createDashboardArchive,
   createReleaseMetadataArchive,
@@ -304,6 +305,7 @@ function finalizeRelease() {
     .concat((component === 'all' || component === 'host') && exists(DEDICATED_SUPPORT_ARCHIVE) ? [DEDICATED_SUPPORT_ARCHIVE] : [])
     .concat(includeDashboard && exists('kala-model-catalog-seed.json') ? ['kala-model-catalog-seed.json'] : [])
     .concat(bootstrapAssets)
+    .concat(UPDATE_FEED_FILES.filter((name) => exists(name)))
   if (builtEntries.some((entry) => entry.role === 'executor' && entry.natives.length > 0)) {
     throw new Error('standalone native Executor binaries are not release assets')
   }

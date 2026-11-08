@@ -1,9 +1,11 @@
-import { chmodSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { createPublicKey, verify } from 'node:crypto'
+import { constants, chmodSync, closeSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 import type { ExecutorInstallMode, ExecutorInstallStatusSnapshot, ExecutorPrivilegeMode } from '@agent-kernel/shared'
 
 import type { InstallerSession } from './installer-session.js'
+import { parseManifest } from './update.js'
 
 export type BootstrapEnvironment = {
   HOST_URL: string
@@ -71,15 +73,55 @@ export async function redeemInstallation(env: BootstrapEnvironment, workspaceId:
   return await installationRequest(env, '/redeem', { method: 'POST', body: JSON.stringify({ workspaceId, ...(env.EXECUTOR_INSTALL_LABEL ? { label: env.EXECUTOR_INSTALL_LABEL } : {}) }) })
 }
 
-export async function downloadExecutorUpdateAssets(hostUrl: string): Promise<ExecutorUpdateAssets | undefined> {
-  const assetsUrl = `${hostUrl.replace(/\/$/u, '')}/install/assets`
+export async function downloadExecutorUpdateAssets(hostUrl: string): Promise<ExecutorUpdateAssets> {
+  const origin = new URL(hostUrl)
+  if (origin.protocol !== 'https:' && !(origin.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname))) {
+    throw new Error('Executor update assets require HTTPS or a loopback Host')
+  }
+  const assetsUrl = `${origin.toString().replace(/\/$/u, '')}/install/assets`
   const manifestUrl = `${assetsUrl}/executor-update-manifest.json`
   const publicKeyUrl = `${assetsUrl}/executor-update-public-key.pem`
   const [manifestResponse, publicKeyResponse] = await Promise.all([fetch(manifestUrl), fetch(publicKeyUrl)])
-  if (manifestResponse.status === 404 && publicKeyResponse.status === 404) return undefined
   if (!manifestResponse.ok) throw new Error(`failed to download Executor update manifest: ${manifestResponse.status}`)
   if (!publicKeyResponse.ok) throw new Error(`failed to download Executor update verification key: ${publicKeyResponse.status}`)
-  return { manifestUrl, publicKey: await publicKeyResponse.text() }
+  const [envelopeText, publicKey] = await Promise.all([manifestResponse.text(), publicKeyResponse.text()])
+  if (envelopeText.length > 64 * 1024 || publicKey.length > 8 * 1024) throw new Error('Executor update metadata exceeds its size limit')
+  const key = createPublicKey(publicKey)
+  if (key.asymmetricKeyType !== 'ed25519') throw new Error('Executor update verification key must be Ed25519')
+  const envelope: unknown = JSON.parse(envelopeText)
+  if (!envelope || typeof envelope !== 'object' || !('signed' in envelope) || !('signature' in envelope)
+    || typeof envelope.signed !== 'string' || typeof envelope.signature !== 'string'
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(envelope.signature)
+    || !verify(null, Buffer.from(envelope.signed), key, Buffer.from(envelope.signature, 'base64'))) {
+    throw new Error('Executor update manifest signature verification failed')
+  }
+  const manifest = parseManifest(envelope.signed)
+  if (manifest.channel !== 'stable' || manifest.artifact.url !== './kala-executor.cjs' || manifest.artifact.file !== 'kala-executor') {
+    throw new Error('Executor update manifest does not describe the expected stable asset')
+  }
+  return { manifestUrl, publicKey }
+}
+
+export function pinExecutorUpdateKey(root: string, publicKey: string): void {
+  mkdirSync(root, { recursive: true, mode: 0o700 })
+  const path = join(root, 'update-public-key.pem')
+  try {
+    const info = lstatSync(path)
+    if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0
+      || readFileSync(path, 'utf8') !== publicKey) {
+      throw new Error('Existing Executor update verification key differs or is unsafe; rotate it through a trusted operator procedure')
+    }
+    return
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600)
+  try {
+    writeFileSync(fd, publicKey)
+  } catch (error) {
+    rmSync(path, { force: true })
+    throw error
+  } finally { closeSync(fd) }
 }
 
 export function writeInstallerSession(path: string, session: InstallerSession): void {

@@ -28,6 +28,7 @@ type CapturedTool = {
 const sdk = vi.hoisted(() => ({
   clientOptions: [] as Array<{ baseDirectory?: string; connection?: { kind: string; args?: readonly string[]; path?: string } }>,
   startError: undefined as Error | undefined,
+  createError: undefined as Error | undefined,
   configs: [] as Array<{
     tools: CapturedTool[]
     streaming?: boolean
@@ -146,6 +147,7 @@ vi.mock('@github/copilot-sdk', () => ({
     }
     async createSession(config: { tools: CapturedTool[]; streaming?: boolean; workingDirectory?: string; remoteSession?: string }) {
       sdk.configs.push(config)
+      if (sdk.createError) throw sdk.createError
       return this.session()
     }
     session() {
@@ -196,6 +198,7 @@ describe('Copilot runtime custom tools', () => {
     sdk.resumeSucceeds = false
     sdk.resumeBarrier = undefined
     sdk.startError = undefined
+    sdk.createError = undefined
     sdk.listeners.length = 0
     sdk.historyEvents.length = 0
     sdk.responses.length = 0
@@ -1788,6 +1791,93 @@ describe('Copilot runtime custom tools', () => {
       replacedCount: 40,
       summary: '# Compacted Context\n\nKeep the active implementation constraints.',
     })
+    await runtime.close()
+  })
+
+  it('broadcasts manual progress before SDK resume and keeps it running until the RPC finishes', async () => {
+    let resume!: () => void
+    sdk.resumeBarrier = new Promise<void>((resolve) => { resume = resolve })
+    let finish!: (value: Awaited<ReturnType<typeof sdk.compact>>) => void
+    sdk.compact.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    const onCompactStatus = vi.fn()
+    const runtime = new CopilotAgentRuntime({
+      store,
+      tools: { async callTool() { return { ok: true, content: 'unused' } }, cancelPending() {} },
+      broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError() {}, onCompactStatus },
+    }, { enabled: true, sessionsDir: dir })
+    const record = await store.create({
+      sessionId: 'copilot-delayed-compact',
+      agentRuntime: 'copilot',
+      config: createConfig({ tools: [] }),
+    })
+    await runtime.start()
+    const pending = runtime.compact(record)
+    expect(onCompactStatus).toHaveBeenCalledWith(expect.objectContaining({ kind: 'running', sessionId: record.sessionId }))
+    expect(runtime.currentCompactStatus(record.sessionId)).toMatchObject({ kind: 'running' })
+    await vi.waitFor(() => expect(record.state.messages.some((message) =>
+      message.metadata?.kind === 'context_compaction' && message.metadata.phase === 'running')).toBe(true))
+    expect(sdk.compact).not.toHaveBeenCalled()
+    resume()
+    await vi.waitFor(() => expect(sdk.compact).toHaveBeenCalledTimes(1))
+    expect(onCompactStatus).toHaveBeenCalledTimes(1)
+    await expect(runtime.compact(record)).rejects.toThrow('already in progress')
+    finish({
+      success: true, tokensRemoved: 100, messagesRemoved: 1, summaryContent: 'Compacted.',
+      contextWindow: {
+        currentTokens: 40_000, tokenLimit: 128_000, messagesLength: 10,
+        systemTokens: 1_000, conversationTokens: 35_000, toolDefinitionsTokens: 4_000,
+      },
+    })
+    await pending
+    expect(onCompactStatus.mock.calls.at(-1)?.[0]).toMatchObject({ kind: 'done' })
+    expect(runtime.currentCompactStatus(record.sessionId)).toBeUndefined()
+    await runtime.close()
+  })
+
+  it('reports the real SDK compaction failure after broadcasting progress', async () => {
+    sdk.compact.mockRejectedValueOnce(new Error('SDK compaction failed'))
+    const onCompactStatus = vi.fn()
+    const runtime = new CopilotAgentRuntime({
+      store,
+      tools: { async callTool() { return { ok: true, content: 'unused' } }, cancelPending() {} },
+      broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError() {}, onCompactStatus },
+    }, { enabled: true, sessionsDir: dir })
+    const record = await store.create({
+      sessionId: 'copilot-failed-compact',
+      agentRuntime: 'copilot',
+      config: createConfig({ tools: [] }),
+    })
+    await runtime.start()
+    await expect(runtime.compact(record)).rejects.toThrow('SDK compaction failed')
+    expect(onCompactStatus.mock.calls.map(([event]) => event.kind)).toEqual(['running', 'error'])
+    expect(onCompactStatus.mock.calls[1]?.[0]).toMatchObject({ message: 'SDK compaction failed' })
+    expect(record.state.messages).toContainEqual(expect.objectContaining({
+      metadata: expect.objectContaining({ kind: 'context_compaction', phase: 'error', error: 'SDK compaction failed' }),
+    }))
+    expect(runtime.currentCompactStatus(record.sessionId)).toBeUndefined()
+    await runtime.close()
+  })
+
+  it('reports SDK session startup failure as a terminal compact error without invoking history', async () => {
+    sdk.createError = new Error('SDK session could not be created')
+    const onCompactStatus = vi.fn()
+    const runtime = new CopilotAgentRuntime({
+      store,
+      tools: { async callTool() { return { ok: true, content: 'unused' } }, cancelPending() {} },
+      broadcast: { onState() {}, onTokenDelta() {}, onApprovalRequired() {}, onError() {}, onCompactStatus },
+    }, { enabled: true, sessionsDir: dir })
+    const record = await store.create({
+      sessionId: 'copilot-compact-startup-error',
+      agentRuntime: 'copilot',
+      config: createConfig({ tools: [] }),
+    })
+    await runtime.start()
+    await expect(runtime.compact(record)).rejects.toThrow('SDK session could not be created')
+    expect(sdk.compact).not.toHaveBeenCalled()
+    expect(onCompactStatus.mock.calls.map(([event]) => event.kind)).toEqual(['running', 'error'])
+    expect(record.state.messages).toContainEqual(expect.objectContaining({
+      metadata: expect.objectContaining({ kind: 'context_compaction', phase: 'error' }),
+    }))
     await runtime.close()
   })
 
