@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { join } from 'node:path'
 
 import { createConfig } from '@agent-kernel/kernel'
@@ -32,7 +33,11 @@ const ownerHeaders = {
   'x-agent-runlab-principal': 'authenticated-owner',
 }
 
-async function start(deployment = DEDICATED_DEPLOYMENT, unitId = 'tenant_owner') {
+async function start(
+  deployment = DEDICATED_DEPLOYMENT,
+  unitId = 'tenant_owner',
+  embeddedSocketAdminAssets?: readonly { path: string; contentBase64: string }[],
+) {
   const directory = mkdtempSync(join(process.cwd(), '.socket-admin-owner-'))
   directories.push(directory)
   const dashboardDir = join(directory, 'dashboard')
@@ -46,6 +51,7 @@ async function start(deployment = DEDICATED_DEPLOYMENT, unitId = 'tenant_owner')
     resourceUnitId: unitId,
     sessionsDir: join(directory, 'sessions'),
     staticDir: dashboardDir,
+    ...(embeddedSocketAdminAssets ? { embeddedSocketAdminAssets } : {}),
     llm: { name: 'unused', async call() { throw new Error('No model calls expected') } },
     defaultConfig: createConfig({ tools: [] }),
     settings: {
@@ -81,8 +87,31 @@ it('serves the installed official UI and connects a Dedicated Owner through exis
   expect(html).toContain('Socket.IO Admin UI')
   expect(html).toContain('kala-bootstrap.js')
   expect(html).not.toContain('https://')
-  const asset = html.match(/<script src="(js\/[^"]+)"/)![1]!
-  expect((await fetch(`${origin}/admin/socket.io/${asset}`, { headers })).status).toBe(200)
+  expect(html).toContain('css/materialdesignicons.min.css')
+  for (const [asset, mime, content] of [
+    [html.match(/<script src="(js\/[^"]+)"/)![1]!, 'application/javascript', 'webpackJsonp'],
+    [html.match(/href="(css\/app\.[^"]+\.css)"/)![1]!, 'text/css', '.'],
+    ['favicon.png', 'image/png', '\x89PNG'],
+    ['css/materialdesignicons.min.css', 'text/css', 'mdi-home-outline'],
+    ['fonts/materialdesignicons-webfont.woff2', 'font/woff2', 'wOF2'],
+  ] as const) {
+    const response = await fetch(`${origin}/admin/socket.io/${asset}`, { headers })
+    expect(response.status, asset).toBe(200)
+    expect(response.headers.get('content-type'), asset).toContain(mime)
+    const body = Buffer.from(await response.arrayBuffer())
+    expect(body.byteLength, asset).toBeGreaterThan(100)
+    expect(body.toString('latin1'), asset).toContain(content)
+    expect(response.headers.get('content-security-policy'), asset).toContain("default-src 'self'")
+    if (asset === 'css/materialdesignicons.min.css') {
+      expect(body.toString()).toContain('url("../fonts/materialdesignicons-webfont.woff2")')
+      expect(body.toString()).toContain('.mdi-server::before')
+      expect(body.toString()).not.toContain('https://cdn.jsdelivr.net')
+    }
+  }
+  const head = await fetch(`${origin}/admin/socket.io/fonts/materialdesignicons-webfont.woff2`, { headers, method: 'HEAD' })
+  expect(head.status).toBe(200)
+  expect(head.headers.get('content-type')).toBe('font/woff2')
+  expect(Number(head.headers.get('content-length'))).toBeGreaterThan(100)
   const bootstrap = await (await fetch(`${origin}/admin/socket.io/kala-bootstrap.js`, { headers })).text()
   expect(bootstrap).toContain('location.origin')
   expect(bootstrap).toContain('"/admin"')
@@ -94,13 +123,36 @@ it('serves the installed official UI and connects a Dedicated Owner through exis
   expect(admin.connected).toBe(true)
 })
 
+it('serves embedded official CSS, JS and favicon alongside the bundled local icon font', async () => {
+  const require = createRequire(import.meta.url)
+  const dist = join(require.resolve('@socket.io/admin-ui/package.json'), '../ui/dist')
+  const html = readFileSync(join(dist, 'index.html'))
+  const index = html.toString()
+  const css = index.match(/href="(css\/app\.[^"]+\.css)"/)![1]!
+  const js = index.match(/<script src="(js\/app\.[^"]+\.js)"/)![1]!
+  const assets = ['index.html', css, js, 'favicon.png'].map(path => ({
+    path, contentBase64: readFileSync(join(dist, path)).toString('base64'),
+  }))
+  const origin = await start(DEDICATED_DEPLOYMENT, 'tenant_owner', assets)
+  for (const [path, mime] of [
+    [css, 'text/css'], [js, 'application/javascript'], ['favicon.png', 'image/png'],
+    ['css/materialdesignicons.min.css', 'text/css'], ['fonts/materialdesignicons-webfont.woff2', 'font/woff2'],
+  ]) {
+    const response = await fetch(`${origin}/admin/socket.io/${path}`, { headers: ownerHeaders })
+    expect(response.status, path).toBe(200)
+    expect(response.headers.get('content-type'), path).toContain(mime)
+    expect((await response.arrayBuffer()).byteLength, path).toBeGreaterThan(100)
+    expect((await fetch(`${origin}/admin/socket.io/${path}`)).status, path).toBe(403)
+  }
+})
+
 it.each([
   ['anonymous', {}],
   ['member', { ...ownerHeaders, 'x-agent-runlab-organization-role': 'member' }],
   ['foreign Unit', { ...ownerHeaders, 'x-agent-runlab-runtime-unit': 'tenant_foreign' }],
 ])('denies %s on both official assets and the real admin namespace', async (_name, headers) => {
   const origin = await start()
-  for (const path of ['/', '/kala-bootstrap.js', '/js/app.js']) {
+  for (const path of ['/', '/kala-bootstrap.js', '/js/app.js', '/css/app.6e3b9661.css', '/favicon.png', '/css/materialdesignicons.min.css', '/fonts/materialdesignicons-webfont.woff2']) {
     expect((await fetch(`${origin}/admin/socket.io${path}`, { headers })).status).toBe(403)
   }
   await expect(connect(origin, headers)).rejects.toThrow('deployment_owner_required')
@@ -205,12 +257,23 @@ it('routes official assets and the real admin handshake using only the revocable
   expect(script.status).toBe(200)
   expect(script.headers.get('content-type')).toContain('application/javascript')
   expect(await script.text()).toContain('webpackJsonp')
+  for (const [path, mime] of [
+    ['css/materialdesignicons.min.css', 'text/css'],
+    ['fonts/materialdesignicons-webfont.woff2', 'font/woff2'],
+    ['favicon.png', 'image/png'],
+  ]) {
+    const asset = await fetch(`${origin}/admin/socket.io/${path}`, { headers: spoofed })
+    expect(asset.status, path).toBe(200)
+    expect(asset.headers.get('content-type'), path).toContain(mime)
+  }
   expect((await fetch(`${origin}/admin/socket.io/kala-bootstrap.js`, { headers: spoofed })).status).toBe(200)
   const admin = await connect(origin, spoofed)
   expect(admin.connected).toBe(true)
   expect((await fetch(`${origin}/admin/socket.io/`, { headers: ownerHeaders })).status).toBe(401)
+  expect((await fetch(`${origin}/admin/socket.io/fonts/materialdesignicons-webfont.woff2`, { headers: ownerHeaders })).status).toBe(401)
   await expect(connect(origin, ownerHeaders)).rejects.toThrow()
   await sessions.revoke(session.id, 'logout', Date.now())
   await vi.waitFor(() => expect(admin.connected).toBe(false))
   expect((await fetch(`${origin}/admin/socket.io/`, { headers: { cookie } })).status).toBe(401)
+  expect((await fetch(`${origin}/admin/socket.io/css/materialdesignicons.min.css`, { headers: { cookie } })).status).toBe(401)
 })

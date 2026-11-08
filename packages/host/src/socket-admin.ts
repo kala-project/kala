@@ -150,7 +150,7 @@ export function loadGatewayOwnerSocketAdminConfig(opts: {
   // The official UI otherwise opens a connection/password dialog and loads
   // third-party fonts. Keep its assets and cookie-authenticated connection local.
   const indexHtml = html.replace(/<link\b[^>]*href=["']https?:\/\/[^>]*>/gi, '')
-    .replace('<head>', '<head><script src="kala-bootstrap.js"></script>')
+    .replace('<head>', '<head><link rel="stylesheet" href="css/materialdesignicons.min.css"><script src="kala-bootstrap.js"></script>')
   return {
     runtime: { enabled: true, authentication: 'gateway-owner', path: DEFAULT_PATH, username: '', mode, distSource, ...(distDir ? { distDir } : {}) },
     summary: { ...summary, active: true, initialized: true, distSource },

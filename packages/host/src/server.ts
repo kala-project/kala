@@ -100,6 +100,7 @@ import type { RuntimeLogger } from './logger.js'
 import { AGENT_RUNTIME_CAPABILITIES, FULL_RUNTIME_CAPABILITIES, PORTABLE_DEPLOYMENT, effectiveTenancy, productVariant, type ProductDeploymentConfig, type RuntimeCapabilities } from '@agent-kernel/shared'
 import { SOCKET_MAX_HTTP_BUFFER_BYTES } from '@agent-kernel/shared'
 import { GATEWAY_OWNER_SOCKET_ADMIN_BOOTSTRAP, isGatewaySocketAdminOwner, loadGatewayOwnerSocketAdminConfig, redactApplicationDebugAdminEvents, redactGatewayOwnerAdminEvents, type SocketAdminConfig } from './socket-admin.js'
+import { SOCKET_ADMIN_ICON_CSS, SOCKET_ADMIN_ICON_WOFF2 } from './socket-admin-icons.js'
 import { defaultRestartStatePath, RestartCoordinator } from './restart-coordinator.js'
 import { inspectUnitQuiescence } from './tenant-runtime/quiescence.js'
 import { socketConnectionAuditSnapshot } from './connection/socket-audit.js'
@@ -1213,10 +1214,19 @@ export async function startHostServer(
     response.setHeader('content-security-policy', "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'")
     if (request.method !== 'GET' && request.method !== 'HEAD') { deny(405, 'method_not_allowed'); return }
     const html = pathname === '/admin/socket.io/' || pathname === '/admin/socket.io/index.html'
-    if (html || pathname === '/admin/socket.io/kala-bootstrap.js') {
+    // Serve the pinned icon subset from the Host bundle in both installed and embedded deployments.
+    const iconCss = pathname === '/admin/socket.io/css/materialdesignicons.min.css'
+    const iconFont = pathname === '/admin/socket.io/fonts/materialdesignicons-webfont.woff2'
+    if (html || pathname === '/admin/socket.io/kala-bootstrap.js' || iconCss || iconFont) {
       claimRoute(request)
-      response.writeHead(200, { 'content-type': html ? 'text/html; charset=utf-8' : 'application/javascript; charset=utf-8' })
-      response.end(request.method === 'HEAD' ? undefined : html ? gatewayOwnerAdmin.indexHtml : GATEWAY_OWNER_SOCKET_ADMIN_BOOTSTRAP)
+      const body = iconFont ? Buffer.from(SOCKET_ADMIN_ICON_WOFF2, 'base64')
+        : html ? gatewayOwnerAdmin.indexHtml! : iconCss ? SOCKET_ADMIN_ICON_CSS : GATEWAY_OWNER_SOCKET_ADMIN_BOOTSTRAP
+      response.writeHead(200, {
+        'content-type': iconFont ? 'font/woff2' : iconCss ? 'text/css; charset=utf-8'
+          : html ? 'text/html; charset=utf-8' : 'application/javascript; charset=utf-8',
+        'content-length': Buffer.byteLength(body),
+      })
+      response.end(request.method === 'HEAD' ? undefined : body)
     }
   })
   const socketAdminMount = (): StaticMount | undefined => activeSocketAdmin

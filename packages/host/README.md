@@ -149,7 +149,14 @@ Production mode retains aggregated diagnostics without per-event inspection.
 Images must retain
 `@socket.io/admin-ui/ui/dist` from the existing Host dependency, or provide the
 embedded official assets. Missing assets leave `settings.socketAdmin.active`
-false with an unavailable reason; startup never downloads them. Portable's
+false with an unavailable reason; startup never downloads them. The Dedicated
+page serves its Material Design icons from a bundled subset of the pinned
+`@mdi/font` package, rather than loading the upstream CDN stylesheet (which
+the Owner-only page's CSP disallows). After changing either pinned package,
+regenerate the subset with `node packages/host/scripts/generate-socket-admin-icons.mjs`
+(requires Python `fontTools` and Brotli); the generated CSS/WOFF2 is embedded
+in the Host so filesystem and standalone builds serve the same Owner-gated
+assets. Portable's
 password-initialized Admin UI and configured instrumentation mode are unchanged.
 
 ## References
