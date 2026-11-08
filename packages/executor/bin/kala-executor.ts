@@ -47,7 +47,7 @@ import { hashExecutorInviteRoute, loadExecutorRouteHint, loadExecutorToken, save
 import { readPairingJson } from '../src/pairing-response.js'
 import { readExecutorCredential, readExecutorRuntimeConfig } from '../src/executor-config.js'
 import { parseSandboxRootsEnv } from '../src/sandbox-roots-env.js'
-import { executorProfileDir, loadOrCreateWorkspaceId, normalizeExecutorProfile } from '../src/workspace-id.js'
+import { executorProfileDir, loadOrCreateWorkspaceId, normalizeExecutorProfile, resolveWorkspaceId } from '../src/workspace-id.js'
 import { acquireExecutorLock } from '../src/local-lock.js'
 import { assertSupportedInstallerPrivileges, bootstrapEnvironment, defaultManagedRoot, downloadExecutorUpdateAssets, pinExecutorUpdateKey, redeemInstallation, reportInstallation, waitForApproval, writeInstallerSession } from '../src/installer-flow.js'
 import { createLinuxServicePlan, executeLinuxServicePlan, linuxServicePaths, type Command } from '../src/linux-service.js'
@@ -553,7 +553,7 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
   const managed = args.config ? readExecutorRuntimeConfig(args.config) : undefined
   if (args.command === 'update') {
     if (!managed?.update?.enabled || !managed.managedRoot || !managed.serviceMode) throw new Error('managed updates are not configured for this Executor service')
-    const workspaceId = loadOrCreateWorkspaceId(undefined, normalizeExecutorProfile(managed.profile))
+    const workspaceId = resolveWorkspaceId(managed.workspaceId, normalizeExecutorProfile(managed.profile))
     const common = { root: managed.managedRoot, serviceMode: managed.serviceMode, workspaceId, socketPath: join(managed.managedRoot, 'update-control.sock'), reconnectTimeoutMs: 60_000, logger }
     if (args.updateAction === 'rollback') await rollbackManagedUpdate(common)
     else {
@@ -660,7 +660,7 @@ async function main(argv = process.argv.slice(2)): Promise<void> {
     }
   }
 
-  const workspaceId = managed?.workspaceId ?? loadOrCreateWorkspaceId(undefined, profile)
+  const workspaceId = resolveWorkspaceId(managed?.workspaceId, profile)
   const workspaceName = name ?? hostname()
   const effectiveExecutorId = executorId ?? ulid()
   const saveToken = (nextToken: string): void => {

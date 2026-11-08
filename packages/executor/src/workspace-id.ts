@@ -69,3 +69,7 @@ export function loadOrCreateWorkspaceId(pathOverride?: string, profile?: string)
   writeFileSync(path, id + '\n', { encoding: 'utf8', mode: 0o600 })
   return id
 }
+
+export function resolveWorkspaceId(configuredId: string | undefined, profile: string | undefined): string {
+  return configuredId ?? loadOrCreateWorkspaceId(undefined, profile)
+}

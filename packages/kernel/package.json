@@ -1,6 +1,6 @@
 {
   "name": "@agent-kernel/kernel",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Pure-function reducer kernel for coding agents. Zero dependencies. < 500 lines.",
   "repository": { "type": "git", "url": "git+https://github.com/xingsy97/kala.git" },
   "homepage": "https://github.com/xingsy97/kala#readme",

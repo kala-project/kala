@@ -1,6 +1,6 @@
 {
   "name": "@agent-kernel/perf-harness",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "description": "Reusable front-end performance & rendering diagnostics for the dashboard: an in-process local stack (host + executor + served dashboard), programmable LLM load scenarios, and browser probes (DOM churn, frame timing, source-mapped CPU profiling, layout overflow). Not published.",
   "type": "module",

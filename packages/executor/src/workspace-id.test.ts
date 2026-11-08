@@ -1,9 +1,9 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { executorProfileDir, loadOrCreateWorkspaceId, normalizeExecutorProfile, workspaceIdPath } from './workspace-id.js'
+import { EXECUTOR_PROFILE_ENV, WORKSPACE_ID_ENV, executorProfileDir, loadOrCreateWorkspaceId, normalizeExecutorProfile, resolveWorkspaceId, workspaceIdPath } from './workspace-id.js'
 
 describe('loadOrCreateWorkspaceId', () => {
   let dir: string
@@ -15,6 +15,7 @@ describe('loadOrCreateWorkspaceId', () => {
   })
 
   afterEach(() => {
+    vi.unstubAllEnvs()
     rmSync(dir, { recursive: true, force: true })
   })
 
@@ -32,6 +33,16 @@ describe('loadOrCreateWorkspaceId', () => {
     const third = loadOrCreateWorkspaceId(path)
     expect(second).toBe(first)
     expect(third).toBe(first)
+  })
+
+  it('uses the enrolled workspace ID for updates even when a profile file contains another ID', () => {
+    const enrolled = '01M35E1525X2JT313FWGY5NJ12'
+    const local = '01M6EFR3NHDN0A2V9E1AM8PHZK'
+    writeFileSync(path, `${local}\n`)
+    vi.stubEnv(WORKSPACE_ID_ENV, path)
+    vi.stubEnv(EXECUTOR_PROFILE_ENV, 'dedicated-local')
+    expect(resolveWorkspaceId(enrolled, 'dedicated-local')).toBe(enrolled)
+    expect(resolveWorkspaceId(undefined, 'dedicated-local')).toBe(local)
   })
 
   it('creates the parent directory if missing, using native path separators', () => {
