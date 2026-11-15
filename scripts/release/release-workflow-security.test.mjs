@@ -221,8 +221,8 @@ test('Private Cloud scanner preserves failure while collecting all three image r
     assert.match(workflow, new RegExp(`scan ${component} [^\n]+ \\|\\| failed=1`, 'u'))
   }
   assert.match(workflow, /exit "\$failed"/u)
-  assert.match(workflow, /grype "\$image"[^\n]+\|\| return 1/u)
-  assert.match(workflow, /trivy image [^\n]+\|\| return 1/u)
+  assert.match(workflow, /grype "\$image"[^\n]+\|\| \{\n[^\n]+Grype execution failed[^\n]+\n\s+return 1\n\s+\}/u)
+  assert.match(workflow, /trivy image [^\n]+\|\| \{\n[^\n]+Trivy execution failed[^\n]+\n\s+return 1\n\s+\}/u)
 })
 
 test('Private Cloud release retains image publishing and accepts the exact signed Compose candidate', () => {
