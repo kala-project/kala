@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { deriveSelectedSessionActivity } from './session-activity.js'
+import { coarseStatusForIndicator, deriveSelectedSessionActivity } from './session-activity.js'
 
 const base = {
   selectedSessionId: 'session-a',
@@ -13,6 +13,22 @@ const base = {
 }
 
 describe('deriveSelectedSessionActivity', () => {
+  it.each(['thinking', 'executing_tools', 'done', 'awaiting_approval'] as const)(
+    'does not change %s to error when selecting a Session with operation feedback',
+    (status) => {
+      const selectedView = {
+        ...base,
+        summaryStatus: status,
+        liveStatus: status,
+        lastError: 'Failed to load workspace details',
+      }
+      const selected = deriveSelectedSessionActivity(selectedView)
+
+      expect(selected.indicatorStatus).toBe(coarseStatusForIndicator(status))
+      expect(selected.derived.activity).not.toBe('failed')
+    },
+  )
+
   it.each([
     ['streaming', { streamingActive: true }],
     ['message acknowledgement', { awaitingAck: true }],
@@ -39,9 +55,8 @@ describe('deriveSelectedSessionActivity', () => {
   it('keeps failures terminal instead of masking them with a loading signal', () => {
     const activity = deriveSelectedSessionActivity({
       ...base,
-      liveStatus: 'thinking',
+      liveStatus: 'error',
       streamingActive: true,
-      lastError: 'provider failed',
     })
 
     expect(activity.status).toBe('error')
@@ -69,12 +84,11 @@ describe('deriveSelectedSessionActivity', () => {
       selectedSessionId: 'session-b',
       hydratedSessionId: 'session-a',
       summaryStatus: 'done',
-      liveStatus: 'executing_tools',
+      liveStatus: 'error',
       pendingCalls: [{ status: 'awaiting_approval' }],
       streamingActive: true,
       awaitingAck: true,
       compactRunning: true,
-      lastError: 'old session failed',
     })
 
     expect(activity.usesLiveProjection).toBe(false)

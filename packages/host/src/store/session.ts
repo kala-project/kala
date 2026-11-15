@@ -4,10 +4,12 @@
  * a cache for hot access.
  */
 
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
 import { open, readFile, rm } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { isDeepStrictEqual } from 'node:util'
 
 import type {
   AgentConfig,
@@ -2201,10 +2203,13 @@ export class SessionStore {
       // Provider totals may legitimately fall after compaction, so timestamp —
       // not token count — is the ordering authority.
       if (latest && contextSnapshot.updatedAt < latest.updatedAt) return
+      // SDK restore rebroadcasts the persisted observation; it is not a new write.
+      if (latest && isDeepStrictEqual(latest, contextSnapshot)) return
       if (this.options.authority) {
         await this.authorityReady
+        const fingerprint = createHash('sha256').update(JSON.stringify(contextSnapshot)).digest('hex')
         const persisted = await this.options.authority.mutate(record.sessionId, {
-          mutationId: `runtime-context:${contextSnapshot.updatedAt}`,
+          mutationId: `runtime-context:${contextSnapshot.updatedAt}:${fingerprint}`,
           eventType: 'session.runtime_context_updated',
           apply: (current) => current ? { ...current, runtimeContextSnapshot: contextSnapshot } : undefined,
         })

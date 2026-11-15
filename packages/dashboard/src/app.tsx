@@ -163,6 +163,7 @@ import {
 import { backgroundTerminalTasks } from './background-terminal.js'
 import { resolveHostEndpoint, type ResolvedHostEndpoint } from './host-endpoint.js'
 import { resolveWorkspaceExplorerBinding } from './workspace-explorer-binding.js'
+import { useSessionListPerformance } from './lib/session-list-performance.js'
 import { workspaceReadBinary } from './lib/workspace-exec.js'
 import { emitRpc } from './socket-rpc.js'
 import { AdmissionDeliveryFailedError, AdmissionDeliveryPendingError, admitUserMessage, releaseMessageAttachments, uploadMessageAttachment } from './admission-client.js'
@@ -839,7 +840,6 @@ export function App(): JSX.Element {
     streamingActive: session.streamingActive,
     awaitingAck,
     compactRunning: compactStatus.kind === 'running' || compactStatus.kind === 'starting',
-    lastError: session.lastError?.message,
   })
   const sessionHydrated = selectedSessionActivity.usesLiveProjection
   useScreenWakeLock(keepScreenAwake && selectedSessionActivity.derived.isRunning)
@@ -1911,6 +1911,11 @@ export function App(): JSX.Element {
   }
 
   const [section, setSection] = useAppSection()
+  useSessionListPerformance(
+    productAccessReady && control.sessionsLoaded && control.executorsLoaded,
+    false,
+    control.sessions.length,
+  )
   useInactiveSessionSummaryToasts({
     sessions: control.sessions,
     activeSessionId,
@@ -1929,10 +1934,10 @@ export function App(): JSX.Element {
       ...summary,
       status: selectedSessionActivity.derived.isRunning ? 'thinking'
         : pendingApprovalsCount > 0 && session.state?.approvalMode !== 'allow_all' ? 'awaiting_approval'
-          : session.lastError ? 'error' : session.state?.status ?? summary.status,
+          : session.state?.status ?? summary.status,
       queuedCount: Math.max(summary.queuedCount ?? 0, session.queuedMessages.length),
     }
-  }), [control.sessions, activeSessionId, sessionHydrated, selectedSessionActivity.derived.isRunning, pendingApprovalsCount, session.state?.approvalMode, session.state?.status, session.lastError, session.queuedMessages.length])
+  }), [control.sessions, activeSessionId, sessionHydrated, selectedSessionActivity.derived.isRunning, pendingApprovalsCount, session.state?.approvalMode, session.state?.status, session.queuedMessages.length])
   useApplicationDebugging({
     socket: session.socket,
     sessionId: activeSessionId,
@@ -2438,7 +2443,7 @@ export function App(): JSX.Element {
                         </div>
                       </div>
                       <div className="min-h-0 flex-1 overflow-hidden">
-                        <Explorer executors={control.executors} sessions={control.sessions} loading={sessionDirectoryLoadingOwner === 'explorer'} autoHideOfflineWorkspacesByDefault={!platformMode} selectedSessionId={explorerSelectedSessionId} sessionStatuses={sessionStatuses} onSelect={selectSession} onClearSelection={clearSessionSelection} onNewSession={newSession} onConnectWorkspace={runtimeCapabilities.workspace ? openConnectWorkspaceDialog : undefined} onDelete={deleteSessionAt} onRename={renameSessionAt} onRenameWorkspace={renameWorkspaceAt} embeddedHeader headerLeading={explorerHeaderLeading} fontSizePx={sessionExplorerFontSizePx} previewStore={previewStore} onOpenSessionInfo={openSessionInfoDialog} onWorkspaceInfo={setWorkspaceInfoId} onOpenWorkspaceTerminal={openWorkspaceTerminal} />
+                        <Explorer sessionListReady={productAccessReady && control.sessionsLoaded && control.executorsLoaded} executors={control.executors} sessions={control.sessions} loading={sessionDirectoryLoadingOwner === 'explorer'} autoHideOfflineWorkspacesByDefault={!platformMode} selectedSessionId={explorerSelectedSessionId} sessionStatuses={sessionStatuses} onSelect={selectSession} onClearSelection={clearSessionSelection} onNewSession={newSession} onConnectWorkspace={runtimeCapabilities.workspace ? openConnectWorkspaceDialog : undefined} onDelete={deleteSessionAt} onRename={renameSessionAt} onRenameWorkspace={renameWorkspaceAt} embeddedHeader headerLeading={explorerHeaderLeading} fontSizePx={sessionExplorerFontSizePx} previewStore={previewStore} onOpenSessionInfo={openSessionInfoDialog} onWorkspaceInfo={setWorkspaceInfoId} onOpenWorkspaceTerminal={openWorkspaceTerminal} />
                       </div>
                       <div className="flex flex-none justify-end bg-card px-3 py-1" data-testid="desktop-sidebar-footer">
                         <SidebarGlobalActions accountPlacement="footer" onOpenSettings={() => setSettingsOpen(true)} account={account} accountLoading={platformMode && authSession.loading} onOpenAccount={openAccount} onOpenAdmin={openAdmin} onSignOut={announceSignOut} evaluationUrl={evaluationUrl} />
@@ -3014,7 +3019,7 @@ export function App(): JSX.Element {
             </div>
             {section === 'agent' ? (
               <div className="min-h-0 flex-1 overflow-hidden">
-                <Explorer executors={control.executors} sessions={control.sessions} loading={sessionDirectoryLoadingOwner === 'explorer'} autoHideOfflineWorkspacesByDefault={!platformMode} selectedSessionId={explorerSelectedSessionId} sessionStatuses={sessionStatuses} onSelect={selectSessionFromExplorerDrawer} onClearSelection={clearSessionSelectionFromExplorerDrawer} onNewSession={newSessionFromExplorerDrawer} onConnectWorkspace={runtimeCapabilities.workspace ? connectWorkspaceFromExplorerDrawer : undefined} onDelete={deleteSessionAt} onRename={renameSessionAt} onRenameWorkspace={renameWorkspaceAt} embeddedHeader fontSizePx={sessionExplorerFontSizePx} previewStore={previewStore} onOpenSessionInfo={openExplorerDrawerSessionInfo} onWorkspaceInfo={openExplorerDrawerWorkspaceInfo} onOpenWorkspaceTerminal={openWorkspaceTerminalFromExplorerDrawer} />
+                <Explorer sessionListReady={productAccessReady && control.sessionsLoaded && control.executorsLoaded} executors={control.executors} sessions={control.sessions} loading={sessionDirectoryLoadingOwner === 'explorer'} autoHideOfflineWorkspacesByDefault={!platformMode} selectedSessionId={explorerSelectedSessionId} sessionStatuses={sessionStatuses} onSelect={selectSessionFromExplorerDrawer} onClearSelection={clearSessionSelectionFromExplorerDrawer} onNewSession={newSessionFromExplorerDrawer} onConnectWorkspace={runtimeCapabilities.workspace ? connectWorkspaceFromExplorerDrawer : undefined} onDelete={deleteSessionAt} onRename={renameSessionAt} onRenameWorkspace={renameWorkspaceAt} embeddedHeader fontSizePx={sessionExplorerFontSizePx} previewStore={previewStore} onOpenSessionInfo={openExplorerDrawerSessionInfo} onWorkspaceInfo={openExplorerDrawerWorkspaceInfo} onOpenWorkspaceTerminal={openWorkspaceTerminalFromExplorerDrawer} />
               </div>
             ) : <div className="min-h-0 flex-1" />}
             <div className="flex min-h-12 flex-none items-center justify-end bg-card px-3 py-1" data-testid="narrow-drawer-footer">

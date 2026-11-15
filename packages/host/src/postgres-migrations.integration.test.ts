@@ -470,6 +470,74 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
     }
   }, 120_000)
 
+  it('backfills v32 summaries and lists them without permission to read transcripts or audit history', async () => {
+    const suffix = randomUUID().replaceAll('-', '')
+    const schema = `summary_${suffix}`
+    const role = `summary_reader_${suffix}`
+    const password = randomUUID()
+    const admin = new Pool({ connectionString: adminUrl })
+    let reader: PostgresHotStateStore | undefined
+    try {
+      await admin.query(`CREATE SCHEMA "${schema}"`)
+      await runPostgresMigrations(admin as unknown as PostgresMigrationPool, { schema, throughVersion: 32 })
+      const before = await admin.query(`SELECT version, checksum FROM "${schema}".kala_schema_migrations ORDER BY version`)
+      const document = {
+        sessionId: 'large-session', agentRuntime: 'copilot', organizationId: 'summary-org',
+        workspaceId: 'summary-workspace', firstUserMessage: 'a'.repeat(200), label: 'Before upgrade',
+        preferences: { toolCardMode: 'standard' },
+        state: { cursor: 9, status: 'done', cwd: '/fixture', messages: [{ text: 'x'.repeat(1024 * 1024) }] },
+        config: { systemPrompt: 'Not part of the list' },
+      }
+      await admin.query(`INSERT INTO "${schema}".tenant_runtime_hot_leases
+        (tenant_id,scope_type,scope_id,owner_id,generation,expires_at,last_sequence)
+        VALUES ('summary-tenant','session','large-session','fixture',1,clock_timestamp(),1),
+          ('summary-tenant','session','never-committed','fixture',1,clock_timestamp(),0)`)
+      await admin.query(`INSERT INTO "${schema}".tenant_session_latest_projection
+        (tenant_id,session_id,version,document) VALUES ('summary-tenant','large-session',1,$1::jsonb)`,
+      [JSON.stringify(document)])
+      await expect(migratePostgres({ connectionString: adminUrl, schema })).resolves.toMatchObject({
+        previousVersion: 32, currentVersion: LATEST_POSTGRES_SCHEMA_VERSION,
+        appliedVersions: Array.from({ length: LATEST_POSTGRES_SCHEMA_VERSION - 32 }, (_, i) => i + 33),
+      })
+      const after = await admin.query(`SELECT version, checksum FROM "${schema}".kala_schema_migrations WHERE version<=32 ORDER BY version`)
+      expect(after.rows).toEqual(before.rows)
+      await admin.query(`CREATE ROLE "${role}" LOGIN PASSWORD '${password}'`)
+      await admin.query(`GRANT USAGE ON SCHEMA "${schema}" TO "${role}"`)
+      await admin.query(`GRANT SELECT (tenant_id,session_id,summary_document)
+        ON "${schema}".tenant_session_latest_projection TO "${role}"`)
+      await admin.query(`GRANT SELECT (tenant_id,scope_type,scope_id,last_sequence)
+        ON "${schema}".tenant_runtime_hot_leases TO "${role}"`)
+      const url = new URL(adminUrl)
+      url.username = role
+      url.password = password
+      reader = createPostgresHotStateStore({ connectionString: url.toString(), schema })
+      const authority = new PostgresSessionAuthority(reader, 'summary-tenant', { schema, schemaManagement: 'external' })
+      await expect(reader.database.query(`SELECT document FROM "${schema}".tenant_session_latest_projection`))
+        .rejects.toMatchObject({ code: '42501' })
+      await expect(reader.database.query(`SELECT scope_id FROM "${schema}".tenant_runtime_hot_events`))
+        .rejects.toMatchObject({ code: '42501' })
+      const summaries = await authority.listSummaryDocuments()
+      expect(summaries).toEqual([{
+        sessionId: document.sessionId, agentRuntime: 'copilot', organizationId: 'summary-org',
+        workspaceId: 'summary-workspace', firstUserMessage: 'a'.repeat(120), label: 'Before upgrade',
+        preferences: document.preferences, state: { cursor: 9, status: 'done', cwd: '/fixture' },
+      }])
+      // Old writers need not know the new column to keep its contents current.
+      await admin.query(`UPDATE "${schema}".tenant_session_latest_projection
+        SET document=jsonb_set(document,'{label}','"After upgrade"') WHERE session_id='large-session'`)
+      expect((await authority.listSummaryDocuments(['large-session']))[0]?.label).toBe('After upgrade')
+      await admin.query(`UPDATE "${schema}".tenant_session_latest_projection SET document='null'::jsonb`)
+      await expect(authority.listSummaryDocuments()).resolves.toEqual([])
+      await admin.query(`UPDATE "${schema}".tenant_session_latest_projection SET document=NULL`)
+      await expect(authority.listSummaryDocuments()).resolves.toEqual([])
+    } finally {
+      await reader?.close()
+      await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
+      await admin.query(`DROP ROLE IF EXISTS "${role}"`)
+      await admin.end()
+    }
+  }, 120_000)
+
   it('upgrades v27 to learning v32 without changing prior checksums or granting an existing operator implicitly', async () => {
     const schema = `learning_v27_${randomUUID().replaceAll('-', '')}`
     const admin = new Pool({ connectionString: adminUrl })

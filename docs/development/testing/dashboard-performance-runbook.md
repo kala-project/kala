@@ -4,6 +4,34 @@ This runbook is the reusable procedure for investigating Dashboard performance. 
 
 Do not start by changing React code. First reproduce the user-visible problem with a production artifact and preserve the trace.
 
+## Navigation to the complete Session list
+
+The primary initial-list metric is `kala:navigation-to-session-list`, a User
+Timing measure starting at navigation time zero. It includes document/assets,
+capability discovery, authentication when required, WebSocket connection, the
+authoritative Session and Executor snapshots, and the Explorer render. The
+Explorer must have a measured layout and no list loader; two animation frames
+allow its committed list to paint before recording completion.
+
+Read the current navigation in browser DevTools:
+
+```js
+performance.getEntriesByName('kala:navigation-to-session-list')
+performance.getEntriesByName('kala:session-list:data-ready')
+performance.getEntriesByName('kala:session-list:visible')
+```
+
+The marks include `detail.sessionCount` without Session contents. Cached
+summaries do not qualify. An authoritative empty list does qualify. A collapsed
+sidebar or unopened mobile drawer has no visibility measurement until opened;
+use the data-ready mark to distinguish that intentional delay. "Complete" means
+the full authoritative snapshot is available to the rendered, virtualized tree,
+not that every offscreen row is mounted or user filters are disabled.
+
+Compare identical data, viewport, authentication state and cache policy.
+Keep database-only timing separate from navigation-to-list timing; a fast SQL
+query does not prove a fast first screen.
+
 ## Tooling map
 
 | Command | Purpose |

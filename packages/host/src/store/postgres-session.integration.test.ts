@@ -10,7 +10,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { loadPersistedMessageQueueState, persistMessageQueueSnapshot } from '../message-queue-store.js'
 import { createPostgresHotStateStore, LeaseFencedError, type PostgresHotStateStore } from '../tenant-runtime/postgres-hot-state.js'
-import { PostgresSessionAuthority, SessionDeletingError } from './postgres-session-authority.js'
+import { PostgresSessionAuthority, SessionDeletingError, type SessionAuthorityMutation } from './postgres-session-authority.js'
 import { SessionNotFoundError, SessionStore } from './session.js'
 import { NATIVE_POSIX_BLOCK_BYTES } from './native-posix-fs.js'
 import { authorizeExecutorShellCall } from '../connection/executor-ns.js'
@@ -67,6 +67,105 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     const authority = makeAuthority(owner)
     return { store: new SessionStore(root, { authority, deleteRegisteredArtifacts }), root, authority }
   }
+
+  it('does not rewrite or replay a restored context snapshot when the SDK rebroadcasts it', async () => {
+    const { store, authority } = makeStore('restored-context')
+    const record = await store.create({ sessionId: 'restored-context', agentRuntime: 'copilot', config })
+    const snapshot = {
+      model: { ref: 'test-model', provider: 'github-copilot', id: 'test-model' },
+      contextWindow: { tokens: 272_000, source: 'api_reported' as const },
+      usage: { inputTokens: 10_000, totalTokens: 10_000 },
+      estimator: { total: { kind: 'provider_reported' as const, confidence: 'exact' as const }, version: 'test' },
+      updatedAt: 1_000,
+    }
+    await store.updateRuntimeContextSnapshot(record, snapshot)
+    await store.recordRuntimeProjection(record.sessionId, {
+      ...record.state, cursor: 1,
+      messages: [...record.state.messages, { role: 'user', content: [{ type: 'text', text: 'history '.repeat(16_384) }] }],
+    }, 'copilot.user_message', {})
+    const restored = await authority.load(record.sessionId)
+    expect(restored?.runtimeContextSnapshot).toEqual(snapshot)
+    const hydrated = { ...record, runtimeContextSnapshot: restored!.runtimeContextSnapshot }
+    const mutate = vi.spyOn(authority, 'mutate')
+    const query = vi.spyOn(authority.hotState.database, 'query')
+    try {
+      await Promise.all([
+        store.updateRuntimeContextSnapshot(hydrated, hydrated.runtimeContextSnapshot!),
+        store.updateRuntimeContextSnapshot(hydrated, structuredClone(snapshot)),
+        store.updateRuntimeContextSnapshot(hydrated, structuredClone(snapshot)),
+      ])
+      expect(mutate).not.toHaveBeenCalled()
+      expect(query).not.toHaveBeenCalled()
+    } finally {
+      mutate.mockRestore()
+      query.mockRestore()
+    }
+    expect((await authority.load(record.sessionId))?.state).toEqual(record.state)
+  })
+
+  it('persists distinct provider context observations with the same timestamp without an idempotency collision', async () => {
+    const { store, authority } = makeStore('context-same-timestamp')
+    const record = await store.create({ sessionId: 'context-same-timestamp', agentRuntime: 'copilot', config })
+    const first = {
+      model: { ref: 'previous-model' },
+      contextWindow: { tokens: 272_000, source: 'api_reported' as const },
+      usage: { inputTokens: 10_000, totalTokens: 10_000 },
+      estimator: { total: { kind: 'provider_reported' as const, confidence: 'exact' as const }, version: 'test' },
+      updatedAt: 1_000,
+    }
+    const second = { ...first, model: { ref: 'current-model' } }
+    await store.updateRuntimeContextSnapshot(record, first)
+    await store.updateRuntimeContextSnapshot(record, second)
+    expect((await authority.load(record.sessionId))?.runtimeContextSnapshot).toEqual(second)
+    expect(record.runtimeContextSnapshot).toEqual(second)
+  })
+
+  it('services a pending heartbeat while validating a retried mutation against audit history', async () => {
+    const authority = makeAuthority('replay-heartbeat', 'replay-heartbeat')
+    const sessionId = 'replay-heartbeat'
+    await authority.initialize()
+    await authority.create({ sessionId, state: { cursor: 0 } })
+    for (let cursor = 1; cursor <= 64; cursor++) {
+      await authority.mutate(sessionId, {
+        mutationId: `history:${cursor}`,
+        eventType: 'test.history',
+        apply: current => ({ ...current!, state: { cursor } }),
+      })
+    }
+    const mutation: SessionAuthorityMutation = {
+      mutationId: 'retried-tail',
+      eventType: 'test.history',
+      apply: current => ({ ...current!, state: { cursor: 65 } }),
+    }
+    const committed = await authority.mutate(sessionId, mutation)
+    const database = authority.hotState.database
+    const originalQuery = database.query.bind(database)
+    let replayEntered = false
+    let heartbeatRan = false
+    let heartbeat: NodeJS.Immediate | undefined
+    const reads = vi.spyOn(database, 'query').mockImplementation(async (sql, values) => {
+      const result = await originalQuery(sql, values)
+      if (sql.includes('sequence > $3 AND sequence <= $4')) {
+        replayEntered = true
+        heartbeat = setImmediate(() => { heartbeatRan = true })
+      }
+      return result
+    })
+    try {
+      const retried = await authority.mutate(sessionId, {
+        ...mutation,
+        apply: current => {
+          expect(replayEntered).toBe(true)
+          expect(heartbeatRan).toBe(true)
+          return mutation.apply(current)
+        },
+      })
+      expect(retried).toEqual(committed)
+    } finally {
+      if (heartbeat) clearImmediate(heartbeat)
+      reads.mockRestore()
+    }
+  })
 
   it('measures persisted session, native file, and committed object bytes within the tenant', async () => {
     const tenantId = `storage-${randomUUID()}`
@@ -227,13 +326,17 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
     const authority = makeAuthority('batch-reader', 'batch-reader-tenant')
     const other = makeAuthority('batch-other', 'batch-other-tenant')
     await authority.initialize()
-    for (const sessionId of ['batch-a', 'batch-b', 'batch-deleted', 'batch-deleting']) {
+    for (const sessionId of ['batch-a', 'batch-b', 'batch-deleted', 'batch-deleting', 'batch-null', 'batch-json-null']) {
       await authority.create({ sessionId, state: { cursor: 0 } })
     }
     await other.create({ sessionId: 'batch-foreign', state: { cursor: 0 } })
     await authority.requestDeletion('batch-deleted')
     await authority.delete('batch-deleted')
     await authority.requestDeletion('batch-deleting')
+    await authority.hotState.database.query(`UPDATE tenant_session_latest_projection
+      SET document = CASE WHEN session_id = 'batch-null' THEN NULL ELSE 'null'::jsonb END
+      WHERE tenant_id = $1 AND session_id = ANY($2::text[])`,
+    ['batch-reader-tenant', ['batch-null', 'batch-json-null']])
     const reads = vi.spyOn(authority.hotState.database, 'query')
     try {
       expect((await authority.list()).map(({ sessionId }) => sessionId)).toEqual(['batch-a', 'batch-b'])
@@ -244,6 +347,15 @@ integrationDescribe('SessionStore PostgreSQL authority integration', () => {
       expect(reads).toHaveBeenCalledTimes(1)
       reads.mockClear()
       await expect(authority.list([])).resolves.toEqual([])
+      expect(reads).not.toHaveBeenCalled()
+      expect((await authority.listSummaryDocuments()).map(({ sessionId }) => sessionId)).toEqual(['batch-a', 'batch-b'])
+      expect(reads).toHaveBeenCalledTimes(1)
+      reads.mockClear()
+      expect((await authority.listSummaryDocuments(['batch-b', 'batch-foreign', 'batch-missing', 'batch-b', 'batch-null', 'batch-json-null']))
+        .map(({ sessionId }) => sessionId)).toEqual(['batch-b'])
+      expect(reads).toHaveBeenCalledTimes(1)
+      reads.mockClear()
+      await expect(authority.listSummaryDocuments([])).resolves.toEqual([])
       expect(reads).not.toHaveBeenCalled()
     } finally {
       reads.mockRestore()

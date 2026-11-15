@@ -165,8 +165,8 @@ describe('ChatPanel', () => {
     expect(timing.querySelector('button > span')?.className).toContain('text-destructive')
     expect(timing.closest('[data-testid="user-message-surface"]')).toBeNull()
     const metadata = screen.getByTestId('user-message-metadata')
-    expect(metadata.className).toContain('absolute')
-    expect(metadata.className).toContain('sm:right-full')
+    expect(metadata.className).not.toContain('absolute')
+    expect(metadata.className).toContain('flex-wrap')
     expect(metadata.className).toContain('pointer-events-auto')
     expect(within(metadata).getByTestId('copy-message').tabIndex).toBe(0)
     fireEvent.click(timing.querySelector('button')!)
@@ -211,7 +211,7 @@ describe('ChatPanel', () => {
     expect(details.textContent).toContain('→')
   })
 
-  it('keeps auto timestamps out of message action layout slots', () => {
+  it('keeps user metadata after the bubble in wrapping normal flow without widening short messages', () => {
     render(
       <DashboardChatPanel
         items={[
@@ -223,8 +223,14 @@ describe('ChatPanel', () => {
     )
     const timestamps = screen.getAllByTestId('message-timestamp')
     expect(timestamps).toHaveLength(2)
-    expect(timestamps.every((timestamp) => timestamp.className.includes('absolute'))).toBe(true)
-    expect(screen.getByTestId('user-message-metadata').className).toContain('absolute')
+    const userMetadata = screen.getByTestId('user-message-metadata')
+    const userTime = within(userMetadata).getByTestId('message-timestamp')
+    expect(userMetadata.className.split(' ')).not.toContain('absolute')
+    expect(userTime.className.split(' ')).not.toContain('absolute')
+    expect(userMetadata.className).toContain('flex-wrap')
+    expect(userTime.className).not.toContain('absolute')
+    expect(userTime.className).toContain('whitespace-normal')
+    expect(screen.getByTestId('user-message-surface').parentElement?.nextElementSibling).toBe(userMetadata)
     expect(screen.getByTestId('assistant-message-footer').className).toContain('h-0')
     expect(screen.getByTestId('assistant-message-footer').querySelector('[data-testid="message-timestamp"]')?.className).toContain('absolute')
     expect(screen.getByTestId('message-actions-start').parentElement?.tagName).toBe('P')

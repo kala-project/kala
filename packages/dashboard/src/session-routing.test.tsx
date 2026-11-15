@@ -48,6 +48,40 @@ const sessionOptions = (sessionId: string, socket: FakeSocket | null = null) => 
   host: window.location.origin, sessionId, socket: socket as never, sessionRouteTickets: true,
 })
 
+describe('Session operation feedback', () => {
+  it('keeps a running Agent stream alive after an operation error, but stops on an authoritative failure', async () => {
+    const socket = new FakeSocket()
+    socket.connected = true
+    const sessionId = 'running-with-operation-error'
+    const view = renderHook(() => useSession({
+      host: window.location.origin, sessionId, socket: socket as never,
+    }))
+    const state = { ...createInitialState({ sessionId }), status: 'thinking' as const }
+    act(() => socket.serverEmit('session:ready', {
+      sessionId, reason: 'load', agentRuntime: 'copilot', cursor: 0,
+      state, config: { tools: [] },
+    }))
+    act(() => socket.serverEmit('session:token_delta', { sessionId, text: 'Still working' }))
+    expect(view.result.current.streamingActive).toBe(true)
+
+    const error = { sessionId, scope: 'host', message: 'Failed to load workspace details' }
+    act(() => socket.serverEmit('session:error', error))
+    expect(view.result.current.lastError).toEqual(error)
+    expect(view.result.current.state?.status).toBe('thinking')
+    expect(view.result.current.streamingActive).toBe(true)
+    act(() => socket.serverEmit('session:token_delta', { sessionId, text: ', continuing' }))
+    expect(view.result.current.streamingActive).toBe(true)
+    await waitFor(() => expect(view.result.current.streamingText).toBe('Still working, continuing'))
+
+    act(() => socket.serverEmit('state:changed', {
+      sessionId, cursor: 1, state: { ...state, cursor: 1, status: 'error' },
+    }))
+    await waitFor(() => expect(view.result.current.state?.status).toBe('error'))
+    expect(view.result.current.streamingActive).toBe(false)
+    view.unmount()
+  })
+})
+
 afterEach(() => {
   vi.unstubAllGlobals()
   sockets.length = 0

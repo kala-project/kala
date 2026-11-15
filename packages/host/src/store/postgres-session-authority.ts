@@ -41,11 +41,11 @@ import { assertNativeFsAdmission, lockNativeFsAdmission, nativeFsAdmissionSchema
 import { decodePostgresJson, stringifyPostgresJson } from '../tenant-runtime/postgres-json.js'
 import { emptyAgentBoard, type AgentBoardState } from './agent-board-state.js'
 import type { ChildCommand, ChildCommandInbox, ChildCommandKind, ChildCompletionNotice } from './child-command-state.js'
+import { SESSION_DELETION_FIELD, sessionSummarySchemaStatements } from './postgres-session-summary.js'
 
 export { SessionDeletingError } from './session-authority.js'
 export type { PersistedSessionDocument, SessionAuthorityMutation } from './session-authority.js'
 
-const SESSION_DELETION_FIELD = '__kalaSessionDeletion'
 const LEGACY_NATIVE_FS_FIELD = '__kalaCopilotSessionFsV1'
 
 type SessionDeletionTombstone = {
@@ -104,6 +104,7 @@ export class PostgresSessionAuthority implements SessionAuthority, ChildCommandI
   readonly childCommandInbox: ChildCommandInbox = this
   readonly #ownerIdPrefix: string
   readonly #eventsTable: string
+  readonly #scopeHeadsTable: string
   readonly #projectionTable: string
   readonly #agentBoardTable: string
   readonly #childCommandTable: string
@@ -212,6 +213,7 @@ export class PostgresSessionAuthority implements SessionAuthority, ChildCommandI
     this.#ownerIdPrefix = options.ownerId ?? 'session-store'
     this.#nativeFsLimits = validateNativeFsLimits(options.nativeFsLimits ?? {})
     this.#eventsTable = `${schema}.tenant_runtime_hot_events`
+    this.#scopeHeadsTable = `${schema}.tenant_runtime_hot_leases`
     this.#projectionTable = `${schema}.tenant_session_latest_projection`
     this.#agentBoardTable = `${schema}.tenant_session_agent_boards`
     this.#childCommandTable = `${schema}.tenant_session_child_commands`
@@ -280,6 +282,12 @@ export class PostgresSessionAuthority implements SessionAuthority, ChildCommandI
       updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
       PRIMARY KEY (tenant_id, session_id)
     )`)
+    await this.hotState.database.transaction(async (transaction) => {
+      await transaction.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`kala:session-summary:${this.#schemaName}`])
+      for (const statement of sessionSummarySchemaStatements(quoteIdentifier(this.#schemaName))) {
+        await transaction.query(statement)
+      }
+    })
     await this.hotState.database.query(`CREATE TABLE IF NOT EXISTS ${this.#agentBoardTable} (
       tenant_id text NOT NULL,
       root_session_id text NOT NULL,
@@ -1374,37 +1382,17 @@ export class PostgresSessionAuthority implements SessionAuthority, ChildCommandI
     const selected = sessionIds === undefined ? undefined : [...new Set(sessionIds)]
     if (selected?.length === 0) return []
     selected?.forEach(validateSessionId)
+    // Both the scope head and stored summary advance atomically with the event.
+    // Listing must not scan the event history or decompress transcript documents.
     const result = await this.hotState.database.query<{
       scope_id: string
       projection_session_id: string | null
       document: PersistedSessionDocument | null
     }>(`SELECT scopes.scope_id, projection.session_id AS projection_session_id,
-      CASE WHEN projection.document IS NULL OR projection.document = 'null'::jsonb THEN NULL
-        ELSE jsonb_strip_nulls(jsonb_build_object(
-        'sessionId', projection.document->'sessionId',
-        'agentRuntime', projection.document->'agentRuntime',
-        'executionMode', projection.document->'executionMode',
-        'agentRuntimeVersion', projection.document->'agentRuntimeVersion',
-        'createdAt', projection.document->'createdAt',
-        'lastEventAt', projection.document->'lastEventAt',
-        'parentSessionId', projection.document->'parentSessionId',
-        'organizationId', projection.document->'organizationId',
-        'workspaceId', projection.document->'workspaceId',
-        'workspaceName', projection.document->'workspaceName',
-        'firstUserMessage', left(projection.document->>'firstUserMessage', 120),
-        'label', projection.document->'label',
-        'goal', projection.document->'goal',
-        '${SESSION_DELETION_FIELD}', projection.document->'${SESSION_DELETION_FIELD}',
-        'preferences', COALESCE(projection.document->'preferences', '{}'::jsonb),
-        'state', jsonb_strip_nulls(jsonb_build_object(
-          'cursor', projection.document#>'{state,cursor}',
-          'status', projection.document#>'{state,status}',
-          'cwd', projection.document#>'{state,cwd}'
-        ))
-      )) END AS document
+        projection.summary_document AS document
       FROM (
-        SELECT DISTINCT scope_id FROM ${this.#eventsTable}
-        WHERE tenant_id = $1 AND scope_type = 'session'
+        SELECT scope_id FROM ${this.#scopeHeadsTable}
+        WHERE tenant_id = $1 AND scope_type = 'session' AND last_sequence > 0
           ${selected ? 'AND scope_id = ANY($2::text[])' : ''}
       ) AS scopes
       LEFT JOIN ${this.#projectionTable} AS projection
@@ -1657,6 +1645,7 @@ export class PostgresSessionAuthority implements SessionAuthority, ChildCommandI
       WHERE tenant_id = $1 AND scope_type = 'session' AND scope_id = $2
         AND sequence > $3 AND sequence <= $4
       ORDER BY sequence ASC`, [this.tenantId, sessionId, version, sequence])
+    let replayed = 0
     for (const row of result.rows) {
       const payload = decodePostgresJson(row.payload)
       if (isDeltaSessionEvent(payload) && BigInt(payload.baseVersion) !== version) {
@@ -1664,6 +1653,8 @@ export class PostgresSessionAuthority implements SessionAuthority, ChildCommandI
       }
       document = applySessionEvent(document, payload)
       version = BigInt(row.sequence)
+      // Historical retries must not starve Runtime membership and owner renewals.
+      if (++replayed % 32 === 0) await new Promise<void>(resolve => setImmediate(resolve))
     }
     if (version !== sequence) throw new Error(`Session audit history ends at ${version}, expected ${sequence}`)
     return document

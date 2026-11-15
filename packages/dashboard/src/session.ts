@@ -1037,8 +1037,6 @@ export function useSession({
         if (historyRequestTimer !== null) { window.clearTimeout(historyRequestTimer); historyRequestTimer = null }
         dispatchProjectionEvent({ kind: 'history', generation, sessionId, entries: [], authoritative: false })
       }
-      finishStream()
-      acceptStreamDeltas = false
       flushProjectionQueue()
       dispatchProjectionEvent({ kind: 'error', generation, sessionId, error: p })
     })

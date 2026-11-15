@@ -2167,16 +2167,11 @@ function MessageRow({
     if (parseShellResultView(messageText)) return <ShellResultMessage text={messageText} ts={ts} />
     const cancelledUserTurn = turnTiming?.status === 'cancelled'
     const metadata = (
-      <div className={cn(
-        'pointer-events-auto z-10 flex items-center gap-1.5',
-        cancelledUserTurn
-          ? 'relative max-w-full flex-wrap justify-end text-muted-foreground'
-          : 'absolute bottom-1 left-2 max-w-[calc(100%-1rem)] rounded-md bg-primary/85 px-1 backdrop-blur-sm sm:bottom-0 sm:left-auto sm:right-full sm:mr-2 sm:max-w-[18rem] sm:bg-transparent sm:px-0 sm:backdrop-blur-none',
-      )} data-testid="user-message-metadata">
+      <div className="pointer-events-auto relative z-10 flex max-w-full flex-wrap items-center justify-end gap-1.5 text-muted-foreground" data-testid="user-message-metadata">
         {scheduledTaskId ? (
           <button
             type="button"
-            className="inline-flex h-6 items-center gap-1 rounded px-1.5 text-caption font-medium text-inherit transition-colors hover:bg-primary-foreground/15 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="inline-flex h-6 items-center gap-1 rounded px-1.5 text-caption font-medium text-inherit transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             aria-label="Open scheduled task details"
             title="Open scheduled task details"
             data-testid="scheduled-message-badge"
@@ -2199,9 +2194,7 @@ function MessageRow({
           } : undefined}
         />
         {turnTiming ? <TurnTimingFooter summary={turnTiming} userMessage cancelledUserMessage={cancelledUserTurn} /> : null}
-        <InlineTimestamp ts={ts} className={cancelledUserTurn
-          ? 'min-w-0'
-          : 'absolute bottom-full left-0 mb-0.5 rounded bg-primary/90 px-1 text-primary-foreground sm:bottom-1/2 sm:left-auto sm:right-full sm:mb-0 sm:mr-2 sm:translate-y-1/2 sm:bg-background/90 sm:text-muted-foreground'} />
+        <InlineTimestamp ts={ts} className="min-w-0 max-w-full whitespace-normal text-right" />
       </div>
     )
     return (
@@ -2209,13 +2202,12 @@ function MessageRow({
         id={`msg-${index}`}
         data-message-index={index}
         className={cn(
-          'group relative flex min-w-0 max-w-full justify-end gap-2',
-          cancelledUserTurn && 'flex-col items-end gap-1',
+          'group relative flex min-w-0 max-w-full flex-col items-end justify-end gap-1',
           highlighted ? 'rounded-2xl bg-amber-50/60 p-1 dark:bg-amber-950/20' : '',
         )}
       >
         <div className="relative min-w-0 max-w-[92%] sm:max-w-[85%]">
-          <div className={cn('relative max-w-full overflow-hidden rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-primary-foreground shadow-sm sm:pb-2.5', cancelledUserTurn ? 'pb-2.5' : 'pb-9')} data-testid="user-message-surface">
+          <div className="relative max-w-full overflow-hidden rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-primary-foreground shadow-sm" data-testid="user-message-surface">
             <div className="flex min-w-0 flex-col gap-2">
               {message.content.map((c, i) => (
                 <ContentBlock
@@ -2230,9 +2222,8 @@ function MessageRow({
               ))}
             </div>
           </div>
-          {!cancelledUserTurn ? metadata : null}
         </div>
-        {cancelledUserTurn ? metadata : null}
+        {metadata}
       </div>
     )
   }

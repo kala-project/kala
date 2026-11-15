@@ -96,11 +96,13 @@ import { readStoredSessionChildrenOpenState, readStoredSessionOrder, readStoredW
 import { coarseSummaryStatus, isSessionWorkspaceOnline, sameExecutorListForExplorer, sameSessionListForExplorer, sameSessionStatusMap } from './comparators.js'
 import { SessionRuntimeStore, useSessionRuntime } from './session-runtime-store.js'
 import { useInterfaceScale } from '../../lib/interface-scale.js'
+import { useSessionListPerformance } from '../../lib/session-list-performance.js'
 
 type Props = {
   executors: readonly AttachedExecutor[]
   sessions: readonly SessionSummary[]
   loading?: boolean
+  sessionListReady?: boolean
   /** Private Cloud should not hide historical sessions when their old Executor is offline. */
   autoHideOfflineWorkspacesByDefault?: boolean
   selectedSessionId: string | null
@@ -138,6 +140,7 @@ function ExplorerImpl({
   executors,
   sessions,
   loading = false,
+  sessionListReady = false,
   autoHideOfflineWorkspacesByDefault = true,
   selectedSessionId,
   sessionStatuses,
@@ -189,6 +192,7 @@ function ExplorerImpl({
   const [autoHideOfflineWorkspaces] = useBooleanPref(PREF_AUTO_HIDE_OFFLINE_WORKSPACES, autoHideOfflineWorkspacesByDefault)
   const [hideSubAgentSessions] = useBooleanPref(PREF_HIDE_SUB_AGENT_SESSIONS, true)
   const [ref, bounds] = useMeasure({ debounce: 30 })
+  useSessionListPerformance(sessionListReady, !loading && bounds.height > 0, sessions.length)
 
   const [manualSessionOrder, setManualSessionOrder] = useState<readonly string[]>(() =>
     syncSessionOrder(readStoredSessionOrder(), sessions),
@@ -1725,6 +1729,7 @@ function RenameInput({
 
 function areExplorerPropsEqual(prev: Props, next: Props): boolean {
   return prev.loading === next.loading &&
+    prev.sessionListReady === next.sessionListReady &&
     prev.autoHideOfflineWorkspacesByDefault === next.autoHideOfflineWorkspacesByDefault &&
     prev.selectedSessionId === next.selectedSessionId &&
     prev.embeddedHeader === next.embeddedHeader &&

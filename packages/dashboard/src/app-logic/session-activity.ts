@@ -25,7 +25,6 @@ export function deriveSelectedSessionActivity({
   streamingActive,
   awaitingAck,
   compactRunning,
-  lastError,
 }: {
   selectedSessionId: string | null
   hydratedSessionId: string | null
@@ -35,7 +34,6 @@ export function deriveSelectedSessionActivity({
   streamingActive: boolean
   awaitingAck: boolean
   compactRunning: boolean
-  lastError?: string | null
 }): SelectedSessionActivity {
   const usesLiveProjection = selectedSessionId !== null && hydratedSessionId === selectedSessionId
   const status = usesLiveProjection ? liveStatus : summaryStatus
@@ -45,9 +43,9 @@ export function deriveSelectedSessionActivity({
         streamingActive,
         awaitingAck,
         compactRunning,
-        lastError,
       }
     : {}
+  // Operation feedback is not an Agent lifecycle transition.
   const derived = deriveSessionState({ status, ...liveSignals })
   const activityStatus: SessionActivityStatus | undefined =
     derived.activity === 'failed'
