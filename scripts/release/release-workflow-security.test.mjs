@@ -32,7 +32,7 @@ test('all release gates use official verified cosign sources and fail closed', (
 
 test('tag orchestrator promotes only after exact-revision asset, image, and hosted acceptance gates', () => {
   const workflow = readFileSync(join(import.meta.dirname, '../../.github/workflows/release-orchestrator.yml'), 'utf8')
-  assert.match(workflow, /tags: \['v0\.4\.0', 'v0\.4\.1', 'v0\.4\.2'\]/u)
+  assert.match(workflow, /tags: \['v0\.4\.0', 'v0\.4\.1', 'v0\.4\.2', 'v0\.4\.3'\]/u)
   assert.match(workflow, /test "\$GITHUB_REF" = "refs\/tags\/\$TAG"/u)
   assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$\(git rev-parse "\$TAG\^\{commit\}"\)"/u)
   assert.match(workflow, /group: complete-release-\$\{\{ github\.sha \}\}/u)
@@ -49,6 +49,8 @@ test('tag orchestrator promotes only after exact-revision asset, image, and host
     'wait_for_run portable-image-release.yml workflow_dispatch',
     'gh workflow run promote-rc.yml',
     'wait_for_run promote-rc.yml workflow_dispatch',
+    'test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = false',
+    'gh workflow run website-pages.yml --ref main',
   ]
   for (let index = 1; index < stages.length; index++) {
     assert.ok(workflow.indexOf(stages[index - 1]) < workflow.indexOf(stages[index]), `${stages[index]} must follow its gate`)
@@ -57,6 +59,8 @@ test('tag orchestrator promotes only after exact-revision asset, image, and host
   assert.match(workflow, /-F require_isolated_vm_acceptance=true/u)
   assert.match(workflow, /promote_before="\$\(baseline promote-rc\.yml\)"[\s\S]*wait_for_run promote-rc\.yml workflow_dispatch "\$promote_before"/u)
   assert.match(workflow, /test "\$\(gh release view "\$TAG" --json isDraft --jq \.isDraft\)" = false/u)
+  assert.match(workflow, /permissions:\n\s+actions: write/u)
+  assert.match(workflow, /GH_TOKEN: \$\{\{ github\.token \}\}/u)
 })
 
 test('release and RC retries are bounded to unassigned macOS runners and never hide failures', () => {
@@ -100,6 +104,16 @@ test('Windows acceptance builds real workspace dependencies instead of a quoted 
   const workflow = readFileSync(join(import.meta.dirname, '../../.github/workflows/rc-acceptance.yml'), 'utf8')
   assert.match(workflow, /windows-portable-conpty:[\s\S]*pnpm --filter @agent-kernel\/shared\.\.\. run build[\s\S]*Prove Windows Node\.js 22 Host/u)
   assert.match(workflow, /\$assets = @\([\s\S]*?'install-executor\.ps1'\s*\)/u)
+})
+
+test('release qualification bounds heavy test concurrency and exposes fail-closed image scan diagnostics', () => {
+  const release = readFileSync(join(import.meta.dirname, '../../.github/workflows/release.yml'), 'utf8')
+  assert.match(release, /name: Configure test workers\n\s+env:\n\s+KALA_TEST_MAX_WORKERS: 2\n\s+run: node scripts\/testing\/configure-test-workers\.mjs/u)
+  const cloud = readFileSync(join(import.meta.dirname, '../../.github/workflows/private-cloud-release.yml'), 'utf8')
+  assert.match(cloud, /::error title=Grype execution failed::/u)
+  assert.match(cloud, /::error title=Trivy execution failed::/u)
+  assert.match(cloud, /::error title=Blocking image vulnerability::/u)
+  assert.match(cloud, /scan runtime[\s\S]*scan ingress[\s\S]*scan dashboard[\s\S]*exit "\$failed"/u)
 })
 
 test('Private Cloud Windows invite fixture uses the same OIDC authentication contract as the Gateway', () => {
@@ -207,8 +221,8 @@ test('Private Cloud scanner preserves failure while collecting all three image r
     assert.match(workflow, new RegExp(`scan ${component} [^\n]+ \\|\\| failed=1`, 'u'))
   }
   assert.match(workflow, /exit "\$failed"/u)
-  assert.match(workflow, /grype "\$image"[^\n]+\|\| return 1/u)
-  assert.match(workflow, /trivy image [^\n]+\|\| return 1/u)
+  assert.match(workflow, /grype "\$image"[^\n]+\|\| \{\n[^\n]+Grype execution failed[^\n]+\n\s+return 1\n\s+\}/u)
+  assert.match(workflow, /trivy image [^\n]+\|\| \{\n[^\n]+Trivy execution failed[^\n]+\n\s+return 1\n\s+\}/u)
 })
 
 test('Private Cloud release retains image publishing and accepts the exact signed Compose candidate', () => {

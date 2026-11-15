@@ -1,4 +1,24 @@
 {
+  "v0.4.3": {
+    "previousTag": "v0.4.2",
+    "improvements": [
+      "The opt-in unified Settings layout groups configuration and administration by authority, with versioned conditional writes, explicit effective-state feedback, and restricted Operator maintenance.",
+      "Session lists use stored summaries and bounded restored-event replay to improve initial readiness without changing Session ownership or organization scoping."
+    ],
+    "fixes": [
+      "Mobile user-message timestamps and metadata remain in normal layout flow instead of overlapping message text.",
+      "Session operation feedback no longer overwrites the authoritative Agent status.",
+      "Dedicated native SILO Console launch, explicit Owner credential handoff, and authenticated WebSocket forwarding work through the retained and direct ingress paths without Dashboard fallback.",
+      "Public release promotion explicitly refreshes the website, so workflow-token publication does not leave the download page on the preceding release."
+    ],
+    "knownIssues": [
+      "Unified Settings remains an installation-controlled rollout through KALA_SETTINGS_LAYOUT=unified; existing installations retain the legacy layout until deliberately enabled.",
+      "Expanded PostgreSQL schemas require Operator-run migrations and a schema-compatible rollback build. Do not restore pre-expansion binaries or downgrade the schema.",
+      "Native SILO Console keeps its separate administrator login. Credential handoff is explicit and Owner-gated; proxy access does not itself authenticate the native application.",
+      "Private Cloud lifecycle support remains preview-only; fresh installs require external OIDC, the postgres-s3 profile, and evaluation and backup acknowledgements."
+    ],
+    "desktopViaDashboard": true
+  },
   "v0.4.2": {
     "previousTag": "v0.4.1",
     "improvements": [],

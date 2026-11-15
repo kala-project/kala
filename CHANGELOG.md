@@ -5,6 +5,33 @@ Versioning while pre-1.0 and uses one product version across release artifacts.
 
 ## [Unreleased]
 
+## [0.4.3]
+
+### Improved
+
+- Opt-in unified Settings organizes configuration and administration by authority,
+  with conditional writes, effective-state feedback, and restricted Operator maintenance.
+- Session lists load stored summaries and replay restored events in bounded batches.
+
+### Fixed
+
+- Mobile user-message timestamps and metadata no longer overlap message text.
+- Session operation feedback preserves the authoritative Agent status.
+- Dedicated SILO Console uses explicit Owner-gated launch and credential handoff,
+  with authenticated WebSocket forwarding through retained and direct ingress.
+- Public release promotion refreshes the website even when publication uses
+  the workflow token.
+
+### Upgrade boundaries
+
+- Existing installations retain the legacy Settings layout until
+  `KALA_SETTINGS_LAYOUT=unified` is deliberately enabled.
+- Expanded PostgreSQL schemas require Operator-run migration and a compatible
+  rollback build; pre-expansion binaries and schema downgrades are not rollback targets.
+- Native SILO administration retains its separate login. Private Cloud remains
+  preview-only and requires external OIDC, postgres-s3, and explicit evaluation
+  and backup acknowledgements for fresh installs.
+
 ## [0.4.2]
 
 ### Fixed

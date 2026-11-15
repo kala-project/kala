@@ -121,6 +121,8 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
       - name: Configure test workers
+        env:
+          KALA_TEST_MAX_WORKERS: 2
         run: node scripts/testing/configure-test-workers.mjs
       - run: pnpm run verify:version -- --tag ${{ needs.resolve.outputs.tag }}
       - run: pnpm run build

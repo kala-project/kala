@@ -438,6 +438,7 @@ describe('executor end-to-end', () => {
 
     const executor = startExecutor({ host: url, workspaceId, workspaceName: 'test-ws', sandboxRoots: [sandboxRoot] })
     await executor.ready
+    await vi.waitFor(() => expect(server.executorsSnapshot().some((entry) => entry.workspaceId === workspaceId)).toBe(true))
 
     const file = await new Promise<{ base64: string; mime: string; size: number; error?: { code: string; message: string } }>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('file view timed out')), 3000)
