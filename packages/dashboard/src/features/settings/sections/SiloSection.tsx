@@ -66,7 +66,7 @@ export function SiloSection({ enabled, credentialsAvailable = false }: {
     {enabled ? <div className="grid min-w-0 gap-5 rounded-xl bg-card/65 p-4 ring-1 ring-border/40 sm:p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">{t('unifiedSettings.silo.loginHelp')}</p>
-        <Button asChild className="min-h-11"><a href="/silo/" target="_blank" rel="noopener noreferrer" data-testid="settings-open-silo">
+        <Button asChild className="min-h-11"><a href="/auth/silo/open" target="_blank" rel="noopener noreferrer" data-testid="settings-open-silo">
           {t('unifiedSettings.silo.open')}<ExternalLink className="ml-2 h-4 w-4" aria-hidden="true" />
         </a></Button>
       </div>

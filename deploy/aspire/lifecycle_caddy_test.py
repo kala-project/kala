@@ -17,8 +17,9 @@ class CaddySiloRouteTests(unittest.TestCase):
         silo = config.split("@silo path /silo /silo/*", 1)[1].split("\n\thandle {", 1)[0]
         self.assertLess(silo.index("forward_auth gateway:13001"), silo.index("uri strip_prefix /silo"))
         self.assertLess(silo.index("uri strip_prefix /silo"), silo.index("reverse_proxy silo:9001"))
-        self.assertIn("uri /auth/silo/authorize", silo)
+        self.assertIn("uri /auth/silo/authorize?\n", silo)
         self.assertIn("header_up Cookie", silo)
+        self.assertIn('header_down Set-Cookie "^(.*)$" "$1; Secure"', silo)
         self.assertIn("stream_timeout 5m", silo)
         self.assertNotIn("reverse_proxy silo:9000", config)
 

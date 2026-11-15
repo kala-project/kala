@@ -5,7 +5,27 @@ import { pathToFileURL } from 'node:url'
 
 const marker = '  # Optional public-origin Console environment override.\n'
 
-export function renderIdentityConsoleCaddy(template, environment, publicOrigin) {
+const dedicatedSiloRoute = `  @silo path /silo /silo/*
+  handle @silo {
+    redir /silo /silo/ 308
+    route {
+      forward_auth {$KALA_GATEWAY_ORIGIN} {
+        uri /auth/silo/authorize?
+        header_up -Connection
+        header_up -Upgrade
+      }
+      uri strip_prefix /silo
+      reverse_proxy silo:9001 {
+        header_up Cookie "(^|;[[:space:]]*)ak_session=[^;]*(;[[:space:]]*)?" "$1"
+        header_down Set-Cookie "^(.*)$" "$1; Secure"
+        stream_timeout 5m
+      }
+    }
+  }
+
+`
+
+export function renderIdentityConsoleCaddy(template, environment, publicOrigin, options = {}) {
   const origin = new URL(publicOrigin)
   if (origin.protocol !== 'https:' || origin.origin !== publicOrigin) {
     throw new Error('Public origin must be a canonical HTTPS origin without a path or credentials')
@@ -28,6 +48,9 @@ export function renderIdentityConsoleCaddy(template, environment, publicOrigin) 
   if (metadata.includes('{$')) {
     throw new Error('Console metadata must not contain Caddy environment substitutions')
   }
+  if (options.dedicatedSiloConsole !== undefined && typeof options.dedicatedSiloConsole !== 'boolean') {
+    throw new Error('Dedicated SILO Console routing must be an explicit boolean')
+  }
   const route = [
     '  # tlsMode disabled serves h2c but may generate an HTTP Console API URL.',
     '  @consoleEnvironment path /ui/console/assets/environment.json',
@@ -38,7 +61,7 @@ export function renderIdentityConsoleCaddy(template, environment, publicOrigin) 
     '  }',
     '',
   ].join('\n')
-  return template.replace(marker, marker + route)
+  return template.replace(marker, marker + route + (options.dedicatedSiloConsole ? dedicatedSiloRoute : ''))
 }
 
 async function readEnvironment(path) {
@@ -54,15 +77,18 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const { values } = parseArgs({ options: {
       'public-origin': { type: 'string' },
       environment: { type: 'string' },
+      'dedicated-silo-console': { type: 'boolean', default: false },
     } })
     if (!values['public-origin'] || !values.environment) {
-      throw new Error('Usage: render-identity-console-caddy.mjs --public-origin https://identity.example --environment console-environment.json')
+      throw new Error('Usage: render-identity-console-caddy.mjs --public-origin https://identity.example --environment console-environment.json [--dedicated-silo-console]')
     }
     const [template, environment] = await Promise.all([
       readFile(new URL('../../deploy/private-cloud/identity-local/single-origin.Caddyfile', import.meta.url), 'utf8'),
       readEnvironment(values.environment),
     ])
-    process.stdout.write(renderIdentityConsoleCaddy(template, JSON.parse(environment), values['public-origin']))
+    process.stdout.write(renderIdentityConsoleCaddy(template, JSON.parse(environment), values['public-origin'], {
+      dedicatedSiloConsole: values['dedicated-silo-console'],
+    }))
   } catch (error) {
     console.error(error.message)
     process.exitCode = 1

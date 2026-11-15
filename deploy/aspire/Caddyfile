@@ -12,11 +12,14 @@
 		redir /silo /silo/ 308
 		route {
 			forward_auth gateway:13001 {
-				uri /auth/silo/authorize
+				uri /auth/silo/authorize?
+				header_up -Connection
+				header_up -Upgrade
 			}
 			uri strip_prefix /silo
 			reverse_proxy silo:9001 {
 				header_up Cookie "(^|;[[:space:]]*)ak_session=[^;]*(;[[:space:]]*)?" "$1"
+				header_down Set-Cookie "^(.*)$" "$1; Secure"
 				stream_timeout 5m
 			}
 		}

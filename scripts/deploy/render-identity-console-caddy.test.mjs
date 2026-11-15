@@ -34,6 +34,21 @@ test('routes Kala Socket.IO administration to Gateway before the identity provid
   assert.match(rendered, /handle @identity \{\s+reverse_proxy h2c:\/\/identity-zitadel:8080/u)
 })
 
+test('Dedicated browser front doors route native storage through the same Owner guard instead of the Dashboard fallback', () => {
+  const rendered = renderIdentityConsoleCaddy(template, environment, publicOrigin, { dedicatedSiloConsole: true })
+  assert(rendered.indexOf('handle @silo') < rendered.indexOf('handle @identity'))
+  assert.match(rendered, /@silo path \/silo \/silo\/\*/u)
+  assert.match(rendered, /forward_auth \{\$KALA_GATEWAY_ORIGIN\} \{\s+uri \/auth\/silo\/authorize\?/u)
+  assert(rendered.includes('uri /auth/silo/authorize?\n        header_up -Connection\n        header_up -Upgrade'))
+  assert.match(rendered, /uri strip_prefix \/silo/u)
+  assert.match(rendered, /reverse_proxy silo:9001/u)
+  assert(rendered.includes('header_up Cookie "(^|;[[:space:]]*)ak_session=[^;]*(;[[:space:]]*)?" "$1"'))
+  assert(rendered.includes('header_down Set-Cookie "^(.*)$" "$1; Secure"'))
+  assert(rendered.includes(template.slice(template.indexOf('  @login'))))
+  assert(!renderIdentityConsoleCaddy(template, environment, publicOrigin).includes('@silo'))
+  assert.throws(() => renderIdentityConsoleCaddy(template, environment, publicOrigin, { dedicatedSiloConsole: 'true' }), /explicit boolean/u)
+})
+
 test('refuses issuer, authority, client identity and configuration injection ambiguity', () => {
   const credentialOrigin = new URL(publicOrigin)
   credentialOrigin.username = 'fixture-user'
@@ -61,6 +76,12 @@ test('CLI renders an existing environment from stdin without network or mutation
   ], { input: JSON.stringify(environment), encoding: 'utf8' })
   assert.equal(result.status, 0, result.stderr)
   assert.equal(result.stdout, renderIdentityConsoleCaddy(template, environment, publicOrigin))
+  const dedicated = spawnSync(process.execPath, [
+    new URL('./render-identity-console-caddy.mjs', import.meta.url).pathname,
+    '--public-origin', publicOrigin, '--environment', '-', '--dedicated-silo-console',
+  ], { input: JSON.stringify(environment), encoding: 'utf8' })
+  assert.equal(dedicated.status, 0, dedicated.stderr)
+  assert.equal(dedicated.stdout, renderIdentityConsoleCaddy(template, environment, publicOrigin, { dedicatedSiloConsole: true }))
   const missing = spawnSync(process.execPath, [
     new URL('./render-identity-console-caddy.mjs', import.meta.url).pathname,
   ], { encoding: 'utf8' })

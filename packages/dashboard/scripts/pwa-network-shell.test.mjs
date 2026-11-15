@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { createServer } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 
 const source = readFileSync(new URL('../src/sw.ts', import.meta.url), 'utf8')
@@ -25,4 +31,31 @@ test('composer context indicator ships statically discoverable stroke colors', (
     assert.ok(runtimeMetrics.includes(className), 'missing static Tailwind class: ' + className)
   }
   assert.doesNotMatch(runtimeMetrics, /\.replace\('border-', 'stroke-'\)/u)
+})
+
+test('the actual static server refuses native Console paths instead of serving the Dashboard shell', { timeout: 10_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'kala-native-route-'))
+  await writeFile(join(directory, 'index.html'), '<title>Dashboard fixture</title>')
+  const reservation = createServer().listen(0, '127.0.0.1')
+  await once(reservation, 'listening')
+  const port = reservation.address().port
+  await new Promise(resolve => reservation.close(resolve))
+  const child = spawn(process.execPath, [new URL('../../../deploy/private-cloud/images/dashboard-server.mjs', import.meta.url).pathname], {
+    env: { ...process.env, DASHBOARD_ROOT: directory, DASHBOARD_PORT: String(port) }, stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  try {
+    await Promise.race([once(child.stdout, 'data'), once(child, 'exit').then(() => { throw new Error('Dashboard server exited before readiness') })])
+    for (const path of ['/silo', '/silo/', '/silo/login', '/auth/silo/open']) {
+      const response = await fetch(`http://127.0.0.1:${port}${path}`)
+      assert.equal(response.status, 503)
+      assert.equal(response.headers.get('cache-control'), 'no-store')
+      assert.deepEqual(await response.json(), { error: 'native_console_route_unavailable' })
+    }
+    const ordinary = await fetch(`http://127.0.0.1:${port}/ordinary-client-route`)
+    assert.equal(ordinary.status, 200)
+    assert.equal(await ordinary.text(), '<title>Dashboard fixture</title>')
+  } finally {
+    if (child.exitCode === null) { child.kill('SIGTERM'); await once(child, 'exit') }
+    await rm(directory, { recursive: true, force: true })
+  }
 })

@@ -14,6 +14,11 @@ createServer(async (request, response) => {
     if (request.url === '/healthz') { response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end('{"ok":true}'); return }
     if (request.method !== 'GET' && request.method !== 'HEAD') { response.writeHead(405, { allow: 'GET, HEAD' }); response.end(); return }
     let pathname; try { pathname = decodeURIComponent(new URL(request.url ?? '/', 'http://dashboard.invalid').pathname) } catch { response.writeHead(400); response.end(); return }
+    if (/^\/silo(?:\/|$)/u.test(pathname) || pathname === '/auth/silo/open') {
+      response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      response.end('{"error":"native_console_route_unavailable"}')
+      return
+    }
     const relative = pathname.replace(/^\/+|\/+$/gu, '') || 'index.html'
     const normalized = normalize(relative)
     if (normalized === '..' || normalized.startsWith(`..${sep}`) || normalized.includes('\0')) { response.writeHead(400); response.end(); return }

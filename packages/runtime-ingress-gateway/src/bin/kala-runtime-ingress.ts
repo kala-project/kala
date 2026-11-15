@@ -254,10 +254,21 @@ async function main(): Promise<void> {
   if (aspireTokenFile && (!dedicated || !observabilityUrl)) throw new Error('Aspire token access requires a Dedicated dashboard URL')
   const siloConsoleEnabled = process.env.KALA_SILO_CONSOLE_ENABLED === '1'
   if (siloConsoleEnabled && !dedicated) throw new Error('SILO console access requires Dedicated Owner authentication')
+  const siloCredentialFiles = [process.env.KALA_SILO_CONSOLE_USERNAME_FILE, process.env.KALA_SILO_CONSOLE_PASSWORD_FILE]
+  if (siloCredentialFiles.some(Boolean) && (!dedicated || !siloConsoleEnabled || !siloCredentialFiles.every(Boolean))) {
+    throw new Error('Storage credential access requires Dedicated Console access and both protected credential files')
+  }
   const operatorServices = dedicated && (observabilityUrl || identityConsoleUrl || siloConsoleEnabled) ? {
     ...(identityConsoleUrl ? { identityConsoleUrl } : {}),
     ...(observabilityUrl ? { observabilityUrl } : {}),
     ...(siloConsoleEnabled ? { siloConsolePath: '/silo/' as const } : {}),
+    ...(siloCredentialFiles.every(Boolean) ? { readSiloCredentials: async () => {
+      const [username, password] = await Promise.all([
+        readRequiredSecretEnv('KALA_SILO_CONSOLE_USERNAME'),
+        readRequiredSecretEnv('KALA_SILO_CONSOLE_PASSWORD'),
+      ])
+      return { username, password }
+    } } : {}),
     ...(aspireTokenFile ? { readObservabilityToken: () => readRequiredSecretEnv('KALA_ASPIRE_BROWSER_TOKEN') } : {}),
   } : undefined
   const webhookManagement = process.env.KALA_WEBHOOK_MANAGEMENT_ENABLED ?? '0'

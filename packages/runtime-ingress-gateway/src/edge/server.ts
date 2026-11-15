@@ -278,6 +278,7 @@ export async function startRuntimeIngressGateway(options: {
     identityConsoleUrl?: string
     observabilityUrl?: string
     siloConsolePath?: '/silo/'
+    readSiloCredentials?: () => Promise<{ username: string; password: string }>
     readObservabilityToken?: () => Promise<string>
   }
   directory: RuntimeAssignmentStore
@@ -698,7 +699,37 @@ export async function startRuntimeIngressGateway(options: {
       }
       return
     }
-    if (url.pathname === '/auth/silo/authorize') {
+    if (url.pathname === '/auth/silo/credentials') {
+      const json = (status: number, body: object) => {
+        response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', pragma: 'no-cache', 'x-content-type-options': 'nosniff' })
+        response.end(JSON.stringify(body))
+      }
+      if (!options.singleTenantOwner || options.operatorServices?.siloConsolePath !== '/silo/' || !options.operatorServices.readSiloCredentials) {
+        json(404, { error: 'not_available' }); return
+      }
+      if (request.method !== 'POST' || url.search) { json(405, { error: 'method_not_allowed' }); return }
+      if (request.headers.origin !== requestPublicOrigin(request)) { json(403, { error: 'origin_forbidden' }); return }
+      const session = await authenticate(request)
+      if (!session) { json(401, { error: 'authentication_required' }); return }
+      const access = await options.organizations?.findAccess(session.identity)
+      if (!access || access.organization.status !== 'active' || access.membership.role !== 'owner') { json(403, { error: 'owner_required' }); return }
+      try {
+        const credentials = await options.operatorServices.readSiloCredentials()
+        if (![credentials.username, credentials.password].every(value => typeof value === 'string' && value.length > 0 && value.length <= 4096 && !/[\0\r\n]/u.test(value))) {
+          throw new Error('invalid storage credentials')
+        }
+        const current = await authenticate(request)
+        const latest = current && await options.organizations?.findAccess(current.identity)
+        if (!current || current.id !== session.id || latest?.organization.id !== access.organization.id || latest.organization.unitId !== access.organization.unitId || latest.organization.status !== 'active' || latest.membership.role !== 'owner') {
+          json(403, { error: 'owner_required' }); return
+        }
+        json(200, { username: credentials.username, password: credentials.password })
+      } catch {
+        json(503, { error: 'silo_credentials_unavailable' })
+      }
+      return
+    }
+    if (url.pathname === '/auth/silo/authorize' || url.pathname === '/auth/silo/open') {
       const deny = (status: number) => { response.writeHead(status, { 'cache-control': 'no-store' }); response.end() }
       if (!options.singleTenantOwner || options.operatorServices?.siloConsolePath !== '/silo/') { deny(404); return }
       if (request.method !== 'GET' || url.search) { deny(405); return }
@@ -711,6 +742,11 @@ export async function startRuntimeIngressGateway(options: {
       if (!session) { deny(401); return }
       const access = await options.organizations?.findAccess(session.identity)
       if (!access || access.organization.status !== 'active' || access.membership.role !== 'owner') { deny(403); return }
+      if (url.pathname === '/auth/silo/open') {
+        response.writeHead(303, { location: '/silo/', 'cache-control': 'no-store' })
+        response.end()
+        return
+      }
       deny(204)
       return
     }
@@ -729,6 +765,7 @@ export async function startRuntimeIngressGateway(options: {
             observability: Boolean(options.operatorServices.observabilityUrl),
             ...(options.operatorServices.observabilityUrl ? { observabilityUrl: options.operatorServices.observabilityUrl } : {}),
             ...(options.operatorServices.siloConsolePath ? { siloConsolePath: options.operatorServices.siloConsolePath } : {}),
+            ...(options.operatorServices.siloConsolePath && options.operatorServices.readSiloCredentials ? { siloCredentialsAvailable: true } : {}),
             ...(options.operatorServices.readObservabilityToken ? { observabilityTokenAvailable: true } : {}),
           },
         } : {}),

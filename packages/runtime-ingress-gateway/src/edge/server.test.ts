@@ -282,6 +282,62 @@ describe('Private Cloud edge request path', () => {
     expect((await fetch(`http://127.0.0.1:${shared.port}/auth/aspire/login-token`, { method: 'POST' })).status).toBe(404)
   })
 
+  it('reveals storage login only on explicit current same-origin Dedicated Owner authorization without caching or leaking metadata', async () => {
+    const organizations = new TestOrganizationStore()
+    const access = await organizations.getOrCreateForIdentity({ issuer: 'http://identity.example', subject: 'alice' })
+    const credentials = { username: 'fictional-storage-admin', password: 'fictional-storage-password' }
+    const readSiloCredentials = vi.fn(async () => credentials)
+    const operatorServices = { siloConsolePath: '/silo/' as const, readSiloCredentials }
+    const gateway = await createGateway('http://127.0.0.1:9', undefined, { organizations, singleTenantOwner: true, operatorServices })
+    const origin = `http://127.0.0.1:${gateway.port}`
+    const endpoint = `${origin}/auth/silo/credentials`
+    expect((await fetch(endpoint, { method: 'POST', headers: { origin } })).status).toBe(401)
+    const login = await fetch(`${origin}/auth/login`, { redirect: 'manual' })
+    const callback = await fetch(`${origin}/auth/callback?code=ok`, { headers: { cookie: `ak_login=${cookieValue(login.headers.getSetCookie(), 'ak_login')}` }, redirect: 'manual' })
+    const headers = { origin, cookie: `ak_session=${cookieValue(callback.headers.getSetCookie(), 'ak_session')}` }
+    const profile = await (await fetch(`${origin}/auth/me`, { headers })).text()
+    expect(profile).toContain('"siloCredentialsAvailable":true')
+    expect(profile).not.toContain(credentials.username)
+    expect(profile).not.toContain(credentials.password)
+    expect((await fetch(endpoint, { headers })).status).toBe(405)
+    expect((await fetch(`${endpoint}?username=other`, { method: 'POST', headers })).status).toBe(405)
+    expect((await fetch(endpoint, { method: 'POST', headers: { ...headers, origin: 'https://other.example' } })).status).toBe(403)
+    expect((await fetch(endpoint, { method: 'POST', headers: { cookie: headers.cookie } })).status).toBe(403)
+    expect(readSiloCredentials).not.toHaveBeenCalled()
+    const revealed = await fetch(endpoint, { method: 'POST', headers })
+    expect(revealed.status).toBe(200)
+    expect(revealed.headers.get('cache-control')).toBe('no-store')
+    expect(revealed.headers.get('pragma')).toBe('no-cache')
+    expect(await revealed.json()).toEqual(credentials)
+    readSiloCredentials.mockImplementationOnce(async () => { throw new Error('private credential file path') })
+    const failed = await fetch(endpoint, { method: 'POST', headers })
+    expect(failed.status).toBe(503)
+    expect(await failed.json()).toEqual({ error: 'silo_credentials_unavailable' })
+    readSiloCredentials.mockResolvedValueOnce({ ...credentials, password: '' })
+    expect((await fetch(endpoint, { method: 'POST', headers })).status).toBe(503)
+    readSiloCredentials.mockImplementationOnce(async () => {
+      organizations.setStatus(access.organization.id, 'suspended')
+      return credentials
+    })
+    const revokedDuringRead = await fetch(endpoint, { method: 'POST', headers })
+    expect(revokedDuringRead.status).toBe(403)
+    expect(await revokedDuringRead.text()).not.toContain(credentials.password)
+    organizations.setStatus(access.organization.id, 'active')
+    const findAccess = organizations.findAccess.bind(organizations)
+    const roleOverride = vi.spyOn(organizations, 'findAccess').mockImplementation(async identity => {
+      const current = await findAccess(identity)
+      return current ? { ...current, membership: { ...current.membership, role: 'member' } } : undefined
+    })
+    expect((await fetch(endpoint, { method: 'POST', headers })).status).toBe(401)
+    roleOverride.mockRestore()
+    const shared = await createGateway('http://127.0.0.1:9', undefined, { organizations, operatorServices })
+    expect((await fetch(`http://127.0.0.1:${shared.port}/auth/silo/credentials`, { method: 'POST', headers: { origin: `http://127.0.0.1:${shared.port}` } })).status).toBe(404)
+    const unprovisioned = await createGateway('http://127.0.0.1:9', undefined, {
+      organizations, singleTenantOwner: true, operatorServices: { siloConsolePath: '/silo/' },
+    })
+    expect((await fetch(`http://127.0.0.1:${unprovisioned.port}/auth/silo/credentials`, { method: 'POST', headers: { origin: `http://127.0.0.1:${unprovisioned.port}` } })).status).toBe(404)
+  })
+
   it('authorizes SILO console requests only for an active same-origin Dedicated Owner', async () => {
     const organizations = new TestOrganizationStore()
     const access = await organizations.getOrCreateForIdentity({ issuer: 'http://identity.example', subject: 'alice' })
@@ -289,7 +345,9 @@ describe('Private Cloud edge request path', () => {
     const gateway = await createGateway('http://127.0.0.1:9', undefined, { organizations, singleTenantOwner: true, operatorServices })
     const origin = `http://127.0.0.1:${gateway.port}`
     const endpoint = `${origin}/auth/silo/authorize`
+    const open = `${origin}/auth/silo/open`
     expect((await fetch(endpoint)).status).toBe(401)
+    expect((await fetch(open, { redirect: 'manual' })).status).toBe(401)
     const login = await fetch(`${origin}/auth/login`, { redirect: 'manual' })
     const callback = await fetch(`${origin}/auth/callback?code=ok`, { headers: { cookie: `ak_login=${cookieValue(login.headers.getSetCookie(), 'ak_login')}` }, redirect: 'manual' })
     const headers = { cookie: `ak_session=${cookieValue(callback.headers.getSetCookie(), 'ak_session')}` }
@@ -297,6 +355,13 @@ describe('Private Cloud edge request path', () => {
     const allowed = await fetch(endpoint, { headers })
     expect(allowed.status).toBe(204)
     expect(allowed.headers.get('cache-control')).toBe('no-store')
+    const opened = await fetch(open, { headers, redirect: 'manual' })
+    expect(opened.status).toBe(303)
+    expect(opened.headers.get('location')).toBe('/silo/')
+    expect(opened.headers.get('cache-control')).toBe('no-store')
+    expect((await fetch(open, { headers: { ...headers, origin: 'https://other.example' }, redirect: 'manual' })).status).toBe(403)
+    expect((await fetch(`${open}?redirect=https://other.example`, { headers, redirect: 'manual' })).status).toBe(405)
+    expect((await fetch(open, { method: 'POST', headers, redirect: 'manual' })).status).toBe(405)
     expect((await fetch(endpoint, { headers: { ...headers, origin: 'https://other.example' } })).status).toBe(403)
     expect((await fetch(endpoint, { headers: { ...headers, 'x-forwarded-method': 'POST' } })).status).toBe(403)
     expect((await fetch(endpoint, { headers: { ...headers, origin } })).status).toBe(204)
@@ -305,6 +370,7 @@ describe('Private Cloud edge request path', () => {
     expect((await fetch(endpoint, { method: 'POST', headers })).status).toBe(405)
     organizations.setStatus(access.organization.id, 'suspended')
     expect((await fetch(endpoint, { headers })).status).toBe(403)
+    expect((await fetch(open, { headers, redirect: 'manual' })).status).toBe(403)
     expect((await (await fetch(`${origin}/auth/me`, { headers })).json()).deploymentServices).toBeUndefined()
     organizations.setStatus(access.organization.id, 'active')
     const findAccess = organizations.findAccess.bind(organizations)
@@ -313,9 +379,11 @@ describe('Private Cloud edge request path', () => {
       return current ? { ...current, membership: { ...current.membership, role: 'member' } } : undefined
     })
     expect((await fetch(endpoint, { headers })).status).not.toBe(204)
+    expect((await fetch(open, { headers, redirect: 'manual' })).status).toBe(401)
     roleOverride.mockRestore()
     const shared = await createGateway('http://127.0.0.1:9', undefined, { organizations, operatorServices })
     expect((await fetch(`http://127.0.0.1:${shared.port}/auth/silo/authorize`, { headers })).status).toBe(404)
+    expect((await fetch(`http://127.0.0.1:${shared.port}/auth/silo/open`, { headers, redirect: 'manual' })).status).toBe(404)
   })
 
   it('advertises native Aspire access only to the Dedicated Owner without fetching telemetry', async () => {

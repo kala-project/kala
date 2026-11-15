@@ -57,6 +57,7 @@ describe('authenticated PWA navigation', () => {
     '/admin/socket.io/',
     '/silo/',
     '/silo/login',
+    '/auth/silo/open',
     '/management/v1',
     '/zitadel.session.v2.SessionService/GetSession',
     '/.well-known/openid-configuration',

@@ -15,6 +15,7 @@ import 'katex/dist/katex.min.css'
 import { initializeTheme } from './lib/theme.js'
 import { initializeInterfaceScale, InterfaceScale } from './lib/interface-scale.js'
 import { recoverStaleDashboard, StaleDashboardAssetError } from './lib/dashboard-version-recovery.js'
+import { isNativeConsolePath, SiloRouteRecovery } from './features/settings/sections/SiloRouteRecovery.js'
 
 window.addEventListener('vite:preloadError', (event) => {
   event.preventDefault()
@@ -48,7 +49,7 @@ createRoot(root).render(
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
         <InterfaceScale />
-        {visualTestFixturesEnabled && demo === 'grouped-tool-calls' ? <GroupedToolCallsDemo /> : visualTestFixturesEnabled && demo === 'markdown-rendering' ? <MarkdownRenderingDemo /> : <App />}
+        {isNativeConsolePath(window.location.pathname) ? <SiloRouteRecovery standalone /> : visualTestFixturesEnabled && demo === 'grouped-tool-calls' ? <GroupedToolCallsDemo /> : visualTestFixturesEnabled && demo === 'markdown-rendering' ? <MarkdownRenderingDemo /> : <App />}
       </QueryClientProvider>
     </ErrorBoundary>
   </StrictMode>,

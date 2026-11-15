@@ -46,7 +46,10 @@ server.on('connection', socket => {
   socket.on('close', () => connections.delete(socket))
 })
 server.on('upgrade', (request, socket, head) => {
-  if (!request.url?.startsWith('/socket.io/')) { socket.destroy(); return }
+  const nativeConsole = request.method === 'GET' && request.headers.upgrade?.toLowerCase() === 'websocket'
+    && browserHosts.has(request.headers.host)
+    && /^\/silo\/ws\/[A-Za-z0-9_-]+(?:\?[^#\\\s]*)?$/u.test(request.url ?? '')
+  if (!request.url?.startsWith('/socket.io/') && !nativeConsole) { socket.destroy(); return }
   const outgoing = http.request(upstream, { method: 'GET', path: request.url, headers: headers(request) })
   outgoing.setTimeout(15000, () => outgoing.destroy(new Error('upgrade_timeout')))
   outgoing.on('upgrade', (response, remote, remoteHead) => {

@@ -95,7 +95,8 @@ var silo = builder.AddContainer("silo", siloImage)
     .WithBindMount(siloDataDirectory, "/data")
     .WithImagePullPolicy(ImagePullPolicy.Missing);
 if (bundledIngress)
-    silo.WithEnvironment("MINIO_BROWSER_REDIRECT_URL", publicOrigin + "/silo/");
+    silo.WithEnvironment("MINIO_BROWSER_REDIRECT_URL", publicOrigin + "/silo/")
+        .WithEnvironment("MINIO_BROWSER_CONTENT_SECURITY_POLICY", "default-src 'self' 'unsafe-eval' 'unsafe-inline'; script-src 'self' https://unpkg.com; connect-src 'self' https://unpkg.com; frame-ancestors 'self';");
 
 var dashboard = builder.AddContainer("dashboard", dashboardImage)
     .WithImagePullPolicy(ImagePullPolicy.Missing);
