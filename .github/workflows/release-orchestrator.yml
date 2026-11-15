@@ -2,7 +2,7 @@ name: Complete Verified Release
 
 on:
   push:
-    tags: ['v0.4.0', 'v0.4.1', 'v0.4.2']
+    tags: ['v0.4.0', 'v0.4.1', 'v0.4.2', 'v0.4.3']
 
 permissions:
   actions: write
@@ -121,3 +121,5 @@ jobs:
             -f tag="$TAG" -f acceptance_run_id="$acceptance_run_id"
           wait_for_run promote-rc.yml workflow_dispatch "$promote_before" >/dev/null
           test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = false
+      - name: Refresh website after public promotion
+        run: gh workflow run website-pages.yml --ref main

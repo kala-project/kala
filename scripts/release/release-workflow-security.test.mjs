@@ -32,7 +32,7 @@ test('all release gates use official verified cosign sources and fail closed', (
 
 test('tag orchestrator promotes only after exact-revision asset, image, and hosted acceptance gates', () => {
   const workflow = readFileSync(join(import.meta.dirname, '../../.github/workflows/release-orchestrator.yml'), 'utf8')
-  assert.match(workflow, /tags: \['v0\.4\.0', 'v0\.4\.1', 'v0\.4\.2'\]/u)
+  assert.match(workflow, /tags: \['v0\.4\.0', 'v0\.4\.1', 'v0\.4\.2', 'v0\.4\.3'\]/u)
   assert.match(workflow, /test "\$GITHUB_REF" = "refs\/tags\/\$TAG"/u)
   assert.match(workflow, /test "\$\(git rev-parse HEAD\)" = "\$\(git rev-parse "\$TAG\^\{commit\}"\)"/u)
   assert.match(workflow, /group: complete-release-\$\{\{ github\.sha \}\}/u)
@@ -49,6 +49,8 @@ test('tag orchestrator promotes only after exact-revision asset, image, and host
     'wait_for_run portable-image-release.yml workflow_dispatch',
     'gh workflow run promote-rc.yml',
     'wait_for_run promote-rc.yml workflow_dispatch',
+    'test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = false',
+    'gh workflow run website-pages.yml --ref main',
   ]
   for (let index = 1; index < stages.length; index++) {
     assert.ok(workflow.indexOf(stages[index - 1]) < workflow.indexOf(stages[index]), `${stages[index]} must follow its gate`)
@@ -57,6 +59,8 @@ test('tag orchestrator promotes only after exact-revision asset, image, and host
   assert.match(workflow, /-F require_isolated_vm_acceptance=true/u)
   assert.match(workflow, /promote_before="\$\(baseline promote-rc\.yml\)"[\s\S]*wait_for_run promote-rc\.yml workflow_dispatch "\$promote_before"/u)
   assert.match(workflow, /test "\$\(gh release view "\$TAG" --json isDraft --jq \.isDraft\)" = false/u)
+  assert.match(workflow, /permissions:\n\s+actions: write/u)
+  assert.match(workflow, /GH_TOKEN: \$\{\{ github\.token \}\}/u)
 })
 
 test('release and RC retries are bounded to unassigned macOS runners and never hide failures', () => {
