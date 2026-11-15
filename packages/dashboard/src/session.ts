@@ -1305,10 +1305,10 @@ export function useSession({
 }
 
 export function useDashboardControlSocket(host: string, token?: string, enabled = true): DashboardSocket | null {
-  const [socket, setSocket] = useState<DashboardSocket | null>(null)
+  const [connection, setConnection] = useState<{ socket: DashboardSocket; host: string; token?: string }>()
 
   useEffect(() => {
-    if (!enabled) { setSocket(null); return }
+    if (!enabled) { setConnection(undefined); return }
     const next = openDashboardSocket(`${host}/dashboard`, {
       // Unit-routed Gateways cannot pin Engine.IO polling requests to a Runtime.
       // Match routed Session sockets instead of Socket.IO's polling-first default.
@@ -1335,16 +1335,16 @@ export function useDashboardControlSocket(host: string, token?: string, enabled 
     }
     window.addEventListener('ak-pref-change', onPreferenceChange)
     window.addEventListener('storage', onStorage)
-    setSocket(next)
+    setConnection({ socket: next, host, token })
     return () => {
       window.removeEventListener('ak-pref-change', onPreferenceChange)
       window.removeEventListener('storage', onStorage)
       next.close()
-      setSocket((current) => current === next ? null : current)
+      setConnection((current) => current?.socket === next ? undefined : current)
     }
   }, [host, token, enabled])
 
-  return socket
+  return enabled && connection?.host === host && connection.token === token ? connection.socket : null
 }
 
 export function deriveHumanAttentionTimeline(

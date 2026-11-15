@@ -437,6 +437,13 @@ describe('NoSessionArea', () => {
   })
 
   describe('initial session selection', () => {
+    it('keeps credential capture pure across both StrictMode initializations before the App layout effect removes the URL token', () => {
+      window.history.replaceState(null, '', '/?host=http%3A%2F%2Fportable.test&token=fictional-bootstrap#/settings/personal/interface')
+      const expected = { sessionId: null, explicit: false, token: 'fictional-bootstrap' }
+      expect(readInitialConfig()).toEqual(expected)
+      expect(readInitialConfig()).toEqual(expected)
+      window.history.replaceState(null, '', '/')
+    })
     it('preserves a forced refresh through app boot while stripping credentials and unrelated query parameters', () => {
       const search = '?__kala_refresh=once&token=secret&host=remote'
       expect(sessionLocationSearch({ explicit: false, sessionId: null }, search)).toBe('?__kala_refresh=once')

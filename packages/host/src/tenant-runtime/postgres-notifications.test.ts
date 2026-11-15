@@ -54,3 +54,31 @@ it('fails initial setup cleanly instead of silently abandoning notifications', a
   expect(vi.getTimerCount()).toBe(0)
   expect(client.end).toHaveBeenCalledOnce()
 })
+
+it('never declares ready before the initial reread and fences immediately during the reconnect gap', async () => {
+  vi.useFakeTimers()
+  const clients: Client[] = []
+  const states: string[] = []
+  const pending: Array<() => void> = []
+  const listener = vi.fn(() => new Promise<void>(resolve => pending.push(resolve)))
+  const started = listenPostgresNotifications(() => {
+    const client = new Client()
+    clients.push(client)
+    return client
+  }, 'inbox_test', listener, { onState: state => states.push(state) })
+  await vi.advanceTimersByTimeAsync(0)
+  expect(states).toEqual(['synchronizing'])
+  pending.shift()!()
+  const stop = await started
+  expect(states).toEqual(['synchronizing', 'ready'])
+  clients[0]!.emit('end')
+  expect(states.at(-1)).toBe('disconnected')
+  await vi.advanceTimersByTimeAsync(1_000)
+  expect(states.at(-1)).toBe('synchronizing')
+  pending.shift()!()
+  await vi.advanceTimersByTimeAsync(0)
+  expect(states.at(-1)).toBe('ready')
+  await stop()
+  expect(states.at(-1)).toBe('disconnected')
+  expect(vi.getTimerCount()).toBe(0)
+})

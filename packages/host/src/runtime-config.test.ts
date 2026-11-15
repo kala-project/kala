@@ -11,8 +11,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { defaultAgentRuntimeSettings, loadAgentRuntimeSettings, loadAnthropicCliDefaults, loadEnvFile, loadRuntimeConfig, organizationAgentSettingsPath, parseCodexToml, parseHookConfigToml, loadHookConfigs, requireAnthropicBaseUrl, writeAgentRuntimeSettings } from './runtime-config.js'
+import { defaultAgentRuntimeSettings, importSettingsFile, loadAgentRuntimeSettings, loadAnthropicCliDefaults, loadEnvFile, loadRuntimeConfig, organizationAgentSettingsPath, parseCodexToml, parseHookConfigToml, loadHookConfigs, requireAnthropicBaseUrl, writeAgentRuntimeSettings } from './runtime-config.js'
 import { DEFAULT_KALA_SYSTEM_PROMPT } from './builtin-tools.js'
+import { KalaStateStore } from './store/state-store.js'
 
 describe('parseCodexToml', () => {
   it('extracts top-level model + provider block fields', () => {
@@ -449,7 +450,9 @@ describe('agent prompt slots', () => {
     expect(settings.selectedSlotId).toBe(selectedSlotId)
     expect(settings.slots.map((slot) => slot.prompt)).toEqual(Array(3).fill(DEFAULT_KALA_SYSTEM_PROMPT))
     expect(readFileSync(path, 'utf8')).not.toContain('delete this legacy text')
-    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual(settings)
+    const { _kalaSettings, ...persisted } = JSON.parse(readFileSync(path, 'utf8'))
+    expect(persisted).toEqual(settings)
+    expect(_kalaSettings.revision).toBe('1')
   })
 
   it('persists and reloads custom names, prompts, and selection atomically', () => {
@@ -468,7 +471,7 @@ describe('agent prompt slots', () => {
     writeAgentRuntimeSettings(path, settings)
 
     expect(loadAgentRuntimeSettings(path)).toEqual(settings)
-    expect(readdirSync(dir)).toEqual(['agent.json'])
+    expect(readdirSync(dir).filter((entry) => entry.endsWith('.pending') || entry.endsWith('.tmp'))).toEqual([])
   })
 
   it('reports invalid stored Slot data without replacing it with defaults', () => {
@@ -480,7 +483,10 @@ describe('agent prompt slots', () => {
     expect(() => loadAgentRuntimeSettings(path)).toThrow(`invalid agent prompt settings file: ${path}`)
     expect(readFileSync(path, 'utf8')).toBe(damaged)
 
-    writeAgentRuntimeSettings(path, defaults)
+    const state = new KalaStateStore(dir)
+    expect(() => writeAgentRuntimeSettings(path, defaults, state)).toThrow('invalid agent prompt settings')
+    importSettingsFile(path, 'agent', defaults, state)
+    state.close()
     const beforeFailure = readFileSync(path, 'utf8')
     expect(() => writeAgentRuntimeSettings(path, invalid)).toThrow('invalid agent prompt settings')
     expect(readFileSync(path, 'utf8')).toBe(beforeFailure)

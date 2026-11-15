@@ -199,7 +199,7 @@ export class WebhookOutboxWorker {
 export function webhookDeliveryId(eventId: string, endpointId: string): string {
   return createHash('sha256').update(JSON.stringify([eventId, endpointId])).digest('hex')
 }
-function safeDestination(url: URL, loopbackHttp = false): boolean {
+export function safeDestination(url: URL, loopbackHttp = false): boolean {
   return (url.protocol === 'https:' || (loopbackHttp && url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)))
     && !url.username && !url.password && !url.search && !url.hash
 }

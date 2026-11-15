@@ -1,7 +1,7 @@
 import i18n from 'i18next'
 import { initReactI18next } from 'react-i18next'
 
-import { PREF_DASHBOARD_LANGUAGE } from '../lib/prefs.js'
+import { PREF_DASHBOARD_LANGUAGE, writeStringPref } from '../lib/prefs.js'
 import { resources, type DashboardLanguage } from './resources.js'
 
 const STORAGE_KEY = PREF_DASHBOARD_LANGUAGE
@@ -27,9 +27,7 @@ void i18n
   })
 
 export function persistDashboardLanguage(language: DashboardLanguage): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, language)
-  } catch {}
+  writeStringPref(STORAGE_KEY, language)
   document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en'
 }
 

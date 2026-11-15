@@ -7,7 +7,7 @@ import { promisify } from 'node:util'
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { assertPostgresSchemaCurrent, grantPostgresArenaOperator, grantPostgresGatewayRuntimeReader, grantPostgresRuntimeDml, migratePostgres, runPostgresMigrations, type PostgresMigrationPool } from './postgres-migrations.js'
+import { assertPostgresSchemaCurrent, grantPostgresArenaOperator, grantPostgresGatewayRuntimeReader, grantPostgresRuntimeDml, LATEST_POSTGRES_SCHEMA_VERSION, migratePostgres, runPostgresMigrations, type PostgresMigrationPool } from './postgres-migrations.js'
 import { createPostgresHotStateStore, type PostgresHotStateStore } from './tenant-runtime/postgres-hot-state.js'
 import { PostgresSessionAuthority } from './store/postgres-session-authority.js'
 import { PostgresTenantStateStore } from './tenant-runtime/postgres-state.js'
@@ -66,13 +66,13 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
   it('migrates from zero idempotently, then supports core DML while rejecting Runtime DDL', async () => {
     await expect(migratePostgres({ connectionString: adminUrl })).resolves.toMatchObject({
       previousVersion: 0,
-      currentVersion: 32,
-      appliedVersions: Array.from({ length: 32 }, (_, i) => i + 1),
+      currentVersion: LATEST_POSTGRES_SCHEMA_VERSION,
+      appliedVersions: Array.from({ length: LATEST_POSTGRES_SCHEMA_VERSION }, (_, i) => i + 1),
     })
 
     await expect(migratePostgres({ connectionString: adminUrl })).resolves.toMatchObject({
-      previousVersion: 32,
-      currentVersion: 32,
+      previousVersion: LATEST_POSTGRES_SCHEMA_VERSION,
+      currentVersion: LATEST_POSTGRES_SCHEMA_VERSION,
       appliedVersions: [],
     })
 
@@ -194,7 +194,7 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
     await expect(runtime.query(`SELECT kala_arena_repair_init(
       'x','x','x','arena-init-A',1,'x','x','kala_runtime','incident','{}','{}','{}')`))
       .rejects.toMatchObject({ code: '42501' })
-    await expect(assertPostgresSchemaCurrent(runtime)).resolves.toBe(32)
+    await expect(assertPostgresSchemaCurrent(runtime)).resolves.toBe(LATEST_POSTGRES_SCHEMA_VERSION)
     await expect(runtime.query('SELECT * FROM tenant_session_agent_boards')).resolves.toMatchObject({ rowCount: 0 })
     await expect(runtime.query('SELECT * FROM tenant_session_child_commands')).resolves.toMatchObject({ rowCount: 0 })
     await expect(runtime.query('SELECT * FROM tenant_runtime_unit_protocol_gates')).resolves.toMatchObject({ rowCount: 0 })
@@ -280,8 +280,8 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
       expect(routine.rows[0]?.routine).toBeNull()
       await admin.query(`DROP FUNCTION "${schema}".kala_arena_operator_state(text,text)`)
       await expect(migratePostgres({ connectionString: adminUrl, schema }))
-        .resolves.toMatchObject({ previousVersion: 22, currentVersion: 32,
-          appliedVersions: Array.from({ length: 10 }, (_, i) => i + 23) })
+        .resolves.toMatchObject({ previousVersion: 22, currentVersion: LATEST_POSTGRES_SCHEMA_VERSION,
+          appliedVersions: Array.from({ length: LATEST_POSTGRES_SCHEMA_VERSION - 22 }, (_, i) => i + 23) })
       await expect(grantOnly()).resolves.toMatchObject({ stdout: expect.stringContaining('"grantOnly":true') })
       const operator = new Pool({ connectionString: arenaOperatorUrl })
       try {
@@ -452,7 +452,7 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
         .resolves.toMatchObject({ currentVersion: 11 })
       const before = await admin.query(`SELECT version, checksum FROM "${schema}".kala_schema_migrations ORDER BY version`)
       await expect(migratePostgres({ connectionString: adminUrl, schema })).resolves.toMatchObject({
-        previousVersion: 11, currentVersion: 32, appliedVersions: Array.from({ length: 21 }, (_, i) => i + 12),
+        previousVersion: 11, currentVersion: LATEST_POSTGRES_SCHEMA_VERSION, appliedVersions: Array.from({ length: LATEST_POSTGRES_SCHEMA_VERSION - 11 }, (_, i) => i + 12),
       })
       const after = await admin.query(`SELECT version, checksum FROM "${schema}".kala_schema_migrations
         WHERE version <= 11 ORDER BY version`)
@@ -482,7 +482,7 @@ integrationDescribe('PostgreSQL operator migrations and DML-only Runtime role', 
       await runPostgresMigrations(admin as unknown as PostgresMigrationPool, { schema, throughVersion: 27 })
       const before = await admin.query(`SELECT version, checksum FROM "${schema}".kala_schema_migrations ORDER BY version`)
       await expect(migratePostgres({ connectionString: adminUrl, schema })).resolves.toMatchObject({
-        previousVersion: 27, currentVersion: 32, appliedVersions: [28, 29, 30, 31, 32],
+        previousVersion: 27, currentVersion: LATEST_POSTGRES_SCHEMA_VERSION, appliedVersions: Array.from({ length: LATEST_POSTGRES_SCHEMA_VERSION - 27 }, (_, i) => i + 28),
       })
       const after = await admin.query(`SELECT version, checksum FROM "${schema}".kala_schema_migrations
         WHERE version <= 27 ORDER BY version`)

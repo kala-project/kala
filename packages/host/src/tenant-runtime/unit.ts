@@ -34,6 +34,8 @@ export class TenantRuntimeUnitRegistry {
   private readonly units = new Map<TenantRuntimeUnitId, TenantRuntimeUnit>()
   private readonly loading = new Map<TenantRuntimeUnitId, Promise<TenantRuntimeUnit>>()
   private readonly closing = new Map<TenantRuntimeUnitId, Promise<void>>()
+  private readonly quiescing = new Set<TenantRuntimeUnitId>()
+  private readonly drains = new Map<TenantRuntimeUnitId, Promise<void>>()
   private draining = false
 
   constructor(
@@ -51,8 +53,10 @@ export class TenantRuntimeUnitRegistry {
   }
 
   async getOrLoad(id: TenantRuntimeUnitId): Promise<TenantRuntimeUnit> {
+    if (this.quiescing.has(id)) throw new Error('TenantRuntimeUnit is quiescing')
     const closing = this.closing.get(id)
     if (closing) await closing
+    if (this.quiescing.has(id)) throw new Error('TenantRuntimeUnit is quiescing')
     const loaded = this.units.get(id)
     if (loaded) return loaded
     if (this.draining) throw new Error('TenantRuntimeUnitRegistry is draining')
@@ -71,14 +75,40 @@ export class TenantRuntimeUnitRegistry {
     return creation
   }
 
+  /** Drain an existing or already-loading Unit without materializing a new one. */
+  drain(id: TenantRuntimeUnitId): Promise<void> {
+    this.quiescing.add(id)
+    const existing = this.drains.get(id)
+    if (existing) return existing
+    const operation = Promise.resolve().then(async () => {
+      if (this.closing.has(id)) throw new Error('TenantRuntimeUnit closed before drain')
+      const pending = this.loading.get(id)
+      const unit = this.units.get(id) ?? (pending ? await pending : undefined)
+      if (this.closing.has(id)) throw new Error('TenantRuntimeUnit closed before drain')
+      await unit?.drain()
+    })
+    this.drains.set(id, operation)
+    return operation
+  }
+
+  async resume(id: TenantRuntimeUnitId): Promise<void> {
+    const drain = this.drains.get(id)
+    if (drain) await drain
+    await this.closing.get(id)
+    if (this.drains.get(id) !== drain || this.units.has(id) || this.loading.has(id)) {
+      throw new Error('TenantRuntimeUnit must be retired before maintenance resume')
+    }
+    this.quiescing.delete(id)
+    this.drains.delete(id)
+  }
+
   close(id: TenantRuntimeUnitId): Promise<void> {
     const existing = this.closing.get(id)
     if (existing) return existing
     const teardown = Promise.resolve().then(async () => {
       const pending = this.loading.get(id)
       const unit = this.units.get(id) ?? (pending ? await pending : undefined)
-      if (!unit) return
-      await unit.close()
+      if (unit) await unit.close()
       this.units.delete(id)
     })
     this.closing.set(id, teardown)

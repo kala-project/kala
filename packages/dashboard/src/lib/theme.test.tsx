@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { DASHBOARD_PREFERENCES } from './prefs.js'
+import { DASHBOARD_PREFERENCES, usePreferencePersistenceFailure } from './prefs.js'
 import { initializeTheme, useTheme } from './theme.js'
 import {
   VSCODE_THEME_STORAGE_KEY,
@@ -57,6 +57,7 @@ beforeEach(() => {
   document.documentElement.removeAttribute('style')
   delete document.documentElement.dataset.vscodeThemeKind
 })
+afterEach(() => vi.restoreAllMocks())
 
 describe('theme scheme authority', () => {
   it('uses system consistently as the registry and hook default', async () => {
@@ -137,5 +138,20 @@ describe('theme scheme authority', () => {
     expect(applyCurrentVSCodeTheme('dark').id).toBe('custom-dark')
     expect(document.documentElement.classList.contains('dark')).toBe(true)
     expect(document.documentElement.style.getPropertyValue(themeCssVarName('editor.background'))).toBe('#010203')
+  })
+
+  it('does not present a failed explicit scheme write as an applied preference', () => {
+    installColorSchemeMedia(false)
+    localStorage.setItem('ak-theme', 'light')
+    const { result } = renderHook(() => ({ theme: useTheme(), failed: usePreferencePersistenceFailure() }))
+    const storage = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('Storage unavailable', 'SecurityError') })
+    act(() => result.current.theme[2]('dark'))
+    expect(result.current.theme[0]).toBe('light')
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
+    expect(result.current.failed).toBe(true)
+    storage.mockRestore()
+    act(() => result.current.theme[2]('dark'))
+    expect(document.documentElement.classList.contains('dark')).toBe(true)
+    expect(result.current.failed).toBe(false)
   })
 })

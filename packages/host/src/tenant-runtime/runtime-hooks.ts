@@ -10,10 +10,10 @@ export function loadRuntimeHooks(options: { unitRoot: string; product: string; c
   let contents: string
   try { contents = readFileSync(configPath, 'utf8') }
   catch (error) {
-    if (!options.configPath && (error as NodeJS.ErrnoException).code === 'ENOENT') return { configPath, hooks: [], hookRunner: undefined }
+    if (!options.configPath && (error as NodeJS.ErrnoException).code === 'ENOENT') return { configPath, hooks: [], hookRunner: undefined, loadedAt: new Date().toISOString() }
     throw error
   }
   const hooks = parseHookConfigToml(contents)
   if ((contents.match(/^\s*\[\[hooks\]\]\s*(?:#.*)?$/gmu)?.length ?? 0) !== hooks.length) throw new Error(`Invalid Runtime hook configuration: ${configPath}`)
-  return { configPath, hooks, hookRunner: hooks.length ? createHookRunner() : undefined }
+  return { configPath, hooks, hookRunner: hooks.length ? createHookRunner() : undefined, loadedAt: new Date().toISOString() }
 }

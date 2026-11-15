@@ -18,6 +18,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
+import { assertControlSettingsWrite, controlSettingsEtag, type ControlSettingsWriteOptions } from '../settings/control-revisions.js'
 
 function expectTransportReset(socket: Duplex): void {
   socket.on('error', (error: NodeJS.ErrnoException) => { if (error.code !== 'ECONNRESET') throw error })
@@ -38,7 +39,10 @@ class TestOrganizationStore extends MemoryOrganizationStore {
     this.organizations.set(organizationId, { ...organization, status })
   }
 
-  async updateRetentionPolicy(organizationId: string, policy: { sessionDays: number; artifactDays: number; auditDays: number; deletedResourceGraceDays: number }): Promise<void> {
+  async retentionConfiguration(_organizationId: string) {
+    return { revision: '1', value: { sessionDays: 30, artifactDays: 90, auditDays: 365, deletedResourceGraceDays: 30 } }
+  }
+  async updateRetentionPolicy(organizationId: string, policy: { sessionDays: number; artifactDays: number; auditDays: number; deletedResourceGraceDays: number }, _write?: ControlSettingsWriteOptions & { actor?: AuthenticatedIdentity }): Promise<void> {
     this.retentionUpdates.push({ organizationId, ...policy })
   }
 }
@@ -47,6 +51,109 @@ const running: Array<{ close(): Promise<void> }> = []
 afterEach(async () => { await Promise.all(running.splice(0).map((server) => server.close())) })
 
 describe('Private Cloud edge request path', () => {
+  it('projects installed integrations under the authenticated organization without inventing downstream health', async () => {
+    const organizations = new TestOrganizationStore()
+    const identity = { issuer: 'https://identity.test', subject: 'integration-owner' }
+    const access = await organizations.getOrCreateForIdentity(identity)
+    const telemetry = new OnlineTelemetry({ serviceName: 'kala-gateway', endpoint: 'http://127.0.0.1:1',
+      authToken: 'fictional-observation-token-32bytes', fetch: async () => { throw new Error('fictional collector unavailable') } })
+    const gateway = await createGateway('http://127.0.0.1:1', undefined, { organizations, callbackIdentity: () => identity, telemetry })
+    const origin = `http://127.0.0.1:${gateway.port}`
+    expect((await fetch(`${origin}/organization/settings/integrations`, { redirect: 'manual' })).status).not.toBe(200)
+    const login = await fetch(`${origin}/auth/login`, { redirect: 'manual' })
+    const callback = await fetch(`${origin}/auth/callback?code=ok`, {
+      headers: { cookie: `ak_login=${cookieValue(login.headers.getSetCookie(), 'ak_login')}` }, redirect: 'manual',
+    })
+    const cookie = `ak_session=${cookieValue(callback.headers.getSetCookie(), 'ak_session')}`
+    const response = await fetch(`${origin}/organization/settings/integrations?organizationId=another`, { headers: { cookie } })
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    const body = await response.json()
+    expect(body).toMatchObject({ organizationId: access.organization.id, integrationStatus: expect.arrayContaining([
+      expect.objectContaining({ id: 'telemetry', configured: true, health: 'unknown' }),
+      expect.objectContaining({ id: 'artifacts', configured: null, health: 'unknown' }),
+    ]) })
+    expect(JSON.stringify(body)).not.toContain('fictional-observation-token')
+    await telemetry.close()
+  })
+
+  it('requires conditional legacy-body policy writes after the explicit deployment transition', async () => {
+    const organizations = new TestOrganizationStore()
+    const identity = { issuer: 'https://identity.test', subject: 'conditional-owner' }
+    await organizations.getOrCreateForIdentity(identity)
+    vi.spyOn(organizations, 'updateRetentionPolicy').mockImplementation(async (organizationId, _policy, write) =>
+      assertControlSettingsWrite(organizationId, 'retention', '1', write ?? {}))
+    const gateway = await createGateway('http://127.0.0.1:1', undefined, {
+      organizations, callbackIdentity: () => identity, settingsWriteProtocol: 'conditional-required',
+    })
+    const origin = `http://127.0.0.1:${gateway.port}`
+    const login = await fetch(`${origin}/auth/login`, { redirect: 'manual' })
+    const callback = await fetch(`${origin}/auth/callback?code=ok`, {
+      headers: { cookie: `ak_login=${cookieValue(login.headers.getSetCookie(), 'ak_login')}` }, redirect: 'manual',
+    })
+    const cookie = `ak_session=${cookieValue(callback.headers.getSetCookie(), 'ak_session')}`
+    for (const [resource, readPath, value] of [
+      ['attachment-policy', 'attachment-policy/configuration', { maxBytes: 4 * 1024 * 1024 }],
+      ['retention', 'retention', { sessionDays: 45, artifactDays: 90, auditDays: 365, deletedResourceGraceDays: 30 }],
+    ] as const) {
+      const read = await fetch(`${origin}/organization/${readPath}`, { headers: { cookie } })
+      expect(read.status).toBe(200)
+      const etag = read.headers.get('etag')!
+      const update = (tag?: string) => fetch(`${origin}/organization/${resource}`, { method: 'PUT',
+        headers: { cookie, origin, 'content-type': 'application/json', ...(tag ? { 'if-match': tag } : {}) },
+        body: JSON.stringify(value),
+      })
+      const legacy = await update()
+      expect(legacy.status).toBe(428)
+      expect(await legacy.json()).toEqual({ error: 'client_upgrade_required' })
+      expect((await update(`W/${etag}`)).status).toBe(412)
+      expect((await update(etag)).status).toBe(204)
+    }
+    const attachment = await fetch(`${origin}/organization/attachment-policy`, { headers: { cookie } })
+    expect(await attachment.json()).toEqual({ maxBytes: 4 * 1024 * 1024 })
+  })
+
+  it('projects one retention authority with a scoped ETag, forwards its precondition and returns conflicts without losing legacy writes', async () => {
+    const organizations = new TestOrganizationStore()
+    const identity = { issuer: 'https://identity.test', subject: 'retention-owner' }
+    const access = await organizations.getOrCreateForIdentity(identity)
+    let revision = '1'
+    const value = { sessionDays: 30, artifactDays: 90, auditDays: 365, deletedResourceGraceDays: 30 }
+    vi.spyOn(organizations, 'retentionConfiguration').mockImplementation(async () => ({ revision, value }))
+    const saved = vi.spyOn(organizations, 'updateRetentionPolicy').mockImplementation(async (organizationId, policy, write) => {
+      assertControlSettingsWrite(organizationId, 'retention', revision, write ?? {})
+      value.sessionDays = policy.sessionDays
+      revision = (BigInt(revision) + 1n).toString()
+    })
+    const gateway = await createGateway('http://127.0.0.1:1', undefined, { organizations, callbackIdentity: () => identity })
+    const origin = `http://127.0.0.1:${gateway.port}`
+    const login = await fetch(`${origin}/auth/login`, { redirect: 'manual' })
+    const callback = await fetch(`${origin}/auth/callback?code=ok`, {
+      headers: { cookie: `ak_login=${cookieValue(login.headers.getSetCookie(), 'ak_login')}` }, redirect: 'manual',
+    })
+    const cookie = `ak_session=${cookieValue(callback.headers.getSetCookie(), 'ak_session')}`
+    const read = await fetch(`${origin}/organization/retention`, { headers: { cookie } })
+    expect(await read.json()).toMatchObject({
+      resource: { kind: 'retention', organizationId: access.organization.id },
+      revision: '1', value: { sessionDays: 30 },
+      application: { state: 'unknown', effectiveRevision: null, reasonCode: 'consumer_observation_unavailable' },
+    })
+    const etag = read.headers.get('etag')!
+    expect(etag).toBe(controlSettingsEtag(access.organization.id, 'retention', '1', origin))
+    const update = (tag?: string) => fetch(`${origin}/organization/retention`, {
+      method: 'PUT', headers: { cookie, origin, 'content-type': 'application/json', ...(tag ? { 'if-match': tag } : {}) },
+      body: JSON.stringify({ ...value, sessionDays: 45 }),
+    })
+    expect((await update(etag)).status).toBe(204)
+    expect(saved).toHaveBeenLastCalledWith(access.organization.id, expect.objectContaining({ sessionDays: 45 }),
+      expect.objectContaining({ expectedEtag: etag, actor: expect.objectContaining(identity) }))
+    const stale = await update(etag)
+    expect(stale.status).toBe(412)
+    expect(await stale.json()).toEqual({ error: 'configuration_conflict' })
+    expect(revision).toBe('2')
+    expect((await update()).status).toBe(204)
+    expect(revision).toBe('3')
+  })
+
   it('scopes attachment limits to the organization, refuses member edits, and replaces forged Runtime limits', async () => {
     const observed: string[] = []
     const upstream = createServer((request, response) => {
@@ -292,9 +399,17 @@ describe('Private Cloud edge request path', () => {
 
   it('reports authenticated external readiness without inventing supervisor status or hiding failed probes', async () => {
     let runtimeReady = true
+    let controller: 'unsupported' | 'slots' | 'failed' | 'missing' = 'unsupported'
+    const slotStatus = { topology: 'dedicated-slots', route: { generation: 7, activeSlot: 'green' } }
     const secrets: Array<string | undefined> = []
     const upstream = createServer((request, response) => {
-      if (request.url === '/internal/health') {
+      if (request.url === '/runtime/deployment/status') {
+        expect(request.headers['x-agent-runlab-ingress-secret']).toBe('gateway-secret')
+        expect(request.headers.cookie).toBeUndefined()
+        response.writeHead(controller === 'slots' ? 200 : controller === 'failed' ? 503 : 404, { 'content-type': 'application/json' })
+        response.end(controller === 'missing' ? '' : JSON.stringify(controller === 'slots' ? slotStatus
+          : { error: controller === 'unsupported' ? 'Runtime route not found' : 'controller_unavailable' }))
+      } else if (request.url === '/internal/health') {
         secrets.push(request.headers['x-agent-runlab-ingress-secret'] as string | undefined)
         response.writeHead(200, { 'content-type': 'application/json' })
         response.end(JSON.stringify({ ok: true, state: runtimeReady ? 'ready' : 'failed', units: ['private-unit-details'] }))
@@ -310,6 +425,7 @@ describe('Private Cloud edge request path', () => {
     const gateway = await createGateway(upstreamOrigin, undefined, { dashboardOrigin: upstreamOrigin, organizations: new TestOrganizationStore() })
     const origin = `http://127.0.0.1:${gateway.port}`
     expect((await fetch(`${origin}/runtime/deployment/health`)).status).toBe(401)
+    expect((await fetch(`${origin}/runtime/deployment/status`)).status).toBe(401)
     expect(secrets).toHaveLength(0)
     const login = await fetch(`${origin}/auth/login`, { redirect: 'manual' })
     const callback = await fetch(`${origin}/auth/callback?code=ok`, { headers: { cookie: `ak_login=${cookieValue(login.headers.getSetCookie(), 'ak_login')}` }, redirect: 'manual' })
@@ -319,8 +435,20 @@ describe('Private Cloud edge request path', () => {
       { component: 'gateway', ready: true }, { component: 'runtime', ready: true }, { component: 'dashboard', ready: true },
     ] })
     expect(secrets).toEqual(['gateway-secret'])
+    const composedStatus = await fetch(`${origin}/runtime/deployment/status`, { headers })
+    expect(composedStatus.status).toBe(200)
+    expect(composedStatus.headers.get('cache-control')).toBe('no-store')
+    expect(await composedStatus.json()).toMatchObject({ kind: 'external', ok: true, checks: healthy.checks })
+    controller = 'slots'
+    expect(await (await fetch(`${origin}/runtime/deployment/status`, { headers })).json()).toEqual(slotStatus)
+    controller = 'failed'
+    expect((await fetch(`${origin}/runtime/deployment/status`, { headers })).status).toBe(503)
+    controller = 'missing'
+    expect((await fetch(`${origin}/runtime/deployment/status`, { headers })).status).toBe(503)
+    expect(secrets).toHaveLength(2)
+    controller = 'unsupported'
     runtimeReady = false
-    const failed = await (await fetch(`${origin}/runtime/deployment/health`, { headers })).json()
+    const failed = await (await fetch(`${origin}/runtime/deployment/status`, { headers })).json()
     expect(failed.ok).toBe(false)
     expect(failed.checks).toContainEqual({ component: 'runtime', ready: false })
     expect(JSON.stringify(failed)).not.toContain('private-unit-details')
@@ -452,10 +580,13 @@ describe('Private Cloud edge request path', () => {
 
   it('binds administrator-created Executor invites to one organization and rejects anonymous, member, and cross-origin creation', async () => {
     const upstreamRequests: Array<{ unit?: string; organization?: string; role?: string; principal?: string }> = []
+    const expiresAt = new Date(Date.now() + 7 * 86_400_000).toISOString()
     const upstream = createServer((request, response) => {
       upstreamRequests.push({ unit: request.headers['x-agent-runlab-runtime-unit'] as string | undefined, organization: request.headers['x-agent-runlab-organization-id'] as string | undefined, role: request.headers['x-agent-runlab-organization-role'] as string | undefined, principal: request.headers['x-agent-runlab-principal'] as string | undefined })
+      if (request.method === 'DELETE') { response.writeHead(204).end(); return }
       response.writeHead(200, { 'content-type': 'application/json' })
-      response.end(JSON.stringify({ id: 'inv_org_a', inviteToken: 'ak_invite_org_a' }))
+      response.end(JSON.stringify(request.url?.endsWith('/revoke') ? { ok: true } :
+        { id: 'inv_org_a', expiresAt, inviteToken: request.url?.endsWith('/regenerate') ? 'ak_invite_regenerated' : 'ak_invite_org_a' }))
     })
     await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve))
     const address = upstream.address()
@@ -465,7 +596,9 @@ describe('Private Cloud edge request path', () => {
     const organizations = new TestOrganizationStore()
     const access = await organizations.getOrCreateForIdentity({ issuer: 'http://identity.example', subject: 'alice' })
     await organizations.addMember(access.organization.id, { issuer: 'http://identity.example', subject: 'bob' }, 'member')
-    const directory = new MemoryRuntimeAssignmentStore()
+    const revoked = vi.fn(async () => undefined)
+    const directory = Object.assign(new MemoryRuntimeAssignmentStore(), { revokeExecutorInviteBinding: revoked })
+    const bound = vi.spyOn(directory, 'bindExecutorInvite')
     const ownerGateway = await createGateway(`http://127.0.0.1:${upstreamPort}`, undefined, { organizations, directory })
     const ownerLogin = await fetch(`http://127.0.0.1:${ownerGateway.port}/auth/login`, { redirect: 'manual' })
     const ownerNonce = cookieValue(ownerLogin.headers.getSetCookie(), 'ak_login')
@@ -493,6 +626,18 @@ describe('Private Cloud edge request path', () => {
     expect(member.status).toBe(403)
     await expect(member.json()).resolves.toMatchObject({ error: 'forbidden', requiredPermission: 'workspace:manage' })
     expect(upstreamRequests).toHaveLength(1)
+    const headers = { cookie: `ak_session=${ownerSession}`, 'content-type': 'application/json', origin: ownerOrigin }
+    expect((await fetch(`${ownerOrigin}/auth/executor-invites/inv_org_a/regenerate`,
+      { method: 'POST', headers, body: '{}' })).status).toBe(200)
+    expect(bound).toHaveBeenLastCalledWith('ak_invite_regenerated', access.organization.unitId, { id: 'inv_org_a', expiresAt })
+    expect(await directory.findUnitByExecutorInvite('ak_invite_regenerated')).toBe(access.organization.unitId)
+    expect(revoked).toHaveBeenLastCalledWith('inv_org_a', access.organization.unitId, true)
+    expect((await fetch(`${ownerOrigin}/auth/executor-invites/inv_org_a/revoke`,
+      { method: 'POST', headers, body: '{}' })).status).toBe(200)
+    expect(revoked).toHaveBeenLastCalledWith('inv_org_a', access.organization.unitId, true)
+    expect((await fetch(`${ownerOrigin}/auth/executor-invites/inv_org_a`, { method: 'DELETE', headers })).status).toBe(204)
+    expect(revoked).toHaveBeenLastCalledWith('inv_org_a', access.organization.unitId, false)
+    expect(bound).toHaveBeenCalledTimes(2)
   })
 
   it('creates copyable organization invites and accepts only the matching verified OIDC identity once', async () => {
@@ -887,6 +1032,56 @@ describe('Private Cloud edge request path', () => {
     expect(response.status).toBe(204)
     await vi.waitFor(() => expect(socket.destroyed).toBe(true), { timeout: 1_000 })
     await vi.waitFor(() => expect(upstream.active()).toBe(0), { timeout: 1_000 })
+  })
+
+  it('revokes both identities on Owner transfer, closing all their browser sockets without affecting another organization', async () => {
+    const upstream = await heldWebSocketUpstream()
+    const organizations = new TestOrganizationStore()
+    const owner = { issuer: 'http://identity.example', subject: 'owner' }
+    const nextOwner = { issuer: owner.issuer, subject: 'next-owner' }
+    const unrelated = { issuer: owner.issuer, subject: 'unrelated-owner' }
+    const access = await organizations.getOrCreateForIdentity(owner)
+    await organizations.addMember(access.organization.id, nextOwner, 'member')
+    let loginAs: AuthenticatedIdentity = owner
+    const gateway = await createGateway(upstream.origin, undefined, { organizations, callbackIdentity: () => loginAs, socketRecheckMs: 60_000 })
+    const endpoint = `http://127.0.0.1:${gateway.port}`
+    const signIn = async (identity: AuthenticatedIdentity) => {
+      loginAs = identity
+      const login = await fetch(`${endpoint}/auth/login`, { redirect: 'manual' })
+      const nonce = cookieValue(login.headers.getSetCookie(), 'ak_login')
+      const callback = await fetch(`${endpoint}/auth/callback?code=ok`, { headers: { cookie: `ak_login=${nonce}` }, redirect: 'manual' })
+      return cookieValue(callback.headers.getSetCookie(), 'ak_session')
+    }
+    const ownerCookie = await signIn(owner)
+    const secondOwnerCookie = await signIn(owner)
+    const nextOwnerCookie = await signIn(nextOwner)
+    const unrelatedCookie = await signIn(unrelated)
+    const cookies = [ownerCookie, secondOwnerCookie, nextOwnerCookie, unrelatedCookie]
+    const sockets = await Promise.all(cookies.map(cookie => keepWebSocket(gateway.port, { cookie: `ak_session=${cookie}` })))
+    const forbidden = await fetch(`${endpoint}/organization/ownership`, {
+      method: 'POST', headers: { cookie: `ak_session=${nextOwnerCookie}`, origin: endpoint, 'content-type': 'application/json' },
+      body: JSON.stringify(owner),
+    })
+    expect(forbidden.status).toBe(403)
+    expect(sockets.every(socket => !socket.destroyed)).toBe(true)
+    const transferred = await fetch(`${endpoint}/organization/ownership`, {
+      method: 'POST', headers: { cookie: `ak_session=${ownerCookie}`, origin: endpoint, 'content-type': 'application/json' },
+      body: JSON.stringify(nextOwner),
+    })
+    expect(transferred.status).toBe(204)
+    await vi.waitFor(() => expect(sockets.slice(0, 3).every(socket => socket.destroyed)).toBe(true), { timeout: 1_000 })
+    expect(sockets[3]!.destroyed).toBe(false)
+    await vi.waitFor(() => expect(upstream.active()).toBe(1), { timeout: 1_000 })
+    for (const cookie of cookies.slice(0, 3)) {
+      expect(await (await fetch(`${endpoint}/auth/me`, { headers: { cookie: `ak_session=${cookie}` } })).json()).toEqual({ authenticated: false })
+    }
+    expect(await (await fetch(`${endpoint}/auth/me`, { headers: { cookie: `ak_session=${unrelatedCookie}` } })).json()).toMatchObject({ authenticated: true })
+    expect((await organizations.findAccess(owner))?.membership.role).toBe('admin')
+    expect((await organizations.findAccess(nextOwner))?.membership.role).toBe('owner')
+    const renewed = await signIn(nextOwner)
+    expect(await (await fetch(`${endpoint}/auth/me`, { headers: { cookie: `ak_session=${renewed}` } })).json())
+      .toMatchObject({ authenticated: true, organization: { id: access.organization.id, role: 'owner' } })
+    sockets[3]!.destroy()
   })
 
   it('closes an already-upgraded browser WebSocket when an external role or contract change invalidates its authority', async () => {
@@ -1537,6 +1732,7 @@ async function createGateway(
     socketRecheckMs?: number
     publicUrls?: string
     singleTenantOwner?: boolean
+    settingsWriteProtocol?: 'legacy-compatible' | 'conditional-required'
     operatorServices?: Parameters<typeof startRuntimeIngressGateway>[0]['operatorServices']
     telemetry?: OnlineTelemetry
   },
@@ -1548,6 +1744,7 @@ async function createGateway(
     port: 0,
     listenHost: '127.0.0.1',
     hostOrigin,
+    settingsWriteProtocol: auth?.settingsWriteProtocol,
     ...(auth?.singleTenantOwner ? { singleTenantOwner: true } : {}),
     ...(auth?.operatorServices ? { operatorServices: auth.operatorServices } : {}),
     ...(auth?.telemetry ? { telemetry: auth.telemetry } : {}),

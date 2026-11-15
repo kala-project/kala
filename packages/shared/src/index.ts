@@ -1,4 +1,6 @@
 export * from './protocol.js'
+export * from './settings.js'
+export * from './mcp-settings.js'
 export * from './terminal-create.js'
 export * from './computer-use.js'
 export * from './app-debug.js'

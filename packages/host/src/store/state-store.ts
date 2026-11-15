@@ -1,10 +1,12 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from 'node:crypto'
+import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 import type { MemoDocument } from '../memo-store.js'
 import { DagStore } from '../dag/store.js'
+import { checkSettingsPrecondition, nextSettingsRevision, settingsRevision, type SettingsWriteOptions } from '../settings-concurrency.js'
+import { migrateSqliteSettings } from './settings-sqlite-migration.js'
 
 const KEY_BYTES = 32
 const NONCE_BYTES = 12
@@ -26,6 +28,8 @@ export type StoredCredential = {
 export class KalaStateStore {
   private database?: DatabaseSync
   private rootKey?: Buffer
+  private maintenanceDepth = 0
+  private verifiedSettingsSchema = false
 
   constructor(
     readonly stateRoot: string,
@@ -33,6 +37,7 @@ export class KalaStateStore {
       keyPath?: string
       legacyMemoDirectory?: string
       legacyCredentialDirectory?: string
+      settingsSchemaMode?: 'bridge' | 'upgrade'
     } = {},
   ) {}
 
@@ -85,7 +90,24 @@ export class KalaStateStore {
     return { secret, metadata: parseMetadata(row.metadata), updatedAt: row.updated_at }
   }
 
-  setCredential(provider: string, secret: string, metadata: Record<string, unknown>, updatedAt = new Date().toISOString()): void {
+  credentialConfiguration(provider: string): { revision: string; value: StoredCredential | undefined } {
+    return this.maintenanceTransaction(() => {
+      const value = this.getCredential(provider)
+      return { revision: this.settingsResourceRevision(credentialResource(provider)), value }
+    })
+  }
+
+  setCredential(
+    provider: string,
+    secret: string,
+    metadata: Record<string, unknown>,
+    updatedAt = new Date().toISOString(),
+    options: SettingsWriteOptions = {},
+  ): void {
+    this.mutateCredential(provider, options, () => this.writeCredential(provider, secret, metadata, updatedAt))
+  }
+
+  private writeCredential(provider: string, secret: string, metadata: Record<string, unknown>, updatedAt: string): void {
     const key = this.loadRootKey(true)
     if (!key) throw new Error('failed to create credential master key')
     const nonce = randomBytes(NONCE_BYTES)
@@ -104,8 +126,99 @@ export class KalaStateStore {
     `).run(provider, JSON.stringify(metadata), nonce, ciphertext, cipher.getAuthTag(), updatedAt)
   }
 
-  deleteCredential(provider: string): void {
-    this.open().prepare("DELETE FROM credentials WHERE scope = 'unit' AND provider = ?").run(provider)
+  deleteCredential(provider: string, options: SettingsWriteOptions = {}): void {
+    this.mutateCredential(provider, options, () => {
+      this.open().prepare("DELETE FROM credentials WHERE scope = 'unit' AND provider = ?").run(provider)
+    })
+  }
+
+  private mutateCredential(provider: string, options: SettingsWriteOptions, operation: () => void): void {
+    this.maintenanceTransaction(() => {
+      this.importLegacyCredential(provider)
+      if (!this.settingsRevisionsAvailable()) {
+        this.requireLegacySettingsWrite(options)
+        operation()
+        return
+      }
+      const resource = credentialResource(provider)
+      const revision = this.settingsResourceRevision(resource)
+      checkSettingsPrecondition(revision, options)
+      const next = nextSettingsRevision(revision)
+      operation()
+      this.recordSettingsRevision(resource, next)
+    })
+  }
+
+  maintenanceTransaction<T>(operation: () => T): T {
+    const database = this.open()
+    if (this.maintenanceDepth > 0) return operation()
+    database.exec('BEGIN IMMEDIATE')
+    this.maintenanceDepth += 1
+    try {
+      const value = operation()
+      if (value && typeof value === 'object' && 'then' in value) throw new TypeError('SQLite maintenance operations must be synchronous')
+      database.exec('COMMIT')
+      return value
+    } catch (error) {
+      database.exec('ROLLBACK')
+      throw error
+    } finally {
+      this.maintenanceDepth -= 1
+    }
+  }
+
+  settingsResourceRevision(resource: { kind: string; id: string }): string {
+    return this.maintenanceTransaction(() => {
+      if (!this.settingsRevisionsAvailable()) throw Object.assign(new Error('configuration_revisions_unavailable'), { status: 503 })
+      this.open().prepare(`INSERT OR IGNORE INTO settings_resource_versions
+        (organization_id, resource_kind, resource_id, revision, updated_at) VALUES ('unit', ?, ?, 1, ?)`)
+        .run(resource.kind, resource.id, new Date().toISOString())
+      return this.settingsHighWater(resource)!
+    })
+  }
+
+  settingsHighWater(resource: { kind: string; id: string }): string | undefined {
+    if (!this.settingsRevisionsAvailable()) return undefined
+    const row = this.open().prepare(`SELECT CAST(revision AS TEXT) AS revision FROM settings_resource_versions
+      WHERE organization_id = 'unit' AND resource_kind = ? AND resource_id = ?`).get(resource.kind, resource.id) as { revision: string } | undefined
+    return row?.revision
+  }
+
+  recordSettingsRevision(resource: { kind: string; id: string }, revision: string): void {
+    if (this.maintenanceDepth === 0) throw new Error('settings revision requires the maintenance transaction')
+    if (!this.settingsRevisionsAvailable()) throw Object.assign(new Error('configuration_revisions_unavailable'), { status: 503 })
+    settingsRevision(revision)
+    this.open().prepare(`INSERT INTO settings_resource_versions
+      (organization_id, resource_kind, resource_id, revision, updated_at) VALUES ('unit', ?, ?, CAST(? AS INTEGER), ?)
+      ON CONFLICT(organization_id, resource_kind, resource_id) DO UPDATE SET
+        revision = excluded.revision, updated_at = excluded.updated_at`)
+      .run(resource.kind, resource.id, revision, new Date().toISOString())
+  }
+
+  settingsContentHmac(content: string, create: boolean): string {
+    const key = this.loadRootKey(create)
+    if (!key) throw new Error('settings_integrity_key_missing')
+    return createHmac('sha256', key).update('kala:settings-file:v1\0').update(content).digest('hex')
+  }
+
+  settingsRevisionsAvailable(): boolean {
+    const database = this.open()
+    const version = Number((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+    if (version === 5) {
+      if (!this.verifiedSettingsSchema) {
+        migrateSqliteSettings(database, 5)
+        this.verifiedSettingsSchema = true
+      }
+      return true
+    }
+    if (version !== 4 || this.verifiedSettingsSchema) throw new Error(`unsupported state database version: ${version}`)
+    return false
+  }
+
+  requireLegacySettingsWrite(options: SettingsWriteOptions): void {
+    if (options.expectedRevision !== undefined || options.writeProtocol === 'conditional-required') {
+      throw Object.assign(new Error('configuration_revisions_unavailable'), { status: 503 })
+    }
   }
 
   dagStore(): DagStore {
@@ -116,19 +229,25 @@ export class KalaStateStore {
     this.database?.close()
     this.database = undefined
     this.rootKey = undefined
+    this.verifiedSettingsSchema = false
   }
 
   private open(): DatabaseSync {
     if (this.database) return this.database
+    const settingsSchemaMode = this.options.settingsSchemaMode ?? process.env.KALA_SETTINGS_SCHEMA_MODE ?? 'upgrade'
+    if (settingsSchemaMode !== 'bridge' && settingsSchemaMode !== 'upgrade') throw new Error('invalid_settings_schema_mode')
     mkdirSync(this.stateRoot, { recursive: true, mode: 0o700 })
     chmodSync(this.stateRoot, 0o700)
     const path = join(this.stateRoot, 'state.sqlite')
     const database = new DatabaseSync(path)
     const version = Number((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
-    if (version > 4) throw new Error(`unsupported state database version: ${version}`)
+    if (![0, 1, 2, 3, 4, 5].includes(version)) {
+      database.close()
+      throw new Error(`unsupported state database version: ${version}`)
+    }
     database.exec(`
-      PRAGMA journal_mode = WAL;
       PRAGMA busy_timeout = 5000;
+      PRAGMA journal_mode = WAL;
       PRAGMA foreign_keys = ON;
       CREATE TABLE IF NOT EXISTS memos (
         owner TEXT PRIMARY KEY,
@@ -259,6 +378,18 @@ export class KalaStateStore {
     `)
     migrateDagSchema(database, version)
     backfillDagGraphVersions(database)
+    try {
+      if (version === 5 || settingsSchemaMode === 'upgrade') {
+        migrateSqliteSettings(database, version)
+        this.verifiedSettingsSchema = true
+      } else {
+        const unexpected = database.prepare("SELECT name FROM sqlite_master WHERE name IN ('settings_resource_versions', 'settings_schema_migrations')").all()
+        if (unexpected.length) throw new Error('state_settings_migration_history_mismatch')
+      }
+    } catch (error) {
+      database.close()
+      throw error
+    }
     chmodSync(path, 0o600)
     this.database = database
     return database
@@ -268,6 +399,10 @@ export class KalaStateStore {
     if (this.rootKey) return this.rootKey
     const path = this.options.keyPath ?? process.env.KALA_STATE_MASTER_KEY_PATH ?? join(this.stateRoot, 'state-store.key')
     if (existsSync(path)) {
+      const info = lstatSync(path)
+      if (!info.isFile() || info.isSymbolicLink() || (process.platform !== 'win32' && ((info.mode & 0o077) !== 0 || info.uid !== process.getuid?.()))) {
+        throw new Error('credential master key must be an owner-only regular file')
+      }
       const key = readFileSync(path)
       if (key.length !== KEY_BYTES) throw new Error('invalid credential master key length')
       this.rootKey = key
@@ -278,6 +413,12 @@ export class KalaStateStore {
     const key = randomBytes(KEY_BYTES)
     writeFileSync(path, key, { flag: 'wx', mode: 0o600 })
     chmodSync(path, 0o600)
+    const descriptor = openSync(path, 'r')
+    try { fsyncSync(descriptor) } finally { closeSync(descriptor) }
+    if (process.platform !== 'win32') {
+      const directory = openSync(dirname(path), 'r')
+      try { fsyncSync(directory) } finally { closeSync(directory) }
+    }
     this.rootKey = key
     return key
   }
@@ -299,6 +440,7 @@ export class KalaStateStore {
   private importLegacyCredential(provider: string): void {
     const exists = this.open().prepare("SELECT 1 AS present FROM credentials WHERE scope = 'unit' AND provider = ?").get(provider)
     if (exists) return
+    if (this.settingsHighWater(credentialResource(provider))) return
     const directory = this.options.legacyCredentialDirectory ?? join(this.stateRoot, 'credentials')
     if (provider === 'serper') this.importLegacyEncryptedRecord({
       provider,
@@ -348,8 +490,19 @@ export class KalaStateStore {
       decipher.final(),
     ]).toString('utf8')
     const metadata = input.metadata(record)
-    this.setCredential(input.provider, secret, metadata, requiredString(record.updatedAt, 'updatedAt'))
+    this.maintenanceTransaction(() => {
+      if (this.settingsHighWater(credentialResource(input.provider))) return
+      this.writeCredential(input.provider, secret, metadata, requiredString(record.updatedAt, 'updatedAt'))
+      if (this.settingsRevisionsAvailable()) this.recordSettingsRevision(credentialResource(input.provider), '1')
+    })
   }
+
+}
+
+function credentialResource(provider: string): { kind: string; id: string } {
+  if (provider === 'serper') return { kind: 'search', id: 'serper' }
+  if (provider === 'azure_speech') return { kind: 'speech', id: 'azure' }
+  return { kind: 'credential', id: provider }
 }
 
 function migrateDagSchema(database: DatabaseSync, version: number): void {

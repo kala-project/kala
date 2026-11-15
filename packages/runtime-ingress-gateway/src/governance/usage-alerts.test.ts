@@ -19,6 +19,12 @@ describe('PostgresUsageAlertService', () => {
     await expect(new PostgresUsageAlertService(new FakeUsageAlertDatabase({ rows: [] })).checkMonthlyTokenBudget('org_missing', 80))
       .rejects.toThrow('contract entitlement not found')
   })
+  it('does not round a large decimal budget just below 80 percent into a false alert', async () => {
+    const database = new FakeUsageAlertDatabase({ tokens: '80000000000000000000', limit: '100000000000000000001' })
+    await expect(new PostgresUsageAlertService(database).checkMonthlyTokenBudget('org_acme', 80))
+      .resolves.toMatchObject({ emitted: false, percent: 79, tokens: '80000000000000000000', limit: '100000000000000000001' })
+    expect(database.outboxInserts).toBe(0)
+  })
 })
 
 class FakeUsageAlertDatabase implements SqlExecutor {

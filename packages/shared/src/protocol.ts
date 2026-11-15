@@ -858,6 +858,7 @@ export type BuildMetadata = {
 
 export type ExecutorCapabilities = {
   schemaVersion: 1
+  mcpConfigProtocol?: 'patch-v1'
   features: {
     backgroundShell: boolean
     filePicker: boolean
@@ -890,6 +891,7 @@ export type ExecutorMcpConfigureRequest = {
 export type ExecutorMcpConfigureAck = {
   ok: boolean
   error?: string
+  revision?: string
 }
 
 export type ExecutorMcpConfigStatusRequest = {
@@ -901,6 +903,10 @@ export type ExecutorMcpConfigStatusAck = {
   /** Names only; do not send command or arguments back to the Host. */
   servers?: Array<{ name: string }>
   error?: string
+  revision?: string
+  editProtocol?: 'patch-v1'
+  requestId?: string
+  editToken?: string
 }
 
 export type ExecutorAnnounce = {
@@ -1973,6 +1979,7 @@ export type RuntimeCapabilitiesPayload = {
   product: import('./deployment.js').ProductVariant
   deployment: import('./deployment.js').ProductDeploymentConfig
   capabilities: RuntimeCapabilities
+  settingsLayout?: 'legacy' | 'unified'
   integrations?: {
     evaluation?: { url: string }
   }
@@ -2020,7 +2027,7 @@ export type ExternalDeploymentHealth = {
   checks: readonly { component: 'gateway' | 'runtime' | 'dashboard'; ready: boolean }[]
 }
 
-export type DeploymentServices = { identityConsoleUrl?: string; observability: boolean; observabilityUrl?: string; observabilityTokenAvailable?: boolean; siloConsolePath?: '/silo/' }
+export type DeploymentServices = { identityConsoleUrl?: string; observability: boolean; observabilityUrl?: string; observabilityTokenAvailable?: boolean; siloConsolePath?: '/silo/'; siloCredentialsAvailable?: boolean }
 export type OperatorObservabilitySnapshot = {
   checkedAt: string
   retainedLogs: number
@@ -2041,6 +2048,9 @@ export type ObjectStorageUsageSnapshot = {
 }
 
 export type ServerSettingsPayload = {
+  agentSettingsResourceId?: string
+  hooksSummary?: { sourceRef: string; loadState: 'loaded' | 'unknown' | 'failed'; events: readonly string[];
+    loadedAt?: string; version?: string; applyMode?: 'restart' }
   deployment?: RuntimeCapabilitiesPayload
   providers: readonly SettingsProviderSummary[]
   defaultModel: string
@@ -2350,6 +2360,7 @@ export type ExecutorServerToClientEvents = {
   'executor:app_debug_request': (payload: AppDebugExecutorRequest, ack: (result: AppDebugReply) => void) => void
   'executor:health_ping': (sentAt: number, ack: (executorAt: number) => void) => void
   'executor:mcp_configure': (payload: ExecutorMcpConfigureRequest, ack: (result: ExecutorMcpConfigureAck) => void) => void
+  'executor:mcp_patch': (payload: import('./mcp-settings.js').ExecutorMcpPatchRequest, ack: (result: import('./mcp-settings.js').ExecutorMcpPatchAck) => void) => void
   'executor:mcp_config_status': (payload: ExecutorMcpConfigStatusRequest, ack: (result: ExecutorMcpConfigStatusAck) => void) => void
   'tool:call': (
     payload: ToolCallMessage,

@@ -116,6 +116,144 @@ describe('multi-tenant Host composition', () => {
     expect(join(root, 'a', 'push-vapid.json')).not.toBe(join(root, 'b', 'push-vapid.json'))
   })
 
+  it('quiesces one real Unit at its checkpoint without closing active work or fencing another organization', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tenant-maintenance-')); roots.push(root)
+    let release = () => {}
+    let entered = false
+    const pending = new Promise<void>(resolve => { release = resolve })
+    const units = new Map<string, Awaited<ReturnType<typeof startLoopbackHostRuntimeUnit>>>()
+    host = await startTenantRuntimeService({
+      port: 0, requireProvisioning: true,
+      resolveUnitId: request => String(request.headers['x-runtime-unit'] ?? ''),
+      factory: async id => {
+        const unit = await startLoopbackHostRuntimeUnit(id, {
+          sessionsDir: join(root, id, 'sessions'), capabilities: AGENT_RUNTIME_CAPABILITIES,
+          llm: id === 'a' ? { name: 'checkpoint-fixture', async call() {
+            entered = true
+            await pending
+            return { message: { role: 'assistant', content: [{ type: 'text', text: 'completed at checkpoint' }] } }
+          } } : llm,
+          defaultConfig: createConfig({ systemPrompt: 'test', tools: [] }),
+        })
+        units.set(id, unit)
+        return unit
+      },
+    })
+    try {
+      await host.markRoutable('a', 'org-a')
+      await host.markRoutable('b', 'org-b')
+      const origin = `http://127.0.0.1:${host.port}`
+      const socket = connect(`${origin}/dashboard`, { transports: ['websocket'],
+        extraHeaders: { ...ingressActorHeaders, 'x-runtime-unit': 'a' },
+        auth: { sessionId: 'checkpoint-session', role: 'dashboard', clientVersion: PROTOCOL_VERSION } })
+      sockets.push(socket)
+      await new Promise<void>((resolve, reject) => { socket.once('connect', resolve); socket.once('connect_error', reject) })
+      await socket.timeout(2_000).emitWithAck('client:create_session', { sessionId: 'checkpoint-session' })
+      socket.emit('client:user_message', { intent: 'text', sessionId: 'checkpoint-session', text: 'retain this work' })
+      await vi.waitFor(() => expect(entered).toBe(true))
+      const a = units.get('a')!
+      const quiescing = host.quiesceUnit('a', 'maintenance-a')
+      expect(host.quiesceUnit('a', 'maintenance-a')).toBe(quiescing)
+      await expect(host.quiesceUnit('a', 'maintenance-b')).rejects.toThrow('another operation')
+      await expect(host.resumeUnit('a', 'org-a')).rejects.toThrow('another operation')
+      await expect(host.resumeUnit('a', 'org-a', 'maintenance-b')).rejects.toThrow('another operation')
+      let completed = false
+      void quiescing.then(() => { completed = true })
+      await vi.waitFor(() => expect(a.state).toBe('draining'))
+      expect(completed).toBe(false)
+      expect(socket.connected).toBe(true)
+      await expect(host.markRoutable('a', 'org-a')).rejects.toThrow('fenced for maintenance')
+      expect((await fetch(`${origin}/runtime/capabilities`, { headers: { 'x-runtime-unit': 'a' } })).status).toBe(404)
+      expect((await fetch(`${origin}/runtime/capabilities`, { headers: { 'x-runtime-unit': 'b' } })).status).toBe(200)
+      release()
+      await quiescing
+      expect(a.state).toBe('closed')
+      expect(host.units.list().map(unit => unit.id)).toEqual(['b'])
+      await expect(host.markRoutable('a', 'org-a')).rejects.toThrow('fenced for maintenance')
+      await host.resumeUnit('a', 'org-a', 'maintenance-a')
+      expect((await fetch(`${origin}/runtime/capabilities`, { headers: { 'x-runtime-unit': 'a' } })).status).toBe(200)
+    } finally { release() }
+  })
+
+  it('keeps a failed checkpoint fenced without closing the Unit or declaring maintenance complete', async () => {
+    const close = vi.fn(async () => {})
+    host = await startTenantRuntimeService({
+      port: 0, requireProvisioning: true, resolveUnitId: () => 'a',
+      factory: async id => ({ id, state: 'ready', origin: 'http://127.0.0.1:9',
+        drain: async () => { throw new Error('checkpoint unavailable') }, close }),
+    })
+    await host.markRoutable('a', 'org-a')
+    await host.units.getOrLoad('a' as TenantRuntimeUnitId)
+    await expect(host.quiesceUnit('a')).rejects.toThrow('checkpoint unavailable')
+    await expect(host.markRoutable('a', 'org-a')).rejects.toThrow('fenced for maintenance')
+    await expect(host.resumeUnit('a', 'org-a')).rejects.toThrow('checkpoint unavailable')
+    expect(close).not.toHaveBeenCalled()
+  })
+
+  it('lets maintenance supersede activation without hard-closing work or releasing placement before its checkpoint', async () => {
+    let activate = () => {}
+    let checkpoint = () => {}
+    const activation = new Promise<void>(resolve => { activate = resolve })
+    const drained = new Promise<void>(resolve => { checkpoint = resolve })
+    const close = vi.fn(async () => {})
+    const drain = vi.fn(() => drained)
+    const placement: RuntimeUnitPlacementOwnership = {
+      activate: vi.fn(() => activation), isCurrent: vi.fn(async () => true),
+      release: vi.fn(async () => {}), releaseAll: vi.fn(async () => {}), setLeaseLostHandler: vi.fn(),
+    }
+    host = await startTenantRuntimeService({
+      port: 0, placementOwnership: placement, requireProvisioning: true, resolveUnitId: () => 'a',
+      factory: async id => ({ id, state: 'ready', origin: 'http://127.0.0.1:9', drain, close }),
+    })
+    try {
+      await host.units.getOrLoad('a' as TenantRuntimeUnitId)
+      const starting = host.markRoutable('a', 'org-a')
+      const rejected = expect(starting).rejects.toThrow('activation was withdrawn')
+      await vi.waitFor(() => expect(placement.activate).toHaveBeenCalledOnce())
+      const quiescing = host.quiesceUnit('a')
+      activate()
+      await rejected
+      await vi.waitFor(() => expect(drain).toHaveBeenCalledOnce())
+      expect(close).not.toHaveBeenCalled()
+      expect(placement.release).not.toHaveBeenCalled()
+      checkpoint()
+      await quiescing
+      expect(close).toHaveBeenCalledOnce()
+      expect(placement.release).toHaveBeenCalledWith('a')
+    } finally { activate(); checkpoint() }
+  })
+
+  it('does not let a racing resume clear a newer maintenance fence', async () => {
+    let activate = () => {}
+    const gate = new Promise<void>(resolve => { activate = resolve })
+    const placement: RuntimeUnitPlacementOwnership = {
+      activate: vi.fn(async () => {}), isCurrent: vi.fn(async () => true),
+      release: vi.fn(async () => {}), releaseAll: vi.fn(async () => {}), setLeaseLostHandler: vi.fn(),
+    }
+    host = await startTenantRuntimeService({
+      port: 0, placementOwnership: placement, requireProvisioning: true, resolveUnitId: () => 'a',
+      factory: async id => ({ id, state: 'ready', origin: 'http://127.0.0.1:9',
+        drain: vi.fn(async () => {}), close: vi.fn(async () => {}) }),
+    })
+    await host.markRoutable('a', 'org-a')
+    await host.units.getOrLoad('a' as TenantRuntimeUnitId)
+    await host.quiesceUnit('a')
+    placement.activate = vi.fn(() => gate)
+    try {
+      const resume = host.resumeUnit('a', 'org-a')
+      const rejected = expect(resume).rejects.toThrow('activation was withdrawn')
+      await vi.waitFor(() => expect(placement.activate).toHaveBeenCalledOnce())
+      const quiescing = host.quiesceUnit('a')
+      activate()
+      await rejected
+      await quiescing
+      await expect(host.markRoutable('a', 'org-a')).rejects.toThrow('fenced for maintenance')
+      await expect(host.units.getOrLoad('a' as TenantRuntimeUnitId)).rejects.toThrow('quiescing')
+      await host.resumeUnit('a', 'org-a')
+      await expect(host.units.getOrLoad('a' as TenantRuntimeUnitId)).resolves.toMatchObject({ id: 'a' })
+    } finally { activate() }
+  })
+
   it('checks live placement on the handshake and closes an established Unit when its lease is lost', async () => {
     const root = await mkdtemp(join(tmpdir(), 'tenant-placement-gate-')); roots.push(root)
     let leaseLost: ((unitId: TenantRuntimeUnitId) => Promise<void>) | undefined
@@ -339,7 +477,9 @@ describe('multi-tenant Host composition', () => {
     vi.spyOn(unit.server.store, 'list').mockReturnValueOnce([{ sessionId: 'draining-session' }])
     vi.spyOn(unit.server.loop, 'drainSnapshot').mockReturnValueOnce({ ...snapshot, safe: false })
     vi.spyOn(unit.server.loop, 'waitForCheckpoint').mockImplementationOnce(async () => await new Promise(() => undefined))
-    const interrupted = expect(unit.drain()).rejects.toThrow('closed before drain checkpoint')
+    const draining = unit.drain()
+    expect(unit.drain()).toBe(draining)
+    const interrupted = expect(draining).rejects.toThrow('closed before drain checkpoint')
     await unit.close()
     await interrupted
     await unit.close()

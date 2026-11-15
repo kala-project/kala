@@ -39,9 +39,15 @@ import type {
   HostRestartAttempt,
   ServerModelsPayload,
   ServerSettingsPayload,
+  RuntimeSettingsSection,
+  SettingsSectionValue,
+  ConfigurationRead,
 } from '@agent-kernel/shared'
 import { PORTABLE_DEPLOYMENT, effectiveTenancy, productVariant, schema, validateClientMessagePayload, validateInlineMessageFiles, validateInlineMessageImages } from '@agent-kernel/shared'
 import { parseWire } from '../wire-validation.js'
+import { runtimeSettingsCapabilities } from './settings-capabilities.js'
+import { configurationEtag, configurationWriteOptions, settingsWriteProtocolFromEnvironment, type RevisionedSettingsKind } from './settings-preconditions.js'
+import type { SettingsWriteOptions, SettingsWriteProtocol } from '../settings-concurrency.js'
 
 import { buildArtifactManifest, decodeManifestCursor, pageArtifactManifest, pruneArtifacts, type ArtifactManifest } from '../artifact-manifest.js'
 import {
@@ -216,17 +222,23 @@ export function attachJsonRoutes(
   server: HttpServer,
   payloads: {
     models: readonly ModelInfo[] | (() => readonly ModelInfo[])
-    defaultModel: string | (() => string)
+    defaultModel: string | null | (() => string | null)
     settings?: ServerSettingsPayload | ((actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>)
-    addManualModel?: (input: ClientAddManualModel, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
-    updateManualModel?: (input: ClientUpdateManualModel, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
-    deleteManualModel?: (input: ClientDeleteManualModel, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
-    addManualProvider?: (input: ClientAddManualProvider, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
-    updateManualProvider?: (input: ClientUpdateManualProvider, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
-    deleteManualProvider?: (input: ClientDeleteManualProvider, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
-    setDefaultModel?: (input: ClientSetDefaultModel, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
-    updateAgentPrompt?: (input: ClientUpdateAgentPromptSettings, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
-    updateDesktopAccess?: (input: { manualAuthorizationRequired: boolean; computerUseEnabled?: boolean; desktopPreviewEnabled?: boolean }, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>
+    settingsSection?: (section: RuntimeSettingsSection, actor: DashboardActor) => SettingsSectionValue | Promise<SettingsSectionValue>
+    assertSettingsReady?: (actor: DashboardActor) => Promise<void>
+    settingsConfiguration?: (section: RuntimeSettingsSection, actor: DashboardActor) =>
+      ConfigurationRead<SettingsSectionValue> | undefined | Promise<ConfigurationRead<SettingsSectionValue> | undefined>
+    settingsRevision?: (resource: RevisionedSettingsKind, actor: DashboardActor) => string | undefined | Promise<string | undefined>
+    settingsWriteProtocol?: SettingsWriteProtocol
+    addManualModel?: (input: ClientAddManualModel, actor: DashboardActor, write?: SettingsWriteOptions) => ServerSettingsPayload | Promise<ServerSettingsPayload>
+    updateManualModel?: (input: ClientUpdateManualModel, actor: DashboardActor, write?: SettingsWriteOptions) => ServerSettingsPayload | Promise<ServerSettingsPayload>
+    deleteManualModel?: (input: ClientDeleteManualModel, actor: DashboardActor, write?: SettingsWriteOptions) => ServerSettingsPayload | Promise<ServerSettingsPayload>
+    addManualProvider?: (input: ClientAddManualProvider, actor: DashboardActor, write?: SettingsWriteOptions) => ServerSettingsPayload | Promise<ServerSettingsPayload>
+    updateManualProvider?: (input: ClientUpdateManualProvider, actor: DashboardActor, write?: SettingsWriteOptions) => ServerSettingsPayload | Promise<ServerSettingsPayload>
+    deleteManualProvider?: (input: ClientDeleteManualProvider, actor: DashboardActor, write?: SettingsWriteOptions) => ServerSettingsPayload | Promise<ServerSettingsPayload>
+    setDefaultModel?: (input: ClientSetDefaultModel, actor: DashboardActor, write?: SettingsWriteOptions) => ServerSettingsPayload | Promise<ServerSettingsPayload>
+    updateAgentPrompt?: (input: ClientUpdateAgentPromptSettings, actor: DashboardActor, write?: SettingsWriteOptions) => ServerSettingsPayload | Promise<ServerSettingsPayload>
+    updateDesktopAccess?: (input: { manualAuthorizationRequired: boolean; computerUseEnabled?: boolean; desktopPreviewEnabled?: boolean }, actor: DashboardActor, write?: SettingsWriteOptions) => ServerSettingsPayload | Promise<ServerSettingsPayload>
     initializeSocketAdmin?: (input: { password: string; mode?: 'development' | 'production' }) => ServerSettingsPayload
     updateSocketAdminMode?: (input: { mode: 'development' | 'production' }) => ServerSettingsPayload
     artifactRootDir?: string | false
@@ -256,19 +268,36 @@ export function attachJsonRoutes(
      */
     enqueueUserMessage?: (input: { sessionId: string; text: string; intent: 'text' | 'shell'; operationId?: string; mode?: 'queue' | 'steer'; content?: readonly import('@agent-kernel/kernel').MessageContent[] }) => Promise<{ accepted?: boolean; committed: boolean; cursor?: number }>
     capabilities?: import('@agent-kernel/shared').RuntimeCapabilities
+    settingsLayout?: 'legacy' | 'unified'
     evaluationUrl?: string
     deployment?: import('@agent-kernel/shared').ProductDeploymentConfig
     metrics?: OperationalMetrics
     memoStore?: MemoStore
     webSearchCredentials?: WebSearchCredentialStore & {
       status(): Promise<WebSearchCredentialStatus> | WebSearchCredentialStatus
-      set(provider: 'serper', key: string): Promise<WebSearchCredentialStatus> | WebSearchCredentialStatus
-      delete(provider: 'serper'): Promise<WebSearchCredentialStatus> | WebSearchCredentialStatus
+      configuration?(): Promise<{ revision: string; value: WebSearchCredentialStatus }> | { revision: string; value: WebSearchCredentialStatus }
+      set(provider: 'serper', key: string, write?: SettingsWriteOptions): Promise<WebSearchCredentialStatus> | WebSearchCredentialStatus
+      delete(provider: 'serper', write?: SettingsWriteOptions): Promise<WebSearchCredentialStatus> | WebSearchCredentialStatus
     }
     speechCredentials?: AzureSpeechCredentialStore
     publicApiHandler?: (request: IncomingMessage, response: ServerResponse) => Promise<boolean>
   },
 ): void {
+  const settingsWriteProtocol = payloads.settingsWriteProtocol ?? settingsWriteProtocolFromEnvironment()
+  const settingsCapabilitiesFor = (actor: DashboardActor) => runtimeSettingsCapabilities({
+    product: productVariant(payloads.deployment ?? PORTABLE_DEPLOYMENT), actor,
+    projectedReads: Boolean(payloads.settingsSection),
+    models: Boolean(payloads.addManualProvider && payloads.updateManualProvider && payloads.deleteManualProvider && payloads.addManualModel && payloads.updateManualModel && payloads.deleteManualModel && payloads.setDefaultModel),
+    agent: Boolean(payloads.updateAgentPrompt), execution: Boolean(payloads.updateDesktopAccess),
+    search: Boolean(payloads.webSearchCredentials), speech: Boolean(payloads.speechCredentials),
+  })
+  const writeOptions = (request: IncomingMessage, resource: RevisionedSettingsKind, actor: DashboardActor) =>
+    configurationWriteOptions(request, resource, actor, settingsWriteProtocol,
+      resource === 'search' && payloads.webSearchCredentials?.configuration
+        ? async () => (await payloads.webSearchCredentials!.configuration!()).revision
+        : resource === 'speech' && payloads.speechCredentials?.configuration
+          ? async () => (await payloads.speechCredentials!.configuration!()).revision
+          : payloads.settingsRevision ? () => payloads.settingsRevision!(resource, actor) : undefined)
   type ManifestSnapshot = { id: string; createdAt: number; manifest: ArtifactManifest }
   const manifestSnapshots = new Map<string, ManifestSnapshot>()
   let currentManifestSnapshot: ManifestSnapshot | undefined
@@ -409,6 +438,7 @@ export function attachJsonRoutes(
       sendJson(req, res, {
         product: productVariant(deployment),
         deployment,
+        ...(productVariant(deployment) === 'portable' && payloads.settingsLayout ? { settingsLayout: payloads.settingsLayout } : {}),
         capabilities: payloads.capabilities ?? { agent: true, workspace: true, operations: true, artifacts: true, pipeline: true },
         ...(payloads.evaluationUrl ? { integrations: { evaluation: { url: payloads.evaluationUrl } } } : {}),
       })
@@ -661,7 +691,19 @@ export function attachJsonRoutes(
     if (path === '/settings/web-search' && payloads.webSearchCredentials) {
       claimRoute(req)
       if (req.method === 'GET' || req.method === 'HEAD') {
-        void Promise.resolve(payloads.webSearchCredentials.status())
+        void (async () => {
+          const auth = authorizeDashboardHttp(req, payloads.auth)
+          if (auth.ok && payloads.webSearchCredentials!.configuration) {
+            try {
+              const snapshot = await payloads.webSearchCredentials!.configuration()
+              res.setHeader('etag', configurationEtag(req, 'search', auth.actor, snapshot.revision))
+              return snapshot.value
+            } catch (error) {
+              if (!(error instanceof Error) || error.message !== 'configuration_revisions_unavailable') throw error
+            }
+          }
+          return payloads.webSearchCredentials!.status()
+        })()
           .then((body) => sendJson(req, res, body))
           .catch((error: unknown) => sendError(res, 500, error instanceof Error ? error.message : String(error)))
         return
@@ -669,24 +711,24 @@ export function attachJsonRoutes(
       if (req.method === 'PUT') {
         const auth = authorizeSensitiveManagement(req, effectiveTenancy(payloads.deployment ?? PORTABLE_DEPLOYMENT), payloads.auth)
         if (!auth.ok) { sendError(res, auth.status, auth.error); return }
-        void readJson(req).then((raw) => {
+        void readJson(req).then(async (raw) => {
           const body = typeof raw === 'object' && raw !== null ? raw as { provider?: unknown; apiKey?: unknown; key?: unknown } : {}
           if (body.provider !== 'serper') throw new HttpRouteError(400, 'provider must be serper')
           const key = body.apiKey ?? body.key
           if (typeof key !== 'string' || key !== key.trim() || key.length < 8 || key.length > 512) {
             throw new HttpRouteError(400, 'key must be a trimmed string between 8 and 512 characters')
           }
-          return payloads.webSearchCredentials!.set('serper', key)
+          return payloads.webSearchCredentials!.set('serper', key, await writeOptions(req, 'search', auth.actor))
         }).then((body) => sendJson(req, res, body))
-          .catch((error: unknown) => sendError(res, error instanceof HttpRouteError ? error.status : 500, error instanceof Error ? error.message : String(error)))
+          .catch((error: unknown) => sendSettingsError(res, error, 500))
         return
       }
       if (req.method === 'DELETE') {
         const auth = authorizeSensitiveManagement(req, effectiveTenancy(payloads.deployment ?? PORTABLE_DEPLOYMENT), payloads.auth)
         if (!auth.ok) { sendError(res, auth.status, auth.error); return }
-        void Promise.resolve(payloads.webSearchCredentials.delete('serper'))
+        void writeOptions(req, 'search', auth.actor).then((write) => payloads.webSearchCredentials!.delete('serper', write))
           .then((body) => sendJson(req, res, body))
-          .catch((error: unknown) => sendError(res, 500, error instanceof Error ? error.message : String(error)))
+          .catch((error: unknown) => sendSettingsError(res, error, 500))
         return
       }
       sendError(res, 405, 'method not allowed')
@@ -710,7 +752,19 @@ export function attachJsonRoutes(
     if (path === '/settings/speech' && payloads.speechCredentials) {
       claimRoute(req)
       if (req.method === 'GET' || req.method === 'HEAD') {
-        void Promise.resolve(payloads.speechCredentials.status())
+        void (async () => {
+          const auth = authorizeDashboardHttp(req, payloads.auth)
+          if (auth.ok && payloads.speechCredentials!.configuration) {
+            try {
+              const snapshot = await payloads.speechCredentials!.configuration()
+              res.setHeader('etag', configurationEtag(req, 'speech', auth.actor, snapshot.revision))
+              return snapshot.value
+            } catch (error) {
+              if (!(error instanceof Error) || error.message !== 'configuration_revisions_unavailable') throw error
+            }
+          }
+          return payloads.speechCredentials!.status()
+        })()
           .then((body) => sendJson(req, res, body))
           .catch((error: unknown) => sendError(res, 500, error instanceof Error ? error.message : String(error)))
         return
@@ -754,7 +808,7 @@ export function attachJsonRoutes(
           if (apiKey !== undefined && (typeof apiKey !== 'string' || apiKey !== apiKey.trim() || apiKey.length < 16 || apiKey.length > 512)) {
             throw new HttpRouteError(400, 'apiKey must be a trimmed string between 16 and 512 characters')
           }
-          return Promise.resolve(payloads.speechCredentials!.status()).then((status) => {
+          return Promise.resolve(payloads.speechCredentials!.status()).then(async (status) => {
             if (typeof apiKey !== 'string' && !status.configured) throw new HttpRouteError(400, 'an Azure Speech key is required')
             return payloads.speechCredentials!.set({
               endpoint,
@@ -763,18 +817,18 @@ export function attachJsonRoutes(
               ...(typeof body.realtimeMaxMinutes === 'number' ? { realtimeMaxMinutes: body.realtimeMaxMinutes } : {}),
               ...(typeof body.afterRecordingMaxMinutes === 'number' ? { afterRecordingMaxMinutes: body.afterRecordingMaxMinutes } : {}),
               ...(typeof apiKey === 'string' ? { apiKey } : {}),
-            })
+            }, await writeOptions(req, 'speech', auth.actor))
           })
         }).then((body) => sendJson(req, res, body))
-          .catch((error: unknown) => sendError(res, error instanceof HttpRouteError ? error.status : 500, error instanceof Error ? error.message : String(error)))
+          .catch((error: unknown) => sendSettingsError(res, error, 500))
         return
       }
       if (req.method === 'DELETE') {
         const auth = authorizeSensitiveManagement(req, effectiveTenancy(payloads.deployment ?? PORTABLE_DEPLOYMENT), payloads.auth)
         if (!auth.ok) { sendError(res, auth.status, auth.error); return }
-        void Promise.resolve(payloads.speechCredentials.delete())
+        void writeOptions(req, 'speech', auth.actor).then((write) => payloads.speechCredentials!.delete(write))
           .then((body) => sendJson(req, res, body))
-          .catch((error: unknown) => sendError(res, 500, error instanceof Error ? error.message : String(error)))
+          .catch((error: unknown) => sendSettingsError(res, error, 500))
         return
       }
       sendError(res, 405, 'method not allowed')
@@ -1057,7 +1111,7 @@ export function attachJsonRoutes(
             sendError(res, 400, 'invalid manual model input')
             return
           }
-          const result = await payloads.addManualModel!(input, auth.actor)
+          const result = await payloads.addManualModel!(input, auth.actor, await writeOptions(req, 'models', auth.actor))
           payloads.audit?.log({ action: 'settings.model_add', actor: httpActor(req, payloads.auth), target: { providerId: input.providerId, model: input.id }, outcome: 'ok' })
           sendJson(req, res, result)
         })
@@ -1071,7 +1125,7 @@ export function attachJsonRoutes(
       void readJson(req).then(async body => {
         const input = parseWire(schema.ClientUpdateManualModelSchema, body, { channel: 'PATCH /settings/models' })
         if (!input) { sendError(res, 400, 'invalid manual model update input'); return }
-        const result = await payloads.updateManualModel!(input, auth.actor)
+        const result = await payloads.updateManualModel!(input, auth.actor, await writeOptions(req, 'models', auth.actor))
         payloads.audit?.log({ action: 'settings.model_update', actor: auth.actor, target: { providerId: input.providerId, model: input.id }, outcome: 'ok' })
         sendJson(req, res, result)
       }).catch((err: unknown) => sendSettingsError(res, err))
@@ -1091,7 +1145,7 @@ export function attachJsonRoutes(
           sendError(res, 400, 'invalid manual model delete input')
           return
         }
-        const result = await payloads.deleteManualModel!(input, auth.actor)
+        const result = await payloads.deleteManualModel!(input, auth.actor, await writeOptions(req, 'models', auth.actor))
         payloads.audit?.log({ action: 'settings.model_delete', actor: httpActor(req, payloads.auth), target: { providerId: input.providerId, model: input.id }, outcome: 'ok' })
         sendJson(req, res, result)
       }).catch((err: unknown) => sendSettingsError(res, err))
@@ -1108,7 +1162,7 @@ export function attachJsonRoutes(
             sendError(res, 400, 'invalid manual provider input')
             return
           }
-          const result = await payloads.addManualProvider!(input, auth.actor)
+          const result = await payloads.addManualProvider!(input, auth.actor, await writeOptions(req, 'models', auth.actor))
           payloads.audit?.log({ action: 'settings.provider_add', actor: httpActor(req, payloads.auth), target: { providerId: input.id }, outcome: 'ok' })
           sendJson(req, res, result)
         })
@@ -1122,7 +1176,7 @@ export function attachJsonRoutes(
       void readJson(req).then(async body => {
         const input = parseWire(schema.ClientUpdateManualProviderSchema, body, { channel: 'PATCH /settings/providers' })
         if (!input) { sendError(res, 400, 'invalid manual provider update input'); return }
-        const result = await payloads.updateManualProvider!(input, auth.actor)
+        const result = await payloads.updateManualProvider!(input, auth.actor, await writeOptions(req, 'models', auth.actor))
         payloads.audit?.log({ action: 'settings.provider_update', actor: auth.actor, target: { providerId: input.providerId }, outcome: 'ok' })
         sendJson(req, res, result)
       }).catch((err: unknown) => sendSettingsError(res, err))
@@ -1141,7 +1195,7 @@ export function attachJsonRoutes(
           sendError(res, 400, 'invalid manual provider delete input')
           return
         }
-        const result = await payloads.deleteManualProvider!(input, auth.actor)
+        const result = await payloads.deleteManualProvider!(input, auth.actor, await writeOptions(req, 'models', auth.actor))
         payloads.audit?.log({ action: 'settings.provider_delete', actor: httpActor(req, payloads.auth), target: { providerId: input.providerId }, outcome: 'ok' })
         sendJson(req, res, result)
       }).catch((err: unknown) => sendSettingsError(res, err))
@@ -1158,7 +1212,7 @@ export function attachJsonRoutes(
             sendError(res, 400, 'invalid default model input')
             return
           }
-          const result = await payloads.setDefaultModel!(input, auth.actor)
+          const result = await payloads.setDefaultModel!(input, auth.actor, await writeOptions(req, 'models', auth.actor))
           payloads.audit?.log({ action: 'settings.default_model_set', actor: httpActor(req, payloads.auth), target: { model: input.model }, outcome: 'ok' })
           sendJson(req, res, result)
         })
@@ -1172,7 +1226,7 @@ export function attachJsonRoutes(
       void readJson(req).then(async (body) => {
         const input = parseWire(schema.ClientUpdateDesktopAccessSettingsSchema, body, { channel: 'POST /settings/desktop-access' })
         if (!input) { sendError(res, 400, 'invalid desktop access settings input'); return }
-        const result = await payloads.updateDesktopAccess!(input, auth.actor)
+        const result = await payloads.updateDesktopAccess!(input, auth.actor, await writeOptions(req, 'agent', auth.actor))
         payloads.audit?.log({ action: 'settings.desktop_access_update', actor: auth.actor, target: input, outcome: 'ok' })
         sendJson(req, res, result)
       }).catch((err: unknown) => {
@@ -1189,13 +1243,13 @@ export function attachJsonRoutes(
       const auth = authorizeSensitiveManagement(req, effectiveTenancy(payloads.deployment ?? PORTABLE_DEPLOYMENT), payloads.auth)
       if (!auth.ok) { sendError(res, auth.status, auth.error); return }
       void readJson(req)
-        .then((body) => {
+        .then(async (body) => {
           const input = parseWire(schema.ClientUpdateAgentPromptSettingsSchema, body, { channel: 'POST /settings/agent-prompt' })
           if (!input) {
             sendError(res, 400, 'invalid agent prompt settings input')
             return
           }
-          return Promise.resolve(payloads.updateAgentPrompt!(input, auth.actor)).then((result) => {
+          return Promise.resolve(payloads.updateAgentPrompt!(input, auth.actor, await writeOptions(req, 'agent', auth.actor))).then((result) => {
             payloads.audit?.log({ action: 'settings.agent_prompt_update', actor: auth.actor, target: { slotId: input.selectedSlotId }, outcome: 'ok' })
             sendJson(req, res, result)
           })
@@ -1462,7 +1516,7 @@ export function attachJsonRoutes(
       claimRoute(req)
       const body: ServerModelsPayload = {
         models: valueOf(payloads.models),
-        defaultModel: valueOf(payloads.defaultModel),
+        defaultModel: valueOf(payloads.defaultModel) ?? '',
       }
       sendJson(req, res, body)
       return
@@ -1479,6 +1533,46 @@ export function attachJsonRoutes(
         .catch((err: unknown) => sendError(res, 500, err instanceof Error ? err.message : String(err)))
       return
     }
+    if (path === '/settings/capabilities' && req.method === 'GET') {
+      claimRoute(req)
+      const auth = authorizeDashboardHttp(req, payloads.auth)
+      if (!auth.ok) { sendError(res, 401, auth.reason); return }
+      res.setHeader('cache-control', 'no-store')
+      void (async () => {
+        await payloads.assertSettingsReady?.(auth.actor)
+        sendJson(req, res, settingsCapabilitiesFor(auth.actor))
+      })().catch(() => sendError(res, 503, 'settings_projection_unavailable'))
+      return
+    }
+    if (path.startsWith('/settings/sections/') && req.method === 'GET') {
+      claimRoute(req)
+      const auth = authorizeDashboardHttp(req, payloads.auth)
+      if (!auth.ok) { sendError(res, 401, auth.reason); return }
+      const section = path.slice('/settings/sections/'.length)
+      if (!['models', 'agent', 'execution', 'hooks', 'skills', 'engines', 'storage', 'diagnostics', 'services', 'integrations'].includes(section)) {
+        sendError(res, 404, 'settings_section_not_found'); return
+      }
+      if (!['models', 'engines', 'skills', 'storage', 'integrations'].includes(section)) {
+        const management = authorizeSensitiveManagement(req, effectiveTenancy(payloads.deployment ?? PORTABLE_DEPLOYMENT), payloads.auth)
+        if (!management.ok) { sendError(res, management.status, management.error); return }
+      }
+      if (!payloads.settingsSection && !payloads.settingsConfiguration) { sendError(res, 503, 'settings_projection_unavailable'); return }
+      res.setHeader('cache-control', 'no-store')
+      void (async () => {
+        await payloads.assertSettingsReady?.(auth.actor)
+        const configuration = await payloads.settingsConfiguration?.(section as RuntimeSettingsSection, auth.actor)
+        if (configuration && ['models', 'agent', 'execution'].includes(section)) {
+          res.setHeader('etag', configurationEtag(req, section === 'models' ? 'models' : 'agent', auth.actor, configuration.revision))
+          const family = section === 'models' ? 'models.' : section === 'agent' ? 'agent.' : 'execution-policy.'
+          return { ...configuration, capabilities: settingsCapabilitiesFor(auth.actor).capabilities.filter((capability) => capability.id.startsWith(family)) }
+        }
+        if (!payloads.settingsSection) throw new Error('settings_projection_unavailable')
+        return payloads.settingsSection(section as RuntimeSettingsSection, auth.actor)
+      })()
+        .then(value => sendJson(req, res, value))
+        .catch(() => sendError(res, 503, 'settings_projection_unavailable'))
+      return
+    }
     if (path === '/router/health' && payloads.routerHealth) {
       claimRoute(req)
       sendJson(req, res, payloads.routerHealth())
@@ -1489,6 +1583,7 @@ export function attachJsonRoutes(
 
 function isProtectedJsonRoute(path: string): boolean {
   return path === '/models' ||
+    path === '/settings/capabilities' || path.startsWith('/settings/sections/') ||
     path === '/settings' ||
     path === '/runtime/capabilities' ||
     path === '/runtime/tool-registry' ||
@@ -2203,8 +2298,8 @@ function sendJsonStatus(req: IncomingMessage, res: ServerResponse, status: numbe
   res.end(json)
 }
 
-function sendSettingsError(res: ServerResponse, error: unknown): void {
-  const status = error instanceof Error && 'status' in error && typeof error.status === 'number' ? error.status : 400
+function sendSettingsError(res: ServerResponse, error: unknown, fallbackStatus = 400): void {
+  const status = error instanceof Error && 'status' in error && typeof error.status === 'number' ? error.status : fallbackStatus
   sendError(res, status, error instanceof Error ? error.message : String(error))
 }
 

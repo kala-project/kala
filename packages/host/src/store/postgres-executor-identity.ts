@@ -142,7 +142,7 @@ export class PostgresExecutorIdentityStore implements ExecutorIdentityStorage {
       invite.lastUsedAt = new Date().toISOString()
       if (!invite.label && cleanString(label)) invite.label = cleanString(label)
       await this.#write(transaction, 'invite', row.record_id, invite)
-      return { ok: true, token: await this.#provision(transaction, workspaceId, label) }
+      return { ok: true, token: await this.#provision(transaction, workspaceId, label, undefined, invite.inviteHash.slice('sha256:'.length), invite.id) }
     })
   }
 
@@ -206,7 +206,7 @@ export class PostgresExecutorIdentityStore implements ExecutorIdentityStorage {
       if (!current) throw new Error('executor identity not found')
       current.record.revokedAt = new Date().toISOString()
       await this.#write(transaction, 'identity', current.id, current.record)
-      return this.#insertIdentity(transaction, workspaceId, current.record.label, current.record.installId, (current.record.credentialVersion ?? 1) + 1)
+      return this.#insertIdentity(transaction, workspaceId, current.record.label, current.record.installId, (current.record.credentialVersion ?? 1) + 1, current.record.enrollmentHash, current.record.enrollmentInviteId)
     })
   }
 
@@ -222,19 +222,21 @@ export class PostgresExecutorIdentityStore implements ExecutorIdentityStorage {
     return this.database.transaction(async (transaction) => this.#revokeWorkspace(transaction, workspaceId))
   }
 
-  async #provision(transaction: HotStateSqlExecutor, workspaceId: string, label?: string, installId?: string): Promise<string> {
+  async #provision(transaction: HotStateSqlExecutor, workspaceId: string, label?: string, installId?: string, enrollmentHash?: string, enrollmentInviteId?: string): Promise<string> {
     await this.#lock(transaction, `workspace:${workspaceId}`)
     await this.#revokeWorkspace(transaction, workspaceId, false)
-    return this.#insertIdentity(transaction, workspaceId, label, installId, 1)
+    return this.#insertIdentity(transaction, workspaceId, label, installId, 1, enrollmentHash, enrollmentInviteId)
   }
 
-  async #insertIdentity(transaction: HotStateSqlExecutor, workspaceId: string, label?: string, installId?: string, credentialVersion?: number): Promise<string> {
+  async #insertIdentity(transaction: HotStateSqlExecutor, workspaceId: string, label?: string, installId?: string, credentialVersion?: number, enrollmentHash?: string, enrollmentInviteId?: string): Promise<string> {
     const token = `ak_exec_${randomBytes(32).toString('base64url')}`
     const now = new Date().toISOString()
     const record: StoredExecutorIdentity = {
       tokenHash: hashToken(token),
       workspaceId,
       ...(installId ? { installId } : {}),
+      ...(enrollmentHash ? { enrollmentHash } : {}),
+      ...(enrollmentInviteId ? { enrollmentInviteId } : {}),
       ...(cleanString(label) ? { label: cleanString(label) } : {}),
       createdAt: now,
       lastSeenAt: now,

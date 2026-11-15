@@ -37,6 +37,16 @@ describe('PostgresUsageLedger', () => {
     await expect(ledger.currentMonth('org_acme')).resolves.toEqual({ tokens: 9000, exhausted: false })
     await expect(ledger.assertMonthlyTokenQuota('org_acme', 1_000_000)).resolves.toEqual({ tokens: 9000 })
   })
+  it('keeps decimal limits and admission comparisons exact beyond JavaScript integer precision', async () => {
+    const ledger = new PostgresUsageLedger(new FakeUsageDatabase({ currentRows: [{
+      tokens: '9007199254740993', monthly_token_limit: '9007199254740994',
+    }] }))
+    await expect(ledger.currentMonth('org_acme')).resolves.toEqual({
+      tokens: '9007199254740993', limit: '9007199254740994', exhausted: false,
+    })
+    await expect(ledger.assertMonthlyTokenQuota('org_acme', 1)).resolves.toMatchObject({ tokens: '9007199254740993' })
+    await expect(ledger.assertMonthlyTokenQuota('org_acme', 2)).rejects.toThrow('organization token quota exceeded')
+  })
 })
 
 class FakeUsageDatabase implements SqlExecutor {

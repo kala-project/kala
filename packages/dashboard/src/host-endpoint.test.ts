@@ -18,6 +18,7 @@ describe('host-endpoint', () => {
     setLocation('http://localhost:3000/')
   })
   afterEach(() => {
+    vi.restoreAllMocks()
     ;(import.meta as any).env = originalEnv
   })
 
@@ -72,5 +73,21 @@ describe('host-endpoint', () => {
     setStoredHostEndpoint('http://new2.example')
     setStoredHostEndpoint('')
     expect(getStoredHostEndpoint()).toBeNull()
+  })
+
+  it('does not publish a changed target when persistence fails on save or reset', () => {
+    localStorage.setItem(STORAGE_KEY, 'https://previous.example')
+    const changed = vi.fn()
+    window.addEventListener('agent-kernel:host-endpoint-changed', changed)
+    const store = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('unavailable') })
+    try {
+      expect(setStoredHostEndpoint('https://different.example')).toBe(false)
+      expect(resolveHostEndpoint().url).toBe('https://previous.example')
+      store.mockRestore()
+      vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => { throw new Error('unavailable') })
+      expect(setStoredHostEndpoint(null)).toBe(false)
+      expect(resolveHostEndpoint().url).toBe('https://previous.example')
+      expect(changed).not.toHaveBeenCalled()
+    } finally { window.removeEventListener('agent-kernel:host-endpoint-changed', changed) }
   })
 })

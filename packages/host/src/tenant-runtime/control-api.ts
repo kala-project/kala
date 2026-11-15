@@ -7,6 +7,9 @@ import type { RuntimeCapabilities } from '@agent-kernel/shared'
 import { parseTenantRuntimeUnitId } from './unit.js'
 import type { RuntimeUnitMaterializationCatalog } from './materialization-store.js'
 import type { TenantRuntimeService } from './service.js'
+import { ModelPolicyUnavailable } from './model-policy-client.js'
+import type { RuntimeModelPolicyControl } from './model-policy-control.js'
+import type { PostgresWorkspaceReferenceAuthority } from './workspace-references.js'
 
 export function attachTenantRuntimeControlApi(options: {
   http: HttpServer
@@ -15,23 +18,33 @@ export function attachTenantRuntimeControlApi(options: {
   store: RuntimeUnitMaterializationCatalog
   dataRoot: string
   capabilities: RuntimeCapabilities
+  modelPolicy?: Pick<RuntimeModelPolicyControl, 'handle'>
+  workspaceReferences?: Pick<PostgresWorkspaceReferenceAuthority, 'inspect'> & Partial<Pick<PostgresWorkspaceReferenceAuthority, 'reserve' | 'consume'>>
 }): void {
   options.http.prependListener('request', (request, response) => {
     if (!(request.url ?? '').startsWith('/internal/')) return
     const supplied = request.headers['x-agent-runlab-ingress-secret']
     if (typeof supplied !== 'string' || !secretsEqual(supplied, options.serviceSecret)) { response.writeHead(403); response.end(); return }
+    const settings = request.url?.startsWith('/internal/settings/') === true
+    if (settings && (request.headers.cookie || request.headers.authorization || request.headers.origin)) {
+      response.writeHead(403); response.end(); return
+    }
     if (request.url === '/internal/health' && request.method === 'GET') {
       response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ ok: true, ...options.service.status() })); return
     }
-    if (!['/internal/runtime-units', '/internal/retention/sessions'].includes(request.url ?? '') || request.method !== 'POST') { response.writeHead(404); response.end(); return }
+    const modelPolicyPaths = ['/internal/settings/model-management/inspect', '/internal/settings/model-management/reconcile',
+      '/internal/settings/model-management/quiesce', '/internal/settings/model-management/resume', '/internal/settings/model-management/observe']
+    if (!['/internal/runtime-units', '/internal/retention/sessions', '/internal/settings/workspace-references',
+      '/internal/settings/workspace-reserve', '/internal/settings/operational-consume', ...modelPolicyPaths].includes(request.url ?? '') || request.method !== 'POST') { response.writeHead(404); response.end(); return }
     let raw = ''; let oversized = false
     request.setTimeout(5_000, () => request.destroy())
     request.on('data', (chunk) => { raw += String(chunk); if (Buffer.byteLength(raw) > 16_384) { oversized = true; request.destroy() } })
     request.on('end', () => { void applyCommand(request.url!, raw, oversized, options).then((result) => {
       response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify(result))
     }).catch((error) => {
-      const status = error instanceof ControlApiError ? error.status : 400
-      const body = { error: error instanceof Error ? error.message : String(error), ...(error instanceof ControlApiError ? { code: error.code } : {}) }
+      const status = error instanceof ControlApiError || error instanceof ModelPolicyUnavailable ? error.status : 400
+      const body = settings ? { error: error instanceof ModelPolicyUnavailable ? error.code : 'invalid_model_policy_request' }
+        : { error: error instanceof Error ? error.message : String(error), ...(error instanceof ControlApiError ? { code: error.code } : {}) }
       if (!response.headersSent) response.writeHead(status, { 'content-type': 'application/json' })
       response.end(JSON.stringify(body))
     }) })
@@ -40,6 +53,19 @@ export function attachTenantRuntimeControlApi(options: {
 
 async function applyCommand(path: string, raw: string, oversized: boolean, options: Parameters<typeof attachTenantRuntimeControlApi>[0]): Promise<unknown> {
   if (oversized) throw new Error('request body too large')
+  if (path === '/internal/settings/workspace-references') {
+    if (!options.workspaceReferences) throw new ModelPolicyUnavailable('workspace_reference_authority_unavailable')
+    return options.workspaceReferences.inspect(JSON.parse(raw))
+  }
+  if (path === '/internal/settings/workspace-reserve' || path === '/internal/settings/operational-consume') {
+    if (path.endsWith('workspace-reserve') && options.workspaceReferences?.reserve) return options.workspaceReferences.reserve(JSON.parse(raw))
+    if (path.endsWith('operational-consume') && options.workspaceReferences?.consume) return options.workspaceReferences.consume(JSON.parse(raw))
+    throw new ModelPolicyUnavailable('operational_consumer_unavailable')
+  }
+  if (path.startsWith('/internal/settings/model-management/')) {
+    if (!options.modelPolicy) throw new ModelPolicyUnavailable('model_policy_authority_unavailable')
+    return options.modelPolicy.handle(path, JSON.parse(raw))
+  }
   if (path === '/internal/retention/sessions') {
     const input = JSON.parse(raw) as { unitId?: string; organizationId?: string; before?: string }
     if (!input.unitId || !input.organizationId || !input.before) throw new Error('invalid retention request')
@@ -83,7 +109,10 @@ async function applyCommand(path: string, raw: string, oversized: boolean, optio
     const desiredState = requestedState ?? (action === 'suspend' ? 'suspended' : 'ready')
     await options.store.apply({ schemaVersion: 1, unitId, ...(organizationId ? { organizationId } : {}), routingKeyDigest: '', routingKeyVersion: 1, generation: input.generation, desiredState, dataRoot: join(options.dataRoot, 'tenant-runtime-units', unitId), capabilities: options.capabilities, lastOperationId: input.operationId, updatedAt: new Date().toISOString() })
     if (desiredState === 'ready') {
-      try { await options.service.markRoutable(unitId, organizationId) } catch (error) {
+      try {
+        if (action === 'resume') await options.service.resumeUnit(unitId, organizationId)
+        else await options.service.markRoutable(unitId, organizationId)
+      } catch (error) {
         throw new ControlApiError(503, 'runtime_unit_placement_unavailable', error instanceof Error ? error.message : String(error))
       }
     } else await options.service.suspendUnit(unitId)

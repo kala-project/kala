@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises'
 
 import type { MemoDocument } from '../memo-store.js'
 import type { HotStateDatabase, HotStateSqlExecutor } from './postgres-hot-state.js'
+import type { SettingsWriteOptions } from '../settings-concurrency.js'
+import { credentialSettingsResource, PostgresSettingsRevisions } from './settings-revisions.js'
 
 const CIPHER = 'aes-256-gcm'
 const NONCE_BYTES = 12
@@ -52,6 +54,9 @@ export class PostgresTenantStateStore {
   readonly #masterKey: Buffer
   readonly #memos: string
   readonly #credentials: string
+  readonly #settingsRevisions: PostgresSettingsRevisions
+
+  get tenantId(): string { return this.#tenantId }
 
   constructor(
     readonly database: HotStateDatabase,
@@ -66,6 +71,7 @@ export class PostgresTenantStateStore {
     const schema = quoteIdentifier(options.schema ?? 'public')
     this.#memos = `${schema}.tenant_state_memos`
     this.#credentials = `${schema}.tenant_state_credentials`
+    this.#settingsRevisions = new PostgresSettingsRevisions(tenantId, options.schema)
   }
 
   /** Explicit schema bootstrap for migrations and isolated tests; never called by runtime constructors. */
@@ -145,15 +151,31 @@ export class PostgresTenantStateStore {
     }
   }
 
+  async credentialConfiguration(credentialId: string): Promise<{ revision: string; value: PostgresCredentialRecord | undefined }> {
+    return this.withCredentialLock(credentialId, async (transaction) => {
+      const revision = await this.credentialRevision(credentialId, transaction)
+      if (!revision) throw Object.assign(new Error('configuration_revisions_unavailable'), { status: 503 })
+      return { revision, value: await this.getCredential(credentialId, transaction) }
+    })
+  }
+
+  async credentialRevision(credentialId: string, transaction: HotStateSqlExecutor): Promise<string | undefined> {
+    return this.#settingsRevisions.lock(transaction, credentialSettingsResource(credentialId))
+  }
+
   async setCredential(
     credentialId: string,
     secret: string,
     metadata: Record<string, unknown>,
     updatedAt = new Date().toISOString(),
     executor: HotStateSqlExecutor = this.database,
+    options: SettingsWriteOptions = {},
   ): Promise<void> {
     validateIdentifierValue(credentialId, 'credentialId')
     if (typeof secret !== 'string' || secret.length === 0) throw new TypeError('secret must be a non-empty string')
+    if (executor === this.database) {
+      return this.withCredentialLock(credentialId, (transaction) => this.setCredential(credentialId, secret, metadata, updatedAt, transaction, options))
+    }
     const encodedMetadata = JSON.stringify(metadata)
     if (encodedMetadata === undefined) throw new TypeError('metadata must be JSON-serializable')
     const nonce = randomBytes(NONCE_BYTES)
@@ -161,7 +183,7 @@ export class PostgresTenantStateStore {
     cipher.setAAD(this.#aad(credentialId))
     const ciphertext = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()])
     const authTag = cipher.getAuthTag()
-    await executor.query(`INSERT INTO ${this.#credentials}
+    await this.#settingsRevisions.mutate(executor, credentialSettingsResource(credentialId), options, () => executor.query(`INSERT INTO ${this.#credentials}
         (tenant_id, credential_id, ciphertext, nonce, auth_tag, metadata, updated_at)
       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::timestamptz)
       ON CONFLICT (tenant_id, credential_id) DO UPDATE SET
@@ -170,13 +192,15 @@ export class PostgresTenantStateStore {
         auth_tag = EXCLUDED.auth_tag,
         metadata = EXCLUDED.metadata,
         updated_at = EXCLUDED.updated_at`,
-    [this.#tenantId, credentialId, ciphertext, nonce, authTag, encodedMetadata, updatedAt])
+    [this.#tenantId, credentialId, ciphertext, nonce, authTag, encodedMetadata, updatedAt]))
   }
 
-  async deleteCredential(credentialId: string, executor: HotStateSqlExecutor = this.database): Promise<void> {
+  async deleteCredential(credentialId: string, executor: HotStateSqlExecutor = this.database, options: SettingsWriteOptions = {}): Promise<void> {
     validateIdentifierValue(credentialId, 'credentialId')
-    await executor.query(`DELETE FROM ${this.#credentials}
-      WHERE tenant_id = $1 AND credential_id = $2`, [this.#tenantId, credentialId])
+    if (executor === this.database) return this.withCredentialLock(credentialId, (transaction) => this.deleteCredential(credentialId, transaction, options))
+    await this.#settingsRevisions.mutate(executor, credentialSettingsResource(credentialId), options, () =>
+      executor.query(`DELETE FROM ${this.#credentials}
+      WHERE tenant_id = $1 AND credential_id = $2`, [this.#tenantId, credentialId]))
   }
 
   #aad(credentialId: string): Buffer {

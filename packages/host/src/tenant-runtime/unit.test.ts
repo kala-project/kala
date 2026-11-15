@@ -76,6 +76,46 @@ describe('TenantRuntimeUnitRegistry', () => {
     await expect(registry.getOrLoad(parseTenantRuntimeUnitId('b'))).rejects.toThrow('draining')
   })
 
+  it('shares a per-Unit checkpoint, fences new loads and never materializes an absent Unit', async () => {
+    const checkpoint = deferred<void>()
+    const a = unit('a')
+    a.drain = vi.fn(() => checkpoint.promise)
+    const factory = vi.fn(async () => a)
+    const registry = new TenantRuntimeUnitRegistry(factory)
+    await registry.getOrLoad(a.id)
+    const first = registry.drain(a.id)
+    const second = registry.drain(a.id)
+    expect(first).toBe(second)
+    await vi.waitFor(() => expect(a.drain).toHaveBeenCalledOnce())
+    await expect(registry.getOrLoad(a.id)).rejects.toThrow('quiescing')
+    expect(a.close).not.toHaveBeenCalled()
+    checkpoint.resolve(undefined)
+    await first
+    await expect(registry.getOrLoad(a.id)).rejects.toThrow('quiescing')
+    await registry.close(a.id)
+    await expect(registry.getOrLoad(a.id)).rejects.toThrow('quiescing')
+    await registry.resume(a.id)
+    await registry.getOrLoad(a.id)
+    await registry.drain(parseTenantRuntimeUnitId('absent'))
+    expect(factory).toHaveBeenCalledTimes(2)
+  })
+
+  it('waits for an already-loading Unit before its checkpoint and retains a failed fence', async () => {
+    const loading = deferred<TenantRuntimeUnit>()
+    const a = unit('a')
+    a.drain = vi.fn(async () => { throw new Error('checkpoint unavailable') })
+    const registry = new TenantRuntimeUnitRegistry(async () => loading.promise)
+    const pending = registry.getOrLoad(a.id)
+    const drain = registry.drain(a.id)
+    expect(a.drain).not.toHaveBeenCalled()
+    loading.resolve(a)
+    await pending
+    await expect(drain).rejects.toThrow('checkpoint unavailable')
+    expect(registry.drain(a.id)).toBe(drain)
+    await expect(registry.getOrLoad(a.id)).rejects.toThrow('quiescing')
+    expect(a.close).not.toHaveBeenCalled()
+  })
+
   it('serializes close during load and blocks reload until teardown completes', async () => {
     const id = parseTenantRuntimeUnitId('a')
     const firstLoad = deferred<TenantRuntimeUnit>()

@@ -8,6 +8,7 @@ import { createPostgresControlPlaneDatabase, migrateControlPlane, readControlPla
 
 import { grantRetentionRole } from '../governance/retention-authority.js'
 import { grantWebhookWorker } from '../webhooks/worker-authority.js'
+import { grantSettingsOperator } from '../settings/operator-authority.js'
 
 const { Client } = pg
 
@@ -36,6 +37,10 @@ async function main(): Promise<void> {
   const writerRole = process.env.KALA_INGRESS_CONTROL_WRITER_ROLE
   const workerRole = process.env.KALA_WEBHOOK_WORKER_ROLE
   const retentionRole = process.env.KALA_RETENTION_MAINTENANCE_ROLE
+  const settingsOperatorRole = process.env.KALA_SETTINGS_OPERATOR_ROLE
+  if (settingsOperatorRole && (!writerRole || [writerRole, workerRole, retentionRole].includes(settingsOperatorRole))) {
+    throw new Error('Settings Operator requires a separate maintenance identity')
+  }
   if (retentionRole && (!writerRole || retentionRole === writerRole || retentionRole === workerRole)) throw new Error('Retention requires a separate maintenance identity')
   if (workerRole && (!writerRole || workerRole === writerRole)) throw new Error('Webhook worker requires a separate control database identity')
   if (requireExistingDatabase) {
@@ -67,6 +72,7 @@ async function main(): Promise<void> {
       if (writerRole) await grantControlWriter(tx, writerRole)
       if (retentionRole) await grantRetentionRole(tx, retentionRole)
       if (workerRole) await grantWebhookWorker(tx, workerRole)
+      if (settingsOperatorRole) await grantSettingsOperator(tx, settingsOperatorRole)
     } })
     process.stdout.write(`${JSON.stringify({ event: 'control_plane_initialized', version })}\n`)
   } finally { await database.close() }
@@ -78,13 +84,57 @@ export async function grantControlWriter(database: { query: (sql: string) => Pro
   assertControlWriterRole(role)
   await database.query(`GRANT CONNECT ON DATABASE runlab_control TO "${role}"`)
   await database.query(`GRANT USAGE ON SCHEMA public TO "${role}"`)
-  await database.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "${role}"`)
+  const businessTables = [
+    'organizations', 'principals', 'organization_memberships', 'organization_invites', 'contract_entitlements',
+    'workspaces', 'workspace_grants', 'workspace_policies', 'runtime_unit_placements', 'executor_pools', 'executors',
+    'executor_enrollment_tokens', 'browser_sessions', 'notification_devices', 'retention_policies',
+    'control_plane_imports', 'service_account_tokens', 'webhook_endpoints', 'oidc_login_states', 'owner_bootstrap_authorizations',
+  ]
+  const readOnlyTables = [
+    'control_plane_schema_migrations', 'outbox_events', 'webhook_deliveries', 'audit_events', 'usage_ledger',
+    'retention_runs', 'dedicated_owner_credentials', 'dedicated_oidc_owner_bindings',
+  ]
+  await database.query(`GRANT SELECT ON TABLE ${[...businessTables, ...readOnlyTables].map(table => `public."${table}"`).join(',')} TO "${role}"`)
+  await database.query(`GRANT INSERT, UPDATE, DELETE ON TABLE ${businessTables.map(table => `public."${table}"`).join(',')} TO "${role}"`)
+  await database.query(`DO $revisions$ BEGIN
+    IF to_regclass('public.settings_resource_versions') IS NOT NULL THEN
+      GRANT SELECT, INSERT, UPDATE ON TABLE public.settings_resource_versions TO "${role}";
+      REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public.settings_resource_versions FROM "${role}";
+      IF has_table_privilege('${role}','public.settings_resource_versions','DELETE,TRUNCATE,REFERENCES,TRIGGER') THEN
+        RAISE EXCEPTION 'Gateway writer must preserve Settings version tombstones';
+      END IF;
+    END IF;
+  END $revisions$`)
+  await database.query(`DO $settings$ DECLARE
+    settings_table text;
+    settings_column text;
+  BEGIN
+    FOREACH settings_table IN ARRAY ARRAY['organization_model_management','organization_model_policies','organization_webhook_secret_bindings','settings_operator_operations'] LOOP
+      IF to_regclass('public.' || settings_table) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE public.%I FROM %I', settings_table, '${role}');
+        FOR settings_column IN SELECT attname FROM pg_attribute
+          WHERE attrelid=to_regclass('public.' || settings_table) AND attnum>0 AND NOT attisdropped LOOP
+          EXECUTE format('REVOKE SELECT (%I), INSERT (%I), UPDATE (%I), REFERENCES (%I) ON TABLE public.%I FROM %I',
+            settings_column, settings_column, settings_column, settings_column, settings_table, '${role}');
+        END LOOP;
+        IF settings_table <> 'settings_operator_operations' THEN
+          EXECUTE format('GRANT SELECT ON TABLE public.%I TO %I', settings_table, '${role}');
+        END IF;
+        IF has_any_column_privilege('${role}', 'public.' || settings_table, 'INSERT,UPDATE,REFERENCES')
+          OR has_table_privilege('${role}', 'public.' || settings_table, 'DELETE,TRUNCATE,TRIGGER')
+          OR settings_table='settings_operator_operations' AND has_any_column_privilege('${role}', 'public.' || settings_table, 'SELECT') THEN
+          RAISE EXCEPTION 'Gateway writer must not inherit Settings Operator authority';
+        END IF;
+      END IF;
+    END LOOP;
+  END $settings$`)
   await database.query(`REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON control_plane_schema_migrations FROM "${role}"`)
   // Business producers may append envelopes, never rewrite delivery progress or event history.
   await database.query(`REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON outbox_events FROM "${role}"`)
   await database.query(`REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON webhook_deliveries FROM "${role}"`)
   await database.query(`GRANT INSERT (id,organization_id,topic,aggregate_type,aggregate_id,payload) ON outbox_events TO "${role}"`)
   await database.query(`REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON audit_events,usage_ledger FROM "${role}"`)
+  await database.query(`GRANT INSERT ON TABLE public.audit_events, public.usage_ledger TO "${role}"`)
   await database.query(`REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON retention_runs FROM "${role}"`)
   // The running Gateway reads the verifier and records successful logins, but cannot
   // replace/bootstrap a credential or modify its identity and password columns.
@@ -95,7 +145,6 @@ export async function grantControlWriter(database: { query: (sql: string) => Pro
       REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public.dedicated_oidc_owner_bindings FROM "${role}";
     END IF;
   END $oidc$`)
-  await database.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "${role}"`)
   // The fresh PG/S3 claim lives outside public; only its immutable marker is readable.
   await database.query(`DO $kala$ BEGIN
     IF has_any_column_privilege('${role}','public.control_plane_schema_migrations','INSERT,UPDATE')

@@ -24,6 +24,7 @@ import type { AgentConfig } from '@agent-kernel/kernel'
 import type { Namespace } from 'socket.io'
 
 import { SessionStore } from '../store/session.js'
+import { hashToken } from '../store/executor-identity.js'
 import { createExecutorRegistry } from './executor.js'
 import { appDebugRelayFor } from './app-debug.js'
 import type { DashboardNs } from './dashboard-ns.js'
@@ -88,6 +89,7 @@ export type ExecutorDeps = {
   auth?: AuthConfig
   installations?: ExecutorInstallationStorage
   executorQuota?: TenantExecutorQuotaEnforcer
+  executorAdmission?: (input: { executorId: string; workspaceId: string; enrollmentHash?: string; enrollmentInviteId?: string }) => Promise<void>
   audit?: AuditLogger
   broadcastError(
     sessionId: string,
@@ -166,6 +168,12 @@ export function configureExecutorNamespace(
         const current = await bounded(authenticateExecutorToken({ role: 'executor', clientVersion: socket.handshake.auth.clientVersion, token: identity.token }, deps.auth))
         if (!socket.connected || executorIdentities.get(socket) !== identity) return false
         if (!current.accepted || current.workspaceId !== identity.workspaceId || current.installId !== identity.installId) return rejectBinding(socket, true)
+        const announcement = executorAnnouncements.get(socket)
+        if (announcement) await deps.executorAdmission?.({
+          executorId: announcement.executorId, workspaceId: announcement.workspaceId,
+          ...(current.enrollmentHash ? { enrollmentHash: current.enrollmentHash } : {}),
+          ...(current.enrollmentInviteId ? { enrollmentInviteId: current.enrollmentInviteId } : {}),
+        })
         validatedAt.set(socket, performance.now())
         return true
       } catch { return rejectBinding(socket, false) }
@@ -272,7 +280,10 @@ export function configureExecutorNamespace(
           return
         }
         socket.emit('executor:welcome', { token: bound.token, workspaceId: payload.workspaceId })
-        const nextIdentity = { accepted: true, token: bound.token, workspaceId: payload.workspaceId, label: payload.workspaceName }
+        const stored = await deps.auth?.executorIdentityStore?.resolveToken(bound.token)
+        const nextIdentity = { accepted: true, token: bound.token, workspaceId: payload.workspaceId, label: payload.workspaceName,
+          enrollmentHash: hashToken(identity.inviteToken).slice('sha256:'.length),
+          ...(stored?.enrollmentInviteId ? { enrollmentInviteId: stored.enrollmentInviteId } : {}) }
         executorIdentities.set(socket, nextIdentity)
         socket.data.executorIdentity = publicExecutorIdentity(nextIdentity)
         deps.audit?.log({ action: 'executor.invite_bound', actor: { kind: 'executor', executorId: payload.executorId, workspaceId: payload.workspaceId }, target: { workspaceId: payload.workspaceId }, outcome: 'ok' })
@@ -322,6 +333,11 @@ export function configureExecutorNamespace(
       socket.data.connectionMeta = connectionMeta
       deps.audit?.log({ action: 'executor.announce_accept', actor: { kind: 'executor', executorId: payload.executorId, workspaceId: payload.workspaceId, ...(identity?.label ? { label: identity.label } : {}) }, target: { workspaceId: payload.workspaceId }, outcome: 'ok', metadata: { ...auditConnectionMeta(connectionMeta), workspaceName: payload.workspaceName } })
       executorAnnouncements.set(socket, payload)
+      const currentIdentity = executorIdentities.get(socket)
+      await deps.executorAdmission?.({ executorId: payload.executorId, workspaceId: payload.workspaceId,
+        ...(currentIdentity?.enrollmentHash ? { enrollmentHash: currentIdentity.enrollmentHash } : {}),
+        ...(currentIdentity?.enrollmentInviteId ? { enrollmentInviteId: currentIdentity.enrollmentInviteId } : {}) })
+      if (!socket.connected) return
       deps.executors.attach(socket, payload, auth.clientVersion)
       monitor(socket)
       if (trustedInstallId && identity?.token) {

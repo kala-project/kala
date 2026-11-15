@@ -39,6 +39,8 @@ export type ExecutorIdentity = {
   workspaceId?: string
   installId?: string
   inviteToken?: string
+  enrollmentHash?: string
+  enrollmentInviteId?: string
   token?: string
   reason?: string
 }
@@ -84,7 +86,7 @@ export async function authenticateExecutorToken(
   // After initial enrollment the Executor retains its route hint, but its
   // durable device credential must take precedence over an expired invite.
   const stored = await config?.executorIdentityStore?.resolveToken(token)
-  if (stored) return { accepted: true, workspaceId: stored.workspaceId, ...(stored.installId ? { installId: stored.installId } : {}), ...(stored.label ? { label: stored.label } : {}), ...(token ? { token } : {}) }
+  if (stored) return { accepted: true, workspaceId: stored.workspaceId, ...(stored.enrollmentHash ? { enrollmentHash: stored.enrollmentHash } : {}), ...(stored.enrollmentInviteId ? { enrollmentInviteId: stored.enrollmentInviteId } : {}), ...(stored.installId ? { installId: stored.installId } : {}), ...(stored.label ? { label: stored.label } : {}), ...(token ? { token } : {}) }
   if (auth?.invite) return { accepted: true, inviteToken: auth.invite }
   const scoped = config?.executorTokens ?? []
   if (scoped.length > 0) {

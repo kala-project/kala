@@ -21,6 +21,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { PreferencePersistenceNotice } from './PreferencePersistenceNotice.js'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type { AttachedExecutor, DashboardClientToServerEvents, DashboardServerToClientEvents, DeploymentServices, ServerSettingsPayload } from '@agent-kernel/shared'
 import type { Socket } from 'socket.io-client'
@@ -193,6 +194,7 @@ export function SettingsDialog({ open, cacheNamespace = 'default', autoHideOffli
             viewportClassName="[&>div]:!block [&>div]:!w-full [&>div]:!min-w-0 [&>div]:!max-w-full"
           >
             <div className="mx-auto min-w-0 max-w-full overflow-x-hidden px-4 py-5 pb-[max(env(safe-area-inset-bottom),1.25rem)] text-foreground md:max-w-3xl md:p-8" data-testid="settings-responsive-content">
+              <PreferencePersistenceNotice />
               <SettingsSectionHelpContext.Provider value={setSectionHelp}>
               {loadError ? (
                 <ProductState kind="error" title={t('settings.loadErrorTitle')} description={t('settings.loadFailed', { error: loadError })} primary={{ label: t('common.retry'), onClick: () => { void settingsQuery.refetch() } }} />

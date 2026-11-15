@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { CHAT_FONT_SIZE_PX, SESSION_EXPLORER_FONT_SIZE_PX, FILE_EXPLORER_FONT_SIZE_PX, FILE_VIEW_FONT_SIZE_PX, DEFAULT_INTERFACE_SCALE, INTERFACE_SCALE_MIN, INTERFACE_SCALE_MAX } from './display-sizes.js'
 
 const CHANGE_EVENT = 'ak-pref-change'
+const WRITE_ERROR_EVENT = 'ak-pref-write-error'
 
 type PrefChangeDetail = { key: string; value: string | null }
 
@@ -116,14 +117,40 @@ function readRaw(key: string): string | null {
   }
 }
 
-function writeRaw(key: string, value: string | null): void {
+export function writeDashboardPreference(key: string, value: string | null): boolean {
   try {
     if (value === null) localStorage.removeItem(key)
     else localStorage.setItem(key, value)
-  } catch {}
+  } catch {
+    window.dispatchEvent(new CustomEvent(WRITE_ERROR_EVENT, { detail: { key } }))
+    return false
+  }
   window.dispatchEvent(
     new CustomEvent<PrefChangeDetail>(CHANGE_EVENT, { detail: { key, value } }),
   )
+  return true
+}
+
+export function usePreferencePersistenceFailure(): boolean {
+  const [failed, setFailed] = useState<ReadonlySet<string>>(() => new Set())
+  useEffect(() => {
+    const changed = (event: Event): void => {
+      const { key } = (event as CustomEvent<Pick<PrefChangeDetail, 'key'>>).detail
+      setFailed(previous => {
+        const next = new Set(previous)
+        if (event.type === WRITE_ERROR_EVENT) next.add(key)
+        else next.delete(key)
+        return next
+      })
+    }
+    window.addEventListener(WRITE_ERROR_EVENT, changed)
+    window.addEventListener(CHANGE_EVENT, changed)
+    return () => {
+      window.removeEventListener(WRITE_ERROR_EVENT, changed)
+      window.removeEventListener(CHANGE_EVENT, changed)
+    }
+  }, [])
+  return failed.size > 0
 }
 
 /**
@@ -153,8 +180,8 @@ export function readStringPref(key: string, defaultValue: string): string {
   return readRaw(key) ?? defaultValue
 }
 
-export function writeStringPref(key: string, value: string): void {
-  writeRaw(key, value)
+export function writeStringPref(key: string, value: string): boolean {
+  return writeDashboardPreference(key, value)
 }
 
 export function useBooleanPref(
@@ -194,8 +221,7 @@ export function useBooleanPref(
   }, [key, defaultValue])
 
   const set = (next: boolean): void => {
-    writeRaw(key, next ? '1' : '0')
-    setValue(next)
+    if (writeDashboardPreference(key, next ? '1' : '0')) setValue(next)
   }
 
   return [value, set]
@@ -240,8 +266,7 @@ export function useNumberPref(
 
   const set = (next: number): void => {
     const normalized = normalize(next)
-    writeRaw(key, String(normalized))
-    setValue(normalized)
+    if (writeDashboardPreference(key, String(normalized))) setValue(normalized)
   }
 
   return [value, set]
@@ -268,8 +293,7 @@ export function useStringPref(
     }
   }, [defaultValue, key])
   const set = (next: string): void => {
-    writeRaw(key, next)
-    setValue(next)
+    if (writeDashboardPreference(key, next)) setValue(next)
   }
   return [value, set]
 }

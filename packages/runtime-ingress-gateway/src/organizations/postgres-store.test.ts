@@ -79,7 +79,7 @@ describe('PostgresOrganizationStore identity assignment', () => {
     const database = {
       async query<Row extends Record<string, unknown> = Record<string, unknown>>(text: string, values: readonly unknown[] = []): Promise<SqlQueryResult<Row>> {
         const sql = normalize(text); executed.push({ sql, values })
-        if (sql.startsWith('SELECT artifact_days')) return result([{ artifact_days: 90, audit_days: 365, deleted_resource_grace_days: 30 } as unknown as Row])
+        if (sql.startsWith('SELECT session_days,artifact_days')) return result([{ session_days: 30, artifact_days: 90, audit_days: 365, deleted_resource_grace_days: 30, version: '1' } as unknown as Row])
         return result([], 1)
       },
       async transaction<T>(operation: (transaction: SqlExecutor) => Promise<T>): Promise<T> { return operation(database) },
@@ -94,7 +94,7 @@ describe('PostgresOrganizationStore identity assignment', () => {
     let updates = 0
     const database = {
       async query<Row extends Record<string, unknown> = Record<string, unknown>>(text: string): Promise<SqlQueryResult<Row>> {
-        if (normalize(text).startsWith('SELECT artifact_days')) return result([{ artifact_days: 90, audit_days: 365, deleted_resource_grace_days: 30 } as unknown as Row])
+        if (normalize(text).startsWith('SELECT session_days,artifact_days')) return result([{ session_days: 30, artifact_days: 90, audit_days: 365, deleted_resource_grace_days: 30, version: '1' } as unknown as Row])
         updates += 1; return result([], 1)
       },
       async transaction<T>(operation: (transaction: SqlExecutor) => Promise<T>): Promise<T> { return operation(database) },

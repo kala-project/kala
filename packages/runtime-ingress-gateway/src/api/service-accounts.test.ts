@@ -6,6 +6,29 @@ import type { SqlExecutor, SqlQueryResult } from '../persistence/postgres.js'
 const NOW = new Date('2026-01-01T00:00:00.000Z')
 
 describe('ServiceAccountService', () => {
+  it('uses the owning transaction for the quota lock and both principal and Token writes', async () => {
+    const database = new FakeServiceAccountDatabase()
+    let active = false
+    const executed: string[] = []
+    const service = new ServiceAccountService({
+      query: async () => { throw new Error('transaction escape') },
+      async transaction(operation) {
+        active = true
+        try {
+          return await operation({ query: async (text, values) => {
+            expect(active).toBe(true)
+            executed.push(text)
+            return database.query(text, values)
+          } })
+        } finally { active = false }
+      },
+    })
+    await service.create({ organizationId: 'org_acme', name: 'automation', scopes: ['organization:read'] })
+    expect(executed[0]).toContain('FOR UPDATE')
+    expect(executed[1]).toContain('INSERT INTO principals')
+    expect(executed[2]).toContain('INSERT INTO service_account_tokens')
+  })
+
   it('enforces configured active service account quotas before issuing a token', async () => {
     const database = new FakeServiceAccountDatabase({ activeCount: 1 })
     const service = new ServiceAccountService(database, { maxActiveServiceAccounts: 1, now: () => NOW })

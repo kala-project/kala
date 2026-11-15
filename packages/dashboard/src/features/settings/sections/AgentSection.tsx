@@ -11,6 +11,7 @@ import { useTranslation } from 'react-i18next'
 
 import { cn } from '../../../lib/utils.js'
 import { EmptyRow, SectionHeader } from '../controls.js'
+import { useSettingsRequest } from '../configuration-request.js'
 
 type Feedback = { kind: 'success' | 'error' | 'pending'; message: string } | null
 
@@ -30,9 +31,11 @@ function replaceSlot(
 type AgentSectionProps = {
   payload: ServerSettingsPayload
   onPayloadChange(payload: ServerSettingsPayload): void
+  onDirtyChange?(dirty: boolean): void
+  readOnly?: boolean
 }
 
-export function AgentSection({ payload, onPayloadChange }: AgentSectionProps): JSX.Element {
+export function AgentSection({ payload, onPayloadChange, onDirtyChange, readOnly = false }: AgentSectionProps): JSX.Element {
   const scope = payload.agentPrompt?.configPath ?? 'unavailable'
   const scopeRef = useRef(scope)
   scopeRef.current = scope
@@ -40,6 +43,8 @@ export function AgentSection({ payload, onPayloadChange }: AgentSectionProps): J
     <AgentSectionForScope
       key={scope}
       payload={payload}
+      readOnly={readOnly}
+      onDirtyChange={onDirtyChange}
       onPayloadChange={(next) => {
         // A save started in a previous organization may finish after switching accounts.
         if (scopeRef.current === scope && next.agentPrompt?.configPath === scope) onPayloadChange(next)
@@ -48,8 +53,9 @@ export function AgentSection({ payload, onPayloadChange }: AgentSectionProps): J
   )
 }
 
-function AgentSectionForScope({ payload, onPayloadChange }: AgentSectionProps): JSX.Element {
+function AgentSectionForScope({ payload, onPayloadChange, onDirtyChange, readOnly = false }: AgentSectionProps): JSX.Element {
   const { t } = useTranslation()
+  const request = useSettingsRequest()
   const queryClient = useQueryClient()
   const agentPrompt = payload.agentPrompt
   const [editingSlotId, setEditingSlotId] = useState<AgentPromptSlotId | null>(agentPrompt?.slots[0]?.id ?? null)
@@ -59,6 +65,7 @@ function AgentSectionForScope({ payload, onPayloadChange }: AgentSectionProps): 
   const [dirtySlotIds, setDirtySlotIds] = useState<ReadonlySet<AgentPromptSlotId>>(() => new Set())
   const [saveFeedback, setSaveFeedback] = useState<Feedback>(null)
   const [defaultFeedback, setDefaultFeedback] = useState<Feedback>(null)
+  useEffect(() => { onDirtyChange?.(dirtySlotIds.size > 0) }, [dirtySlotIds, onDirtyChange])
 
   useEffect(() => {
     if (!agentPrompt) return
@@ -73,7 +80,8 @@ function AgentSectionForScope({ payload, onPayloadChange }: AgentSectionProps): 
   }, [agentPrompt, dirtySlotIds])
 
   const postSettings = async (next: ClientUpdateAgentPromptSettings): Promise<ServerSettingsPayload> => {
-    const res = await fetch('/settings/agent-prompt', {
+    if (readOnly) throw new Error('configuration_read_only')
+    const res = await request('/settings/agent-prompt', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(next),
@@ -100,7 +108,9 @@ function AgentSectionForScope({ payload, onPayloadChange }: AgentSectionProps): 
       void queryClient.invalidateQueries({ queryKey: ['settings'] })
     },
     onError: (err, variables) => {
-      if (settingsSavedPending(err)) {
+      if (err instanceof Error && err.message === 'configuration_outcome_unknown') {
+        setSaveFeedback({ kind: 'error', message: t('unifiedSettings.configuration.outcome-unknown') })
+      } else if (settingsSavedPending(err)) {
         setDirtySlotIds((current) => {
           const updated = new Set(current)
           updated.delete(variables.slotId)
@@ -123,7 +133,9 @@ function AgentSectionForScope({ payload, onPayloadChange }: AgentSectionProps): 
       void queryClient.invalidateQueries({ queryKey: ['settings'] })
     },
     onError: (err, variables) => {
-      if (settingsSavedPending(err)) {
+      if (err instanceof Error && err.message === 'configuration_outcome_unknown') {
+        setDefaultFeedback({ kind: 'error', message: t('unifiedSettings.configuration.outcome-unknown') })
+      } else if (settingsSavedPending(err)) {
         if (agentPrompt) onPayloadChange({ ...payload, agentPrompt: { ...agentPrompt, ...variables } })
         setDefaultFeedback({ kind: 'pending', message: t('settings.agent.savedPending') })
         void queryClient.invalidateQueries({ queryKey: ['settings'] })
@@ -150,7 +162,8 @@ function AgentSectionForScope({ payload, onPayloadChange }: AgentSectionProps): 
   const busy = saveSlot.isPending || selectDefault.isPending
 
   const updateDraft = (patch: Partial<Pick<SettingsAgentPromptSlot, 'name' | 'prompt'>>): void => {
-    if (!editingSlotId) return
+    if (!editingSlotId || readOnly) return
+    onDirtyChange?.(true)
     setDrafts((current) => {
       const slot = current[editingSlotId]
       return slot ? { ...current, [editingSlotId]: { ...slot, ...patch } } : current
@@ -208,7 +221,7 @@ function AgentSectionForScope({ payload, onPayloadChange }: AgentSectionProps): 
                       setDefaultFeedback(null)
                       selectDefault.mutate({ selectedSlotId: slot.id, slots: agentPrompt.slots })
                     }}
-                    disabled={busy || selected}
+                    disabled={readOnly || busy || selected}
                     data-testid={`settings-agent-default-${slot.id}`}
                   >
                     {selected ? t('settings.agent.currentDefault') : t('settings.agent.useForNewSessions')}
@@ -239,6 +252,7 @@ function AgentSectionForScope({ payload, onPayloadChange }: AgentSectionProps): 
                 data-testid="settings-agent-slot-name"
                 className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 value={editingSlot.name}
+                readOnly={readOnly}
                 onChange={(event) => updateDraft({ name: event.target.value })}
                 disabled={busy}
                 maxLength={80}
@@ -251,6 +265,7 @@ function AgentSectionForScope({ payload, onPayloadChange }: AgentSectionProps): 
                 data-testid="settings-agent-slot-prompt"
                 className="min-h-72 w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-sm leading-relaxed text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 value={editingSlot.prompt}
+                readOnly={readOnly}
                 onChange={(event) => updateDraft({ prompt: event.target.value })}
                 disabled={busy}
                 spellCheck={false}
@@ -267,7 +282,7 @@ function AgentSectionForScope({ payload, onPayloadChange }: AgentSectionProps): 
               <button
                 type="button"
                 className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
-                disabled={busy || !editingDirty || !editingSlot.name.trim() || !editingSlot.prompt.trim()}
+                disabled={readOnly || busy || !editingDirty || !editingSlot.name.trim() || !editingSlot.prompt.trim()}
                 onClick={() => {
                   setSaveFeedback(null)
                   const nextSlot = { ...editingSlot, name: editingSlot.name.trim() }

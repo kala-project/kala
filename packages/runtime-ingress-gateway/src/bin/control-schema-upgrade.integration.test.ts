@@ -1,13 +1,15 @@
 import { execFile } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
+import type { QueryResultRow } from 'pg'
 
 import { assertControlUpgradeSource, migrationIdentities, validateControlUpgradePlan } from './control-schema-upgrade.js'
 import { grantControlWriter } from './init-control-plane.js'
 import { PostgresOrganizationStore } from '../organizations/postgres-store.js'
-import { createPostgresControlPlaneDatabase, migrateControlPlane, readControlPlaneMigrations } from '../persistence/postgres.js'
+import { assertControlPlaneSchema, createPostgresControlPlaneDatabase, migrateControlPlane, readControlPlaneMigrations } from '../persistence/postgres.js'
+import { PostgresModelPolicyReader } from '../settings/model-policy-reader.js'
 
 const exec = promisify(execFile)
 const integration = process.env.KALA_RUN_POSTGRES_INTEGRATION === '1' ? describe : describe.skip
@@ -47,14 +49,14 @@ integration('control schema 10-to-11 and attachment policy migration on isolated
       }
       await admin.query(`CREATE ROLE kala_control_owner LOGIN PASSWORD '${password}'`)
       await admin.query('ALTER ROLE kala_control_owner NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS')
-      await admin.query('CREATE ROLE kala_gateway NOLOGIN')
+      await admin.query(`CREATE ROLE kala_gateway LOGIN PASSWORD '${password}'`)
       await admin.query('CREATE DATABASE runlab_control OWNER kala_control_owner')
       await admin.close()
       admin = undefined
 
       database = createPostgresControlPlaneDatabase({
         connectionString: `postgres://kala_control_owner:${password}@127.0.0.1:${port}/runlab_control`,
-        maxConnections: 1,
+        maxConnections: 4,
       })
       await migrateControlPlane(database, migrations.slice(0, 10))
       await database.query(`CREATE SCHEMA kala_installation_claim`)
@@ -96,16 +98,123 @@ integration('control schema 10-to-11 and attachment policy migration on isolated
         beforeApply: (tx) => assertControlUpgradeSource(tx, plan, installationId, 16, true),
       })).rejects.toThrow('Source migration history differs')
       expect((await database.health()).schemaVersion).toBe(11)
-      await expect(migrateControlPlane(database, migrations)).resolves.toBe(12)
-      const store = new PostgresOrganizationStore(database)
+      await expect(migrateControlPlane(database, migrations.slice(0, 12))).resolves.toBe(12)
+      await expect(assertControlPlaneSchema(database, migrations)).resolves.toBe(12)
       const identity = { issuer: 'issuer', subject: 'subject' }
-      expect((await store.findAccess(identity))?.organization.attachmentMaxBytes).toBe(2 * 1024 * 1024)
-      await store.updateAttachmentLimit('org_upgrade', 8 * 1024 * 1024, identity)
+      const bridge = new PostgresOrganizationStore(database)
+      await database.query(`INSERT INTO contract_entitlements(organization_id,contract_reference,support_tier,starts_at,ends_at,seat_limit,concurrent_session_limit)
+        VALUES('org_upgrade','bridge-fixture','standard',now()-interval '1 day',now()+interval '1 day',10,10);
+        INSERT INTO executor_pools(id,organization_id,name,mode) VALUES('pool_upgrade','org_upgrade','Bridge pool','organization')`)
+      const admission = (invite: string, executorId: string) => ({ installationId, organizationId: 'org_upgrade', unitId: 'unit-upgrade',
+        executorId, workspaceId: 'bridge-native-workspace', enrollmentHash: createHash('sha256').update(invite).digest('hex'),
+        enrollmentInviteId: executorId })
+      await bridge.bindExecutorInvite('fictional-old-native', 'unit-upgrade')
+      await bridge.bindExecutorInvite('fictional-old-native-late', 'unit-upgrade')
+      await database.query("UPDATE executor_enrollment_tokens SET expires_at=now()-interval '1 hour',created_at=now()-interval '2 hours'")
+      expect(await new PostgresModelPolicyReader(database, installationId).executor(admission('fictional-old-native', 'old-native')))
+        .toMatchObject({ admitted: true, registry: 'registered', pool: { revision: '1' } })
+      expect(await bridge.attachmentConfiguration('org_upgrade')).toEqual({ value: { maxBytes: 2 * 1024 * 1024 } })
+      await expect(bridge.updateAttachmentLimit('org_upgrade', 4 * 1024 * 1024, identity, { expectedRevision: '1' }))
+        .rejects.toMatchObject({ status: 503 })
+      let release = (): void => {}
+      let observed = (): void => {}
+      const released = new Promise<void>(resolve => { release = resolve })
+      const probed = new Promise<void>(resolve => { observed = resolve })
+      const pausedBridge = new PostgresOrganizationStore({
+        query: database.query,
+        transaction: operation => database!.transaction(transaction => operation({
+          query: async <Row extends QueryResultRow>(sql: string, values?: readonly unknown[]) => {
+            const result = await transaction.query<Row>(sql, values)
+            if (sql.includes("to_regclass('public.settings_resource_versions')")) { observed(); await released }
+            return result
+          },
+        })),
+      })
+      const oldWrite = pausedBridge.updateAttachmentLimit('org_upgrade', 4 * 1024 * 1024, identity)
+      await probed
+      const expansion = migrateControlPlane(database, migrations)
+      void expansion.catch(() => undefined)
+      try {
+        let waiting = false
+        for (let attempt = 0; attempt < 100; attempt++) {
+          waiting = (await database.query<{ waiting: boolean }>(
+            "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND mode='ExclusiveLock' AND NOT granted) AS waiting",
+          )).rows[0]?.waiting === true
+          if (waiting) break
+          await new Promise(resolve => setTimeout(resolve, 10))
+        }
+        expect(waiting).toBe(true)
+      } finally { release() }
+      await oldWrite
+      await expect(expansion).resolves.toBe(17)
+      expect(await bridge.attachmentConfiguration('org_upgrade')).toEqual({ revision: '1', value: { maxBytes: 4 * 1024 * 1024 } })
+      await expect(assertControlPlaneSchema(database, migrations)).resolves.toBe(17)
+      await expect(assertControlPlaneSchema(database, migrations.slice(0, 14))).rejects.toThrow('ahead expected version 14')
+      await expect(assertControlPlaneSchema(database, migrations.slice(0, 15))).rejects.toThrow('ahead expected version 15')
+      await expect(assertControlPlaneSchema(database, migrations.slice(0, 13))).rejects.toThrow('ahead expected version 13')
+      await expect(assertControlPlaneSchema(database, migrations.slice(0, 12))).rejects.toThrow('ahead expected version 12')
+      expect((await database.query<{ token_hash: string }>("SELECT token_hash FROM browser_sessions WHERE id='bs_upgrade'")).rows[0]?.token_hash).toBe('upgrade-token')
+      const store = new PostgresOrganizationStore(database)
+      expect((await store.findAccess(identity))?.organization.attachmentMaxBytes).toBe(4 * 1024 * 1024)
+      await bridge.updateAttachmentLimit('org_upgrade', 8 * 1024 * 1024, identity, { expectedRevision: '1' })
+      expect(await bridge.attachmentConfiguration('org_upgrade')).toEqual({ revision: '2', value: { maxBytes: 8 * 1024 * 1024 } })
       expect((await store.findAccess(identity))?.organization.attachmentMaxBytes).toBe(8 * 1024 * 1024)
       await expect(store.updateAttachmentLimit('org_upgrade', 3 * 1024 * 1024, identity)).rejects.toThrow('invalid_attachment_limit')
       expect((await database.query<{ action: string; actor_principal_id: string }>(
         "SELECT action,actor_principal_id FROM audit_events WHERE organization_id='org_upgrade' AND action='organization.attachment_limit.update'"
-      )).rows).toEqual([{ action: 'organization.attachment_limit.update', actor_principal_id: 'prn_upgrade' }])
+      )).rows).toEqual([
+        { action: 'organization.attachment_limit.update', actor_principal_id: 'prn_upgrade' },
+        { action: 'organization.attachment_limit.update', actor_principal_id: 'prn_upgrade' },
+      ])
+      await database.query('CREATE TABLE unreviewed_operator_resource (id text PRIMARY KEY, protected_value text)')
+      await database.query('CREATE SEQUENCE unreviewed_operator_sequence')
+      await database.query('GRANT UPDATE (state) ON settings_operator_operations TO kala_gateway')
+      await grantControlWriter(database, 'kala_gateway')
+      const gateway = createPostgresControlPlaneDatabase({
+        connectionString: `postgres://kala_gateway:${password}@127.0.0.1:${port}/runlab_control`, maxConnections: 1,
+      })
+      try {
+        const rollback = new PostgresOrganizationStore(gateway)
+        const reader = new PostgresModelPolicyReader(gateway, installationId)
+        expect(await reader.executor(admission('fictional-old-native-late', 'old-native-late'))).toMatchObject({ admitted: true })
+        await rollback.revokeExecutorInviteBinding('old-native-late', 'unit-upgrade', true)
+        expect(await reader.executor(admission('fictional-old-native-late', 'old-native-late'))).toMatchObject({ admitted: false })
+        const binding = { id: 'new-native', expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString() }
+        await rollback.bindExecutorInvite('fictional-new-native', 'unit-upgrade', binding)
+        expect(await reader.executor(admission('fictional-new-native', 'new-native'))).toMatchObject({ admitted: true })
+        await rollback.bindExecutorInvite('fictional-new-native', 'unit-upgrade', binding)
+        expect((await gateway.query("SELECT used_count FROM executor_enrollment_tokens WHERE token_hash=$1",
+          [createHash('sha256').update('fictional-new-native').digest('base64url')])).rows[0]?.used_count).toBe(1)
+        await rollback.revokeExecutorInviteBinding('new-native', 'unit-upgrade', false)
+        expect(await reader.executor(admission('fictional-new-native', 'new-native'))).toMatchObject({ admitted: true })
+        await rollback.revokeExecutorInviteBinding('new-native', 'unit-upgrade', true)
+        expect(await reader.executor(admission('fictional-new-native', 'new-native'))).toMatchObject({ admitted: false })
+        await rollback.bindExecutorInvite('fictional-expired-new-native', 'unit-upgrade',
+          { id: 'expired-new-native', expiresAt: binding.expiresAt })
+        await database.query("UPDATE executor_enrollment_tokens SET expires_at=clock_timestamp()+interval '30 milliseconds' WHERE token_hash=$1",
+          [createHash('sha256').update('fictional-expired-new-native').digest('base64url')])
+        await new Promise(resolve => setTimeout(resolve, 50))
+        expect(await reader.executor(admission('fictional-expired-new-native', 'expired-new-native'))).toMatchObject({ admitted: false })
+        await rollback.updateAttachmentLimit('org_upgrade', 16 * 1024 * 1024, identity, { expectedRevision: '2', writeProtocol: 'conditional-required' })
+        await expect(rollback.updateAttachmentLimit('org_upgrade', 2 * 1024 * 1024, identity, { writeProtocol: 'conditional-required' })).rejects.toMatchObject({ status: 428 })
+        await rollback.updateAttachmentLimit('org_upgrade', 4 * 1024 * 1024, identity)
+        expect(await rollback.attachmentConfiguration('org_upgrade')).toEqual({ revision: '4', value: { maxBytes: 4 * 1024 * 1024 } })
+        await expect(gateway.query('DELETE FROM settings_resource_versions')).rejects.toMatchObject({ code: '42501' })
+        await expect(gateway.query('SELECT * FROM organization_model_management')).resolves.toHaveProperty('rowCount', 1)
+        await expect(gateway.query('SELECT * FROM organization_webhook_secret_bindings')).resolves.toHaveProperty('rowCount', 0)
+        for (const sql of [
+          'INSERT INTO organization_model_management(organization_id,desired_management) VALUES (\'forbidden\',\'dashboard\')',
+          'UPDATE organization_webhook_secret_bindings SET label=\'forbidden\'',
+          'SELECT * FROM settings_operator_operations', 'UPDATE settings_operator_operations SET state=\'failed\'',
+          'SELECT * FROM unreviewed_operator_resource', 'DELETE FROM unreviewed_operator_resource',
+          "SELECT nextval('unreviewed_operator_sequence')",
+        ]) await expect(gateway.query(sql)).rejects.toMatchObject({ code: '42501' })
+        await expect(gateway.query("UPDATE workspaces SET name=name WHERE organization_id='org_upgrade'")).resolves.toHaveProperty('rowCount', 0)
+      } finally { await gateway.close() }
+      await database.query('GRANT UPDATE (desired_management) ON organization_model_management TO PUBLIC')
+      try {
+        await expect(grantControlWriter(database, 'kala_gateway')).rejects.toThrow('Gateway writer must not inherit Settings Operator authority')
+      } finally { await database.query('REVOKE UPDATE (desired_management) ON organization_model_management FROM PUBLIC') }
     } finally {
       await database?.close()
       await admin?.close()

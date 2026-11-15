@@ -1,10 +1,13 @@
 import { ScrollArea } from '../../components/ui/scroll-area.js'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { HelpHint } from '../../components/ui/help-hint.js'
 import { Button } from '../../components/ui/button.js'
 import { Input } from '../../components/ui/input.js'
+import type { SettingsMember, SettingsInvite } from '@agent-kernel/shared'
 import { ProductState } from '../../components/ui/product-state.js'
+import type { SettingsRequest } from '../settings/configuration-client.js'
+import { i18n } from '../../i18n/index.js'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -18,7 +21,7 @@ import {
 
 type Row = Record<string, any>
 type TFunction = ReturnType<typeof useTranslation>['t']
-export type OrganizationSnapshot = { organization: Row; role: 'owner' | 'admin' | 'member' | 'viewer'; permissions: string[]; members: Row[]; entitlement?: Row; retention?: Row; usage?: Row; workspaces: Row[]; executorPools: Row[]; executors: Row[]; invites: Row[]; browserSessions: Row[]; serviceAccounts: Row[]; webhooks: Row[]; audit: Row[]; integrations: Row }
+export type OrganizationSnapshot = { organization: Row; role: 'owner' | 'admin' | 'member' | 'viewer'; permissions: string[]; members: SettingsMember[]; entitlement?: Row; retention?: Row; usage?: Row; workspaces: Row[]; executorPools: Row[]; executors: Row[]; invites: SettingsInvite[]; browserSessions: Row[]; serviceAccounts: Row[]; webhooks: Row[]; audit: Row[]; integrations: Row }
 const tabs = ['overview', 'members', 'workspaces', 'executors', 'policies', 'usage', 'integrations'] as const
 type AdminTab = (typeof tabs)[number]
 const navigation: { label: 'manage' | 'review'; items: readonly AdminTab[] }[] = [
@@ -26,9 +29,9 @@ const navigation: { label: 'manage' | 'review'; items: readonly AdminTab[] }[] =
   { label: 'review', items: ['workspaces', 'executors', 'usage', 'integrations'] },
 ]
 
-async function mutate(path: string, method: string, body?: unknown): Promise<void> {
-  const response = await fetch(path, { method, headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
-  if (!response.ok) throw new Error(`${method} ${path}: ${response.status}`)
+async function mutate(path: string, method: string, body?: unknown, request: SettingsRequest = fetch): Promise<void> {
+  const response = await request(path, { method, headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
+  if (!response.ok) throw new Error(response.status === 428 ? i18n.t('unifiedSettings.configuration.upgrade-required') : `${method} ${path}: ${response.status}`)
 }
 
 async function mutateJson<T>(path: string, method: string, body: unknown): Promise<T> {
@@ -98,12 +101,42 @@ function Overview({ snapshot, canManage, canPolicy, openTab, t }: { snapshot: Or
     <details className="border-t border-border/40 pt-4"><summary className="cursor-pointer text-sm font-medium">{t('admin.contract')} · {t('admin.currentMonth')}</summary><Grid><Card title={t('admin.contract')}><KV rows={{ [t('admin.labels.reference')]: snapshot.entitlement?.contract_reference, [t('admin.labels.tier')]: snapshot.entitlement?.support_tier, [t('admin.labels.ends')]: snapshot.entitlement?.ends_at, [t('admin.labels.seats')]: snapshot.entitlement?.seat_limit, [t('admin.labels.concurrentSessions')]: snapshot.entitlement?.concurrent_session_limit, [t('admin.labels.monthlyTokens')]: snapshot.entitlement?.monthly_token_limit ?? t('admin.unlimited'), [t('admin.labels.runtimeUnit')]: snapshot.organization.runtime_unit_id }} /></Card><Card title={t('admin.currentMonth')}><KV rows={{ [t('admin.labels.tokens')]: snapshot.usage?.tokens, [t('admin.labels.sessions')]: snapshot.usage?.sessions, [t('admin.labels.ledger')]: snapshot.usage?.entries }} /></Card></Grid></details>
   </div>
 }
-function Members({ snapshot, canManage, load, setError, t }: { snapshot: OrganizationSnapshot; canManage: boolean; load(): Promise<void>; setError(value: string): void; t: TFunction }): JSX.Element {
+export function Members({ snapshot, canManage, load, setError, t, onInterruptionChange, onOwnershipTransferred }: { snapshot: { members: readonly SettingsMember[]; invites: readonly SettingsInvite[]; role: OrganizationSnapshot['role'] }; canManage: boolean; load(): Promise<void>; setError(value: string): void; t: TFunction; onInterruptionChange?(active: boolean): void; onOwnershipTransferred?(): void }): JSX.Element {
   const [email, setEmail] = useState('')
   const [role, setRole] = useState<'admin' | 'member' | 'viewer'>('member')
   const [expiresInDays, setExpiresInDays] = useState(7)
   const [inviteUrl, setInviteUrl] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const [nextOwner, setNextOwner] = useState<SettingsMember>()
+  const [transferring, setTransferring] = useState(false)
+  const [transferError, setTransferError] = useState<string>()
+  const alive = useRef(true)
+  const transferInFlight = useRef(false)
+  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
+  useEffect(() => {
+    onInterruptionChange?.(transferring || Boolean(inviteUrl))
+    return () => onInterruptionChange?.(false)
+  }, [inviteUrl, onInterruptionChange, transferring])
+  const transfer = async (): Promise<void> => {
+    if (!nextOwner || transferInFlight.current) return
+    transferInFlight.current = true
+    setTransferError(undefined)
+    setTransferring(true)
+    try {
+      await mutate('/organization/ownership', 'POST', { issuer: nextOwner.issuer, subject: nextOwner.subject })
+      if (!alive.current) return
+      onOwnershipTransferred?.()
+      setNextOwner(undefined)
+      window.location.assign('/auth/login?prompt=login')
+    } catch (reason) {
+      if (alive.current) {
+        const message = reason instanceof Error ? reason.message : String(reason)
+        setTransferError(message)
+        setError(message)
+      }
+    }
+    finally { transferInFlight.current = false; if (alive.current) setTransferring(false) }
+  }
   const createInvite = async (): Promise<void> => {
     try {
       const created = await mutateJson<{ inviteUrl: string }>('/organization/invites', 'POST', { email, role, expiresInDays })
@@ -115,6 +148,13 @@ function Members({ snapshot, canManage, load, setError, t }: { snapshot: Organiz
     try { await navigator.clipboard.writeText(inviteUrl); setCopied(true) } catch { setError(t('admin.copyFailed')) }
   }
   return <div className="grid gap-5">
+    {snapshot.role === 'owner' ? <Card title={t('unifiedSettings.ownership.title')}>
+      <p className="mb-3 text-sm text-muted-foreground">{t('unifiedSettings.ownership.description')}</p>
+      {snapshot.members.filter(member => member.role !== 'owner').map(member => <Line key={`${member.issuer}:${member.subject}`} title={member.displayName || member.email || member.subject} right={<Button variant="outline" disabled={transferring} onClick={() => { setTransferError(undefined); setNextOwner(member) }}>{t('unifiedSettings.ownership.choose')}</Button>} />)}
+      <AlertDialog open={Boolean(nextOwner)} onOpenChange={open => { if (!open && !transferring) setNextOwner(undefined) }}>
+        <AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{t('unifiedSettings.ownership.confirmTitle')}</AlertDialogTitle><AlertDialogDescription>{t('unifiedSettings.ownership.confirm', { name: nextOwner?.displayName || nextOwner?.email || nextOwner?.subject })}</AlertDialogDescription></AlertDialogHeader>{transferError ? <p role="alert" className="text-sm text-destructive">{transferError}</p> : null}<AlertDialogFooter><AlertDialogCancel disabled={transferring}>{t('common.cancel')}</AlertDialogCancel><AlertDialogAction disabled={transferring} onClick={event => { event.preventDefault(); void transfer() }}>{t('unifiedSettings.ownership.choose')}</AlertDialogAction></AlertDialogFooter></AlertDialogContent>
+      </AlertDialog>
+    </Card> : null}
     <Card title={t('admin.tabs.members')}>{!canManage ? <RestrictedNotice text={t('admin.membersRestricted')} /> : null}{snapshot.members.length ? snapshot.members.map((member) => <Line key={`${member.issuer}:${member.subject}`} title={member.displayName || member.email || member.subject} subtitle={member.displayName && member.email && member.displayName !== member.email ? member.email : undefined} right={<div className="flex flex-wrap justify-end gap-2"><select aria-label={`${t('admin.memberRole')}: ${member.displayName || member.email || member.subject}`} disabled={!canManage || member.role === 'owner'} value={member.role} onChange={(event) => void mutate('/organization/members', 'PATCH', { issuer: member.issuer, subject: member.subject, role: event.target.value }).then(load).catch((reason) => setError(String(reason)))} className="h-9 max-w-full rounded border border-border/50 bg-background px-2 text-sm">{(['admin', 'member', 'viewer', 'owner'] as const).map((role) => <option key={role} value={role}>{t(`admin.roles.${role}`)}</option>)}</select>{canManage && member.role !== 'owner' ? <Button size="sm" variant="destructive" onClick={() => void mutate('/organization/members', 'DELETE', { issuer: member.issuer, subject: member.subject }).then(load).catch((reason) => setError(String(reason)))}>{t('admin.remove')}</Button> : null}</div>} />) : <Empty title={t('admin.emptyMembersTitle')} text={t('admin.emptyMembersDescription')} />}</Card>
     <Card title={t('adminNavigation.invitations')}>{canManage ? <div className="mb-4 grid gap-3 rounded-lg bg-muted/30 p-4 md:grid-cols-[minmax(0,1fr)_auto_auto_auto]">
       <label className="grid gap-1 text-sm"><span>{t('admin.inviteEmail')}</span><input required type="email" value={email} onChange={(event) => setEmail(event.target.value)} className="rounded border border-border/50 bg-background px-3 py-2" /></label>
@@ -129,13 +169,13 @@ function Members({ snapshot, canManage, load, setError, t }: { snapshot: Organiz
 }
 function Workspaces({ snapshot, t }: { snapshot: OrganizationSnapshot; t: TFunction }): JSX.Element { return <div className="grid gap-3"><ReadOnlyNotice t={t} /><Grid><Card title={t('admin.tabs.workspaces')}>{snapshot.workspaces.length ? snapshot.workspaces.map((workspace) => <Line key={workspace.id} title={workspace.name} subtitle={`${workspace.status} · policy v${workspace.policy_version}`} />) : <Empty title={t('admin.emptyWorkspacesTitle')} text={t('admin.noWorkspaces')} />}</Card><Card title={t('admin.executorPools')}>{snapshot.executorPools.length ? snapshot.executorPools.map((pool) => <Line key={pool.id} title={pool.name} subtitle={`${pool.mode}${pool.workspace_id ? ` · ${pool.workspace_id}` : ''}`} />) : <Empty title={t('admin.emptyPoolsTitle')} text={t('admin.emptyPoolsDescription')} />}</Card></Grid></div> }
 function Executors({ snapshot, t }: { snapshot: OrganizationSnapshot; t: TFunction }): JSX.Element { return <div className="grid gap-3"><ReadOnlyNotice t={t} /><Card title={t('admin.tabs.executors')}>{snapshot.executors.length ? snapshot.executors.map((executor) => <Line key={executor.id} title={executor.name} subtitle={`${executor.status} · ${t('admin.lastSeen', { value: executor.last_seen_at || t('admin.never') })}`} />) : <Empty title={t('admin.emptyExecutorsTitle')} text={t('admin.noExecutors')} />}</Card></div> }
-function Policies({ snapshot, canPolicy, load, setError, t }: { snapshot: OrganizationSnapshot; canPolicy: boolean; load(): Promise<void>; setError(value: string): void; t: TFunction }): JSX.Element {
+export function Policies({ snapshot, canPolicy, load, setError, t, section, request }: { snapshot: Pick<OrganizationSnapshot, 'organization' | 'retention'>; canPolicy: boolean; load(): Promise<void>; setError(value: string): void; t: TFunction; section?: 'attachments' | 'retention'; request?: SettingsRequest }): JSX.Element {
   const [attachmentMaxBytes, setAttachmentMaxBytes] = useState(Number(snapshot.organization.attachment_max_bytes ?? 2 * 1024 * 1024))
   const [savingAttachment, setSavingAttachment] = useState(false)
   const saveAttachment = async (): Promise<void> => {
     setSavingAttachment(true)
     try {
-      await mutate('/organization/attachment-policy', 'PUT', { maxBytes: attachmentMaxBytes })
+      await mutate('/organization/attachment-policy', 'PUT', { maxBytes: attachmentMaxBytes }, request)
       await load()
       window.dispatchEvent(new Event('kala:attachment-policy-updated'))
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) } finally { setSavingAttachment(false) }
@@ -161,10 +201,10 @@ function Policies({ snapshot, canPolicy, load, setError, t }: { snapshot: Organi
         artifactDays: snapshot.retention?.artifact_days,
         auditDays: snapshot.retention?.audit_days,
         deletedResourceGraceDays: snapshot.retention?.deleted_resource_grace_days,
-      })
+      }, request)
+      await load()
       setEditing(false)
       setPendingSessionDays(null)
-      await load()
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) } finally { setSaving(false) }
   }
   const cancelEdit = (): void => {
@@ -172,7 +212,7 @@ function Policies({ snapshot, canPolicy, load, setError, t }: { snapshot: Organi
     setEditing(false)
   }
   return <div className="space-y-4">
-    <Card title={t('attachmentPolicy.title')} action={<HelpHint label={t('attachmentPolicy.title')}>{t('attachmentPolicy.scope')}</HelpHint>}>
+    {section !== 'retention' ? <Card title={t('attachmentPolicy.title')} action={<HelpHint label={t('attachmentPolicy.title')}>{t('attachmentPolicy.scope')}</HelpHint>}>
       {!canPolicy ? <RestrictedNotice text={t('attachmentPolicy.restricted')} /> : null}
       <div className="flex flex-wrap items-center gap-3">
         <label htmlFor="admin-attachment-limit" className="text-sm">{t('attachmentPolicy.label')}</label>
@@ -181,8 +221,8 @@ function Policies({ snapshot, canPolicy, load, setError, t }: { snapshot: Organi
         </select>
         {canPolicy ? <Button size="sm" disabled={savingAttachment || attachmentMaxBytes === Number(snapshot.organization.attachment_max_bytes ?? 2 * 1024 * 1024)} onClick={() => void saveAttachment()}>{t('attachmentPolicy.save')}</Button> : null}
       </div>
-    </Card>
-    <Card title={t('admin.retention')} action={<div className="flex items-center gap-2"><HelpHint label={t('admin.retention')}>{t('admin.retentionScope')}</HelpHint>{canEditSessionDays && !editing ? <Button size="sm" onClick={() => setEditing(true)}>{t('admin.editSessionRetention')}</Button> : null}</div>}>
+    </Card> : null}
+    {section !== 'attachments' ? <Card title={t('admin.retention')} action={<div className="flex items-center gap-2"><HelpHint label={t('admin.retention')}>{t('admin.retentionScope')}</HelpHint>{canEditSessionDays && !editing ? <Button size="sm" onClick={() => { setDraft(String(currentSessionDays)); setEditing(true) }}>{t('admin.editSessionRetention')}</Button> : null}</div>}>
       {!canPolicy ? <RestrictedNotice text={t('admin.policyRestricted')} /> : null}
       <KV rows={{ [t('admin.labels.sessionDays')]: snapshot.retention?.session_days }} />
       {editing ? <div className="mt-4 grid gap-3 rounded-lg bg-muted/30 p-4">
@@ -193,7 +233,7 @@ function Policies({ snapshot, canPolicy, load, setError, t }: { snapshot: Organi
         <div className="flex justify-end gap-2"><Button size="sm" variant="ghost" onClick={cancelEdit}>{t('common.cancel')}</Button><Button size="sm" disabled={!validDraft || parsedDraft === currentSessionDays} onClick={reviewChange}>{t('admin.reviewRetentionChange')}</Button></div>
       </div> : null}
       <details className="mt-4 border-t border-border/40 pt-4"><summary className="cursor-pointer text-sm font-medium">{t('admin.unsupportedRetentionTitle')}</summary><div className="mt-3"><KV rows={{ [t('admin.labels.artifactDays')]: snapshot.retention?.artifact_days, [t('admin.labels.auditDays')]: snapshot.retention?.audit_days, [t('admin.labels.deletedGrace')]: snapshot.retention?.deleted_resource_grace_days, [t('admin.labels.version')]: snapshot.retention?.version }} /><p className="mt-2 text-sm text-muted-foreground">{t('admin.unsupportedRetentionFields')}</p></div></details>
-    </Card>
+    </Card> : null}
     <AlertDialog open={pendingSessionDays !== null} onOpenChange={(open) => { if (!open && !saving) setPendingSessionDays(null) }}>
       <AlertDialogContent>
         <AlertDialogHeader><AlertDialogTitle>{t('admin.confirmRetentionTitle')}</AlertDialogTitle><AlertDialogDescription asChild><div className="space-y-3"><p>{t('admin.confirmRetentionChange', { current: currentSessionDays, next: pendingSessionDays })}</p><p className="font-medium text-destructive">{t('admin.confirmRetentionWarning')}</p><p>{t('admin.retentionScope')}</p></div></AlertDialogDescription></AlertDialogHeader>
@@ -203,7 +243,17 @@ function Policies({ snapshot, canPolicy, load, setError, t }: { snapshot: Organi
   </div>
 }
 function UsageSecurity({ snapshot, t }: { snapshot: OrganizationSnapshot; t: TFunction }): JSX.Element { return <div className="grid gap-3"><ReadOnlyNotice t={t} /><Grid><Card title={t('admin.browserSessions')}>{snapshot.browserSessions.length ? snapshot.browserSessions.map((session) => <Line key={session.id} title={session.device?.browser || 'Browser'} subtitle={`${t('admin.lastActive', { value: session.last_seen_at })}${session.revoked_at ? ` · ${t('admin.revoked')}` : ''}`} />) : <Empty title={t('admin.emptyActivityTitle')} text={t('admin.emptyBrowserSessions')} />}</Card><Card title={t('admin.serviceAccounts')}>{snapshot.serviceAccounts.length ? snapshot.serviceAccounts.map((account) => <Line key={account.id} title={account.display_name || account.email || account.id} subtitle={(account.scopes || []).join(', ')} />) : <Empty title={t('admin.emptyConfigurationTitle')} text={t('admin.noServiceAccounts')} />}</Card><Card title={t('admin.webhooks')}>{snapshot.webhooks.length ? snapshot.webhooks.map((webhook) => <Line key={webhook.id} title={webhook.url} subtitle={`${t(webhook.enabled ? 'admin.enabled' : 'admin.disabled')} · ${(webhook.topics || []).join(', ')}`} />) : <Empty title={t('admin.emptyConfigurationTitle')} text={t('admin.noWebhooks')} />}</Card><Card title={t('admin.auditLog')}>{snapshot.audit.length ? snapshot.audit.map((event) => <Line key={event.id} title={event.action} subtitle={`${event.result} · ${event.occurred_at}`} />) : <Empty title={t('admin.emptyActivityTitle')} text={t('admin.noAudit')} />}</Card></Grid></div> }
-function Integrations({ snapshot, t }: { snapshot: OrganizationSnapshot; t: TFunction }): JSX.Element { return <Card title={t('admin.adapters')}><ReadOnlyNotice t={t} /><KV rows={{ [t('admin.labels.secrets')]: snapshot.integrations?.secrets, [t('admin.labels.artifacts')]: snapshot.integrations?.artifacts, [t('admin.labels.telemetry')]: t(snapshot.integrations?.telemetry ? 'admin.connected' : 'admin.notConfigured'), [t('admin.labels.errorReporting')]: t(snapshot.integrations?.errorReporting ? 'admin.connected' : 'admin.notConfigured'), [t('admin.labels.ticketing')]: t(snapshot.integrations?.ticketing ? 'admin.connected' : 'admin.notConfigured') }} /><p className="mt-3 text-xs text-muted-foreground">{t('admin.adaptersDescription')}</p></Card> }
+function Integrations({ snapshot, t }: { snapshot: OrganizationSnapshot; t: TFunction }): JSX.Element {
+  const observed = (key: string): string => {
+    const value = snapshot.integrations?.[key]
+    return typeof value === 'string' ? value : t('unifiedSettings.unknown')
+  }
+  return <Card title={t('admin.adapters')}><ReadOnlyNotice t={t} /><KV rows={{
+    [t('admin.labels.secrets')]: observed('secrets'), [t('admin.labels.artifacts')]: observed('artifacts'),
+    [t('admin.labels.telemetry')]: observed('telemetry'), [t('admin.labels.errorReporting')]: observed('error-reporting'),
+    [t('admin.labels.ticketing')]: observed('ticketing'),
+  }} /><p className="mt-3 text-xs text-muted-foreground">{t('unifiedSettings.integrations.meaning')}</p></Card>
+}
 
 function isPendingInvite(invite: Row): boolean { return !invite.acceptedAt && !invite.revokedAt && Date.parse(invite.expiresAt) > Date.now() }
 function inviteStatus(invite: Row, t: TFunction): string {

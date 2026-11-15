@@ -1,0 +1,22 @@
+.ak-settings-page {
+  container: kala-settings / inline-size;
+  display: flex;
+  flex-direction: column;
+}
+.ak-settings-grid { display: grid; flex: 1; min-height: 0; min-width: 0; grid-template-columns: minmax(0, 1fr); }
+.ak-settings-sidebar { display: none; min-height: 0; overflow: auto; border-right: 1px solid hsl(var(--border)); }
+.ak-settings-picker { display: block; }
+.ak-settings-nav-row { display: flex; align-items: center; min-height: 40px; width: 100%; padding: 0.5rem 0.75rem; border-radius: 0.375rem; text-align: left; font-size: 0.875rem; overflow-wrap: anywhere; }
+.ak-settings-nav-row:hover, .ak-settings-nav-row[aria-current="page"] { background: hsl(var(--accent)); }
+.ak-settings-nav-row:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+@container kala-settings (min-width: 52rem) {
+  .ak-settings-grid { grid-template-columns: 14.5rem minmax(0, 1fr); }
+  .ak-settings-sidebar { display: block; }
+  .ak-settings-picker { display: none; }
+}
+.ak-settings-task details > summary { cursor: pointer; padding: 0.625rem 0; font-size: 0.875rem; font-weight: 500; }
+@media (max-width: 767px) {
+  .ak-settings-task button:not([role="switch"]):not([aria-expanded]), .ak-settings-task select { min-height: 44px; }
+  .ak-settings-task input:not([type="checkbox"]):not([type="radio"]), .ak-settings-task select, .ak-settings-task textarea { font-size: 16px; }
+}
+@media (pointer: coarse) { .ak-settings-nav-row { min-height: 44px; } }

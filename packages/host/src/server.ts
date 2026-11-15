@@ -208,6 +208,7 @@ export type HostServerOptions = {
   resourceUnitId?: string
   resourceArtifactUsage?: () => Promise<number>
   executorQuota?: TenantExecutorQuotaEnforcer
+  executorAdmission?: import('./connection/executor-ns.js').ExecutorDeps['executorAdmission']
   copilot?: {
     enabled?: boolean
     gitHubToken?: string
@@ -247,7 +248,7 @@ export type HostServerOptions = {
    * The CLI populates this from `~/.claude/settings.json` + `~/.codex/config.toml`.
    */
   models?: readonly ModelInfo[] | (() => readonly ModelInfo[])
-  defaultModel?: string | (() => string)
+  defaultModel?: string | null | (() => string | null)
   /**
    * User-configured hooks (from `~/.config/kala/config.toml`). When
    * present the loop invokes matching hooks around every tool dispatch;
@@ -261,8 +262,9 @@ export type HostServerOptions = {
   skills?: SkillRegistry | SkillManager
   webSearchCredentials?: WebSearchCredentialStore
   webSearchCredentialStatus?: () => Promise<WebSearchCredentialStatus> | WebSearchCredentialStatus
-  setWebSearchCredential?: (provider: 'serper', key: string) => Promise<WebSearchCredentialStatus> | WebSearchCredentialStatus
-  deleteWebSearchCredential?: (provider: 'serper') => Promise<WebSearchCredentialStatus> | WebSearchCredentialStatus
+  webSearchCredentialConfiguration?: NonNullable<Parameters<typeof attachJsonRoutes>[1]['webSearchCredentials']>['configuration']
+  setWebSearchCredential?: NonNullable<Parameters<typeof attachJsonRoutes>[1]['webSearchCredentials']>['set']
+  deleteWebSearchCredential?: NonNullable<Parameters<typeof attachJsonRoutes>[1]['webSearchCredentials']>['delete']
   speechCredentials?: AzureSpeechCredentialStore
   /** Memo authority override. Omit to retain the KalaStateStore SQLite backend. */
   memoStore?: MemoStore
@@ -276,12 +278,23 @@ export type HostServerOptions = {
    * operator already put in their config.
    */
   settings?: ServerSettingsPayload | ((actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>)
+  settingsSection?: Parameters<typeof attachJsonRoutes>[1]['settingsSection']
+  settingsConfiguration?: Parameters<typeof attachJsonRoutes>[1]['settingsConfiguration']
+  assertSettingsReady?: Parameters<typeof attachJsonRoutes>[1]['assertSettingsReady']
+  settingsRevision?: Parameters<typeof attachJsonRoutes>[1]['settingsRevision']
+  settingsServingSet?: import('./tenant-runtime/settings-serving-set.js').PostgresSettingsServingSet
+  onAgentApplicationChange?: () => void
+  settingsWriteProtocol?: Parameters<typeof attachJsonRoutes>[1]['settingsWriteProtocol']
   addManualModel?: Parameters<typeof attachJsonRoutes>[1]['addManualModel']
   updateManualModel?: Parameters<typeof attachJsonRoutes>[1]['updateManualModel']
   deleteManualModel?: Parameters<typeof attachJsonRoutes>[1]['deleteManualModel']
   addManualProvider?: Parameters<typeof attachJsonRoutes>[1]['addManualProvider']
   updateManualProvider?: Parameters<typeof attachJsonRoutes>[1]['updateManualProvider']
   onModelCatalogChange?: (listener: () => void) => () => void
+  onAgentSettingsChange?: (
+    listener: (actor: DashboardActor) => Promise<void>,
+    onState: (state: 'disconnected' | 'synchronizing' | 'ready') => void,
+  ) => Promise<() => Promise<void>>
   deleteManualProvider?: Parameters<typeof attachJsonRoutes>[1]['deleteManualProvider']
   setDefaultModel?: Parameters<typeof attachJsonRoutes>[1]['setDefaultModel']
   updateAgentPrompt?: Parameters<typeof attachJsonRoutes>[1]['updateAgentPrompt']
@@ -294,6 +307,7 @@ export type HostServerOptions = {
   logger?: Pick<RuntimeLogger, 'warn'>
   deployment?: ProductDeploymentConfig
   capabilities?: RuntimeCapabilities
+  settingsLayout?: 'legacy' | 'unified'
   /** Public browser URL for an independently deployed Evaluation UI. */
   evaluationUrl?: string
   /** Dedicated/Portable defaults to true; embedders may explicitly retain the guard. */
@@ -315,6 +329,7 @@ export type HostServer = {
   readonly loop: LoopHandle
   readonly store: SessionStore
   readonly executorsSnapshot: () => readonly AttachedExecutor[]
+  agentSettingsObservation(revision: string, organizationId?: string): import('./tenant-runtime/settings-serving-set.js').SettingsConsumerSnapshot
   readonly restartStatus: () => import('@agent-kernel/shared').HostRestartStatus
   readonly port: number
   close(): Promise<void>
@@ -429,6 +444,8 @@ export async function startHostServer(
   let scheduledTaskScheduler: UnitScheduler | undefined
   let stopScheduledInboxNotifications: (() => Promise<void>) | undefined
   let stopModelCatalogNotifications: (() => void) | undefined
+  let stopAgentSettingsNotifications: (() => Promise<void>) | undefined
+  let agentSettingsSynchronization: 'disconnected' | 'synchronizing' | 'ready' = options.onAgentSettingsChange ? 'synchronizing' : 'ready'
   let detachPublicAccessGate: (() => void) | undefined
   let promptSynchronizationTimer: ReturnType<typeof setTimeout> | undefined
   let deletionRecoveryTimer: ReturnType<typeof setInterval> | undefined
@@ -457,6 +474,7 @@ export async function startHostServer(
     await scheduledTaskScheduler?.stop()
     await stopScheduledInboxNotifications?.()
     stopModelCatalogNotifications?.()
+    await stopAgentSettingsNotifications?.()
     // Queue persistence and post-turn drains may still be crossing their durable
     // boundary after the last socket closes. Wait before callers remove the
     // Session directory (tests) or replace storage (shutdown/deploy).
@@ -775,6 +793,14 @@ export async function startHostServer(
       }
     : { kind: 'anonymous' }
   const pendingPromptSynchronizations = new Set<string>()
+  const agentSettingsApplications = new WeakMap<SessionRecord, { revision: string; observedAt: string }>()
+  function agentSettingsObservation(revision: string, organizationId?: string) {
+    const records = store.list().filter(record => (organizationId === undefined || record.organizationId === organizationId)
+      && effectiveDelegationDepth(record) === 0)
+    const pending = records.filter(record => agentSettingsApplications.get(record)?.revision !== revision).length
+    return { revision: agentSettingsSynchronization === 'ready' && !pending ? revision : null,
+      synchronization: agentSettingsSynchronization, loadedSessions: records.length, pendingSessions: pending }
+  }
   const promptSettingUpdateTails = new Map<string, Promise<ServerSettingsPayload>>()
   const serializePromptSettingsUpdate = (
     actor: DashboardActor,
@@ -800,7 +826,7 @@ export async function startHostServer(
   let startupPromptDiscoveryPending = true
   let promptSynchronizationRunning = false
   let promptSynchronizationFailures = 0
-  const ensureEffectiveSystemPrompt = async (record: SessionRecord): Promise<boolean> => {
+  const applyEffectiveSystemPrompt = async (record: SessionRecord): Promise<boolean> => {
     const config = deriveSessionConfig(await getEffectiveDefaultConfig(actorForRecord(record)), undefined, record.executionMode)
     if (options.desktopFeaturePolicy) store.refreshRuntimeConfig(record, config)
     // A child owns its delegated instructions, not the organization's root prompt.
@@ -836,6 +862,20 @@ export async function startHostServer(
       manualAuthorizationRequired: options.desktopManualAuthorizationRequired?.(actor) ?? true,
     })
   }
+  const ensureEffectiveSystemPrompt = async (record: SessionRecord): Promise<boolean> => {
+    const actor = actorForRecord(record)
+    const before = await options.settingsRevision?.('agent', actor)
+    const changed = await applyEffectiveSystemPrompt(record)
+    await refreshDesktopFeaturePolicy(record)
+    const after = await options.settingsRevision?.('agent', actor)
+    if (before !== undefined && before === after && isRestingStatus(record.state.status) && effectiveDelegationDepth(record) === 0) {
+      agentSettingsApplications.set(record, { revision: after, observedAt: new Date().toISOString() })
+    } else {
+      agentSettingsApplications.delete(record)
+    }
+    options.onAgentApplicationChange?.()
+    return changed
+  }
   const synchronizeOrganizationPrompt = async (actor: DashboardActor): Promise<void> => {
     const organizationId = organizationIdForActor(actor)
     let ids: string[]
@@ -854,7 +894,6 @@ export async function startHostServer(
       try {
         const record = store.get(sessionId) ?? await store.load(sessionId, { recoverDangling: false, runtimeConfig: getDefaultConfig(actor) })
         await ensureEffectiveSystemPrompt(record)
-        await refreshDesktopFeaturePolicy(record)
         pendingPromptSynchronizations.delete(sessionId)
       } catch (error) {
         pendingPromptSynchronizations.add(sessionId)
@@ -903,7 +942,6 @@ export async function startHostServer(
         try {
           const record = store.get(sessionId) ?? await store.load(sessionId, { recoverDangling: false })
           await ensureEffectiveSystemPrompt(record)
-          await refreshDesktopFeaturePolicy(record)
           pendingPromptSynchronizations.delete(sessionId)
         } catch (error) {
           // Settings or Session storage may be temporarily unreadable. Retain it.
@@ -1050,11 +1088,11 @@ export async function startHostServer(
     return true
   }
   const withModelCatalogUpdate = <Input,>(
-    callback: (input: Input, actor: DashboardActor) => ServerSettingsPayload | Promise<ServerSettingsPayload>,
+    callback: (input: Input, actor: DashboardActor, write?: import('./settings-concurrency.js').SettingsWriteOptions) => ServerSettingsPayload | Promise<ServerSettingsPayload>,
     removedModels?: (input: Input) => readonly ModelInfo[],
-  ) => async (input: Input, actor: DashboardActor): Promise<ServerSettingsPayload> => {
+  ) => async (input: Input, actor: DashboardActor, write?: import('./settings-concurrency.js').SettingsWriteOptions): Promise<ServerSettingsPayload> => {
     if (options.mutableReady?.() === false) throw Object.assign(new Error('Host is not ready to update model settings'), { status: 503 })
-    if (product === 'dedicated' && removedModels) {
+    if (product !== 'portable' && removedModels) {
       const removed = removedModels(input)
       const sessions = await store.listSummaries({ organizationId: organizationIdForActor(actor) })
       if (sessions.some(session => session.agentRuntime !== 'copilot' && removed.some(model =>
@@ -1062,18 +1100,94 @@ export async function startHostServer(
         throw Object.assign(new Error('Select another model in existing Sessions before deleting this model or provider'), { status: 409 })
       }
     }
-    const result = await callback(input, actor)
+    const result = await callback(input, actor, write)
     if (!options.onModelCatalogChange) io.of('/dashboard').emit('server:agent_runtimes', { runtimes: agentRuntimes?.catalog() ?? [] })
     return result
   }
   attachJsonRoutes(http, {
+    ...(options.assertSettingsReady ? { assertSettingsReady: options.assertSettingsReady } : {}),
     models: options.models ?? [],
     defaultModel: options.defaultModel ?? '',
+    ...(options.settingsRevision ? { settingsRevision: options.settingsRevision } : {}),
+    ...(options.settingsConfiguration ? { settingsConfiguration: async (section, actor) => {
+      const configuration = await options.settingsConfiguration!(section, actor)
+      if (!configuration) return undefined
+      if (section !== 'agent' && section !== 'execution') {
+        let application = configuration.application
+        if (options.settingsServingSet && section === 'models') {
+          await options.settingsServingSet.publish(configuration.resource, {
+            revision: application.effectiveRevision,
+            synchronization: application.observations?.[0]?.synchronization ?? 'synchronizing',
+          })
+          application = await options.settingsServingSet.application(configuration.resource, configuration.revision, application.applyMode)
+        }
+        return { ...configuration, application, value: { ...configuration.value, deployment: { product, deployment, capabilities } } }
+      }
+      const sessionObservations = store.list().filter(record =>
+        record.organizationId === organizationIdForActor(actor) && effectiveDelegationDepth(record) === 0).map(record => {
+        const applied = agentSettingsApplications.get(record)
+        const matches = agentSettingsSynchronization === 'ready' && applied?.revision === configuration.revision
+        return { sessionId: record.sessionId, desiredRevision: configuration.revision,
+          effectiveRevision: matches ? applied.revision : null,
+          state: matches ? 'applied' as const : agentSettingsSynchronization === 'disconnected' ? 'unknown' as const : 'pending' as const,
+          observedAt: matches ? applied.observedAt : null }
+      })
+      const effectiveRevision = sessionObservations.length > 0 && sessionObservations.every(item => item.state === 'applied')
+        ? configuration.revision : null
+      if (options.settingsServingSet) {
+        await options.settingsServingSet.publish(configuration.resource,
+          agentSettingsObservation(configuration.revision, organizationIdForActor(actor)))
+        return { ...configuration, value: { ...configuration.value, deployment: { product, deployment, capabilities } },
+          application: { ...await options.settingsServingSet.application(configuration.resource, configuration.revision, configuration.application.applyMode),
+            sessionObservations } }
+      }
+      return { ...configuration, value: { ...configuration.value, deployment: { product, deployment, capabilities } },
+        application: { ...configuration.application, state: 'unknown' as const,
+          effectiveRevision, sessionObservations, reasonCode: 'local_loaded_session_observations_only',
+          observations: configuration.application.observations?.map(observation => ({
+            ...observation, revision: effectiveRevision, synchronization: agentSettingsSynchronization,
+          })),
+        } }
+    } } : {}),
+    ...(options.settingsWriteProtocol ? { settingsWriteProtocol: options.settingsWriteProtocol } : {}),
     ...(options.settings ? { settings: async (actor: DashboardActor) => ({
       ...await settingsWithSkills(options.settings!)(actor),
       ...(gatewayOwnerAdmin && actor.kind === 'ingress' && actor.role === 'owner' ? { socketAdmin: gatewayOwnerAdmin.summary } : {}),
       deployment: { product, deployment, capabilities },
     }) } : {}),
+    settingsSection: async (section, actor) => {
+      const common = { deployment: { product, deployment, capabilities } }
+      if (section === 'integrations') {
+        const observedAt = new Date().toISOString()
+        const observations: import('@agent-kernel/shared').IntegrationObservation[] = [
+          { id: 'artifacts', component: 'runtime', configured: true, health: 'unknown',
+            sourceRef: options.objectStorage ? 'runtime-object-storage-adapter' : 'runtime-local-artifact-store', observedAt,
+            reasonCode: 'adapter_installed_health_not_probed' },
+          { id: 'telemetry', component: 'runtime', configured: Boolean(options.telemetry), health: options.telemetry ? 'unknown' : 'not-applicable',
+            sourceRef: 'runtime-telemetry-adapter', observedAt, ...(options.telemetry ? { reasonCode: 'delivery_not_observed' } : {}) },
+          { id: 'secrets', component: 'runtime', configured: null, health: 'unknown',
+            sourceRef: 'runtime-credential-authority', observedAt, reasonCode: 'composition_observation_unavailable' },
+          ...(['error-reporting', 'ticketing'] as const).map(id => ({
+            id, component: 'runtime' as const, configured: false, health: 'not-applicable' as const,
+            sourceRef: 'runtime-adapter-registry', observedAt, reasonCode: 'adapter_not_installed',
+          })),
+        ]
+        const composed = await options.settingsSection?.(section, actor)
+        const overrides = new Map(composed?.integrationStatus?.map(item => [item.id, item]))
+        return { ...common, integrationStatus: observations.map(item => overrides.get(item.id) ?? item) }
+      }
+      if (section === 'skills') return { ...common, skills: { count: defaultSkillRegistry.skills.length,
+        roots: actor.kind === 'ingress' ? [] : defaultSkillRootsList,
+        diagnostics: actor.kind === 'ingress' ? [] : defaultSkillRegistry.diagnostics } }
+      if (section === 'engines') return { ...common, agentRuntimes: agentRuntimes?.catalog().map(runtime => runtime.id === 'kernel'
+        ? { ...runtime, models: typeof options.models === 'function' ? options.models() : options.models ?? [] } : runtime) ?? [] }
+      if (section === 'diagnostics') return { ...common, socketConnections: socketConnectionAuditSnapshot(io),
+        ...(gatewayOwnerAdmin && actor.kind === 'ingress' && actor.role === 'owner' ? { socketAdmin: gatewayOwnerAdmin.summary } : {}) }
+      if (section === 'services') return { ...common, ...(await options.settingsSection?.(section, actor)),
+        runtime: restart?.status() ?? restartUnavailableStatus(), runtimeManagement: restart ? 'local' : 'external' }
+      if (!options.settingsSection) throw new Error('settings_projection_unavailable')
+      return { ...common, ...await options.settingsSection(section, actor) }
+    },
     ...(options.addManualModel ? { addManualModel: withModelCatalogUpdate(options.addManualModel) } : {}),
     ...(options.updateManualModel ? { updateManualModel: withModelCatalogUpdate(options.updateManualModel) } : {}),
     ...(options.deleteManualModel ? { deleteManualModel: withModelCatalogUpdate(options.deleteManualModel, input =>
@@ -1084,10 +1198,10 @@ export async function startHostServer(
       (typeof options.models === 'function' ? options.models() : options.models ?? []).filter(model => model.providerId === input.providerId)) } : {}),
     ...(options.setDefaultModel ? { setDefaultModel: withModelCatalogUpdate(options.setDefaultModel) } : {}),
     ...(options.updateAgentPrompt ? {
-      updateAgentPrompt: (input, actor) => serializePromptSettingsUpdate(actor, () => options.updateAgentPrompt!(input, actor)),
+      updateAgentPrompt: (input, actor, write) => serializePromptSettingsUpdate(actor, () => options.updateAgentPrompt!(input, actor, write)),
     } : {}),
     ...(options.updateDesktopAccess ? {
-      updateDesktopAccess: (input, actor) => serializePromptSettingsUpdate(actor, () => options.updateDesktopAccess!(input, actor)),
+      updateDesktopAccess: (input, actor, write) => serializePromptSettingsUpdate(actor, () => options.updateDesktopAccess!(input, actor, write)),
     } : {}),
     ...(options.initializeSocketAdmin ? { initializeSocketAdmin: (input: { password: string; mode?: 'development' | 'production' }) => options.initializeSocketAdmin!({ ...input, activate: activateSocketAdmin }) } : {}),
     ...(options.updateSocketAdminMode ? { updateSocketAdminMode: options.updateSocketAdminMode } : {}),
@@ -1102,6 +1216,7 @@ export async function startHostServer(
     audit,
     capabilities,
     deployment,
+    ...(product === 'portable' && options.settingsLayout ? { settingsLayout: options.settingsLayout } : {}),
     ...(options.evaluationUrl ? { evaluationUrl: options.evaluationUrl } : {}),
     metrics,
     memoStore,
@@ -1109,6 +1224,7 @@ export async function startHostServer(
       webSearchCredentials: {
         get: (provider: 'serper') => options.webSearchCredentials!.get(provider),
         status: options.webSearchCredentialStatus,
+        ...(options.webSearchCredentialConfiguration ? { configuration: options.webSearchCredentialConfiguration } : {}),
         set: options.setWebSearchCredential,
         delete: options.deleteWebSearchCredential,
       },
@@ -2996,6 +3112,7 @@ export async function startHostServer(
     ...(auth ? { auth } : {}),
     installations: executorInstallations,
     ...(options.executorQuota ? { executorQuota: options.executorQuota } : {}),
+    ...(options.executorAdmission ? { executorAdmission: options.executorAdmission } : {}),
     audit,
     broadcastError,
     dashboardNs,
@@ -3045,6 +3162,15 @@ export async function startHostServer(
     http.once('error', onError)
     http.listen(options.port, options.listenHost, onListening)
   })
+  if (options.onAgentSettingsChange) {
+    try {
+      stopAgentSettingsNotifications = await options.onAgentSettingsChange(synchronizeOrganizationPrompt,
+        state => { agentSettingsSynchronization = state; options.onAgentApplicationChange?.() })
+    } catch (error) {
+      await closeServer()
+      throw error
+    }
+  }
   const addr = http.address()
   const port =
     typeof addr === 'object' && addr && 'port' in addr ? addr.port : options.port
@@ -3066,6 +3192,7 @@ export async function startHostServer(
     loop,
     store,
     executorsSnapshot: () => executors.snapshot().map((executor) => workspaceAliases.apply(executor)),
+    agentSettingsObservation,
     restartStatus: () => restart?.status() ?? restartUnavailableStatus(),
     port,
     close: closeServer,

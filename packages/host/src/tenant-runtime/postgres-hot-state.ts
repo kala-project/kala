@@ -9,7 +9,7 @@ import {
 } from './postgres-runtime-unit-placement-store.js'
 import { assertResourceOwner, type RuntimeResourceOwnership } from './postgres-runtime-resource-ownership.js'
 import { decodePostgresJson, stringifyPostgresJson } from './postgres-json.js'
-import { listenPostgresNotifications, type PostgresNotificationClient } from './postgres-notifications.js'
+import { listenPostgresNotifications, type PostgresNotificationClient, type PostgresSubscriptionOptions } from './postgres-notifications.js'
 
 type QueryResultRow = Record<string, unknown>
 export type SqlQueryResult<Row extends QueryResultRow = QueryResultRow> = {
@@ -60,7 +60,7 @@ export interface HotStateSqlExecutor {
 }
 
 export interface HotStateDatabase extends HotStateSqlExecutor {
-  listen?(channel: string, listener: (payload?: string) => void): Promise<() => Promise<void>>
+  listen?(channel: string, listener: (payload?: string) => void | Promise<void>, options?: PostgresSubscriptionOptions): Promise<() => Promise<void>>
   transaction<T>(operation: (transaction: HotStateSqlExecutor) => Promise<T>): Promise<T>
   close?(): Promise<void>
 }
@@ -375,14 +375,14 @@ export function createPostgresHotStateStore(options: {
   const database: HotStateDatabase = {
     query: (text, values) => inTransaction(async (transaction) => await transaction.query(text, values)),
     transaction: inTransaction,
-    async listen(channel, listener) {
+    async listen(channel, listener, subscriptionOptions) {
       const stop = await listenPostgresNotifications(() => new Client({
         connectionString: options.connectionString,
         application_name: `${options.applicationName ?? 'kala-tenant-runtime-hot-state'}-notifications`,
         connectionTimeoutMillis: 5_000,
         statement_timeout: options.statementTimeoutMs ?? 15_000,
         ...(options.ssl !== undefined ? { ssl: options.ssl } : {}),
-      }), channel, listener)
+      }), channel, listener, subscriptionOptions)
       notificationListeners.add(stop)
       return async () => { notificationListeners.delete(stop); await stop() }
     },

@@ -29,8 +29,8 @@ export type SpeechToken = {
   expiresInSeconds: number
 }
 
-export async function loadSpeechSettings(): Promise<SpeechSettings> {
-  const response = await fetch('/settings/speech', { cache: 'no-store' })
+export async function loadSpeechSettings(request: (path: string, init?: RequestInit) => Promise<Response> = fetch): Promise<SpeechSettings> {
+  const response = await request('/settings/speech', { cache: 'no-store' })
   if (!response.ok) throw new Error(await responseError(response))
   const settings = await response.json() as Omit<SpeechSettings, 'mode' | 'realtimeMaxMinutes' | 'afterRecordingMaxMinutes'> & { mode?: unknown; realtimeMaxMinutes?: unknown; afterRecordingMaxMinutes?: unknown }
   return {

@@ -215,6 +215,26 @@ describe('routed Session hook', () => {
     expect(sockets[0]!.closed).toBe(true)
   })
 
+  it('never exposes a former target or credential socket during the render before effect cleanup', () => {
+    const observed: Array<{ host: string; token: string; socket: unknown }> = []
+    const view = renderHook(({ host, token }) => {
+      const socket = useDashboardControlSocket(host, token)
+      observed.push({ host, token, socket })
+      return socket
+    }, { initialProps: { host: 'http://127.0.0.1:31001', token: 'fictional-a' } })
+    const first = view.result.current
+    view.rerender({ host: 'http://127.0.0.1:31002', token: 'fictional-b' })
+    expect(observed.find(item => item.host.endsWith('31002'))?.socket).toBeNull()
+    expect(observed.filter(item => item.host.endsWith('31002')).some(item => item.socket === first)).toBe(false)
+    const second = view.result.current
+    view.rerender({ host: 'http://127.0.0.1:31002', token: 'fictional-c' })
+    expect(observed.find(item => item.token === 'fictional-c')?.socket).toBeNull()
+    expect(view.result.current).not.toBe(second)
+    expect((first as unknown as FakeSocket).closed).toBe(true)
+    expect((second as unknown as FakeSocket).closed).toBe(true)
+    view.unmount()
+  })
+
   it('creates a private-cloud Session on a fresh Gateway-selected control connection', async () => {
     const shared = new FakeSocket()
     const creating = createSessionWithAck(shared as never, { sessionId: 'placed-session' }, 1_000, {

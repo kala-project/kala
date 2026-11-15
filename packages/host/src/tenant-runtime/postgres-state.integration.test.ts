@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { promisify } from 'node:util'
 import { createServer } from 'node:http'
 import { EventEmitter, once } from 'node:events'
@@ -12,18 +13,22 @@ import { PostgresWebSearchCredentialStore } from '../web-search/credential-store
 import { createPostgresHotStateStore, type PostgresHotStateStore } from './postgres-hot-state.js'
 import { PostgresTenantStateStore } from './postgres-state.js'
 import { DedicatedModelSettings, DEDICATED_MODEL_SETTINGS_CREDENTIAL } from '../llm/dedicated-model-settings.js'
+import { OrganizationModelSettings, ORGANIZATION_MODEL_SETTINGS_CREDENTIAL } from '../llm/organization-model-settings.js'
 import type { DashboardActor } from '../auth-control.js'
 import type { RuntimeProviderCatalog } from '../llm/runtime-provider-catalog.js'
 import { ExplicitLLMClientFactory } from '../llm/client-factory.js'
+import type { SecretResolver } from '../llm/client-factory.js'
+import { runPostgresMigrations, type PostgresMigrationPool } from '../postgres-migrations.js'
 
 const execFileAsync = promisify(execFile)
 const integrationDescribe = process.env.KALA_RUN_POSTGRES_INTEGRATION === '1' ? describe : describe.skip
+const { Pool } = createRequire(import.meta.url)('pg') as { Pool: new (options: object) => PostgresMigrationPool }
 
 integrationDescribe('Private Cloud PostgreSQL tenant state integration', () => {
   const testProject = `kala-tenant-state-test-${randomUUID()}`
   const containerName = `${testProject}-postgres`
   const databases: PostgresHotStateStore[] = []
-  const modelServices: DedicatedModelSettings[] = []
+  const modelServices: Array<DedicatedModelSettings | OrganizationModelSettings> = []
   const masterKey = randomBytes(32)
   let connectionString: string
 
@@ -41,7 +46,9 @@ integrationDescribe('Private Cloud PostgreSQL tenant state integration', () => {
     if (!/^\d+$/u.test(port)) throw new Error(`Docker did not assign a PostgreSQL port: ${port}`)
     connectionString = `postgres://postgres:kala_test_only@127.0.0.1:${port}/kala_tenant_state_test`
     const schema = state('schema', masterKey)
-    await eventually(async () => await schema.initializeSchema(), 30_000)
+    await eventually(async () => await schema.database.query('SELECT 1'), 30_000)
+    const owner = new Pool({ connectionString })
+    try { await runPostgresMigrations(owner) } finally { await owner.end() }
   }, 120_000)
 
   afterAll(async () => {
@@ -55,6 +62,83 @@ integrationDescribe('Private Cloud PostgreSQL tenant state integration', () => {
     databases.push(database)
     return new PostgresTenantStateStore(database.database, tenantId, key)
   }
+
+  it('creates a distinct empty encrypted organization authority without a shared credential fallback, then routes its owned models', async () => {
+    const organizationId = `org-${randomUUID()}`
+    const authority = state(organizationId, masterKey)
+    let allowed = true
+    const guard = async () => { if (!allowed) throw new Error('model_policy_fenced') }
+    const guards = { assertCallAllowed: vi.fn(guard), assertMutationAllowed: vi.fn(guard), assertInitializationAllowed: vi.fn(guard) }
+    const factory = vi.fn((resolver: SecretResolver) => new ExplicitLLMClientFactory(resolver))
+    const settings = new OrganizationModelSettings(authority, organizationId, guards, factory)
+    modelServices.push(settings)
+    expect(() => new OrganizationModelSettings(authority, 'different-organization', guards)).toThrow('model_settings_tenant_mismatch')
+    await settings.load()
+    expect(guards.assertInitializationAllowed).toHaveBeenCalledOnce()
+    expect(guards.assertInitializationAllowed.mock.calls[0]).toHaveLength(1)
+    expect(factory).toHaveBeenCalledOnce()
+    expect(settings.defaultModel).toBeNull()
+    expect(settings.models).toEqual([])
+    expect(JSON.parse((await authority.getCredential(ORGANIZATION_MODEL_SETTINGS_CREDENTIAL))!.secret)).toEqual({
+      version: 1, catalog: { version: 1, defaultModel: null, providers: [] }, keys: {},
+    })
+    expect(await authority.getCredential(DEDICATED_MODEL_SETTINGS_CREDENTIAL)).toBeUndefined()
+    await expect(settings.llm.call({ messages: [], tools: [] })).rejects.toThrow('model_not_configured')
+    expect(guards.assertCallAllowed).toHaveBeenCalledOnce()
+    const calls: Array<{ key?: string; model: string }> = []
+    const provider = createServer((request, response) => {
+      let body = ''
+      request.on('data', chunk => { body += String(chunk) })
+      request.on('end', () => {
+        calls.push({ key: request.headers.authorization, model: (JSON.parse(body) as { model: string }).model })
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }] }))
+      })
+    })
+    await new Promise<void>(resolve => provider.listen(0, '127.0.0.1', resolve))
+    try {
+      const address = provider.address()
+      if (!address || typeof address === 'string') throw new Error('missing fixture address')
+      const actor: DashboardActor = { kind: 'ingress', principal: 'admin', organizationId, role: 'admin' }
+      await settings.addProvider({ id: 'owned', wire: 'openai', baseUrl: `http://127.0.0.1:${address.port}/v1`, apiKey: 'owned-fixture-key' }, actor)
+      await settings.addModel({ providerId: 'owned', id: 'first' }, actor)
+      await expect(settings.llm.call({ messages: [], tools: [] })).rejects.toThrow('model_not_configured')
+      await settings.setDefault({ model: 'owned:first' }, actor)
+      await settings.llm.call({ messages: [], tools: [] })
+      expect(calls).toEqual([{ key: 'Bearer owned-fixture-key', model: 'first' }])
+      const desired = await settings.configuration()
+      expect(desired.defaultModel).toBe('owned:first')
+      expect(JSON.stringify(desired)).not.toContain('owned-fixture-key')
+      const row = (await authority.database.query<{ ciphertext: Buffer }>(
+        'SELECT ciphertext FROM tenant_state_credentials WHERE tenant_id=$1 AND credential_id=$2', [organizationId, ORGANIZATION_MODEL_SETTINGS_CREDENTIAL],
+      )).rows[0]!
+      expect(row.ciphertext.toString()).not.toContain('owned-fixture-key')
+      allowed = false
+      await expect(settings.llm.call({ messages: [], tools: [] })).rejects.toThrow('model_policy_fenced')
+      await expect(settings.updateProvider({ providerId: 'owned', apiKey: 'not-written' }, actor)).rejects.toThrow('model_policy_fenced')
+      expect((await settings.configuration()).revision).toBe(desired.revision)
+      expect(calls).toHaveLength(1)
+      allowed = true
+      const restarted = new OrganizationModelSettings(state(organizationId, masterKey), organizationId, guards)
+      modelServices.push(restarted)
+      await restarted.load()
+      await restarted.llm.call({ messages: [], tools: [] })
+      expect(calls).toHaveLength(2)
+      expect(await state('other-organization', masterKey).getCredential(ORGANIZATION_MODEL_SETTINGS_CREDENTIAL)).toBeUndefined()
+    } finally { provider.closeAllConnections(); await new Promise<void>(resolve => provider.close(() => resolve())) }
+  })
+
+  it('does not provision an organization catalog when the protected initialization guard refuses it', async () => {
+    const organizationId = `org-${randomUUID()}`
+    const authority = state(organizationId, masterKey)
+    const guard = async () => { throw new Error('maintenance_required') }
+    const settings = new OrganizationModelSettings(authority, organizationId, {
+      assertCallAllowed: guard, assertMutationAllowed: guard, assertInitializationAllowed: guard,
+    })
+    modelServices.push(settings)
+    await expect(settings.load()).rejects.toThrow('maintenance_required')
+    expect(await authority.getCredential(ORGANIZATION_MODEL_SETTINGS_CREDENTIAL)).toBeUndefined()
+  })
 
   it('persists atomic live model edits, encrypted keys and tenant isolation with real adapter routing', async () => {
     const calls: Array<{ url: string; key?: string; model: string }> = []
@@ -174,6 +258,11 @@ integrationDescribe('Private Cloud PostgreSQL tenant state integration', () => {
     const applicationName = `model-${randomUUID()}`
     const writerState = state(organizationId, masterKey)
     const replicaState = state(organizationId, masterKey, applicationName)
+    const subscription = new EventEmitter()
+    const listen = replicaState.database.listen!.bind(replicaState.database)
+    vi.spyOn(replicaState.database, 'listen').mockImplementation((channel, listener, options) => listen(channel, listener, {
+      onState: state => { options?.onState?.(state); subscription.emit(state) },
+    }))
     const seed: RuntimeProviderCatalog = { version: 1, defaultModel: 'seed:first', providers: [{
       id: 'seed', wire: 'openai', baseUrl: 'https://example.test/v1', credentialRef: 'file:seed',
       models: [{ id: 'first' }, { id: 'second' }],
@@ -188,7 +277,8 @@ integrationDescribe('Private Cloud PostgreSQL tenant state integration', () => {
     const events = new EventEmitter()
     writer.onChange(() => { throw new Error('replica-secret') })
     replica.onChange(() => events.emit('change'))
-    vi.spyOn(replicaState, 'getCredential').mockRejectedValueOnce(new Error('replica-secret'))
+    const readCredential = replicaState.getCredential.bind(replicaState)
+    const credentialReads = vi.spyOn(replicaState, 'getCredential').mockRejectedValueOnce(new Error('replica-secret'))
     let changed = once(events, 'change', { signal: AbortSignal.timeout(5_000) })
     await writer.setDefault({ model: 'seed:second' }, actor)
     await eventually(async () => {
@@ -215,12 +305,30 @@ integrationDescribe('Private Cloud PostgreSQL tenant state integration', () => {
     )
     expect(listener.rows).toHaveLength(1)
     changed = once(events, 'change', { signal: AbortSignal.timeout(5_000) })
-    await writerState.database.query(
-      'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid = $1 AND datname = current_database() AND application_name = $2',
-      [listener.rows[0]!.pid, listenerName],
-    )
-    await writer.updateProvider({ providerId: 'seed', baseUrl: 'https://edited.test/v1', apiKey: 'rotated-secret' }, actor)
-    await changed
+    const disconnected = once(subscription, 'disconnected', { signal: AbortSignal.timeout(5_000) })
+    const ready = once(subscription, 'ready', { signal: AbortSignal.timeout(5_000) })
+    let releaseRead!: () => void, enteredRead!: () => void
+    const heldRead = new Promise<void>(resolve => { releaseRead = resolve })
+    const reading = new Promise<void>(resolve => { enteredRead = resolve })
+    credentialReads.mockImplementationOnce(async (...args) => {
+      enteredRead()
+      await heldRead
+      return readCredential(...args)
+    })
+    try {
+      await writerState.database.query(
+        'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid = $1 AND datname = current_database() AND application_name = $2',
+        [listener.rows[0]!.pid, listenerName],
+      )
+      await disconnected
+      await expect(replica.llm.call({ messages: [], tools: [] })).rejects.toThrow('synchronization is unavailable')
+      await writer.updateProvider({ providerId: 'seed', baseUrl: 'https://edited.test/v1', apiKey: 'rotated-secret' }, actor)
+      await reading
+      await expect(replica.llm.call({ messages: [], tools: [] })).rejects.toThrow('synchronization is unavailable')
+      releaseRead()
+      await changed
+      await ready
+    } finally { releaseRead() }
     expect(replica.providers[0]?.baseUrl).toBe('https://edited.test/v1')
     changed = once(events, 'change', { signal: AbortSignal.timeout(5_000) })
     await writer.setDefault({ model: 'seed:first' }, actor)

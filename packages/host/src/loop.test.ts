@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHookRunner } from './extensions/hooks.js'
 
 import { createConfig, createInitialState } from '@agent-kernel/kernel'
 import type { AgentConfig, AgentState } from '@agent-kernel/kernel'
@@ -3041,7 +3042,7 @@ describe('host loop', () => {
     expect(store.get(parent.sessionId)!.state.approvalMode).toBe('auto')
   })
 
-  it('pre_tool_use hook blocks the tool call when it fails', async () => {
+  it('native pre_tool_use hook blocks the tool call when it fails', async () => {
     const llm = scriptedLlm([
       {
         message: {
@@ -3075,15 +3076,8 @@ describe('host loop', () => {
       llm,
       tools,
       broadcast: silentBroadcast(),
-      hooks: [{ event: 'pre_tool_use', command: '_ignored' }],
-      hookRunner: {
-        run: async () => ({
-          ok: false,
-          exitCode: 3,
-          stdout: 'denied by policy',
-          stderr: '',
-        }),
-      },
+      hooks: [{ event: 'pre_tool_use', command: `"${process.execPath}" -e "process.stdout.write('denied by policy');process.exit(3)"` }],
+      hookRunner: createHookRunner(),
     })
 
     await loop.dispatch(sessionId, { kind: 'user_message', text: 'read x' })
@@ -3102,7 +3096,7 @@ describe('host loop', () => {
     expect(content).toContain('denied by policy')
   })
 
-  it('post_tool_use hook fires after a successful tool call', async () => {
+  it('native post_tool_use hook receives the successful result without blocking on its nonzero exit', async () => {
     const llm = scriptedLlm([
       {
         message: {
@@ -3128,19 +3122,22 @@ describe('host loop', () => {
       callTool: async () => ({ ok: true, content: 'hello file' }),
     })
     let postSeen = false
+    const runner = createHookRunner()
     const loop = runHostLoop({
       store,
       llm,
       tools,
       broadcast: silentBroadcast(),
-      hooks: [{ event: 'post_tool_use', command: '_ignored' }],
+      hooks: [{ event: 'post_tool_use', command: `"${process.execPath}" -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{process.stdout.write(d);process.exit(7)})"` }],
       hookRunner: {
-        run: async (_hook, payload) => {
+        run: async (hook, payload) => {
+          const outcome = await runner.run(hook, payload)
           if (payload.event === 'post_tool_use') {
             postSeen = true
-            expect(payload.toolResult).toEqual({ ok: true, content: 'hello file' })
+            expect(JSON.parse(outcome.stdout).toolResult).toEqual({ ok: true, content: 'hello file' })
+            expect(outcome.exitCode).toBe(7)
           }
-          return { ok: true, exitCode: 0, stdout: '', stderr: '' }
+          return outcome
         },
       },
     })

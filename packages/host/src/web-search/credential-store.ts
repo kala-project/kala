@@ -1,6 +1,7 @@
 import { KalaStateStore } from '../store/state-store.js'
 import type { PostgresTenantStateStore } from '../tenant-runtime/postgres-state.js'
 import type { WebSearchCredentialStore } from './index.js'
+import type { SettingsWriteOptions } from '../settings-concurrency.js'
 
 const PROVIDER = 'serper' as const
 
@@ -24,16 +25,26 @@ export class PostgresWebSearchCredentialStore implements WebSearchCredentialStor
     return provider === PROVIDER ? (await this.state.getCredential(PROVIDER))?.secret : undefined
   }
 
-  async set(provider: typeof PROVIDER, key: string): Promise<WebSearchCredentialStatus> {
+  async configuration(): Promise<{ revision: string; value: WebSearchCredentialStatus }> {
+    const snapshot = await this.state.credentialConfiguration(PROVIDER)
+    return {
+      revision: snapshot.revision,
+      value: snapshot.value
+        ? { configured: true, provider: PROVIDER, updatedAt: snapshot.value.updatedAt }
+        : { configured: false, provider: PROVIDER },
+    }
+  }
+
+  async set(provider: typeof PROVIDER, key: string, options: SettingsWriteOptions = {}): Promise<WebSearchCredentialStatus> {
     if (provider !== PROVIDER) throw new Error('unsupported web search provider')
     const updatedAt = new Date().toISOString()
-    await this.state.setCredential(PROVIDER, key, { version: 1, provider: PROVIDER }, updatedAt)
+    await this.state.setCredential(PROVIDER, key, { version: 1, provider: PROVIDER }, updatedAt, undefined, options)
     return { configured: true, provider: PROVIDER, updatedAt }
   }
 
-  async delete(provider: typeof PROVIDER): Promise<WebSearchCredentialStatus> {
+  async delete(provider: typeof PROVIDER, options: SettingsWriteOptions = {}): Promise<WebSearchCredentialStatus> {
     if (provider !== PROVIDER) throw new Error('unsupported web search provider')
-    await this.state.deleteCredential(PROVIDER)
+    await this.state.deleteCredential(PROVIDER, undefined, options)
     return { configured: false, provider: PROVIDER }
   }
 }
@@ -61,16 +72,26 @@ export class LocalWebSearchCredentialStore implements WebSearchCredentialStore {
     return provider === PROVIDER ? this.state.getCredential(PROVIDER)?.secret : undefined
   }
 
-  async set(provider: typeof PROVIDER, key: string): Promise<WebSearchCredentialStatus> {
+  async configuration(): Promise<{ revision: string; value: WebSearchCredentialStatus }> {
+    const snapshot = this.state.credentialConfiguration(PROVIDER)
+    return {
+      revision: snapshot.revision,
+      value: snapshot.value
+        ? { configured: true, provider: PROVIDER, updatedAt: snapshot.value.updatedAt }
+        : { configured: false, provider: PROVIDER },
+    }
+  }
+
+  async set(provider: typeof PROVIDER, key: string, options: SettingsWriteOptions = {}): Promise<WebSearchCredentialStatus> {
     if (provider !== PROVIDER) throw new Error('unsupported web search provider')
     const updatedAt = new Date().toISOString()
-    this.state.setCredential(PROVIDER, key, { version: 1, provider: PROVIDER }, updatedAt)
+    this.state.setCredential(PROVIDER, key, { version: 1, provider: PROVIDER }, updatedAt, options)
     return { configured: true, provider: PROVIDER, updatedAt }
   }
 
-  async delete(provider: typeof PROVIDER): Promise<WebSearchCredentialStatus> {
+  async delete(provider: typeof PROVIDER, options: SettingsWriteOptions = {}): Promise<WebSearchCredentialStatus> {
     if (provider !== PROVIDER) throw new Error('unsupported web search provider')
-    this.state.deleteCredential(PROVIDER)
+    this.state.deleteCredential(PROVIDER, options)
     return { configured: false, provider: PROVIDER }
   }
 }

@@ -57,15 +57,19 @@ import { createHookRunner } from '../src/extensions/hooks.js'
 import { createRuntimeLogger } from '../src/logger.js'
 import {
   defaultAgentSettingsPath,
+  defaultAgentRuntimeSettings,
+  agentSettingsSnapshot,
   loadAgentRuntimeSettings,
   loadHookConfigs,
   loadRuntimeConfig,
+  manualConfigSnapshot,
   modelInfo,
   modelRef,
   organizationAgentSettingsPath,
   type ProviderSpec,
-  writeAgentRuntimeSettings,
-  writeManualConfig,
+  updateAgentRuntimeSettings,
+  updateManualConfig,
+  type ManualConfigFile,
 } from '../src/runtime-config.js'
 import { startHostServer } from '../src/server.js'
 import { selectPortableInstallation } from '../src/store/portable-installation.js'
@@ -186,7 +190,6 @@ async function main(): Promise<void> {
   if (process.env.KALA_ALLOW_ALL_OK === undefined) {
     process.env.KALA_ALLOW_ALL_OK = '1'
   }
-  const runtime = loadRuntimeConfig()
   const port = Number(argValue(process.argv.slice(2), '--port') ?? process.env.KALA_PORT ?? 3000)
   const sessionsDir =
     process.env.KALA_SESSIONS_DIR ?? join(homedir(), '.kala', 'sessions')
@@ -209,6 +212,7 @@ async function main(): Promise<void> {
     legacyMemoDirectory: join(stateRoot, 'memos'),
     legacyCredentialDirectory: join(stateRoot, 'credentials'),
   })
+  const runtime = loadRuntimeConfig({ settingsState: stateStore })
   const webSearchCredentialStore = new LocalWebSearchCredentialStore(stateStore)
   const speechCredentialStore = new LocalAzureSpeechCredentialStore(stateStore)
   const artifactRootDir = process.env.KALA_ARTIFACTS_DIR === '0'
@@ -222,27 +226,31 @@ async function main(): Promise<void> {
   executorIdentityStore.load()
   const effectiveAuth: AuthConfig = { ...(auth ?? {}), executorIdentityStore }
   const healthRegistry = createProviderHealthRegistry()
-  const registry = createModelRegistry(runtime.providers, runtime.manualModels, {
+  const registryOptions = {
     initialManualProviders: runtime.manualProviders,
     initialManualDefaultModel: runtime.manualDefaultModel,
     fallbackDefault: runtime.defaultModel,
     healthRegistry,
     ...(artifactRootDir ? { artifactRootDir } : {}),
     logger,
-  })
+  }
+  let registry = createModelRegistry(runtime.providers, runtime.manualModels, registryOptions)
   const modelMetadata = new ModelMetadataService({ logger })
   const enrichModels = () => modelMetadata.enrichModels(registry.models, registry.providers, registry.manualModels)
   modelMetadata.setUpdateHandler(enrichModels)
   await modelMetadata.start(registry.providers)
   enrichModels()
-  const { llm } = registry
+  const llm: LLMAdapter = { name: 'portable-live-models', call: (input) => {
+    refreshPortableModelConfiguration()
+    return registry.llm.call(input)
+  } }
 
   const skills = await discoverSkills()
   const agentSettingsPath = defaultAgentSettingsPath()
   const settingsPathForActor = (actor?: DashboardActor): string => actor?.kind === 'ingress'
     ? organizationAgentSettingsPath(agentSettingsPath, actor.organizationId)
     : agentSettingsPath
-  const agentSettingsForActor = (actor?: DashboardActor) => loadAgentRuntimeSettings(settingsPathForActor(actor))
+  const agentSettingsForActor = (actor?: DashboardActor) => loadAgentRuntimeSettings(settingsPathForActor(actor), stateStore)
   const resolveAgentModuleForActor = (actor?: DashboardActor) => {
     const settings = agentSettingsForActor(actor)
     return resolveBuiltinAgentModule({
@@ -284,6 +292,48 @@ async function main(): Promise<void> {
   const processReadinessPath = process.env.KALA_PROCESS_READINESS?.trim()
 
   const manualModelsPath = join(homedir(), '.config', 'kala', 'models.json')
+  const discoveredProviders = runtime.providers.filter((provider) => provider.source !== 'manual').map((provider) => ({
+    ...provider, models: provider.models.filter((model) => !runtime.manualModels.some((manual) => manual.providerId === provider.id && manual.id === model)),
+  }))
+  let modelEffectiveRevision = runtime.manualSettingsRevision ?? null
+  const prepareManualModels = (current: ManualConfigFile): BuildResult => {
+      const manualProviders = current.providers.filter((provider) => !discoveredProviders.some((existing) => existing.id === provider.id))
+      const manualModels = current.models.filter((model) => !discoveredProviders.some((provider) => provider.id === model.providerId && provider.models.includes(model.id)))
+      const providers: ProviderSpec[] = [
+        ...discoveredProviders.map((provider) => ({ ...provider, models: [...provider.models], contextWindows: { ...provider.contextWindows } })),
+        ...manualProviders.map((provider) => ({ ...provider, label: provider.label ?? provider.id, source: 'manual' as const, models: [] as string[] })),
+      ]
+      for (const model of manualModels) {
+        const provider = providers.find((provider) => provider.id === model.providerId)
+        if (!provider) continue
+        provider.models = [...provider.models, model.id]
+        if (model.contextWindow) provider.contextWindows = { ...provider.contextWindows, [model.id]: model.contextWindow }
+      }
+      return createModelRegistry(providers, manualModels, { ...registryOptions,
+        initialManualProviders: manualProviders, initialManualDefaultModel: current.defaultModel })
+  }
+  function refreshPortableModelConfiguration(): void {
+    const snapshot = manualConfigSnapshot(manualModelsPath, stateStore)
+    if (snapshot.revision === modelEffectiveRevision) return
+    registry = prepareManualModels(snapshot.value ?? { providers: [], models: [] })
+    modelEffectiveRevision = snapshot.revision
+    modelMetadata.updateProviders(registry.providers)
+    enrichModels()
+  }
+  const changeManualModels = (change: (candidate: BuildResult) => void, write?: import('../src/settings-concurrency.js').SettingsWriteOptions) => {
+    let candidate: BuildResult | undefined
+    const saved = updateManualConfig(manualModelsPath, (current: ManualConfigFile) => {
+      candidate = prepareManualModels(current)
+      change(candidate)
+      return { ...(candidate.manualDefaultModel ? { defaultModel: candidate.manualDefaultModel } : {}),
+        providers: candidate.manualProviders, models: candidate.manualModels }
+    }, stateStore, write)
+    if (!candidate) throw new Error('model candidate was not prepared')
+    registry = candidate
+    modelEffectiveRevision = saved.revision
+    modelMetadata.updateProviders(registry.providers)
+    enrichModels()
+  }
   const hookSummaries = hooks.map((h) => ({
       event: h.event,
       command: h.command,
@@ -334,7 +384,10 @@ async function main(): Promise<void> {
   }
 
   const evaluationUrl = publicHttpUrl(process.env.KALA_EVALUATION_URL)
+  const settingsLayout = process.env.KALA_SETTINGS_LAYOUT ?? 'legacy'
+  if (!['legacy', 'unified'].includes(settingsLayout)) throw new Error('KALA_SETTINGS_LAYOUT must be legacy or unified')
   const server = await startHostServer({
+    settingsLayout: settingsLayout as 'legacy' | 'unified',
     port,
     ...(process.env.KALA_BIND_HOST?.trim() ? { listenHost: process.env.KALA_BIND_HOST.trim() } : {}),
     ...(product === 'portable' ? {
@@ -369,50 +422,124 @@ async function main(): Promise<void> {
     logger,
     webSearchCredentials: webSearchCredentialStore,
     webSearchCredentialStatus: () => webSearchCredentialStore.status(),
-    setWebSearchCredential: (provider, key) => webSearchCredentialStore.set(provider, key),
-    deleteWebSearchCredential: (provider) => webSearchCredentialStore.delete(provider),
+    webSearchCredentialConfiguration: () => webSearchCredentialStore.configuration(),
+    setWebSearchCredential: (provider, key, write) => webSearchCredentialStore.set(provider, key, write),
+    deleteWebSearchCredential: (provider, write) => webSearchCredentialStore.delete(provider, write),
+    settingsRevision: (resource, actor) => {
+      if (!stateStore.settingsRevisionsAvailable()) return undefined
+      if (resource === 'models') return manualConfigSnapshot(manualModelsPath, stateStore).revision
+      if (resource === 'agent') return agentSettingsSnapshot(settingsPathForActor(actor), stateStore).revision
+      return undefined
+    },
     speechCredentials: speechCredentialStore,
     stateStore,
     defaultConfig: (actor) => resolveAgentModuleForActor(actor).config,
     models: () => registry.models,
     defaultModel: () => registry.defaultModel,
     settings: makeSettings,
-    addManualModel: (input) => {
-      registry.addManual(input)
-      enrichModels()
-      writeManualConfig(manualModelsPath, { defaultModel: registry.manualDefaultModel, providers: registry.manualProviders, models: registry.manualModels })
+    settingsConfiguration: (section, actor) => {
+      if (!stateStore.settingsRevisionsAvailable()) return undefined
+      if (section !== 'models' && section !== 'agent' && section !== 'execution') return undefined
+      if (section === 'models') {
+        const snapshot = manualConfigSnapshot(manualModelsPath, stateStore)
+        const candidate = prepareManualModels(snapshot.value ?? { providers: [], models: [] })
+        return {
+          resource: { kind: 'models', id: 'catalog' }, revision: snapshot.revision, capabilities: [],
+          value: { providers: candidate.providers.map((provider) => ({
+            id: provider.id, label: provider.label, wire: provider.wire, source: provider.source,
+            ...(provider.baseUrl ? { baseUrl: provider.baseUrl } : {}),
+            models: candidate.models.filter((model) => model.providerId === provider.id),
+          })), defaultModel: candidate.defaultModel },
+          application: { state: modelEffectiveRevision === snapshot.revision ? 'applied' : 'pending',
+            desiredRevision: snapshot.revision, effectiveRevision: modelEffectiveRevision, applyMode: 'immediate', scope: 'unit' },
+        }
+      }
+      const snapshot = agentSettingsSnapshot(settingsPathForActor(actor), stateStore)
+      const settings = snapshot.value ?? defaultAgentRuntimeSettings()
+      return {
+        resource: { kind: 'agent', id: 'runtime' }, revision: snapshot.revision, capabilities: [],
+        value: section === 'agent'
+          ? { agentPrompt: { ...settings, configPath: settingsPathForActor(actor) } }
+          : { agentSettingsResourceId: settingsPathForActor(actor), desktopAccess: {
+            manualAuthorizationRequired: settings.desktopManualAuthorizationRequired ?? false,
+            computerUseEnabled: settings.computerUseEnabled ?? false, desktopPreviewEnabled: settings.desktopPreviewEnabled ?? false,
+          } },
+        application: { state: 'unknown', desiredRevision: snapshot.revision, effectiveRevision: null,
+          applyMode: 'next-turn', scope: 'unit', reasonCode: 'session_application_not_observed' },
+      }
+    },
+    settingsSection: (section, actor) => {
+      if (section === 'models') return {
+        providers: registry.providers.map(p => ({ id: p.id, label: p.label, wire: p.wire, source: p.source,
+          ...(p.baseUrl ? { baseUrl: p.baseUrl } : {}), models: registry.models.filter(m => m.providerId === p.id) })),
+        defaultModel: registry.defaultModel,
+      }
+      if (section === 'agent') {
+        const settings = agentSettingsForActor(actor)
+        return { agentModule: resolveAgentModuleForActor(actor).metadata, agentPrompt: {
+          selectedSlotId: settings.selectedSlotId, slots: settings.slots, configPath: settingsPathForActor(actor),
+        } }
+      }
+      if (section === 'execution') {
+        const settings = agentSettingsForActor(actor)
+        return { agentSettingsResourceId: settingsPathForActor(actor), desktopAccess: { manualAuthorizationRequired: settings.desktopManualAuthorizationRequired ?? false,
+          computerUseEnabled: settings.computerUseEnabled ?? false, desktopPreviewEnabled: settings.desktopPreviewEnabled ?? false } }
+      }
+      if (section === 'hooks') return { hooks: hookSummaries, paths: { claudeSettings: '', codexConfig: '', manualModels: '', hooksConfig: join(homedir(), '.config', 'kala', 'config.toml'), sessionsDir: '' } }
+      if (section === 'services') {
+        const observedAt = new Date().toISOString()
+        const versioned = stateStore.settingsRevisionsAvailable()
+        return { versions: { host: VERSION, protocol: PROTOCOL_VERSION, build: buildInfo }, release, configurationSources: [
+          { id: 'models', sourceRef: 'portable.models-json', management: 'dashboard',
+            revision: versioned ? manualConfigSnapshot(manualModelsPath, stateStore).revision : null,
+            effectiveRevision: modelEffectiveRevision, observedAt, maintenance: 'portable-model-import' },
+          { id: 'agent', sourceRef: 'portable.agent-json', management: 'dashboard',
+            revision: versioned ? agentSettingsSnapshot(settingsPathForActor(actor), stateStore).revision : null,
+            effectiveRevision: null, observedAt, maintenance: 'portable-agent-import' },
+          { id: 'credentials', sourceRef: 'portable.encrypted-sqlite', management: 'protected-maintenance',
+            revision: null, effectiveRevision: null, observedAt },
+          { id: 'hooks', sourceRef: 'portable.loaded-runtime-hooks', management: 'protected-maintenance',
+            revision: null, effectiveRevision: null, observedAt },
+        ] }
+      }
+      if (section === 'integrations') return { integrationStatus: [{
+        id: 'secrets', component: 'runtime', configured: true, health: 'unknown',
+        sourceRef: 'portable-encrypted-sqlite', observedAt: new Date().toISOString(),
+        reasonCode: 'authority_installed_health_not_probed',
+      }] }
+      return {}
+    },
+    addManualModel: (input, _actor, write) => {
+      changeManualModels((candidate) => candidate.addManual(input), write)
       return makeSettings()
     },
-    deleteManualModel: (input) => {
-      registry.deleteManual(input.providerId, input.id)
-      enrichModels()
-      writeManualConfig(manualModelsPath, { defaultModel: registry.manualDefaultModel, providers: registry.manualProviders, models: registry.manualModels })
+    deleteManualModel: (input, _actor, write) => {
+      changeManualModels((candidate) => {
+        if (candidate.defaultModel === modelRef(input.providerId, input.id)) throw new Error('Choose another default model before deleting this model')
+        candidate.deleteManual(input.providerId, input.id)
+      }, write)
       return makeSettings()
     },
-    addManualProvider: (input) => {
-      registry.addManualProvider(input)
-      modelMetadata.updateProviders(registry.providers)
-      enrichModels()
-      writeManualConfig(manualModelsPath, { defaultModel: registry.manualDefaultModel, providers: registry.manualProviders, models: registry.manualModels })
+    addManualProvider: (input, _actor, write) => {
+      changeManualModels((candidate) => candidate.addManualProvider(input), write)
       return makeSettings()
     },
-    deleteManualProvider: (input) => {
-      registry.deleteManualProvider(input.providerId)
-      modelMetadata.updateProviders(registry.providers)
-      enrichModels()
-      writeManualConfig(manualModelsPath, { defaultModel: registry.manualDefaultModel, providers: registry.manualProviders, models: registry.manualModels })
+    deleteManualProvider: (input, _actor, write) => {
+      changeManualModels((candidate) => {
+        if (candidate.models.some((model) => model.providerId === input.providerId && model.ref === candidate.defaultModel)) throw new Error('Choose another default model before deleting its provider')
+        candidate.deleteManualProvider(input.providerId)
+      }, write)
       return makeSettings()
     },
-    setDefaultModel: (input) => {
-      registry.setDefaultModel(input.model)
-      writeManualConfig(manualModelsPath, { defaultModel: registry.manualDefaultModel, providers: registry.manualProviders, models: registry.manualModels })
+    setDefaultModel: (input, _actor, write) => {
+      changeManualModels((candidate) => candidate.setDefaultModel(input.model), write)
       return makeSettings()
     },
-    updateAgentPrompt: (input, actor) => {
+    updateAgentPrompt: (input, actor, write) => {
       // Publish nothing in memory until the atomic rename succeeds. A failed
       // save therefore leaves both GET and the next model call on the old file.
-      writeAgentRuntimeSettings(settingsPathForActor(actor), { ...agentSettingsForActor(actor), ...input,
-        desktopManualAuthorizationRequired: agentSettingsForActor(actor).desktopManualAuthorizationRequired ?? false })
+      updateAgentRuntimeSettings(settingsPathForActor(actor), (current) => ({ ...current, ...input,
+        desktopManualAuthorizationRequired: current.desktopManualAuthorizationRequired ?? false }), stateStore, write)
       return makeSettings(actor)
     },
     desktopManualAuthorizationRequired: (actor) => agentSettingsForActor(actor).desktopManualAuthorizationRequired ?? false,
@@ -420,11 +547,10 @@ async function main(): Promise<void> {
       const settings = agentSettingsForActor(actor)
       return { computerUseEnabled: settings.computerUseEnabled ?? false, desktopPreviewEnabled: settings.desktopPreviewEnabled ?? false }
     },
-    updateDesktopAccess: (input, actor) => {
-      const current = agentSettingsForActor(actor)
-      writeAgentRuntimeSettings(settingsPathForActor(actor), { ...current, desktopManualAuthorizationRequired: input.manualAuthorizationRequired,
+    updateDesktopAccess: (input, actor, write) => {
+      updateAgentRuntimeSettings(settingsPathForActor(actor), (current) => ({ ...current, desktopManualAuthorizationRequired: input.manualAuthorizationRequired,
         computerUseEnabled: input.computerUseEnabled ?? current.computerUseEnabled ?? false,
-        desktopPreviewEnabled: input.desktopPreviewEnabled ?? current.desktopPreviewEnabled ?? false })
+        desktopPreviewEnabled: input.desktopPreviewEnabled ?? current.desktopPreviewEnabled ?? false }), stateStore, write)
       return makeSettings(actor)
     },
     initializeSocketAdmin: (input) => {

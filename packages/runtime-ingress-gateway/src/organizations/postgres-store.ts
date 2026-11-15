@@ -4,7 +4,14 @@ import type { AuthenticatedIdentity } from '../assignments/store.js'
 import { identityKey, inviteKey } from '../assignments/store.js'
 import type { SqlExecutor } from '../persistence/postgres.js'
 import { ACTIVE_CONTRACT_SQL } from './contract-access.js'
+import type { OrganizationSettingsSection, OrganizationSettingsValue, SettingsWorkspace, SettingsSession, SettingsAudit, SettingsMember, SettingsInvite } from '@agent-kernel/shared'
+import { settingsPageCursor, type SettingsPageRequest } from './settings-view.js'
+import { assertControlSettingsWrite, lockAttachmentRevision, lockControlSettingsSchema, type ControlSettingsWriteOptions } from '../settings/control-revisions.js'
 import { assertInviteExpiration, isAllowedAttachmentLimit, normalizeInviteEmail, type CreatedOrganizationInvite, type Organization, type OrganizationAccess, type OrganizationInvite, type OrganizationMembership, type OrganizationRole, type OrganizationStatus, type OrganizationStore } from './store.js'
+
+function nativeEnrollmentId(organizationId: string, inviteId: string): string {
+  return `enr_native_${createHash('sha256').update(JSON.stringify([organizationId, inviteId])).digest('hex')}`
+}
 
 export class PostgresOrganizationStore implements OrganizationStore {
   constructor(
@@ -179,15 +186,38 @@ export class PostgresOrganizationStore implements OrganizationStore {
     })
   }
 
-  async bindExecutorInvite(inviteToken: string, unitId: string): Promise<void> {
-    const organization = await this.database.query<{ id: string }>(`SELECT o.id FROM organizations o WHERE o.runtime_unit_id = $1 AND o.status = 'active' AND ${ACTIVE_CONTRACT_SQL}`, [unitId])
+  async bindExecutorInvite(inviteToken: string, unitId: string, binding?: { id: string; expiresAt: string }): Promise<void> {
+    if (binding && (!binding.id || binding.id.length > 512 || !Number.isFinite(Date.parse(binding.expiresAt))
+      || Date.parse(binding.expiresAt) <= Date.now() || Date.parse(binding.expiresAt) > Date.now() + 7 * 86_400_000 + 60_000)) throw new Error('invalid_native_invite_binding')
+    return this.database.transaction(async tx => {
+    const organization = await tx.query<{ id: string }>(`SELECT o.id FROM organizations o WHERE o.runtime_unit_id = $1 AND o.status = 'active' AND ${ACTIVE_CONTRACT_SQL}`, [unitId])
     if (!organization.rows[0]) throw new Error('organization not found')
-    const pool = await this.database.query<{ id: string }>('SELECT id FROM executor_pools WHERE organization_id = $1 ORDER BY created_at LIMIT 1', [organization.rows[0].id])
+    const pool = await tx.query<{ id: string }>('SELECT id FROM executor_pools WHERE organization_id = $1 ORDER BY created_at,id LIMIT 1 FOR SHARE', [organization.rows[0].id])
     if (!pool.rows[0]) throw new Error('executor pool not configured')
-    await this.database.query(`INSERT INTO executor_enrollment_tokens(id, organization_id, pool_id, token_hash, created_by, expires_at)
-      SELECT $1, $2, $3, $4, m.principal_id, now() + interval '15 minutes'
-      FROM organization_memberships m WHERE m.organization_id = $2 AND m.role = 'owner' AND m.status = 'active' ORDER BY m.created_at LIMIT 1`,
-    [`enr_${randomBytes(13).toString('hex')}`, organization.rows[0].id, pool.rows[0].id, inviteKey(inviteToken)])
+    const id = binding ? nativeEnrollmentId(organization.rows[0].id, binding.id) : `enr_${randomBytes(13).toString('hex')}`
+    const inserted = await tx.query(`INSERT INTO executor_enrollment_tokens(id, organization_id, pool_id, token_hash, created_by, expires_at)
+      SELECT $1, $2, $3, $4, m.principal_id, coalesce($5::timestamptz,now() + interval '15 minutes')
+      FROM organization_memberships m WHERE m.organization_id = $2 AND m.role = 'owner' AND m.status = 'active' ORDER BY m.created_at LIMIT 1
+      ON CONFLICT(id) DO UPDATE SET token_hash=EXCLUDED.token_hash,expires_at=EXCLUDED.expires_at,
+        used_count=CASE WHEN executor_enrollment_tokens.token_hash=EXCLUDED.token_hash THEN executor_enrollment_tokens.used_count ELSE 0 END,
+        revoked_at=CASE WHEN executor_enrollment_tokens.token_hash=EXCLUDED.token_hash THEN executor_enrollment_tokens.revoked_at ELSE NULL END
+      WHERE executor_enrollment_tokens.organization_id=EXCLUDED.organization_id`,
+    [id, organization.rows[0].id, pool.rows[0].id, inviteKey(inviteToken), binding?.expiresAt ?? null])
+    if (inserted.rowCount !== 1) throw new Error('executor_enrollment_owner_unavailable')
+    })
+  }
+
+  async revokeExecutorInviteBinding(inviteId: string, unitId: string, revokeEnrolled: boolean): Promise<void> {
+    await this.database.transaction(async tx => {
+      const organization = (await tx.query<{ id: string }>('SELECT id FROM organizations WHERE runtime_unit_id=$1', [unitId])).rows[0]
+      if (!organization) throw new Error('organization not found')
+      const id = nativeEnrollmentId(organization.id, inviteId)
+      await tx.query(`UPDATE executor_enrollment_tokens SET revoked_at=coalesce(revoked_at,now()) WHERE organization_id=$1
+        AND (id=$2 OR id IN(SELECT platform->>'nativeEnrollmentId' FROM executors
+          WHERE organization_id=$1 AND platform->>'nativeInviteId'=$3))`, [organization.id, id, inviteId])
+      if (revokeEnrolled) await tx.query(`UPDATE executors SET status='revoked' WHERE organization_id=$1
+        AND (platform->>'nativeEnrollmentId'=$2 OR platform->>'nativeInviteId'=$3)`, [organization.id, id, inviteId])
+    })
   }
 
   async findUnitByExecutorInvite(inviteToken: string): Promise<string | undefined> {
@@ -204,10 +234,94 @@ export class PostgresOrganizationStore implements OrganizationStore {
     return result.rows[0]?.runtime_unit_id
   }
 
+  async settingsView(organizationId: string, section: OrganizationSettingsSection, page: SettingsPageRequest): Promise<OrganizationSettingsValue> {
+    if (section === 'members') {
+      const result = await this.database.query<{ id: string; cursor_timestamp: string } & (
+        { kind: 'member'; value: SettingsMember } | { kind: 'invite'; value: SettingsInvite }
+      )>(`
+        SELECT entries.*,to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_timestamp FROM (
+          SELECT p.id,m.created_at,'member'::text AS kind,jsonb_build_object(
+            'issuer',p.issuer,'subject',p.subject,'displayName',p.display_name,'email',p.email,'role',m.role,'createdAt',m.created_at) AS value
+          FROM organization_memberships m JOIN principals p ON p.id=m.principal_id
+          WHERE m.organization_id=$1 AND m.status='active'
+          UNION ALL
+          SELECT id,created_at,'invite'::text AS kind,jsonb_build_object(
+            'id',id,'email',email_normalized,'role',role,'createdAt',created_at,'expiresAt',expires_at,'acceptedAt',accepted_at,'revokedAt',revoked_at) AS value
+          FROM organization_invites WHERE organization_id=$1
+        ) entries WHERE ($2::timestamptz IS NULL OR (created_at,id)<($2::timestamptz,$3))
+        ORDER BY created_at DESC,id DESC LIMIT $4`, [organizationId, page.after?.[0] ?? null, page.after?.[1] ?? null, page.limit + 1])
+      const rows = result.rows.slice(0, page.limit), last = rows.at(-1)
+      return { members: rows.flatMap(row => row.kind === 'member' ? [row.value] : []),
+        invites: rows.flatMap(row => row.kind === 'invite' ? [row.value] : []),
+        ...(result.rows.length > page.limit && last ? { nextCursor: settingsPageCursor(organizationId, section, last.cursor_timestamp, last.id) } : {}) }
+    }
+    if (section === 'workspaces') {
+      const result = await this.database.query<SettingsWorkspace>(`SELECT id,name,status,policy_version FROM workspaces
+        WHERE organization_id=$1 AND ($2::text IS NULL OR (name,id)>($2,$3))
+        AND ($5::text IS NULL OR id=$5)
+        ORDER BY name ASC,id ASC LIMIT $4`, [organizationId, page.after?.[0] ?? null, page.after?.[1] ?? null, page.limit + 1, page.workspaceId ?? null])
+      const rows = result.rows.slice(0, page.limit), last = rows.at(-1)
+      return { workspaces: rows, ...(result.rows.length > page.limit && last ? { nextCursor: settingsPageCursor(organizationId, section, last.name, last.id) } : {}) }
+    }
+    if (section === 'executors') {
+      type Pool = NonNullable<OrganizationSettingsValue['executorPools']>[number]
+      type Registration = NonNullable<OrganizationSettingsValue['executorRegistrations']>[number]
+      const result = await this.database.query<{ id: string; cursor_timestamp: string } & (
+        { kind: 'pool'; value: Pool } | { kind: 'executor'; value: Registration }
+      )>(`SELECT entries.*,to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_timestamp FROM (
+        SELECT id,created_at,'pool'::text AS kind,jsonb_build_object('id',id,'name',name,'mode',mode,
+          'workspaceId',workspace_id,'revision',coalesce(to_jsonb(p)->>'settings_revision','1')) AS value
+          FROM executor_pools p WHERE organization_id=$1
+        UNION ALL
+        SELECT id,created_at,'executor'::text AS kind,jsonb_build_object('id',id,'name',name,'poolId',pool_id,'status',status,
+          'nativeExecutorId',platform->>'nativeExecutorId','workspaceId',platform->>'nativeWorkspaceId','lastSeenAt',last_seen_at) AS value
+          FROM executors WHERE organization_id=$1
+        ) entries WHERE ($2::timestamptz IS NULL OR (created_at,id)<($2::timestamptz,$3))
+        ORDER BY created_at DESC,id DESC LIMIT $4`, [organizationId, page.after?.[0] ?? null, page.after?.[1] ?? null, page.limit + 1])
+      const rows = result.rows.slice(0, page.limit), last = rows.at(-1)
+      return { executorPools: rows.flatMap(row => row.kind === 'pool' ? [row.value] : []),
+        executorRegistrations: rows.flatMap(row => row.kind === 'executor' ? [row.value] : []),
+        ...(result.rows.length > page.limit && last ? { nextCursor: settingsPageCursor(organizationId, section, last.cursor_timestamp, last.id) } : {}) }
+    }
+    if (section === 'sessions') {
+      const result = await this.database.query<SettingsSession & { cursor_timestamp: string }>(`SELECT id,device,created_at,last_seen_at,absolute_expires_at,revoked_at,
+        to_char(last_seen_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_timestamp FROM browser_sessions
+        WHERE organization_id=$1 AND ($2::timestamptz IS NULL OR (last_seen_at,id)<($2::timestamptz,$3))
+        ORDER BY last_seen_at DESC,id DESC LIMIT $4`, [organizationId, page.after?.[0] ?? null, page.after?.[1] ?? null, page.limit + 1])
+      const rows = result.rows.slice(0, page.limit), last = rows.at(-1)
+      return { sessions: rows.map(({ cursor_timestamp: _cursor, ...row }) => row),
+        ...(result.rows.length > page.limit && last ? { nextCursor: settingsPageCursor(organizationId, section, last.cursor_timestamp, last.id) } : {}) }
+    }
+    if (section === 'audit') {
+      const result = await this.database.query<SettingsAudit & { cursor_timestamp: string }>(`SELECT id,actor_kind,action,target_type,target_id,result,occurred_at,
+        to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_timestamp FROM audit_events
+        WHERE organization_id=$1 AND ($2::timestamptz IS NULL OR (occurred_at,id)<($2::timestamptz,$3))
+        ORDER BY occurred_at DESC,id DESC LIMIT $4`, [organizationId, page.after?.[0] ?? null, page.after?.[1] ?? null, page.limit + 1])
+      const rows = result.rows.slice(0, page.limit), last = rows.at(-1)
+      return { audit: rows.map(({ cursor_timestamp: _cursor, ...row }) => row),
+        ...(result.rows.length > page.limit && last ? { nextCursor: settingsPageCursor(organizationId, section, last.cursor_timestamp, last.id) } : {}) }
+    }
+    if (section === 'policies') {
+      const [organization, retention] = await Promise.all([
+        this.database.query<{ attachment_max_bytes: number }>('SELECT attachment_max_bytes FROM organizations WHERE id=$1', [organizationId]),
+        this.database.query<NonNullable<OrganizationSettingsValue['retention']>>('SELECT session_days,artifact_days,audit_days,deleted_resource_grace_days,version FROM retention_policies WHERE organization_id=$1', [organizationId]),
+      ])
+      return { attachmentMaxBytes: organization.rows[0]?.attachment_max_bytes, retention: retention.rows[0] }
+    }
+    if (section === 'usage') {
+      const [usage, entitlement] = await Promise.all([
+        this.database.query<NonNullable<OrganizationSettingsValue['usage']>>(`SELECT COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens),0)::text AS tokens,COUNT(DISTINCT session_id)::int AS sessions,COUNT(*)::int AS entries FROM usage_ledger WHERE organization_id=$1 AND occurred_at>=date_trunc('month',now())`, [organizationId]),
+        this.database.query<NonNullable<OrganizationSettingsValue['entitlement']>>('SELECT contract_reference,support_tier,ends_at,seat_limit::float8 AS seat_limit,concurrent_session_limit::float8 AS concurrent_session_limit,workspace_limit::float8 AS workspace_limit,monthly_token_limit::text,storage_bytes_limit::text FROM contract_entitlements WHERE organization_id=$1', [organizationId]),
+      ])
+      return { usage: usage.rows[0], entitlement: entitlement.rows[0] }
+    }
+    throw new Error('settings_projection_unavailable')
+  }
+
   async administrationSnapshot(organizationId: string): Promise<Record<string, unknown>> {
     const queries = await Promise.all([
       this.database.query('SELECT id,name,status,runtime_unit_id,attachment_max_bytes,authorization_version,created_at,updated_at FROM organizations WHERE id=$1', [organizationId]),
-      this.database.query('SELECT contract_reference,support_tier,starts_at,ends_at,grace_ends_at,seat_limit,concurrent_session_limit,workspace_limit,monthly_token_limit,storage_bytes_limit FROM contract_entitlements WHERE organization_id=$1', [organizationId]),
+      this.database.query('SELECT contract_reference,support_tier,starts_at,ends_at,grace_ends_at,seat_limit::float8 AS seat_limit,concurrent_session_limit::float8 AS concurrent_session_limit,workspace_limit::float8 AS workspace_limit,monthly_token_limit::text,storage_bytes_limit::text FROM contract_entitlements WHERE organization_id=$1', [organizationId]),
       this.database.query('SELECT session_days,artifact_days,audit_days,deleted_resource_grace_days,version,updated_at FROM retention_policies WHERE organization_id=$1', [organizationId]),
       this.database.query(`SELECT COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens),0)::text AS tokens,COUNT(DISTINCT session_id)::int AS sessions,COUNT(*)::int AS entries FROM usage_ledger WHERE organization_id=$1 AND occurred_at>=date_trunc('month',now())`, [organizationId]),
       this.database.query('SELECT id,name,status,policy_version,created_at,updated_at FROM workspaces WHERE organization_id=$1 ORDER BY name', [organizationId]),
@@ -220,34 +334,75 @@ export class PostgresOrganizationStore implements OrganizationStore {
       this.database.query('SELECT id,actor_kind,action,target_type,target_id,result,metadata,occurred_at FROM audit_events WHERE organization_id=$1 ORDER BY occurred_at DESC LIMIT 100', [organizationId]),
     ])
     const [organization, entitlement, retention, usage, workspaces, pools, executors, invites, sessions, serviceAccounts, webhooks, audit] = queries
-    return { organization: organization.rows[0], entitlement: entitlement.rows[0], retention: retention.rows[0], usage: usage.rows[0], workspaces: workspaces.rows, executorPools: pools.rows, executors: executors.rows, invites: invites.rows, browserSessions: sessions.rows, serviceAccounts: serviceAccounts.rows, webhooks: webhooks.rows, audit: audit.rows, integrations: { secrets: 'local', artifacts: 'session-jsonl', telemetry: false, errorReporting: false, ticketing: false } }
+    return { organization: organization.rows[0], entitlement: entitlement.rows[0], retention: retention.rows[0], usage: usage.rows[0], workspaces: workspaces.rows, executorPools: pools.rows, executors: executors.rows, invites: invites.rows, browserSessions: sessions.rows, serviceAccounts: serviceAccounts.rows, webhooks: webhooks.rows, audit: audit.rows }
   }
 
-  async updateRetentionPolicy(organizationId: string, policy: { sessionDays: number; artifactDays: number; auditDays: number; deletedResourceGraceDays: number }): Promise<void> {
+  async updateRetentionPolicy(organizationId: string, policy: { sessionDays: number; artifactDays: number; auditDays: number; deletedResourceGraceDays: number }, write: ControlSettingsWriteOptions & { actor?: AuthenticatedIdentity } = {}): Promise<void> {
     const values = [policy.sessionDays, policy.artifactDays, policy.auditDays, policy.deletedResourceGraceDays]
     if (values.some((value) => !Number.isSafeInteger(value) || value < 0) || values.slice(0, 3).some((value) => value < 1)) throw new Error('invalid_retention_policy')
-    const current = await this.database.query<{ artifact_days: number; audit_days: number; deleted_resource_grace_days: number }>('SELECT artifact_days,audit_days,deleted_resource_grace_days FROM retention_policies WHERE organization_id=$1', [organizationId])
-    if (!current.rows[0]) throw new Error('retention_policy_not_found')
-    const unsupported = [
-      current.rows[0].artifact_days !== policy.artifactDays ? 'artifactDays' : undefined,
-      current.rows[0].audit_days !== policy.auditDays ? 'auditDays' : undefined,
-      current.rows[0].deleted_resource_grace_days !== policy.deletedResourceGraceDays ? 'deletedResourceGraceDays' : undefined,
-    ].filter((field): field is string => field !== undefined)
-    if (unsupported.length > 0) throw new Error(`unsupported_retention_fields:${unsupported.join(',')}`)
-    const result = await this.database.query(`UPDATE retention_policies SET session_days=$2,version=version+1,updated_at=now() WHERE organization_id=$1`, [organizationId, policy.sessionDays])
-    if (result.rowCount !== 1) throw new Error('retention_policy_not_found')
+    await this.database.transaction(async transaction => {
+      const current = (await transaction.query<{ session_days: number; artifact_days: number; audit_days: number; deleted_resource_grace_days: number; version: string | number }>(
+        'SELECT session_days,artifact_days,audit_days,deleted_resource_grace_days,version FROM retention_policies WHERE organization_id=$1 FOR UPDATE', [organizationId],
+      )).rows[0]
+      if (!current) throw new Error('retention_policy_not_found')
+      assertControlSettingsWrite(organizationId, 'retention', String(current.version), write)
+      const unsupported = [
+        current.artifact_days !== policy.artifactDays ? 'artifactDays' : undefined,
+        current.audit_days !== policy.auditDays ? 'auditDays' : undefined,
+        current.deleted_resource_grace_days !== policy.deletedResourceGraceDays ? 'deletedResourceGraceDays' : undefined,
+      ].filter((field): field is string => field !== undefined)
+      if (unsupported.length > 0) throw new Error(`unsupported_retention_fields:${unsupported.join(',')}`)
+      const result = await transaction.query(`UPDATE retention_policies SET session_days=$2,version=version+1,updated_at=now() WHERE organization_id=$1`, [organizationId, policy.sessionDays])
+      if (result.rowCount !== 1) throw new Error('retention_policy_not_found')
+      if (write.actor) {
+        await transaction.query(`INSERT INTO audit_events(id,organization_id,actor_principal_id,actor_kind,action,target_type,target_id,result,metadata)
+          VALUES ($1,$2,(SELECT id FROM principals WHERE issuer=$3 AND subject=$4),'human','organization.retention.update','organization',$2,'succeeded',$5::jsonb)`,
+        [`aud_${randomBytes(13).toString('hex')}`, organizationId, write.actor.issuer, write.actor.subject,
+          JSON.stringify({ previousSessionDays: current.session_days, sessionDays: policy.sessionDays,
+            previousRevision: String(current.version), revision: (BigInt(current.version) + 1n).toString() })])
+      }
+    })
   }
 
-  async updateAttachmentLimit(organizationId: string, maxBytes: number, actor: AuthenticatedIdentity): Promise<void> {
+  async retentionConfiguration(organizationId: string) {
+    const row = (await this.database.query<{
+      version: string; session_days: number; artifact_days: number; audit_days: number; deleted_resource_grace_days: number
+    }>('SELECT version::text,session_days,artifact_days,audit_days,deleted_resource_grace_days FROM retention_policies WHERE organization_id=$1', [organizationId])).rows[0]
+    if (!row) throw new Error('retention_policy_not_found')
+    return { revision: row.version, value: {
+      sessionDays: row.session_days, artifactDays: row.artifact_days, auditDays: row.audit_days,
+      deletedResourceGraceDays: row.deleted_resource_grace_days,
+    } }
+  }
+
+  async attachmentConfiguration(organizationId: string): Promise<{ revision?: string; value: { maxBytes: number } }> {
+    return this.database.transaction(async transaction => {
+      const versioned = await lockControlSettingsSchema(transaction)
+      const row = (await transaction.query<{ attachment_max_bytes: number }>(
+        'SELECT attachment_max_bytes FROM organizations WHERE id=$1 FOR UPDATE', [organizationId],
+      )).rows[0]
+      if (!row) throw new Error('organization not found')
+      const revision = versioned ? await lockAttachmentRevision(transaction, organizationId) : undefined
+      return { ...(revision ? { revision } : {}), value: { maxBytes: row.attachment_max_bytes } }
+    })
+  }
+
+  async updateAttachmentLimit(organizationId: string, maxBytes: number, actor: AuthenticatedIdentity, write: ControlSettingsWriteOptions = {}): Promise<void> {
     if (!isAllowedAttachmentLimit(maxBytes)) throw new Error('invalid_attachment_limit')
     await this.database.transaction(async (transaction) => {
+      const versioned = await lockControlSettingsSchema(transaction)
       const current = await transaction.query<{ attachment_max_bytes: number }>('SELECT attachment_max_bytes FROM organizations WHERE id=$1 FOR UPDATE', [organizationId])
       if (!current.rows[0]) throw new Error('organization not found')
+      const revision = versioned ? await lockAttachmentRevision(transaction, organizationId) : undefined
+      assertControlSettingsWrite(organizationId, 'attachment-policy', revision, write)
       await transaction.query('UPDATE organizations SET attachment_max_bytes=$2,updated_at=now() WHERE id=$1', [organizationId, maxBytes])
+      if (revision) await transaction.query(`UPDATE settings_resource_versions SET revision=revision+1,updated_at=clock_timestamp()
+        WHERE organization_id=$1 AND resource_kind='policy' AND resource_id='attachment'`, [organizationId])
       await transaction.query(`INSERT INTO audit_events(id,organization_id,actor_principal_id,actor_kind,action,target_type,target_id,result,metadata)
         VALUES ($1,$2,(SELECT id FROM principals WHERE issuer=$3 AND subject=$4),'human','organization.attachment_limit.update','organization',$2,'succeeded',$5::jsonb)`,
       [`aud_${randomBytes(13).toString('hex')}`, organizationId, actor.issuer, actor.subject,
-        JSON.stringify({ previousMaxBytes: current.rows[0].attachment_max_bytes, maxBytes })])
+        JSON.stringify({ previousMaxBytes: current.rows[0].attachment_max_bytes, maxBytes,
+          ...(revision ? { previousRevision: revision, revision: (BigInt(revision) + 1n).toString() } : {}) })])
     })
   }
 }

@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { AttachedExecutor, ExecutorMcpConfigureRequest, ManagedMcpServer } from '@agent-kernel/shared'
+import type { AttachedExecutor, ExecutorMcpConfigureRequest, ExecutorMcpPatchAck, ManagedMcpServer } from '@agent-kernel/shared'
 
 import type { AuditEntry } from '../audit-log.js'
 import type { ExecutorMcpTarget } from '../connection/executor.js'
@@ -23,12 +23,15 @@ describe('managed MCP settings routes', () => {
     configureResult?: { ok: boolean; error?: string }
     trusted?: boolean
     organizationId?: string
+    patch?: boolean
+    patchResult?: ExecutorMcpPatchAck
   } = {}) {
     const binding = options.binding ?? { id: 'inst-managed', workspaceId: 'ws-managed' }
     const executor = options.executor === undefined ? { workspaceId: binding.workspaceId, installId: binding.id } : options.executor
     const auditEntries: AuditEntry[] = []
     const configureMcp = vi.fn(async (_workspaceId: string, _target: ExecutorMcpTarget, _payload: ExecutorMcpConfigureRequest) => options.configureResult ?? { ok: true })
     const mcpConfigStatus = vi.fn(async () => ({ ok: true, servers: options.statusServers ?? [] }))
+    const patchMcp = vi.fn(async () => options.patchResult ?? { ok: true, revision: '2' })
     const server = createServer()
     servers.push(server)
     attachMcpSettingsRoutes(server, {
@@ -44,12 +47,14 @@ describe('managed MCP settings routes', () => {
           runtime: 'node',
           runtimeVersion: 'test',
           attachedAt: new Date(0).toISOString(),
+          ...(options.patch ? { capabilities: { schemaVersion: 1, mcpConfigProtocol: 'patch-v1', features: { backgroundShell: false, filePicker: false, overflowFiles: false, workspaceSandbox: false } } } : {}),
           ...executor,
         } as AttachedExecutor] : [],
         hasTrustedManagedExecutor: (workspaceId, installId) => options.trusted !== false && workspaceId === binding.workspaceId && installId === binding.id,
         hasTrustedWorkspaceExecutor: (workspaceId, executorId) => options.trusted !== false && workspaceId === executor?.workspaceId && executorId === 'exec-managed',
         configureMcp,
         mcpConfigStatus,
+        ...(options.patch ? { patchMcp } : {}),
       },
       tenancy: options.tenancy ?? 'single-tenant',
       ...(options.organizationId ? { organizationId: options.organizationId } : {}),
@@ -59,8 +64,30 @@ describe('managed MCP settings routes', () => {
     await new Promise<void>((resolve) => server.listen(0, resolve))
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('missing address')
-    return { url: `http://localhost:${address.port}`, configureMcp, mcpConfigStatus, auditEntries }
+    return { url: `http://localhost:${address.port}`, configureMcp, mcpConfigStatus, patchMcp, auditEntries }
   }
+
+  it('dispatches strict patches only to declared capable trusted Executors and distinguishes stale from unknown outcomes', async () => {
+    const request = { workspaceId: 'ws-managed', requestId: '00000000-0000-4000-8000-000000000001', editToken: 'opaque-ticket',
+      expectedRevision: '1', operations: [{ op: 'delete', name: 'filesystem' }] }
+    const headers = { authorization: 'Bearer operator-token', 'content-type': 'application/json' }
+    for (const [result, status] of [[{ ok: true, revision: '2' }, 200], [{ ok: false, error: 'configuration_conflict' }, 412], [{ ok: false, error: 'outcome_unknown' }, 504]] as const) {
+      const { url, patchMcp, configureMcp } = await start({ auth: { sharedToken: 'operator-token' }, patch: true, patchResult: result })
+      const response = await fetch(`${url}/settings/mcp`, { method: 'PATCH', headers, body: JSON.stringify(request) })
+      expect(response.status).toBe(status)
+      const { workspaceId: _workspaceId, ...input } = request
+      expect(patchMcp).toHaveBeenCalledWith('ws-managed', 'inst-managed', input)
+      expect(configureMcp).not.toHaveBeenCalled()
+    }
+    const legacy = await start({ auth: { sharedToken: 'operator-token' } })
+    expect((await fetch(`${legacy.url}/settings/mcp`, { method: 'PATCH', headers, body: JSON.stringify(request) })).status).toBe(409)
+    expect(legacy.patchMcp).not.toHaveBeenCalled()
+    const strict = await start({ auth: { sharedToken: 'operator-token' }, patch: true })
+    for (const body of [{ ...request, surprise: true }, { ...request, operations: [...request.operations, ...request.operations] }]) {
+      expect((await fetch(`${strict.url}/settings/mcp`, { method: 'PATCH', headers, body: JSON.stringify(body) })).status).toBe(400)
+    }
+    expect(strict.patchMcp).not.toHaveBeenCalled()
+  })
 
   it('rejects anonymous GET and PUT on localhost even when dashboard auth is not configured', async () => {
     const { url, configureMcp, mcpConfigStatus } = await start()
@@ -169,7 +196,7 @@ describe('managed MCP settings routes', () => {
 
     const read = await fetch(`${url}/settings/mcp?workspaceId=ws-managed`, { headers: { authorization: 'Bearer test-token' } })
     expect(read.status).toBe(200)
-    expect(await read.json()).toEqual({ supported: true, workspaceId: 'ws-managed', servers: [{ name: 'filesystem' }] })
+    expect(await read.json()).toEqual({ supported: true, workspaceId: 'ws-managed', servers: [{ name: 'filesystem' }], editProtocol: 'legacy-replacement' })
     expect(mcpConfigStatus).toHaveBeenCalledWith('ws-managed', 'inst-managed', expect.any(String))
     expect(auditEntries.filter((entry) => entry.outcome === 'ok')).toHaveLength(2)
   })

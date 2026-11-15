@@ -4,20 +4,24 @@ import { useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { InterfaceToggle, SectionHeader, SettingsKeyValueList } from '../controls.js'
+import { useSettingsRequest } from '../configuration-request.js'
 
-export function SecuritySection({ payload, onPayloadChange }: {
+export function SecuritySection({ payload, onPayloadChange, readOnly = false }: {
   payload: ServerSettingsPayload
   onPayloadChange?(payload: ServerSettingsPayload): void
+  readOnly?: boolean
 }): JSX.Element {
   const { t } = useTranslation()
+  const request = useSettingsRequest()
   const queryClient = useQueryClient()
-  const scope = payload.agentPrompt?.configPath ?? 'unavailable'
+  const scope = payload.agentSettingsResourceId ?? payload.agentPrompt?.configPath ?? 'unavailable'
   const scopeRef = useRef(scope)
   scopeRef.current = scope
   const [feedback, setFeedback] = useState<{ scope: string; message: string; pending: boolean } | null>(null)
   const updateDesktopAccess = useMutation({
     mutationFn: async (input: { scope: string; manualAuthorizationRequired: boolean; computerUseEnabled?: boolean; desktopPreviewEnabled?: boolean }) => {
-      const response = await fetch('/settings/desktop-access', {
+      if (readOnly || !onPayloadChange) throw new Error('configuration_read_only')
+      const response = await request('/settings/desktop-access', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ manualAuthorizationRequired: input.manualAuthorizationRequired,
@@ -35,7 +39,7 @@ export function SecuritySection({ payload, onPayloadChange }: {
       return body as ServerSettingsPayload
     },
     onSuccess: (next, input) => {
-      if (scopeRef.current !== input.scope || next.agentPrompt?.configPath !== input.scope) return
+      if (scopeRef.current !== input.scope || (next.agentSettingsResourceId ?? next.agentPrompt?.configPath) !== input.scope) return
       setFeedback(null)
       onPayloadChange?.(next)
       void queryClient.invalidateQueries({ queryKey: ['settings'] })
@@ -88,7 +92,7 @@ export function SecuritySection({ payload, onPayloadChange }: {
               label={t('settings.security.computerUse')}
               description={t('settings.security.computerUseHint')}
               checked={payload.desktopAccess.computerUseEnabled}
-              disabled={!onPayloadChange || updateDesktopAccess.isPending}
+              disabled={readOnly || !onPayloadChange || updateDesktopAccess.isPending}
               testId="settings-computer-use"
               onChange={(computerUseEnabled) => updateDesktopAccess.mutate({ scope, manualAuthorizationRequired: payload.desktopAccess!.manualAuthorizationRequired, computerUseEnabled })}
             />
@@ -96,7 +100,7 @@ export function SecuritySection({ payload, onPayloadChange }: {
               label={t('settings.security.desktopPreview')}
               description={t('settings.security.desktopPreviewHint')}
               checked={payload.desktopAccess.desktopPreviewEnabled ?? false}
-              disabled={!payload.desktopAccess.computerUseEnabled || !onPayloadChange || updateDesktopAccess.isPending}
+              disabled={readOnly || !payload.desktopAccess.computerUseEnabled || !onPayloadChange || updateDesktopAccess.isPending}
               testId="settings-desktop-preview"
               onChange={(desktopPreviewEnabled) => updateDesktopAccess.mutate({ scope, manualAuthorizationRequired: payload.desktopAccess!.manualAuthorizationRequired, desktopPreviewEnabled })}
             />
@@ -105,7 +109,7 @@ export function SecuritySection({ payload, onPayloadChange }: {
             label={t('settings.security.desktopManualAuthorization')}
             description={t('settings.security.desktopManualAuthorizationHint')}
             checked={payload.desktopAccess.manualAuthorizationRequired}
-            disabled={payload.desktopAccess.computerUseEnabled === false || !onPayloadChange || updateDesktopAccess.isPending}
+            disabled={readOnly || payload.desktopAccess.computerUseEnabled === false || !onPayloadChange || updateDesktopAccess.isPending}
             testId="settings-desktop-manual-authorization"
             onChange={(manualAuthorizationRequired) => updateDesktopAccess.mutate({ scope, manualAuthorizationRequired })}
           />

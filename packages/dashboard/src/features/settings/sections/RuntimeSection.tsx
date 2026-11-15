@@ -8,6 +8,7 @@ import { Button } from '../../../components/ui/button.js'
 import { HelpHint } from '../../../components/ui/help-hint.js'
 import { SectionHeader } from '../controls.js'
 import { errorMessageFromBody } from '../section-utils.js'
+import { useSettingsRequest } from '../configuration-request.js'
 
 export function RuntimeSection({
   payload,
@@ -17,13 +18,14 @@ export function RuntimeSection({
   onOpenModels?(): void
 }): JSX.Element {
   const { t } = useTranslation()
+  const request = useSettingsRequest()
   const queryClient = useQueryClient()
   const [error, setError] = useState<string | null>(null)
   const [operation, setOperation] = useState<{ operationId: string; deploymentId?: string; phase: string; blockers?: readonly string[] } | null>(null)
   const platform = payload.deployment?.deployment.architecture === 'platform'
   const restart = useMutation({
     mutationFn: async (): Promise<unknown> => {
-      const res = await fetch(platform ? '/runtime/deployment/restart' : '/runtime/restart', {
+      const res = await request(platform ? '/runtime/deployment/restart' : '/runtime/restart', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(platform ? {} : { mode: 'checkpoint', reason: 'manual' }),
@@ -41,7 +43,7 @@ export function RuntimeSection({
   })
   const abortRestart = useMutation({
     mutationFn: async (): Promise<unknown> => {
-      const res = await fetch(platform && operation ? `/runtime/deployment/operations/${encodeURIComponent(operation.operationId)}/abort` : '/runtime/restart/abort', { method: 'POST' })
+      const res = await request(platform && operation ? `/runtime/deployment/operations/${encodeURIComponent(operation.operationId)}/abort` : '/runtime/restart/abort', { method: 'POST' })
       const body = await res.json() as unknown
       if (!res.ok) throw new Error(errorMessageFromBody(body) ?? `HTTP ${res.status}`)
       return body
@@ -58,7 +60,7 @@ export function RuntimeSection({
     let timer: number | undefined
     const poll = async (): Promise<void> => {
       try {
-        const res = await fetch(`/runtime/deployment/operations/${encodeURIComponent(operation.operationId)}`, { cache: 'no-store' })
+        const res = await request(`/runtime/deployment/operations/${encodeURIComponent(operation.operationId)}`, { cache: 'no-store' })
         const body = await res.json() as { operationId?: string; deploymentId?: string; phase?: string; blockers?: readonly string[]; error?: { message?: string } }
         if (!res.ok || !body.phase) throw new Error(body.error?.message ?? `HTTP ${res.status}`)
         if (!cancelled) {
@@ -80,7 +82,7 @@ export function RuntimeSection({
       cancelled = true
       if (timer !== undefined) window.clearTimeout(timer)
     }
-  }, [operation?.operationId, operation?.phase, platform])
+  }, [operation?.operationId, operation?.phase, platform, request])
   const runtime = payload.runtime
   const externallyManaged = payload.runtimeManagement === 'external'
   const currentAttempt = runtime?.current

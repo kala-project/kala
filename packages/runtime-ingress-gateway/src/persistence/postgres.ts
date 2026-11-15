@@ -88,6 +88,8 @@ export async function migrateControlPlane(database: ControlPlaneDatabase, migrat
     await transaction.query("SET LOCAL lock_timeout = '5s'")
     await transaction.query("SET LOCAL statement_timeout = '60s'")
     await transaction.query('SELECT pg_advisory_xact_lock($1)', [lockKey])
+    // Take the schema fence before any DDL, including earlier steps in a batched upgrade.
+    await transaction.query("SELECT pg_advisory_xact_lock(hashtextextended('kala:control-settings-schema:v1', 0))")
     await options.beforeApply?.(transaction)
     await transaction.query(`CREATE TABLE IF NOT EXISTS control_plane_schema_migrations (
       version integer PRIMARY KEY CHECK (version > 0),
@@ -95,8 +97,8 @@ export async function migrateControlPlane(database: ControlPlaneDatabase, migrat
       checksum text NOT NULL,
       applied_at timestamptz NOT NULL DEFAULT now()
     )`)
-    const applied = await transaction.query<{ version: number; checksum: string }>('SELECT version, checksum FROM control_plane_schema_migrations ORDER BY version')
-    if (applied.rows.some((row, index) => row.version !== migrations[index]?.version)) {
+    const applied = await transaction.query<{ version: number; name: string; checksum: string }>('SELECT version, name, checksum FROM control_plane_schema_migrations ORDER BY version')
+    if (applied.rows.some((row, index) => row.version !== migrations[index]?.version || row.name !== migrations[index]?.name)) {
       throw new Error('control-plane migration history is not a known release prefix; refuse partial/ahead schema')
     }
     const byVersion = new Map(applied.rows.map((row) => [row.version, row.checksum]))
@@ -117,9 +119,27 @@ export async function migrateControlPlane(database: ControlPlaneDatabase, migrat
 export async function assertControlPlaneSchema(database: ControlPlaneDatabase, migrations: readonly ControlPlaneMigration[]): Promise<number> {
   const expected = migrations.at(-1)?.version ?? 0
   const health = await database.health()
-  if (health.schemaVersion !== expected) {
+  const serviceAccountBridge = migrations.length === 13 && migrations.every((migration, index) => migration.version === index + 1)
+    && migrations[12]?.name === '0013_service_account_principal_identity.sql'
+  const settingsBridge = [14, 15, 16, 17].includes(migrations.length) && migrations.every((migration, index) => migration.version === index + 1)
+    && migrations[12]?.name === '0013_service_account_principal_identity.sql'
+    && migrations[13]?.name === '0014_authoritative_settings_resource_versions.sql'
+    && (migrations.length === 14 || migrations[14]?.name === '0015_immutable_webhook_bindings.sql')
+    && (migrations.length < 16 || migrations[15]?.name === '0016_operator_settings_authority.sql')
+    && (migrations.length < 17 || migrations[16]?.name === '0017_workspace_operation_fences.sql')
+  const compatible = settingsBridge ? Array.from({ length: expected - 11 }, (_, index) => index + 12) : serviceAccountBridge ? [12, 13] : [expected]
+  if (!compatible.includes(health.schemaVersion)) {
     const direction = health.schemaVersion < expected ? 'behind' : 'ahead'
     throw new Error(`control-plane schema version ${health.schemaVersion} is ${direction} expected version ${expected}; run the migrator with the matching release before starting ingress`)
+  }
+  if (serviceAccountBridge || settingsBridge) {
+    const history = await database.query<{ version: number; name: string; checksum: string }>(
+      'SELECT version, name, checksum FROM control_plane_schema_migrations ORDER BY version',
+    )
+    if (history.rows.length !== health.schemaVersion || history.rows.some((row, index) =>
+      row.version !== index + 1 || row.name !== migrations[index]?.name || row.checksum !== migrations[index]?.checksum)) {
+      throw new Error('control-plane schema history does not match the reviewed Settings bridge')
+    }
   }
   return health.schemaVersion
 }

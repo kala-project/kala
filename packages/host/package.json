@@ -18,6 +18,7 @@
     "kala-host": "./dist/bin/kala-host.js",
     "kala-runtime-service": "./dist/bin/kala-runtime-service.js",
     "kala-postgres-migrate": "./dist/bin/kala-postgres-migrate.js",
+    "kala-settings-file": "./dist/bin/kala-settings-file.js",
     "kala-parallel-placement": "./dist/bin/kala-parallel-placement.js",
     "kala-fresh-storage-claim": "./dist/bin/kala-fresh-storage-claim.js",
     "kala-recovery-checkpoint": "./dist/bin/kala-recovery-checkpoint.js",

@@ -136,7 +136,7 @@ export function InterfaceSection({ sessionCache, autoHideOfflineWorkspacesByDefa
   }
   const applyStoredTheme = (next: StoredVSCodeTheme | null): void => {
     if (next) setTheme(themeScheme(next.theme, effectiveTheme))
-    writeStoredVSCodeTheme(next)
+    if (!writeStoredVSCodeTheme(next)) { restoreSavedTheme(); return }
     setStoredVSCodeTheme(next)
   }
   const previewTheme = (next: StoredVSCodeTheme): void => {
@@ -584,15 +584,15 @@ function MarketplaceThemeBrowser({
         <div>
           <div className="text-sm font-medium">{t('settings.interface.vscodeTheme.themeList')}</div>
         </div>
-        <div className="flex min-w-0 gap-2">
+        <div className="flex w-full min-w-0 gap-2 sm:w-80">
           <input
-            className="h-8 min-w-0 rounded-md border border-border/50 bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+            className="h-8 min-w-0 flex-1 rounded-md border border-border/50 bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder={t('settings.interface.vscodeTheme.searchPlaceholder')}
             data-testid="settings-vscode-marketplace-search"
           />
-          <Button type="button" variant="outline" size="sm" onClick={() => searchQuery.refetch()}>
+          <Button type="button" variant="outline" size="sm" className="shrink-0" onClick={() => searchQuery.refetch()}>
             <RefreshCw className="mr-1.5 h-3.5 w-3.5" aria-hidden />
             {t('settings.interface.vscodeTheme.refresh')}
           </Button>

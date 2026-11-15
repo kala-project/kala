@@ -21,12 +21,14 @@ type SecureConfig = {
   value: Record<string, unknown>
   dev: number
   ino: number
+  raw: string
 }
 
-function readSecureConfig(path: string): SecureConfig {
+export function readSecureConfig(path: string): SecureConfig {
   const before = lstatSync(path)
   if (!before.isFile() || before.isSymbolicLink()) throw new Error('managed Executor config must be a regular file')
   if (process.platform !== 'win32' && (before.mode & 0o077) !== 0) throw new Error('managed Executor config permissions must not allow group or other access')
+  if (process.getuid && before.uid !== process.getuid()) throw new Error('managed Executor config owner is not the current identity')
   if (before.size > MAX_CONFIG_BYTES) throw new Error('managed Executor config is too large')
 
   const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
@@ -41,7 +43,7 @@ function readSecureConfig(path: string): SecureConfig {
 
   const parsed: unknown = JSON.parse(raw)
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('managed Executor config must contain an object')
-  return { value: parsed as Record<string, unknown>, dev: before.dev, ino: before.ino }
+  return { value: parsed as Record<string, unknown>, dev: before.dev, ino: before.ino, raw }
 }
 
 export function readDashboardMcpServers(path: string): DashboardMcpServerConfig[] {
@@ -54,12 +56,13 @@ export function readDashboardMcpServers(path: string): DashboardMcpServerConfig[
  * The existing file is checked again immediately before the atomic rename so a
  * path swap cannot redirect this write through a symlink or different inode.
  */
-export function writeDashboardMcpServers(path: string, servers: readonly DashboardMcpServerConfig[]): void {
-  const config = readSecureConfig(path)
+export function writeDashboardMcpServers(path: string, servers: readonly DashboardMcpServerConfig[], expected?: ReturnType<typeof readSecureConfig>, metadata?: unknown): void {
+  const config = expected ?? readSecureConfig(path)
   // Refuse to let Dashboard management overwrite a config containing literal
   // env values, even though the replacement payload itself is secret-free.
   parseDashboardMcpServers(config.value.mcpServers, 'managed Executor config mcpServers')
-  const next = `${JSON.stringify({ ...config.value, mcpServers: servers }, null, 2)}\n`
+  if (config.value._kalaManagedMcp && metadata === undefined) throw new Error('versioned MCP config requires the patch-v1 preserving writer')
+  const next = `${JSON.stringify({ ...config.value, mcpServers: servers, ...(metadata ? { _kalaManagedMcp: metadata } : {}) }, null, 2)}\n`
   if (Buffer.byteLength(next, 'utf8') > MAX_CONFIG_BYTES) throw new Error('managed Executor config is too large')
 
   const directory = dirname(path)
@@ -77,6 +80,7 @@ export function writeDashboardMcpServers(path: string, servers: readonly Dashboa
       throw new Error('managed Executor config changed before replacement')
     }
     if (process.platform !== 'win32' && (current.mode & 0o077) !== 0) throw new Error('managed Executor config permissions became unsafe')
+    if (readSecureConfig(path).raw !== config.raw) throw new Error('managed Executor config changed before replacement')
     renameSync(temporary, path)
 
     // Flush the directory entry where supported. Some platforms (notably

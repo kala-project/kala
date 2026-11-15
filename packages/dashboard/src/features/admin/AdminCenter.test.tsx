@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { AdminCenter } from './AdminCenter.js'
 import { i18n } from '../../i18n/index.js'
@@ -54,6 +54,37 @@ it('creates a copyable invitation without asking an administrator for OIDC ident
   fireEvent.click(screen.getByRole('button', { name: i18n.t('admin.copyLink') }))
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(inviteUrl))
   expect(screen.getByRole('button', { name: i18n.t('admin.copied') })).toBeTruthy()
+})
+
+it('confirms an existing member before Owner transfer, suppresses duplicate submits, and retains the confirmation on rejection', async () => {
+  const next = { issuer: 'https://id.example', subject: 'member-sub', displayName: 'Next Owner', role: 'member', createdAt: '2026-01-01' }
+  const snapshot = { ...policySnapshot, members: [
+    { ...next, subject: 'owner-sub', displayName: 'Current Owner', role: 'owner' }, next,
+  ] }
+  let settle: (response: Response) => void = () => { throw new Error('transfer was not submitted') }
+  const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    if (String(input) === '/organization/ownership' && init?.method === 'POST') return new Promise(resolve => { settle = resolve })
+    return Promise.resolve(Response.json(snapshot))
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  render(<AdminCenter onClose={() => {}} />)
+  fireEvent.click(await screen.findByRole('button', { name: i18n.t('admin.tabs.members') }))
+  const choose = () => screen.getByRole('button', { name: i18n.t('unifiedSettings.ownership.choose') })
+  fireEvent.click(choose())
+  expect(screen.getByRole('alertdialog').textContent).toContain('Next Owner')
+  fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: i18n.t('common.cancel') }))
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  fireEvent.click(choose())
+  const confirm = within(screen.getByRole('alertdialog')).getByRole('button', { name: i18n.t('unifiedSettings.ownership.choose') })
+  fireEvent.click(confirm)
+  fireEvent.click(confirm)
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+  expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({ issuer: next.issuer, subject: next.subject })
+  expect((confirm as HTMLButtonElement).disabled).toBe(true)
+  await act(async () => settle(new Response('{}', { status: 409 })))
+  expect(screen.getByRole('alertdialog').textContent).toContain('Next Owner')
+  expect((confirm as HTMLButtonElement).disabled).toBe(false)
+  expect(screen.getByRole('alert').textContent).toContain('409')
 })
 
 it('makes the organization scope, role, and first routine tasks explicit', async () => {

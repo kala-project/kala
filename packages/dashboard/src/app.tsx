@@ -100,6 +100,7 @@ import { SessionTabStrip } from './features/session-tabs/SessionTabStrip.js'
 import { useSessionTabs } from './session-tabs.js'
 import { DesktopSessionRail, ProductSwitcher, SidebarBrand, SidebarGlobalActions } from './app-shell/AppShellNav.js'
 import { parseSessionDeepLink, useAppSection, useSessionDeepLink, type AppSection } from './app-shell/section.js'
+import { openSettings as navigateToSettings } from './features/settings/routes.js'
 import { useRuntimeDeployment } from './runtime-capabilities.js'
 import { configureArtifactClient } from './features/artifacts/artifact-client.js'
 import { useAuthSession } from './auth-session.js'
@@ -115,6 +116,7 @@ const DocsPage = lazy(() => loadDashboardExport(import('./features/docs/DocsPage
 const MemoPage = lazy(() => loadDashboardExport(import('./features/memo/MemoPage.js'), 'MemoPage', 'MemoPage'))
 const PipelinePage = lazy(() => loadDashboardExport(import('./features/pipeline/PipelinePage.js'), 'PipelinePage', 'PipelinePage'))
 const SettingsDialog = lazy(() => loadDashboardExport(import('./features/settings/SettingsDialog.js'), 'SettingsDialog', 'SettingsDialog'))
+const SettingsPage = lazy(() => loadDashboardExport(import('./features/settings/SettingsPage.js'), 'SettingsPage', 'SettingsPage'))
 const SessionFilesPanel = lazy(() => loadDashboardExport(import('./features/session-files/SessionFilesPanel.js'), 'SessionFilesPanel', 'SessionFilesPanel'))
 const SessionTerminalPanel = lazy(() => loadDashboardExport(import('./features/session-terminal/SessionTerminalPanel.js'), 'SessionTerminalPanel', 'SessionTerminalPanel'))
 const ComputerPanel = lazy(() => loadDashboardExport(import('./features/computer-use/ComputerPanel.js'), 'ComputerPanel', 'ComputerPanel'))
@@ -300,12 +302,19 @@ export function markToolUpgradeNoticeSeen(namespace: string, sessionId: string, 
 export function App(): JSX.Element {
   const { t } = useTranslation()
   const [config, setConfig] = useState(() => readInitialConfig())
+  useLayoutEffect(() => {
+    const url = new globalThis.URL(window.location.href)
+    if (!url.searchParams.has('token')) return
+    // Capture credentials in both StrictMode initializations before removing them before paint.
+    url.searchParams.delete('token')
+    window.history.replaceState(null, '', url.toString())
+  }, [])
   const [draftKey, setDraftKey] = useState(0)
   // Selection feedback is urgent and intentionally independent from the heavy
   // workspace/session hydration commit. Explorer can paint the marker first.
   const [optimisticSelectedSessionId, setOptimisticSelectedSessionId] = useState<string | null>(null)
   const [highlightIndex, setHighlightIndex] = useState<number | null>(null)
-  const runtimeDeployment = useRuntimeDeployment()
+  const runtimeDeployment = useRuntimeDeployment(config.token)
   const runtimeCapabilities = runtimeDeployment.capabilities
   const platformMode = runtimeDeployment.deployment?.architecture === 'platform'
   const authSession = useAuthSession(platformMode)
@@ -332,7 +341,15 @@ export function App(): JSX.Element {
   const [transcriptViewStartOverrides, setTranscriptViewStartOverrides] = useState<Record<string, number>>({})
   const [chapterModeOverrides, setChapterModeOverrides] = useState<Record<string, ChapterReadingMode | null>>({})
   const [cwdDialogOpen, setCwdDialogOpen] = useState(false)
-  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [legacySettingsOpen, setLegacySettingsOpen] = useState(false)
+  const unifiedSettings = runtimeDeployment.product === 'portable'
+    ? runtimeDeployment.settingsLayout === 'unified'
+    : authSession.session?.authenticated && authSession.session.settingsLayout === 'unified'
+  const settingsOpen = unifiedSettings ? window.location.hash.startsWith('#/settings') : legacySettingsOpen
+  const setSettingsOpen = (open: boolean): void => {
+    if (unifiedSettings && open) navigateToSettings()
+    else setLegacySettingsOpen(open)
+  }
   const [settingsInitialSection, setSettingsInitialSection] = useState<'connection' | 'speech' | 'management'>('connection')
   const [accountCenterOpen, setAccountCenterOpen] = useState(false)
   const [adminCenterOpen, setAdminCenterOpen] = useState(false)
@@ -1953,7 +1970,11 @@ export function App(): JSX.Element {
     setSection(next)
     // Operations, Artifacts, Pipeline, and Docs are real pages rendered inline below.
   }, [])
-  const openDeployment = useMemo(() => deploymentServices ? () => { setExplorerDrawerOpen(false); setSettingsInitialSection('management'); setSettingsOpen(true) } : undefined, [deploymentServices])
+  const openDeployment = useMemo(() => deploymentServices ? () => {
+    setExplorerDrawerOpen(false)
+    if (unifiedSettings) navigateToSettings('deployment/services')
+    else { setSettingsInitialSection('management'); setSettingsOpen(true) }
+  } : undefined, [deploymentServices, unifiedSettings])
   const explorerHeaderLeading = useMemo(
     () => <ProductSwitcher section={section} onSelect={handleSectionSelect} adaptive onOpenManagement={openDeployment} />,
     [handleSectionSelect, section, openDeployment],
@@ -2324,8 +2345,8 @@ export function App(): JSX.Element {
     )
   }
 
-  const openAccount = platformMode ? () => setAccountCenterOpen(true) : undefined
-  const openAdmin = authSession.session?.authenticated && (authSession.session.organization?.role === 'owner' || authSession.session.organization?.role === 'admin') ? () => setAdminCenterOpen(true) : undefined
+  const openAccount = platformMode ? () => unifiedSettings ? navigateToSettings('personal/account') : setAccountCenterOpen(true) : undefined
+  const openAdmin = runtimeDeployment.product !== 'dedicated' && authSession.session?.authenticated && (authSession.session.organization?.role === 'owner' || authSession.session.organization?.role === 'admin') ? () => unifiedSettings ? navigateToSettings('organization/members') : setAdminCenterOpen(true) : undefined
   const announceSignOut = platformMode ? () => {
     authSession.announceLogout()
     void sessionViewCache.clearDurable()
@@ -2357,7 +2378,15 @@ export function App(): JSX.Element {
       <PwaUpdateGlobalBanner />
       <div className="min-h-0 min-w-0 max-w-full flex-1 overflow-hidden">
       <div className="hidden" data-testid="login-column-hidden" />
-      {section === 'operations' ? (
+      {section === 'settings' ? (
+        unifiedSettings && runtimeDeployment.product ? <Suspense fallback={<PageLoadingFallback />}>
+          <SettingsPage key={cacheNamespace} cacheNamespace={cacheNamespace} product={runtimeDeployment.product}
+            profile={account} organization={authSession.session?.authenticated ? authSession.session.organization : undefined}
+            deploymentServices={deploymentServices} executors={controlSocket ? control.executors : []} sessionCache={sessionViewCache}
+            storageSocket={controlSocket ?? undefined} host={hostEndpoint.url} token={config.token} onModelsChanged={reloadModels}
+            connectionPanel={<PersonalConnectionPanel />} />
+        </Suspense> : <CapabilityUnavailable title={t('unifiedSettings.unavailable')} />
+      ) : section === 'operations' ? (
         runtimeCapabilities.operations ? <Suspense fallback={<PageLoadingFallback />}>
           <OperationsPage
             deployment={runtimeDeployment}
@@ -2470,8 +2499,8 @@ export function App(): JSX.Element {
                 host={hostEndpoint.url}
                 token={config.token}
                 onOpenVoiceSettings={() => {
-                  setSettingsInitialSection('speech')
-                  setSettingsOpen(true)
+                  if (unifiedSettings) navigateToSettings('organization/integrations/speech')
+                  else { setSettingsInitialSection('speech'); setSettingsOpen(true) }
                 }}
                 agentRuntimes={control.agentRuntimes}
                 models={models}
@@ -2699,8 +2728,8 @@ export function App(): JSX.Element {
                           workspaceUnavailable={sessionWorkspaceKnownOffline}
                           onReconnectService={() => controlSocket?.connect()}
                           onOpenVoiceSettings={() => {
-                            setSettingsInitialSection('speech')
-                            setSettingsOpen(true)
+                            if (unifiedSettings) navigateToSettings('organization/integrations/speech')
+                            else { setSettingsInitialSection('speech'); setSettingsOpen(true) }
                           }}
                           model={composerModel}
                           models={availableModels}
@@ -3122,7 +3151,7 @@ export function App(): JSX.Element {
         onSave={submitCwd}
         onOpenChange={setCwdDialogOpen}
       />
-      {settingsOpen ? (
+      {settingsOpen && !unifiedSettings ? (
         <Suspense fallback={<PageLoadingFallback compact />}>
           <SettingsDialog
             key={cacheNamespace}
@@ -3432,12 +3461,6 @@ export function readInitialConfig(): Config {
   const sessionId = fromUrl || parseSessionDeepLink(url.hash)
   const explicit = sessionId !== null
   const token = url.searchParams.get('token') ?? undefined
-  if (token !== undefined) {
-    // Strip the bootstrap token from the address bar so it doesn't leak
-    // into browser history, referrer headers, screenshots, or bookmarks.
-    url.searchParams.delete('token')
-    window.history.replaceState(null, '', url.toString())
-  }
   return { sessionId, explicit, ...(token !== undefined ? { token } : {}) }
 }
 
@@ -3918,7 +3941,9 @@ export function TopbarRestoreButton({ onClick }: { onClick(): void }): JSX.Eleme
 }
 
 const CONNECTION_HEALTH_WINDOW_MS = 10 * 60 * 1000
-const CONNECTION_HEALTH_FAILURES_BEFORE_ISSUE = 2
+const CONNECTION_HEALTH_SAMPLE_INTERVAL_MS = 5_000
+const CONNECTION_HEALTH_SAMPLE_BUDGET_MS = 2 * 60_000
+const CONNECTION_HEALTH_SAMPLE_FRESH_MS = 15_000
 
 export function connectionHealthSocket<T>(controlSocket: T | null, sessionSocket: T | null, sessionSelected: boolean, workspaceId?: string): T | null {
   return workspaceId ? controlSocket : sessionSelected ? sessionSocket : controlSocket
@@ -3941,36 +3966,67 @@ export function connectionStatusForTransport(socket: { connected: boolean } | nu
 }
 
 type ConnectionStatusProps = { socket: DashboardSocket | null; executorSocket?: DashboardSocket | null; status: string; sessionSyncStatus?: string; transport?: string; cursor: number; workspaceId?: string; executorConnected: boolean; sessionSelected?: boolean; onResync(): void; compact?: boolean; appearance?: 'default' | 'brand'; triggerId?: string }
-type ConnectionStatusEntryOptions = Pick<ConnectionStatusProps, 'compact' | 'appearance' | 'triggerId'>
+type ConnectionStatusEntryOptions = Pick<ConnectionStatusProps, 'compact' | 'appearance' | 'triggerId'> & { inline?: boolean }
 type ConnectionStatusRenderer = (options: ConnectionStatusEntryOptions) => JSX.Element
 
-const ConnectionStatusContext = createContext<ConnectionStatusRenderer | null>(null)
+const ConnectionStatusContext = createContext<{ render: ConnectionStatusRenderer; register(triggerId: string, inline?: boolean): () => void } | null>(null)
 
 export const ConnectionStatus = memo(function ConnectionStatus(props: ConnectionStatusProps): JSX.Element {
   return <ConnectionStatusProvider {...props}><ConnectionStatusEntry compact={props.compact} appearance={props.appearance} triggerId={props.triggerId} /></ConnectionStatusProvider>
 })
 
 export function ConnectionStatusEntry(options: ConnectionStatusEntryOptions): JSX.Element {
-  const sharedRenderer = useContext(ConnectionStatusContext)
-  if (!sharedRenderer) throw new Error('ConnectionStatusEntry must be rendered inside ConnectionStatusProvider')
-  return sharedRenderer(options)
+  const shared = useContext(ConnectionStatusContext)
+  if (!shared) throw new Error('ConnectionStatusEntry must be rendered inside ConnectionStatusProvider')
+  const { register } = shared
+  useEffect(() => register(options.triggerId ?? 'connection-status', options.inline), [options.triggerId, options.inline, register])
+  return shared.render(options)
+}
+
+export function PersonalConnectionPanel(): JSX.Element {
+  return <ConnectionStatusEntry triggerId="settings-personal-connection" inline />
 }
 
 export function ConnectionStatusProvider({ socket, executorSocket, status, sessionSyncStatus, transport, cursor, workspaceId, executorConnected, sessionSelected = true, onResync, children, enabled = true }: ConnectionStatusProps & { children: ReactNode; enabled?: boolean }): JSX.Element {
   const { t } = useTranslation()
   const [openTrigger, setOpenTrigger] = useState<string | null>(null)
+  const [inlineEntries, setInlineEntries] = useState(0)
   const [hostRtt, setHostRtt] = useState<number | null>(null)
   const [executorRtt, setExecutorRtt] = useState<number | null>(null)
   const [hostError, setHostError] = useState<string | null>(null)
   const [executorError, setExecutorError] = useState<string | null>(null)
+  const [hostSampleAt, setHostSampleAt] = useState<number | null>(null)
+  const [executorSampleAt, setExecutorSampleAt] = useState<number | null>(null)
+  const [freshnessClock, setFreshnessClock] = useState(Date.now)
+  const [visible, setVisible] = useState(() => !document.hidden)
   const [history, setHistory] = useState<readonly ConnectionHealthSample[]>([])
-  const [probeFailureStreak, setProbeFailureStreak] = useState(0)
   const [checking, setChecking] = useState(false)
   const [copied, setCopied] = useState(false)
   const executorRequired = Boolean(workspaceId)
   const executorProbeSocket = executorSocket === undefined ? socket : executorSocket
   const executorRouteReady = Boolean(executorProbeSocket?.connected && (executorProbeSocket === socket || sessionSyncStatus === 'ready'))
   const probeGeneration = useRef(0)
+  const checkingRef = useRef(false)
+  const samplingDeadline = useRef(0)
+  const samplingBlocked = useRef(false)
+  const entries = useRef(new Map<string, number>())
+  const register = useCallback((triggerId: string, inline = false) => {
+    entries.current.set(triggerId, (entries.current.get(triggerId) ?? 0) + 1)
+    if (inline) {
+      samplingDeadline.current = Date.now() + CONNECTION_HEALTH_SAMPLE_BUDGET_MS
+      samplingBlocked.current = false
+      setInlineEntries(count => count + 1)
+    }
+    return () => {
+      if (inline) setInlineEntries(count => count - 1)
+      const count = (entries.current.get(triggerId) ?? 1) - 1
+      if (count > 0) entries.current.set(triggerId, count)
+      else {
+        entries.current.delete(triggerId)
+        setOpenTrigger(current => current === triggerId ? null : current)
+      }
+    }
+  }, [])
 
   const appendSample = useCallback((sample: ConnectionHealthSample) => {
     setHistory((previous) => {
@@ -3980,6 +4036,7 @@ export function ConnectionStatusProvider({ socket, executorSocket, status, sessi
   }, [])
 
   const measure = useCallback(() => {
+    if (!enabled || document.hidden || checkingRef.current) return
     const generation = ++probeGeneration.current
     if (!socket?.connected) {
       setHostRtt(null)
@@ -3990,6 +4047,7 @@ export function ConnectionStatusProvider({ socket, executorSocket, status, sessi
       setChecking(false)
       return
     }
+    checkingRef.current = true
     setChecking(true)
     let pending = workspaceId && executorConnected && executorRouteReady ? 2 : 1
     const sample: ConnectionHealthSample = { at: Date.now(), hostRttMs: null, executorRttMs: null, hostOk: false, executorOk: false, executorRequired }
@@ -3997,106 +4055,153 @@ export function ConnectionStatusProvider({ socket, executorSocket, status, sessi
       pending -= 1
       if (pending === 0) {
         appendSample(sample)
-        setProbeFailureStreak((previous) => {
-          const failed = !sample.hostOk || (sample.executorRequired && executorConnected && executorRouteReady && !sample.executorOk)
-          return failed ? previous + 1 : 0
-        })
+        if (!sample.hostOk || sample.executorRequired && executorConnected && executorRouteReady && !sample.executorOk) samplingBlocked.current = true
+        checkingRef.current = false
         setChecking(false)
       }
     }
     const hostStart = performance.now()
     socket.timeout(3000).emit('client:connection_ping', Date.now(), (err: unknown) => {
       if (generation !== probeGeneration.current) return
-      const nextHostRtt = err ? null : Math.round(performance.now() - hostStart)
+      const nextHostRtt = err ? null : Math.max(0, Math.round(performance.now() - hostStart))
       sample.hostRttMs = nextHostRtt
       sample.hostOk = !err
       setHostRtt(nextHostRtt)
       setHostError(err ? t('connectionHealth.timedOut') : null)
+      setHostSampleAt(Date.now())
+      setFreshnessClock(Date.now())
       finish()
     })
     if (workspaceId && executorConnected && executorRouteReady && executorProbeSocket) {
       executorProbeSocket.timeout(3500).emit('client:executor_ping', workspaceId, (err: unknown, result?: { rttMs?: number; error?: string }) => {
         if (generation !== probeGeneration.current) return
+        setExecutorSampleAt(Date.now())
+        setFreshnessClock(Date.now())
         if (err || result?.error) {
           sample.executorRttMs = null
           sample.executorOk = false
           setExecutorRtt(null)
           setExecutorError(t(result?.error ? 'connectionHealth.unavailable' : 'connectionHealth.timedOut'))
         } else {
-          sample.executorRttMs = result?.rttMs ?? null
-          sample.executorOk = result?.rttMs !== undefined
+          const valid = typeof result?.rttMs === 'number' && Number.isFinite(result.rttMs) && result.rttMs >= 0
+          sample.executorRttMs = valid ? result.rttMs! : null
+          sample.executorOk = valid
           setExecutorRtt(sample.executorRttMs)
-          setExecutorError(result?.rttMs === undefined ? t('connectionHealth.notMeasured') : null)
+          setExecutorError(valid ? null : t('connectionHealth.notMeasured'))
         }
         finish()
       })
     } else {
       sample.executorOk = false
       setExecutorRtt(null)
+      setExecutorSampleAt(null)
       setExecutorError(executorRequired && !executorConnected ? t('connectionHealth.offline') : null)
     }
-  }, [appendSample, executorConnected, executorProbeSocket, executorRequired, executorRouteReady, socket, t, workspaceId])
+  }, [appendSample, enabled, executorConnected, executorProbeSocket, executorRequired, executorRouteReady, socket, status, t, workspaceId])
+  const measureRef = useRef(measure)
+  measureRef.current = measure
 
   useEffect(() => {
     setHostRtt(null)
     setExecutorRtt(null)
     setHostError(null)
     setExecutorError(null)
+    setHostSampleAt(null)
+    setExecutorSampleAt(null)
     setHistory([])
-    setProbeFailureStreak(0)
   }, [workspaceId])
 
   useEffect(() => {
+    checkingRef.current = false
+    setChecking(false)
     if (!enabled) return
     measure()
-    let scheduledProbe: number | null = null
-    const scheduleMeasure = (): void => {
-      if (scheduledProbe !== null) return
-      scheduledProbe = window.setTimeout(() => {
-        scheduledProbe = null
-        measure()
-      }, 0)
-    }
-    const onVisible = (): void => { if (!document.hidden) scheduleMeasure() }
-    window.addEventListener('focus', scheduleMeasure)
-    window.addEventListener('online', scheduleMeasure)
-    document.addEventListener('visibilitychange', onVisible)
     return () => {
-      window.removeEventListener('focus', scheduleMeasure)
-      window.removeEventListener('online', scheduleMeasure)
-      document.removeEventListener('visibilitychange', onVisible)
-      if (scheduledProbe !== null) window.clearTimeout(scheduledProbe)
       probeGeneration.current += 1
+      checkingRef.current = false
     }
   }, [enabled, measure])
 
-  const diagnostics = { status, transport: transport ?? 'unknown', hostRttMs: hostRtt, hostError, ...(executorRequired ? { executorRttMs: executorRtt, executorError, executorPresence: executorConnected ? 'online' : 'offline' } : {}), sessionCursor: cursor }
+  useEffect(() => {
+    const changed = (): void => {
+      if (document.hidden) {
+        samplingBlocked.current = true
+        probeGeneration.current += 1
+        checkingRef.current = false
+        setChecking(false)
+      }
+      setVisible(!document.hidden)
+    }
+    document.addEventListener('visibilitychange', changed)
+    return () => document.removeEventListener('visibilitychange', changed)
+  }, [])
+
+  useEffect(() => {
+    if ((!openTrigger && !inlineEntries) || !enabled || !visible || !socket?.connected || status !== 'ready') return
+    let timer: number | undefined
+    const schedule = (): void => {
+      const remaining = samplingDeadline.current - Date.now()
+      if (samplingBlocked.current || remaining <= 0) return
+      timer = window.setTimeout(() => {
+        if (Date.now() >= samplingDeadline.current || document.hidden || !socket.connected || samplingBlocked.current) return
+        measureRef.current()
+        schedule()
+      }, Math.min(CONNECTION_HEALTH_SAMPLE_INTERVAL_MS, remaining))
+    }
+    schedule()
+    return () => window.clearTimeout(timer)
+  }, [enabled, inlineEntries, openTrigger, socket, status, visible])
+
+  useEffect(() => {
+    const now = Date.now()
+    const expiries = [hostSampleAt, executorSampleAt]
+      .filter((at): at is number => at !== null)
+      .map(at => at + CONNECTION_HEALTH_SAMPLE_FRESH_MS)
+      .filter(at => at > now)
+    if (!visible || !expiries.length) return
+    const timer = window.setTimeout(() => setFreshnessClock(Date.now()), Math.min(...expiries) - now)
+    return () => window.clearTimeout(timer)
+  }, [executorSampleAt, freshnessClock, hostSampleAt, visible])
+
+  const sampleState = (at: number | null, error: string | null): 'unknown' | 'failed' | 'fresh' | 'stale' =>
+    at === null ? 'unknown' : error ? 'failed' : Math.max(freshnessClock, Date.now()) - at >= CONNECTION_HEALTH_SAMPLE_FRESH_MS ? 'stale' : 'fresh'
+  const hostFreshness = sampleState(hostSampleAt, hostError)
+  const executorFreshness = sampleState(executorSampleAt, executorError)
+  const diagnostics = { status, transport: transport ?? 'unknown', hostRttMs: hostRtt, hostError, hostSampleAt, hostFreshness, ...(executorRequired ? { executorRttMs: executorRtt, executorError, executorSampleAt, executorFreshness, executorPresence: executorConnected ? 'online' : 'offline' } : {}), measurement: 'independent-application-rtts', sessionCursor: cursor }
   const copy = (): void => { void writeTextToClipboard(JSON.stringify(diagnostics, null, 2)).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }).catch(() => { setCopied(false); notify.error(t('common.copyFailed')) }) }
-  const transientProbeFailed = hostError !== null || executorRequired && executorConnected && executorError !== null
-  const probeFailed = status === 'ready' && transientProbeFailed && probeFailureStreak >= CONNECTION_HEALTH_FAILURES_BEFORE_ISSUE
   const executorOffline = status === 'ready' && executorRequired && !executorConnected
   const measurementUnknown = status === 'ready'
     && (hostRtt === null || executorRequired && executorConnected && executorRtt === null)
-  const displayStatus = probeFailed || executorOffline ? 'error' : measurementUnknown ? 'connecting' : status
+  const displayStatus = executorOffline ? 'error' : measurementUnknown ? 'connecting' : status
   const syncStatus = sessionSyncStatus ?? status
-  const label = probeFailed || executorOffline ? t('connectionHealth.issue')
+  const label = executorOffline ? t('connectionHealth.issue')
     : measurementUnknown ? t('connectionHealth.notMeasured') : hostStatusLabel(status, t)
   const healthy = displayStatus === 'ready' && (!executorRequired || executorConnected)
   const failed = displayStatus === 'error' || displayStatus === 'disconnected'
-  const hostTone = status === 'ready' && hostRtt !== null && !hostError ? 'healthy' : hostError || status === 'disconnected' || status === 'error' ? 'failed' : 'pending'
-  const executorTone = !executorConnected || executorError ? 'failed' : executorRtt === null ? 'pending' : 'healthy'
-  const headlineLatency = executorRequired && executorConnected
-    ? hostRtt !== null && executorRtt !== null ? hostRtt + executorRtt : null
-    : hostRtt
-  const headlineText = headlineLatency !== null ? `${headlineLatency} ms` : checking ? t('connectionHealth.measuring') : '—'
+  const hostTone = hostFreshness === 'stale' ? 'pending' : status === 'ready' && hostRtt !== null && !hostError ? 'healthy' : hostError || status === 'disconnected' || status === 'error' ? 'failed' : 'pending'
+  const executorTone = !executorConnected || executorError ? 'failed' : executorRtt === null || executorFreshness === 'stale' ? 'pending' : 'healthy'
+  const headlineText = hostRtt !== null ? `${hostRtt} ms${hostFreshness === 'stale' ? ` · ${t('unifiedSettings.latency.stale')}` : ''}` : checking ? t('connectionHealth.measuring') : '—'
 
-  const renderEntry: ConnectionStatusRenderer = ({ compact = false, appearance = 'default', triggerId = 'connection-status' }) => {
+  const renderEntry: ConnectionStatusRenderer = ({ compact = false, appearance = 'default', triggerId = 'connection-status', inline = false }) => {
     const open = openTrigger === triggerId
-    const triggerTitle = `${label}${headlineText !== '—' ? ` · ${headlineText}` : ''}`
+    const triggerTitle = `${label}${headlineText !== '—' ? ` · ${t('connectionHealth.deviceHost')}: ${headlineText}` : ''}`
+    const toggle = (): void => {
+      if (openTrigger === triggerId) { setOpenTrigger(null); return }
+      if (openTrigger === null) {
+        samplingDeadline.current = Date.now() + CONNECTION_HEALTH_SAMPLE_BUDGET_MS
+        samplingBlocked.current = false
+      }
+      setOpenTrigger(triggerId)
+    }
     const brand = appearance === 'brand'
+    const renderDetails = (details: ReactNode): ReactNode => inline ? details : createPortal(details,
+      // Keep mobile controls inside Radix's modal pointer-event boundary.
+      triggerId === 'mobile-drawer'
+        ? document.querySelector('[data-testid="explorer-drawer"]') ?? document.body
+        : document.body)
     return (
       <div className="relative flex-none">
-        <button type="button" onClick={() => setOpenTrigger((value) => value === triggerId ? null : triggerId)} className={brand ? 'inline-flex h-9 w-9 touch-manipulation items-center justify-center rounded-full transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring' : cn('inline-flex h-9 items-center rounded-lg text-xs font-medium text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground sm:h-8', compact ? 'w-8 justify-center p-0' : 'gap-2 px-2')} data-testid={brand ? 'sidebar-connection-status' : 'connection-status'} data-trigger-id={triggerId} data-status={displayStatus} data-compact={compact ? 'true' : undefined} aria-expanded={open} aria-label={brand || compact ? triggerTitle : undefined} title={triggerTitle}>
+        {!inline ? <button type="button" onClick={toggle} className={brand ? 'inline-flex h-9 w-9 touch-manipulation items-center justify-center rounded-full transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring' : cn('inline-flex h-9 items-center rounded-lg text-xs font-medium text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground sm:h-8', compact ? 'w-8 justify-center p-0' : 'gap-2 px-2')} data-testid={brand ? 'sidebar-connection-status' : 'connection-status'} data-trigger-id={triggerId} data-status={displayStatus} data-compact={compact ? 'true' : undefined} aria-expanded={open} aria-label={brand || compact ? triggerTitle : undefined} title={triggerTitle}>
           {brand ? (
             <span className={cn('relative grid h-8 w-8 place-items-center overflow-hidden rounded-full border-2', statusRing(displayStatus))} data-testid="sidebar-connection-status-ring">
               <span className="absolute inset-0 grid place-items-center leading-none">
@@ -4106,14 +4211,22 @@ export function ConnectionStatusProvider({ socket, executorSocket, status, sessi
           ) : <span className={cn('h-2 w-2 rounded-full', statusDot(displayStatus))} />}
           {brand || compact ? null : <span className="hidden sm:inline">{label}</span>}
           {brand || compact ? null : <span className="hidden font-mono text-caption tabular-nums text-muted-foreground md:inline" data-testid="connection-headline-latency">{headlineText}</span>}
-        </button>
-        {open && typeof document !== 'undefined' ? createPortal(
+        </button> : null}
+        {(inline || open) && typeof document !== 'undefined' ? renderDetails(
           // Radix ScrollArea sets inline relative positioning; a fixed class alone cannot override it.
-          <ScrollArea className={cn('fixed left-[max(0.5rem,env(safe-area-inset-left))] right-[max(0.5rem,env(safe-area-inset-right))] top-[max(3.5rem,calc(env(safe-area-inset-top)+3rem))] z-[100] mx-auto max-h-[calc(var(--ak-viewport-h,100dvh)-max(4rem,calc(env(safe-area-inset-top)+3.5rem))-max(0.5rem,env(safe-area-inset-bottom)))] max-w-md rounded-2xl bg-popover text-xs shadow-2xl ring-1 ring-border/30 sm:mt-2 sm:max-h-[min(42rem,calc(100vh-5rem))] sm:w-[28rem]', brand ? cn('sm:left-3 sm:right-auto sm:top-12 sm:mx-0', triggerId === 'mobile-drawer' && 'sm:w-[22.5rem]') : 'sm:left-auto sm:right-3 sm:top-12 sm:mx-0')} style={{ position: 'fixed' }} contentClassName="p-4" data-testid="connection-status-popover">
+          <ScrollArea className={inline ? 'min-w-0 rounded-2xl bg-card/60 text-xs ring-1 ring-border/30' : cn('fixed left-[max(0.5rem,env(safe-area-inset-left))] right-[max(0.5rem,env(safe-area-inset-right))] top-[max(3.5rem,calc(env(safe-area-inset-top)+3rem))] z-[100] mx-auto max-h-[calc(var(--ak-viewport-h,100dvh)-max(4rem,calc(env(safe-area-inset-top)+3.5rem))-max(0.5rem,env(safe-area-inset-bottom)))] max-w-md rounded-2xl bg-popover text-xs shadow-2xl ring-1 ring-border/30 sm:mt-2 sm:max-h-[min(42rem,calc(100vh-5rem))] sm:w-[28rem]', brand ? cn('sm:left-3 sm:right-auto sm:top-12 sm:mx-0', triggerId === 'mobile-drawer' && 'sm:w-[22.5rem]') : 'sm:left-auto sm:right-3 sm:top-12 sm:mx-0')} style={inline ? undefined : { position: 'fixed' }} contentClassName="p-4" data-testid={inline ? 'personal-connection-panel' : 'connection-status-popover'}>
           <div className="flex items-start justify-between gap-3 pb-3">
             <div className="flex items-center gap-1.5">
               <h3 className="text-sm font-semibold">{t('connectionHealth.title')}</h3>
-              <HelpHint label={t('connectionHealth.title')} testId="connection-health-help">{t('connectionHealth.subtitle')}</HelpHint>
+              <HelpHint label={t('connectionHealth.title')} testId="connection-health-help">
+                <span className="block">{t('connectionHealth.subtitle')}</span>
+                <span className="mt-2 block">{t('unifiedSettings.latency.meaning')}</span>
+                <span className="mt-2 block">{t('unifiedSettings.latency.bounded')}</span>
+                <span className="mt-2 block" data-testid="connection-sample-freshness">
+                  <span className="block" data-freshness={hostFreshness}>{t('connectionHealth.deviceHost')} · {hostSampleAt === null ? t('connectionHealth.notMeasured') : formatHealthSampleTimestamp(hostSampleAt)} · {t(`unifiedSettings.latency.${hostFreshness}`)}</span>
+                  {executorRequired ? <span className="block" data-freshness={executorFreshness}>{t('connectionHealth.hostExecutor')} · {executorSampleAt === null ? t('connectionHealth.notMeasured') : formatHealthSampleTimestamp(executorSampleAt)} · {t(`unifiedSettings.latency.${executorFreshness}`)}</span> : null}
+                </span>
+              </HelpHint>
             </div>
             <span className={cn('inline-flex items-center gap-1.5 text-caption font-medium', healthy ? 'text-emerald-600 dark:text-emerald-400' : failed ? 'text-rose-600 dark:text-rose-400' : 'text-amber-600 dark:text-amber-300')}><span className={cn('h-1.5 w-1.5 rounded-full', healthy ? 'bg-emerald-500' : failed ? 'bg-rose-500' : 'bg-amber-500')} />{t(healthy ? 'connectionHealth.healthy' : failed ? 'connectionHealth.issue' : 'connectionHealth.check')}</span>
           </div>
@@ -4137,17 +4250,12 @@ export function ConnectionStatusProvider({ socket, executorSocket, status, sessi
             <Button size="sm" variant="ghost" className="h-7 flex-none" onClick={copy} title={t('connectionHealth.diagnostics')}>{t(copied ? 'common.copied' : 'common.copy')}</Button>
           </div>
           </ScrollArea>,
-          // Radix disables pointer events outside the modal drawer. Keep this
-          // portal inside its content so the health controls receive touches.
-          triggerId === 'mobile-drawer'
-            ? document.querySelector('[data-testid="explorer-drawer"]') ?? document.body
-            : document.body,
         ) : null}
       </div>
     )
   }
 
-  return <ConnectionStatusContext.Provider value={renderEntry}>{children}</ConnectionStatusContext.Provider>
+  return <ConnectionStatusContext.Provider value={{ render: renderEntry, register }}>{children}</ConnectionStatusContext.Provider>
 }
 
 type HealthTone = 'healthy' | 'failed' | 'pending'

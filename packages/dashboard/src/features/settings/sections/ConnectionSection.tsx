@@ -7,9 +7,11 @@ import { getStoredHostEndpoint, resolveHostEndpoint, setStoredHostEndpoint } fro
 import { SectionHeader } from '../controls.js'
 import { isDesktopClient } from '../../../lib/desktop.js'
 import { DesktopUpdateSettings } from '../../../app-shell/DesktopUpdate.js'
+import { useSettingsRequest } from '../configuration-request.js'
 
-export function ConnectionSection(): JSX.Element {
+export function ConnectionSection({ hosted = false }: { hosted?: boolean } = {}): JSX.Element {
   const { t } = useTranslation()
+  const request = useSettingsRequest()
   const [current, setCurrent] = useState(() => resolveHostEndpoint())
   const [draft, setDraft] = useState<string>(() => getStoredHostEndpoint() ?? '')
   const [testState, setTestState] = useState<{ kind: 'idle' | 'testing' | 'ok' | 'error'; msg?: string }>({ kind: 'idle' })
@@ -42,19 +44,33 @@ export function ConnectionSection(): JSX.Element {
   const crossOriginHelp = <>{t('settings.connection.crossOriginPrefix')}{' '}<code className="rounded bg-muted px-1">KALA_PUBLIC_URLS</code>.</>
 
   const save = () => {
-    setStoredHostEndpoint(draft.trim() === '' ? null : draft.trim())
-    setTestState({ kind: 'idle' })
+    if (hosted && draft.trim()) {
+      try {
+        const target = new URL(draft.trim())
+        if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password || target.pathname !== '/' || target.search || target.hash) throw new Error('Invalid target Origin')
+        if (target.origin !== window.location.origin) {
+          window.location.assign(`${target.origin}/#/settings/personal/connection`)
+          return
+        }
+      } catch {
+        setTestState({ kind: 'error', msg: t('unifiedSettings.connection.invalidOrigin') })
+        return
+      }
+    }
+    setTestState(setStoredHostEndpoint(draft.trim() === '' ? null : draft.trim()) ? { kind: 'idle' } : { kind: 'error', msg: t('unifiedSettings.preferences.writeFailed') })
   }
   const reset = () => {
-    setStoredHostEndpoint(null)
-    setDraft('')
-    setTestState({ kind: 'idle' })
+    if (setStoredHostEndpoint(null)) {
+      setDraft('')
+      setTestState({ kind: 'idle' })
+    } else setTestState({ kind: 'error', msg: t('unifiedSettings.preferences.writeFailed') })
   }
   const test = async () => {
-    const target = draft.trim() === '' ? window.location.origin : draft.trim().replace(/\/+$/, '')
+    const target = hosted ? window.location.origin : (draft.trim() || current.url).replace(/\/+$/, '')
     setTestState({ kind: 'testing' })
     try {
-      const res = await fetch(`${target}/models`, { method: 'GET' })
+      const probe = hosted || target === current.url ? request : fetch
+      const res = await probe(`${target}/models`, { method: 'GET', credentials: hosted ? 'same-origin' : 'omit', cache: 'no-store' })
       if (!res.ok) {
         setTestState({ kind: 'error', msg: `HTTP ${res.status}` })
         return
@@ -77,7 +93,7 @@ export function ConnectionSection(): JSX.Element {
 
   return (
     <div className="space-y-5 md:space-y-6">
-      <SectionHeader title={t('settings.connection.title')} subtitle={`${t('settings.connection.subtitle')} ${t('settings.connection.priority')}`} />
+      <SectionHeader title={t('settings.connection.title')} subtitle={`${t('settings.connection.subtitle')} ${t('settings.connection.priority')}${hosted ? ` ${t('unifiedSettings.connection.hosted')}` : ''}`} />
 
       <div className="space-y-2.5 rounded-xl bg-card/60 p-4 text-sm ring-1 ring-border/50 md:space-y-3 md:rounded-md">
         <div>
@@ -103,7 +119,7 @@ export function ConnectionSection(): JSX.Element {
           <Button data-testid="settings-connection-test" variant="outline" className="h-10 rounded-lg px-4 md:h-7 md:rounded md:px-2" onClick={() => void test()} disabled={testState.kind === 'testing'}>
             {testState.kind === 'testing' ? t('settings.connection.testing') : t('settings.connection.test')}
           </Button>
-          <Button data-testid="settings-connection-reset" variant="ghost" className="ml-auto h-10 rounded-lg px-3 text-muted-foreground md:ml-0 md:h-7 md:rounded md:px-2" onClick={reset}>{t('settings.connection.reset')}</Button>
+          <Button data-testid="settings-connection-reset" variant="ghost" className="h-10 rounded-lg px-3 text-muted-foreground md:h-7 md:rounded md:px-2" onClick={reset}>{t('settings.connection.reset')}</Button>
         </div>
         {testState.kind === 'ok' && (
           <div className="text-xs text-emerald-500" data-testid="settings-connection-result">✓ {testState.msg}</div>

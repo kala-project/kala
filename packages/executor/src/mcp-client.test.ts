@@ -199,7 +199,7 @@ describe('MCP stdio client manager', () => {
     const oldResult = request<{ ok: boolean }>(inbound, 'tool:call', { sessionId: 's', callId: 'old-call', name: 'old__echo', input: {} })
     await waitFor(() => executor.activeToolCount() === 1)
     const replacement = server('new', 'normal', 'replacement')
-    await expect(request(inbound, 'executor:mcp_configure', { requestId: 'configure-1', servers: [replacement] })).resolves.toEqual({ ok: true })
+    await expect(request(inbound, 'executor:mcp_configure', { requestId: 'configure-1', servers: [replacement] })).resolves.toEqual({ ok: true, revision: '2' })
 
     const announcements = emitted.filter((item) => item.event === 'executor:announce').map((item) => item.args[0] as { tools: string[] })
     expect(announcements.at(-1)?.tools).toEqual(['__workspace_attachment_transfer', 'new__replacement'])
@@ -208,7 +208,7 @@ describe('MCP stdio client manager', () => {
     expect(persisted.unrelated).toEqual({ retained: true })
     expect(persisted.mcpServers).toEqual([replacement])
     if (process.platform !== 'win32') expect(statSync(configPath).mode & 0o777).toBe(0o600)
-    await expect(request(inbound, 'executor:mcp_config_status', { requestId: 'status-1' })).resolves.toEqual({ ok: true, servers: [{ name: replacement.name }] })
+    await expect(request(inbound, 'executor:mcp_config_status', { requestId: 'status-1' })).resolves.toMatchObject({ ok: true, servers: [{ name: replacement.name }], revision: '2', editProtocol: 'patch-v1' })
 
     inbound.emit('tool:cancel', { sessionId: 's', callId: 'old-call' })
     await expect(oldResult).resolves.toMatchObject({ ok: false })
@@ -269,7 +269,7 @@ describe('MCP stdio client manager', () => {
       const servers = [server('invite-server')]
       const reply = await request<{ ok: boolean }>(inbound, 'executor:mcp_configure', { requestId: 'invite-update', servers })
       expect(reply.ok).toBe(workspaceId === 'workspace')
-      expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual(workspaceId === 'workspace' ? { ...initial, mcpServers: servers } : initial)
+      expect(JSON.parse(readFileSync(configPath, 'utf8'))).toEqual(workspaceId === 'workspace' ? { ...initial, mcpServers: servers, _kalaManagedMcp: { formatVersion: 1, revision: '2', receipts: [] } } : initial)
       await executor.close()
     }
     }

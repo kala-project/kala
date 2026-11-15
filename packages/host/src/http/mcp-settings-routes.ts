@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http'
 
 import type { ManagedMcpServer, PlatformTenancy } from '@agent-kernel/shared'
+import { WorkspaceMcpPatchSchema } from '@agent-kernel/shared'
 
 import type { AuthConfig, DashboardActor } from '../auth-control.js'
 import type { AuditLogger } from '../audit-log.js'
@@ -17,7 +18,7 @@ const MAX_MCP_ARGS = 64
 const MAX_MCP_STRING_LENGTH = 8 * 1024
 const MCP_SERVER_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/u
 
-type McpExecutorAccess = Pick<ExecutorRegistry, 'snapshot' | 'hasTrustedManagedExecutor' | 'hasTrustedWorkspaceExecutor' | 'mcpConfigStatus' | 'configureMcp'>
+type McpExecutorAccess = Pick<ExecutorRegistry, 'snapshot' | 'hasTrustedManagedExecutor' | 'hasTrustedWorkspaceExecutor' | 'mcpConfigStatus' | 'configureMcp'> & Partial<Pick<ExecutorRegistry, 'patchMcp'>>
 type McpInstallationAccess = Pick<ExecutorInstallationStorage, 'managedBinding' | 'managedBindingsForWorkspace'>
 
 type McpSettingsSummary = {
@@ -44,7 +45,7 @@ export function attachMcpSettingsRoutes(server: HttpServer, options: {
     if (url.pathname !== '/settings/mcp') return
     claimRoute(req)
 
-    if (req.method !== 'GET' && req.method !== 'PUT') {
+    if (req.method !== 'GET' && req.method !== 'PUT' && req.method !== 'PATCH') {
       sendError(res, 405, 'method_not_allowed')
       return
     }
@@ -89,11 +90,38 @@ export function attachMcpSettingsRoutes(server: HttpServer, options: {
           return
         }
         audit(options.audit, 'mcp_config.read', authorization.actor, workspaceId, servers.map((item) => item.name), 'ok')
-        sendSummary(res, workspaceId, servers)
+        const executor = options.executors.snapshot().find(item => item.workspaceId === workspaceId)
+        const patch = options.executors.patchMcp && executor?.capabilities?.mcpConfigProtocol === 'patch-v1'
+          && ack.editProtocol === 'patch-v1' && typeof ack.revision === 'string' && typeof ack.editToken === 'string' && typeof ack.requestId === 'string'
+        sendJson(res, 200, { supported: true, workspaceId, servers,
+          ...(patch ? { editProtocol: ack.editProtocol, revision: ack.revision, requestId: ack.requestId, editToken: ack.editToken } : { editProtocol: 'legacy-replacement' }) })
       }).catch(() => {
         audit(options.audit, 'mcp_config.read', authorization.actor, workspaceId, [], 'error', 'executor_request_failed')
         sendError(res, 502, 'mcp_status_unavailable')
       })
+      return
+    }
+
+    if (req.method === 'PATCH') {
+      void readJson(req).then(async body => {
+        const parsed = WorkspaceMcpPatchSchema.safeParse(body)
+        if (!parsed.success) { sendError(res, 400, 'invalid_request'); return }
+        const { workspaceId, ...input } = parsed.data
+        const selected = await selectManagedExecutor(workspaceId, authorization.actor, options.installations, options.executors, options.organizationId)
+        if (!selected.ok) { sendError(res, selected.status, selected.error); return }
+        if (!options.executors.patchMcp || options.executors.snapshot().find(item => item.workspaceId === workspaceId)?.capabilities?.mcpConfigProtocol !== 'patch-v1') {
+          sendError(res, 409, 'mcp_patch_unsupported'); return
+        }
+        const result = await options.executors.patchMcp(workspaceId, selected.target, input)
+        if (!result.ok) {
+          const error = result.error ?? 'mcp_configuration_failed'
+          const status = error === 'configuration_conflict' ? 412 : error === 'outcome_unknown' ? 504
+            : ['edit_ticket_reused_with_different_request', 'deduplication_capacity_exceeded', 'mcp_configuration_locked'].includes(error) ? 409 : 502
+          sendError(res, status, error); return
+        }
+        audit(options.audit, 'mcp_config.patch', authorization.actor, workspaceId, input.operations.map(item => item.name), 'ok')
+        sendJson(res, 200, result)
+      }).catch((error: unknown) => sendError(res, error instanceof RequestTooLargeError ? 413 : 400, error instanceof RequestTooLargeError ? 'request_too_large' : 'invalid_request'))
       return
     }
 

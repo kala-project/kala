@@ -19,6 +19,7 @@ export interface RuntimeReplicaMembership {
   release(unitId: string): Promise<void>
   releaseAll(): Promise<void>
   setLeaseLostHandler(handler: (unitId: TenantRuntimeUnitId) => Promise<void>): void
+  setObservationHandler?(handler: (unitId: TenantRuntimeUnitId) => Promise<void>): void
 }
 
 type Active = { lease: RuntimeUnitReplicaMembership; renewal?: NodeJS.Timeout }
@@ -37,6 +38,7 @@ export class PostgresRuntimeReplicaMembership implements RuntimeReplicaMembershi
   readonly #replicaId: string
   readonly #origin: string
   #leaseLost: (unitId: TenantRuntimeUnitId) => Promise<void> = async () => undefined
+  #observe: (unitId: TenantRuntimeUnitId) => Promise<void> = async () => undefined
 
   constructor(readonly store: RuntimeReplicaMembershipStore, options: {
     replicaId: string; origin: string; ttlMs?: number; operationTimeoutMs?: number
@@ -58,6 +60,7 @@ export class PostgresRuntimeReplicaMembership implements RuntimeReplicaMembershi
   setLeaseLostHandler(handler: (unitId: TenantRuntimeUnitId) => Promise<void>): void {
     this.#leaseLost = handler
   }
+  setObservationHandler(handler: (unitId: TenantRuntimeUnitId) => Promise<void>): void { this.#observe = handler }
 
   async activate(rawId: string, organizationId: string): Promise<void> {
     const unitId = parseTenantRuntimeUnitId(rawId)
@@ -70,6 +73,7 @@ export class PostgresRuntimeReplicaMembership implements RuntimeReplicaMembershi
           if (active.lease.organizationId !== organizationId) throw new Error('replica membership organization mismatch')
           try {
             active.lease = await timed(this.store.renewReplica(active.lease, this.#ttlMs), this.#operationTimeoutMs)
+            void this.#observe(unitId).catch(() => undefined)
             return
           } catch (error) {
             this.#forget(unitId, active)
@@ -83,6 +87,7 @@ export class PostgresRuntimeReplicaMembership implements RuntimeReplicaMembershi
         }, this.#ttlMs), this.#operationTimeoutMs)
         const registered: Active = { lease }
         this.#leases.set(unitId, registered)
+        void this.#observe(unitId).catch(() => undefined)
         this.#renewLater(unitId, registered)
       })
     } catch (error) {
@@ -133,6 +138,7 @@ export class PostgresRuntimeReplicaMembership implements RuntimeReplicaMembershi
       const lease = await timed(this.store.renewReplica(active.lease, this.#ttlMs), this.#operationTimeoutMs)
       if (this.#leases.get(unitId) !== active) return
       active.lease = lease
+      void this.#observe(unitId).catch(() => undefined)
       this.#renewLater(unitId, active)
     } catch (error) {
       process.emitWarning(`Runtime replica membership renewal failed: ${error instanceof Error ? error.message : String(error)}`, {

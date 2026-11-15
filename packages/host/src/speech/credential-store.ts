@@ -1,5 +1,6 @@
 import { KalaStateStore } from '../store/state-store.js'
 import type { PostgresTenantStateStore } from '../tenant-runtime/postgres-state.js'
+import type { SettingsWriteOptions } from '../settings-concurrency.js'
 
 export const DEFAULT_AZURE_SPEECH_ENDPOINT = 'https://japaneast.api.cognitive.microsoft.com/'
 export const DEFAULT_SPEECH_MAX_MINUTES = 15
@@ -38,8 +39,9 @@ export interface AzureSpeechCredentialStore {
     mode: SpeechTranscriptionMode
     realtimeMaxMinutes?: number
     afterRecordingMaxMinutes?: number
-  }): Promise<AzureSpeechCredentialStatus> | AzureSpeechCredentialStatus
-  delete(): Promise<AzureSpeechCredentialStatus> | AzureSpeechCredentialStatus
+  }, options?: SettingsWriteOptions): Promise<AzureSpeechCredentialStatus> | AzureSpeechCredentialStatus
+  delete(options?: SettingsWriteOptions): Promise<AzureSpeechCredentialStatus> | AzureSpeechCredentialStatus
+  configuration?(): Promise<{ revision: string; value: AzureSpeechCredentialStatus }> | { revision: string; value: AzureSpeechCredentialStatus }
 }
 
 export function normalizeAzureSpeechEndpoint(raw: string): { endpoint: string; region: string } {
@@ -79,6 +81,11 @@ export class PostgresAzureSpeechCredentialStore implements AzureSpeechCredential
     }
   }
 
+  async configuration(): Promise<{ revision: string; value: AzureSpeechCredentialStatus }> {
+    const snapshot = await this.state.credentialConfiguration('azure_speech')
+    return { revision: snapshot.revision, value: snapshot.value ? statusFromRecord(snapshot.value) : unconfiguredStatus() }
+  }
+
   async set(input: {
     endpoint: string
     apiKey?: string
@@ -86,43 +93,17 @@ export class PostgresAzureSpeechCredentialStore implements AzureSpeechCredential
     mode: SpeechTranscriptionMode
     realtimeMaxMinutes?: number
     afterRecordingMaxMinutes?: number
-  }): Promise<AzureSpeechCredentialStatus> {
-    const { endpoint, region } = normalizeAzureSpeechEndpoint(input.endpoint)
-    const existing = await this.get()
-    const apiKey = input.apiKey ?? existing?.apiKey
-    if (!apiKey) throw new Error('an Azure Speech key is required')
-    const realtimeMaxMinutes = input.realtimeMaxMinutes === undefined
-      ? existing?.realtimeMaxMinutes ?? DEFAULT_SPEECH_MAX_MINUTES
-      : validatedMaxMinutes('realtimeMaxMinutes', input.realtimeMaxMinutes)
-    const afterRecordingMaxMinutes = input.afterRecordingMaxMinutes === undefined
-      ? existing?.afterRecordingMaxMinutes ?? DEFAULT_SPEECH_MAX_MINUTES
-      : validatedMaxMinutes('afterRecordingMaxMinutes', input.afterRecordingMaxMinutes)
-    const updatedAt = new Date().toISOString()
-    await this.state.setCredential('azure_speech', apiKey, {
-      version: 1,
-      provider: 'azure',
-      endpoint,
-      region,
-      enabled: input.enabled,
-      mode: input.mode,
-      realtimeMaxMinutes,
-      afterRecordingMaxMinutes,
-    }, updatedAt)
-    return {
-      configured: true,
-      provider: 'azure',
-      endpoint,
-      region,
-      enabled: input.enabled,
-      mode: input.mode,
-      realtimeMaxMinutes,
-      afterRecordingMaxMinutes,
-      updatedAt,
-    }
+  }, options: SettingsWriteOptions = {}): Promise<AzureSpeechCredentialStatus> {
+    return this.state.withCredentialLock('azure_speech', async (transaction) => {
+      const current = await this.state.getCredential('azure_speech', transaction)
+      const next = speechCredentialUpdate(input, current)
+      await this.state.setCredential('azure_speech', next.secret, next.metadata, next.status.updatedAt, transaction, options)
+      return next.status
+    })
   }
 
-  async delete(): Promise<AzureSpeechCredentialStatus> {
-    await this.state.deleteCredential('azure_speech')
+  async delete(options: SettingsWriteOptions = {}): Promise<AzureSpeechCredentialStatus> {
+    await this.state.deleteCredential('azure_speech', undefined, options)
     return unconfiguredStatus()
   }
 }
@@ -159,6 +140,11 @@ export class LocalAzureSpeechCredentialStore implements AzureSpeechCredentialSto
     }
   }
 
+  async configuration(): Promise<{ revision: string; value: AzureSpeechCredentialStatus }> {
+    const snapshot = this.state.credentialConfiguration('azure_speech')
+    return { revision: snapshot.revision, value: snapshot.value ? statusFromRecord(snapshot.value) : unconfiguredStatus() }
+  }
+
   async set(input: {
     endpoint: string
     apiKey?: string
@@ -166,45 +152,40 @@ export class LocalAzureSpeechCredentialStore implements AzureSpeechCredentialSto
     mode: SpeechTranscriptionMode
     realtimeMaxMinutes?: number
     afterRecordingMaxMinutes?: number
-  }): Promise<AzureSpeechCredentialStatus> {
-    const { endpoint, region } = normalizeAzureSpeechEndpoint(input.endpoint)
-    const existing = await this.get()
-    const apiKey = input.apiKey ?? existing?.apiKey
-    if (!apiKey) throw new Error('an Azure Speech key is required')
-    const realtimeMaxMinutes = input.realtimeMaxMinutes === undefined
-      ? existing?.realtimeMaxMinutes ?? DEFAULT_SPEECH_MAX_MINUTES
-      : validatedMaxMinutes('realtimeMaxMinutes', input.realtimeMaxMinutes)
-    const afterRecordingMaxMinutes = input.afterRecordingMaxMinutes === undefined
-      ? existing?.afterRecordingMaxMinutes ?? DEFAULT_SPEECH_MAX_MINUTES
-      : validatedMaxMinutes('afterRecordingMaxMinutes', input.afterRecordingMaxMinutes)
-    const updatedAt = new Date().toISOString()
-    this.state.setCredential('azure_speech', apiKey, {
-      version: 1,
-      provider: 'azure',
-      endpoint,
-      region,
-      enabled: input.enabled,
-      mode: input.mode,
-      realtimeMaxMinutes,
-      afterRecordingMaxMinutes,
-    }, updatedAt)
-    return {
-      configured: true,
-      provider: 'azure',
-      endpoint,
-      region,
-      enabled: input.enabled,
-      mode: input.mode,
-      realtimeMaxMinutes,
-      afterRecordingMaxMinutes,
-      updatedAt,
-    }
+  }, options: SettingsWriteOptions = {}): Promise<AzureSpeechCredentialStatus> {
+    return this.state.maintenanceTransaction(() => {
+      const next = speechCredentialUpdate(input, this.state.getCredential('azure_speech'))
+      this.state.setCredential('azure_speech', next.secret, next.metadata, next.status.updatedAt, options)
+      return next.status
+    })
   }
 
-  async delete(): Promise<AzureSpeechCredentialStatus> {
-    this.state.deleteCredential('azure_speech')
+  async delete(options: SettingsWriteOptions = {}): Promise<AzureSpeechCredentialStatus> {
+    this.state.deleteCredential('azure_speech', options)
     return unconfiguredStatus()
   }
+}
+
+function speechCredentialUpdate(
+  input: Parameters<AzureSpeechCredentialStore['set']>[0],
+  current: { secret: string; metadata: Record<string, unknown>; updatedAt: string } | undefined,
+): { secret: string; metadata: Record<string, unknown>; status: AzureSpeechCredentialStatus & { updatedAt: string } } {
+  const { endpoint, region } = normalizeAzureSpeechEndpoint(input.endpoint)
+  const existing = current ? statusFromRecord(current) : undefined
+  const secret = input.apiKey ?? current?.secret
+  if (!secret) throw new Error('an Azure Speech key is required')
+  const realtimeMaxMinutes = input.realtimeMaxMinutes === undefined
+    ? existing?.realtimeMaxMinutes ?? DEFAULT_SPEECH_MAX_MINUTES
+    : validatedMaxMinutes('realtimeMaxMinutes', input.realtimeMaxMinutes)
+  const afterRecordingMaxMinutes = input.afterRecordingMaxMinutes === undefined
+    ? existing?.afterRecordingMaxMinutes ?? DEFAULT_SPEECH_MAX_MINUTES
+    : validatedMaxMinutes('afterRecordingMaxMinutes', input.afterRecordingMaxMinutes)
+  const status = {
+    configured: true, provider: 'azure' as const, endpoint, region, enabled: input.enabled, mode: input.mode,
+    realtimeMaxMinutes, afterRecordingMaxMinutes, updatedAt: new Date().toISOString(),
+  }
+  const { configured: _configured, updatedAt: _updatedAt, ...metadata } = status
+  return { secret, metadata: { version: 1, ...metadata }, status }
 }
 
 function statusFromRecord(record: { metadata: Record<string, unknown>; updatedAt: string }): AzureSpeechCredentialStatus {

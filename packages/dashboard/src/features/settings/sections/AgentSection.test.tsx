@@ -21,6 +21,27 @@ function settings(path: string, prompt: string): ServerSettingsPayload {
 }
 
 describe('organization-scoped agent prompt drafts', () => {
+  it('lets authorized readers inspect every slot without offering configuration writes', () => {
+    const fetch = vi.spyOn(globalThis, 'fetch')
+    const dirty = vi.fn()
+    const queryClient = new QueryClient()
+    const view = render(<QueryClientProvider client={queryClient}>
+      <AgentSection payload={settings('/org-a/agent.json', 'Original')} readOnly onDirtyChange={dirty} onPayloadChange={vi.fn()} />
+    </QueryClientProvider>)
+    try {
+      fireEvent.click(screen.getByTestId('settings-agent-edit-slot-2'))
+      const prompt = screen.getByTestId('settings-agent-slot-prompt') as HTMLTextAreaElement
+      expect(prompt.value).toBe('Second prompt')
+      expect(prompt.readOnly).toBe(true)
+      fireEvent.change(prompt, { target: { value: 'Not permitted' } })
+      fireEvent.click(screen.getByTestId('settings-agent-default-slot-2'))
+      fireEvent.click(screen.getByTestId('settings-agent-slot-save'))
+      expect((screen.getByTestId('settings-agent-slot-save') as HTMLButtonElement).disabled).toBe(true)
+      expect(dirty).not.toHaveBeenCalledWith(true)
+      expect(fetch).not.toHaveBeenCalled()
+    } finally { fetch.mockRestore(); view.unmount(); queryClient.clear() }
+  })
+
   it('discards unsaved content immediately when switching organizations', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const onPayloadChange = vi.fn()

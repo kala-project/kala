@@ -13,7 +13,8 @@
     "kala-dedicated-oidc-owner-bootstrap": "./dist/src/bin/bootstrap-dedicated-oidc-owner.js",
     "kala-dedicated-owner-rotate": "./dist/src/bin/rotate-dedicated-owner.js",
     "kala-dedicated-owner-reset": "./dist/src/bin/reset-dedicated-owner.js",
-    "kala-webhook-worker": "./dist/src/bin/webhook-worker.js"
+    "kala-webhook-worker": "./dist/src/bin/webhook-worker.js",
+    "kala-control-plane-settings": "./dist/src/bin/control-plane-settings.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

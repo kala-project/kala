@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { applyCurrentVSCodeTheme, VSCODE_THEME_CHANGE_EVENT, VSCODE_THEME_STORAGE_KEY } from '../theme/vscode-theme.js'
-import { PREF_THEME } from './prefs.js'
+import { PREF_THEME, writeStringPref } from './prefs.js'
 
 export type Theme = 'dark' | 'light'
 export type ThemePreference = Theme | 'system'
@@ -43,9 +43,7 @@ export function useTheme(): [ThemePreference, () => void, (theme: ThemePreferenc
 
   useEffect(() => {
     applyCurrentVSCodeTheme(effectiveTheme)
-    try {
-      localStorage.setItem(THEME_STORAGE_KEY, preference)
-    } catch {}
+    writeStringPref(THEME_STORAGE_KEY, preference)
   }, [effectiveTheme, preference])
 
   useEffect(() => {
@@ -64,10 +62,8 @@ export function useTheme(): [ThemePreference, () => void, (theme: ThemePreferenc
   }, [effectiveTheme])
 
   const setThemePreference = (next: ThemePreference): void => {
+    if (!writeStringPref(THEME_STORAGE_KEY, next)) return
     setPreference(next)
-    try {
-      localStorage.setItem(THEME_STORAGE_KEY, next)
-    } catch {}
     window.dispatchEvent(new Event(THEME_CHANGE_EVENT))
   }
 

@@ -5,7 +5,25 @@ import { Agent as HttpsAgent, request as httpsRequest } from 'node:https'
 import { Readable, type Duplex } from 'node:stream'
 
 import httpProxy from 'http-proxy'
-import { parsePublicUrls, validatePublicRequest, type ExternalDeploymentHealth, type PublicUrlPattern } from '@agent-kernel/shared'
+import { parsePublicUrls, validatePublicRequest, type ExternalDeploymentHealth, type PublicUrlPattern, type OrganizationSettingsSection, type IntegrationObservation } from '@agent-kernel/shared'
+
+function gatewayIntegrationObservations(telemetry: boolean, webhooks: boolean): IntegrationObservation[] {
+  const observedAt = new Date().toISOString()
+  return [
+    { id: 'secrets', component: 'gateway', configured: null, health: 'unknown',
+      sourceRef: 'protected-deployment-configuration', observedAt, reasonCode: 'resolver_health_not_observed' },
+    { id: 'artifacts', component: 'gateway', configured: null, health: 'unknown',
+      sourceRef: 'runtime-owned-artifact-authority', observedAt, reasonCode: 'runtime_observation_required' },
+    { id: 'telemetry', component: 'gateway', configured: telemetry, health: telemetry ? 'unknown' : 'not-applicable',
+      sourceRef: 'gateway-telemetry-adapter', observedAt, ...(telemetry ? { reasonCode: 'delivery_not_observed' } : {}) },
+    { id: 'webhooks', component: 'gateway', configured: webhooks, health: webhooks ? 'unknown' : 'not-applicable',
+      sourceRef: 'organization-webhook-authority', observedAt, ...(webhooks ? { reasonCode: 'worker_delivery_not_observed' } : {}) },
+    ...(['error-reporting', 'ticketing'] as const).map(id => ({
+      id, component: 'gateway' as const, configured: false, health: 'not-applicable' as const,
+      sourceRef: 'gateway-adapter-registry', observedAt, reasonCode: 'adapter_not_installed',
+    })),
+  ]
+}
 import { createOnlineTelemetryFromEnv, type OnlineTelemetry } from '@agent-kernel/shared/node-telemetry'
 
 import type { LoginStateStore } from '../auth/login-state-store.js'
@@ -24,6 +42,12 @@ import { isOwnerBootstrapToken, ownerBootstrapHash, type OwnerBootstrapGateway }
 import type { RuntimeConnectionRoute, RuntimeOriginResolver } from '../runtime-origin/postgres-runtime-origin-resolver.js'
 import type { RuntimeRoutingTicketResolver } from '../runtime-origin/runtime-routing-ticket-resolver.js'
 import type { DedicatedOwnerAuthenticator } from '../auth/dedicated-owner.js'
+import { organizationSettingsCapabilities } from '../organizations/settings-capabilities.js'
+import { parseSettingsPage } from '../organizations/settings-view.js'
+import { ControlSettingsConflict, controlSettingsEtag, type ControlSettingsWriteOptions } from '../settings/control-revisions.js'
+import { WebhookSettingsError, type PostgresWebhookSettingsStore } from '../webhooks/settings-store.js'
+import { handleModelPolicyRead } from './model-policy.js'
+import type { PostgresModelPolicyReader } from '../settings/model-policy-reader.js'
 
 export type RuntimeIngressGateway = { readonly http: HttpServer; readonly port: number; close(): Promise<void> }
 export type { RuntimeOriginResolver } from '../runtime-origin/postgres-runtime-origin-resolver.js'
@@ -247,6 +271,9 @@ export async function startRuntimeIngressGateway(options: {
   telemetry?: OnlineTelemetry
   authentication: GatewayAuthentication
   singleTenantOwner?: boolean
+  settingsLayout?: 'legacy' | 'unified'
+  settingsWriteProtocol?: ControlSettingsWriteOptions['writeProtocol']
+  webhooks?: PostgresWebhookSettingsStore
   operatorServices?: {
     identityConsoleUrl?: string
     observabilityUrl?: string
@@ -275,8 +302,12 @@ export async function startRuntimeIngressGateway(options: {
   rateLimiter?: RateLimiter
   socketRecheckMs?: number
   backgroundAuthority?: BackgroundAuthority
+  modelPolicyReader?: Pick<PostgresModelPolicyReader, 'read'> & Partial<Pick<PostgresModelPolicyReader, 'resource' | 'executor'>>
   provision?(unitId: string): Promise<void>
 }): Promise<RuntimeIngressGateway> {
+  if (options.webhooks && (options.singleTenantOwner || options.authentication.kind === 'dedicated-owner')) {
+    throw new Error('Dedicated webhook delivery is unsupported')
+  }
   const telemetry = options.telemetry ?? createOnlineTelemetryFromEnv('kala-gateway')
   const ownsTelemetry = options.telemetry === undefined
   const recheckMs = options.socketRecheckMs ?? 15_000
@@ -422,6 +453,7 @@ export async function startRuntimeIngressGateway(options: {
     return await options.sessions.touch(session.id, Date.now(), Date.now() + 86_400_000)
   }
   const publicUrl = new URL(options.publicOrigin)
+  const settingsAuthority = (): string => publicUrl.port === '0' ? `http://127.0.0.1:${port}` : publicUrl.origin
   let publicUrls = options.publicUrls
   const requestPublicOrigin = (request: IncomingMessage): string => {
     const value = request.headers['x-kala-public-origin']
@@ -689,6 +721,7 @@ export async function startRuntimeIngressGateway(options: {
       const access = session && options.organizations ? await options.organizations.findAccess(session.identity) : undefined
       response.end(JSON.stringify(session ? {
         authenticated: true,
+        settingsLayout: options.settingsLayout ?? 'legacy',
         profile: publicProfile(session.identity),
         ...(options.singleTenantOwner && access?.organization.status === 'active' && access.membership.role === 'owner' && options.operatorServices ? {
           deploymentServices: {
@@ -863,11 +896,15 @@ export async function startRuntimeIngressGateway(options: {
       }
       if (request.method === 'GET' && !serviceAccountItem) {
         try {
-          const items = await options.serviceAccounts.list(organizationAccess.organization.id)
+          const paged = url.searchParams.has('limit') || url.searchParams.has('cursor')
+          const page = paged ? await options.serviceAccounts.listPage(organizationAccess.organization.id,
+            parseSettingsPage(organizationAccess.organization.id, 'service-accounts', url.searchParams)) : undefined
+          const items = page?.items ?? await options.serviceAccounts.list(organizationAccess.organization.id)
           response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-request-id': randomBytes(16).toString('hex'), 'x-kala-api-version': 'v1', 'x-kala-api-compatibility': '1' })
-          response.end(JSON.stringify({ items }))
-        } catch {
-          apiGatewayError(response, 500, 'internal_error', 'service accounts could not be listed')
+          response.end(JSON.stringify({ items, ...(page?.nextCursor ? { nextCursor: page.nextCursor } : {}), limits: options.serviceAccounts.limits() }))
+        } catch (error) {
+          if (error instanceof Error && ['invalid_page_limit', 'invalid_page_cursor'].includes(error.message)) apiGatewayError(response, 400, 'invalid_request', 'invalid service account page')
+          else apiGatewayError(response, 500, 'internal_error', 'service accounts could not be listed')
         }
         return
       }
@@ -992,6 +1029,95 @@ export async function startRuntimeIngressGateway(options: {
       response.end(JSON.stringify({ error: 'not_found' }))
       return
     }
+    if (url.pathname === '/organization/capabilities') {
+      if (!session || !organizationAccess) { apiGatewayError(response, 401, 'authentication_required', 'browser authentication is required'); return }
+      if (request.method !== 'GET') { response.writeHead(405, { allow: 'GET' }); response.end(); return }
+      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      response.end(JSON.stringify(organizationSettingsCapabilities(organizationAccess, {
+        dedicated: options.singleTenantOwner === true || options.authentication.kind === 'dedicated-owner',
+        serviceAccounts: Boolean(options.serviceAccounts), projections: Boolean(options.organizations?.settingsView),
+        silo: options.operatorServices?.siloConsolePath === '/silo/', consoles: Boolean(options.operatorServices),
+        webhooks: Boolean(options.webhooks),
+      })))
+      return
+    }
+    if (url.pathname === '/organization/webhooks' || url.pathname.startsWith('/organization/webhooks/')
+      || url.pathname === '/organization/webhook-secret-bindings') {
+      const send = (status: number, body: unknown) => {
+        response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        response.end(JSON.stringify(body))
+      }
+      if (!session || !organizationAccess || !identity) { send(401, { error: 'authentication_required' }); return }
+      if (!permits(organizationAccess.membership.role, 'organization:manage')) { send(403, { error: 'organization_management_required' }); return }
+      if (!options.webhooks) { send(503, { error: 'webhook_delivery_unavailable' }); return }
+      try {
+        if (url.pathname === '/organization/webhook-secret-bindings' && request.method === 'GET') {
+          send(200, await options.webhooks.bindings(organizationAccess.organization.id,
+            parseSettingsPage(organizationAccess.organization.id, 'webhook-bindings', url.searchParams))); return
+        }
+        if (url.pathname === '/organization/webhooks' && request.method === 'GET') {
+          const page = parseSettingsPage(organizationAccess.organization.id, 'webhooks', url.searchParams)
+          send(200, await options.webhooks.list(organizationAccess.organization.id, page)); return
+        }
+        const endpoint = /^\/organization\/webhooks\/([^/]+)$/u.exec(url.pathname)
+        if (request.method !== 'POST' && request.method !== 'PATCH'
+          || request.method === 'POST' && url.pathname !== '/organization/webhooks'
+          || request.method === 'PATCH' && !endpoint) {
+          response.setHeader('allow', url.pathname === '/organization/webhooks' ? 'GET, POST'
+            : url.pathname === '/organization/webhook-secret-bindings' ? 'GET' : 'PATCH')
+          send(405, { error: 'method_not_allowed' }); return
+        }
+        if (!requireSameOriginWhenPresent(request, response)) return
+        let body: unknown
+        try { body = JSON.parse((await readRequestBody(request, 16_384)).toString('utf8')) } catch {
+          send(400, { error: 'invalid_webhook_configuration' }); return
+        }
+        const value = request.method === 'POST'
+          ? await options.webhooks.create(organizationAccess.organization.id, identity, body)
+          : await options.webhooks.patch(organizationAccess.organization.id, identity, decodeURIComponent(endpoint![1]!), body,
+            typeof request.headers['if-match'] === 'string' ? request.headers['if-match'] : undefined)
+        send(request.method === 'POST' ? 201 : 200, value)
+      } catch (error) {
+        if (error instanceof WebhookSettingsError) send(error.status, { error: error.code })
+        else if (error instanceof URIError || error instanceof Error && error.message.startsWith('invalid_page_')) {
+          send(400, { error: 'invalid_webhook_request' })
+        } else send(503, { error: 'webhook_configuration_unavailable' })
+      }
+      return
+    }
+    if (url.pathname === '/organization/settings/integrations') {
+      if (!session || !organizationAccess) { apiGatewayError(response, 401, 'authentication_required', 'browser authentication is required'); return }
+      if (request.method !== 'GET') { response.writeHead(405, { allow: 'GET' }); response.end(); return }
+      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      response.end(JSON.stringify({ organizationId: organizationAccess.organization.id,
+        integrationStatus: gatewayIntegrationObservations(Boolean(telemetry), Boolean(options.webhooks)) }))
+      return
+    }
+    if (url.pathname === '/organization/settings-view') {
+      if (!session || !organizationAccess || !options.organizations) { apiGatewayError(response, 401, 'authentication_required', 'browser authentication is required'); return }
+      if (request.method !== 'GET') { response.writeHead(405, { allow: 'GET' }); response.end(); return }
+      const section = url.searchParams.get('section') ?? ''
+      if (!['members', 'workspaces', 'executors', 'policies', 'usage', 'sessions', 'audit', 'webhooks'].includes(section)) {
+        apiGatewayError(response, 400, 'invalid_request', 'unknown Settings section'); return
+      }
+      if (section !== 'workspaces' && !permits(organizationAccess.membership.role, 'organization:manage')) {
+        apiGatewayError(response, 403, 'forbidden', 'organization:manage permission is required'); return
+      }
+      if (section === 'members' && (options.singleTenantOwner || options.authentication.kind === 'dedicated-owner')) {
+        apiGatewayError(response, 403, 'forbidden', 'dedicated_single_owner'); return
+      }
+      try {
+        const page = parseSettingsPage(organizationAccess.organization.id, section as OrganizationSettingsSection, url.searchParams)
+        if (!options.organizations.settingsView) { apiGatewayError(response, 503, 'internal_error', 'settings_projection_unavailable'); return }
+        const value = await options.organizations.settingsView(organizationAccess.organization.id, section as OrganizationSettingsSection, page)
+        response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        response.end(JSON.stringify(value))
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith('invalid_page_')) apiGatewayError(response, 400, 'invalid_request', error.message)
+        else apiGatewayError(response, 503, 'internal_error', 'settings_projection_unavailable')
+      }
+      return
+    }
     if (url.pathname === '/organization' && request.method === 'GET' && organizationAccess && options.organizations) {
       const members = await options.organizations.listMembers(organizationAccess.organization.id)
       const [administration, invites] = await Promise.all([
@@ -1004,13 +1130,36 @@ export async function startRuntimeIngressGateway(options: {
         permissions: ['runtime:read', 'runtime:write', 'workspace:manage', 'organization:manage', 'policy:manage'].filter((permission) => permits(organizationAccess.membership.role, permission as Parameters<typeof permits>[1])),
         members: members.map((member) => ({ issuer: member.identity.issuer, subject: member.identity.subject, displayName: member.identity.displayName, email: member.identity.email, role: member.role, createdAt: member.createdAt })),
         ...(administration ?? {}),
+        integrations: Object.fromEntries(gatewayIntegrationObservations(Boolean(telemetry), Boolean(options.webhooks)).map(item =>
+          [item.id, item.configured === null ? 'unknown' : item.configured ? 'configured; health unknown' : 'not configured'])),
         invites,
+      })); return
+    }
+    if (url.pathname === '/organization/attachment-policy/configuration' && request.method === 'GET' && organizationAccess && options.organizations) {
+      if (!permits(organizationAccess.membership.role, 'policy:manage')) {
+        response.writeHead(403, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        response.end(JSON.stringify({ error: 'forbidden' })); return
+      }
+      const configuration = await options.organizations.attachmentConfiguration?.(organizationAccess.organization.id)
+      if (!configuration?.revision) {
+        response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        response.end(JSON.stringify({ error: 'configuration_revisions_unavailable' })); return
+      }
+      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store',
+        etag: controlSettingsEtag(organizationAccess.organization.id, 'attachment-policy', configuration.revision, settingsAuthority()) })
+      response.end(JSON.stringify({
+        resource: { kind: 'attachment-policy', id: organizationAccess.organization.id, organizationId: organizationAccess.organization.id },
+        revision: configuration.revision, capabilities: [], value: configuration.value,
+        application: { state: 'unknown', desiredRevision: configuration.revision, effectiveRevision: null,
+          applyMode: 'immediate', scope: 'organization', reasonCode: 'consumer_observation_unavailable' },
       })); return
     }
     if (url.pathname === '/organization/attachment-policy' && organizationAccess && options.organizations) {
       if (request.method === 'GET') {
-        response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
-        response.end(JSON.stringify({ maxBytes: organizationAccess.organization.attachmentMaxBytes ?? DEFAULT_ATTACHMENT_LIMIT }))
+        const configuration = await options.organizations.attachmentConfiguration?.(organizationAccess.organization.id)
+        response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store',
+          ...(configuration?.revision ? { etag: controlSettingsEtag(organizationAccess.organization.id, 'attachment-policy', configuration.revision, settingsAuthority()) } : {}) })
+        response.end(JSON.stringify(configuration?.value ?? { maxBytes: organizationAccess.organization.attachmentMaxBytes ?? DEFAULT_ATTACHMENT_LIMIT }))
         return
       }
       if (request.method === 'PUT') {
@@ -1031,23 +1180,77 @@ export async function startRuntimeIngressGateway(options: {
           response.end(JSON.stringify({ error: 'invalid_attachment_limit' }))
           return
         }
-        const maxBytes = body !== null && typeof body === 'object' && 'maxBytes' in body ? body.maxBytes : undefined
+        const maxBytes = body !== null && typeof body === 'object' && !Array.isArray(body)
+          && Object.keys(body).length === 1 && 'maxBytes' in body ? body.maxBytes : undefined
         if (!isAllowedAttachmentLimit(maxBytes)) {
           response.writeHead(400, { 'content-type': 'application/json', 'cache-control': 'no-store' })
           response.end(JSON.stringify({ error: 'invalid_attachment_limit' }))
           return
         }
-        await options.organizations.updateAttachmentLimit(organizationAccess.organization.id, maxBytes, identity!)
+        try {
+          const expectedEtag = request.headers['if-match']
+          if (options.settingsWriteProtocol === 'conditional-required' && expectedEtag === undefined) throw new ControlSettingsConflict(428, 'client_upgrade_required')
+          await options.organizations.updateAttachmentLimit(organizationAccess.organization.id, maxBytes, identity!, {
+            writeProtocol: options.settingsWriteProtocol, authority: settingsAuthority(),
+            ...(expectedEtag !== undefined ? { expectedEtag: String(expectedEtag) } : {}),
+          })
+        } catch (reason) {
+          if (!(reason instanceof ControlSettingsConflict)) throw reason
+          response.writeHead(reason.status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+          response.end(JSON.stringify({ error: reason.code })); return
+        }
         response.writeHead(204, { 'cache-control': 'no-store' }); response.end(); return
       }
+    }
+    if (url.pathname === '/organization/retention' && request.method === 'GET' && organizationAccess && options.organizations?.retentionConfiguration) {
+      if (!permits(organizationAccess.membership.role, 'policy:manage')) {
+        response.writeHead(403, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: 'forbidden' })); return
+      }
+      let configuration: Awaited<ReturnType<NonNullable<OrganizationStore['retentionConfiguration']>>>
+      try { configuration = await options.organizations.retentionConfiguration(organizationAccess.organization.id) } catch {
+        response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        response.end(JSON.stringify({ error: 'retention_configuration_unavailable' })); return
+      }
+      response.writeHead(200, {
+        'content-type': 'application/json', 'cache-control': 'no-store',
+        etag: controlSettingsEtag(organizationAccess.organization.id, 'retention', configuration.revision, settingsAuthority()),
+      })
+      response.end(JSON.stringify({
+        resource: { kind: 'retention', id: organizationAccess.organization.id, organizationId: organizationAccess.organization.id },
+        revision: configuration.revision, capabilities: [], value: configuration.value,
+        application: { state: 'unknown', desiredRevision: configuration.revision, effectiveRevision: null,
+          applyMode: 'immediate', scope: 'organization', reasonCode: 'consumer_observation_unavailable' },
+      }))
+      return
     }
     if (url.pathname === '/organization/retention' && request.method === 'PUT' && organizationAccess && options.organizations?.updateRetentionPolicy) {
       if (!requireSameOriginWhenPresent(request, response)) return
       if (!permits(organizationAccess.membership.role, 'policy:manage')) { response.writeHead(403, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: 'forbidden' })); return }
-      const raw = JSON.parse((await readRequestBody(request)).toString('utf8')) as { sessionDays: number; artifactDays: number; auditDays: number; deletedResourceGraceDays: number }
+      let raw: { sessionDays: number; artifactDays: number; auditDays: number; deletedResourceGraceDays: number }
       try {
-        await options.organizations!.updateRetentionPolicy!(organizationAccess.organization.id, raw)
+        const value: unknown = JSON.parse((await readRequestBody(request)).toString('utf8'))
+        if (!value || typeof value !== 'object' || Array.isArray(value)
+          || Object.keys(value).some(key => !['sessionDays', 'artifactDays', 'auditDays', 'deletedResourceGraceDays'].includes(key))) throw new Error()
+        raw = value as typeof raw
+      } catch {
+        response.writeHead(400, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: 'invalid_retention_policy' })); return
+      }
+      try {
+        const expectedEtag = request.headers['if-match']
+        if (options.settingsWriteProtocol === 'conditional-required' && expectedEtag === undefined) throw new ControlSettingsConflict(428, 'client_upgrade_required')
+        await options.organizations!.updateRetentionPolicy!(organizationAccess.organization.id, raw, {
+          actor: identity!, writeProtocol: options.settingsWriteProtocol, authority: settingsAuthority(),
+          ...(expectedEtag !== undefined ? { expectedEtag: String(expectedEtag) } : {}),
+        })
       } catch (reason) {
+        if (reason instanceof ControlSettingsConflict) {
+          response.writeHead(reason.status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+          response.end(JSON.stringify({ error: reason.code })); return
+        }
+        if (reason instanceof Error && reason.message === 'invalid_retention_policy') {
+          response.writeHead(400, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+          response.end(JSON.stringify({ error: 'invalid_retention_policy' })); return
+        }
         if (reason instanceof Error && reason.message.startsWith('unsupported_retention_fields:')) {
           const unsupportedFields = reason.message.slice('unsupported_retention_fields:'.length).split(',')
           response.writeHead(400, { 'content-type': 'application/json', 'cache-control': 'no-store' })
@@ -1220,7 +1423,38 @@ export async function startRuntimeIngressGateway(options: {
         response.end(JSON.stringify({ error: error instanceof SessionHttpInputError ? error.message : 'session_route_unavailable' })); return
       }
     } else runtimeOrigin = await resolveRuntimeOrigin(assignment.unitId)
-    if (url.pathname === '/runtime/deployment/health' && request.method === 'GET') {
+    let externalDeploymentStatus = false
+    if (url.pathname === '/runtime/deployment/status' && request.method === 'GET') {
+      try {
+        const upstream = await requestRuntime(runtimeOrigin, url.pathname, 'GET', {
+          'x-agent-runlab-runtime-unit': assignment.unitId,
+          'x-agent-runlab-ingress-secret': options.ingressSecret,
+          ...(organizationAccess ? {
+            'x-agent-runlab-organization-id': organizationAccess.organization.id,
+            'x-agent-runlab-organization-role': organizationAccess.membership.role,
+            'x-agent-runlab-principal': Buffer.from(`${identity.issuer}\0${identity.subject}`, 'utf8').toString('base64url'),
+          } : {}),
+        }, undefined, options.runtimeTls, { signal: AbortSignal.timeout(3_000), maxResponseBytes: 1_048_576 })
+        // Only Native's unsupported-route sentinel permits fallback, not a missing configured controller receipt.
+        if (upstream.status === 404 && upstream.contentType.includes('application/json')) {
+          const body: unknown = JSON.parse(upstream.body.toString('utf8'))
+          externalDeploymentStatus = typeof body === 'object' && body !== null
+            && 'error' in body && body.error === 'Runtime route not found'
+        }
+        if (!externalDeploymentStatus) {
+          response.writeHead(upstream.status === 404 ? 503 : upstream.status, {
+            'content-type': upstream.contentType, 'cache-control': 'no-store',
+          })
+          response.end(upstream.body)
+          return
+        }
+      } catch {
+        response.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        response.end(JSON.stringify({ error: 'deployment_status_unavailable' }))
+        return
+      }
+    }
+    if ((externalDeploymentStatus || url.pathname === '/runtime/deployment/health') && request.method === 'GET') {
       const probe = async (component: 'runtime' | 'dashboard', origin: string): Promise<ExternalDeploymentHealth['checks'][number]> => {
         try {
           const upstream = await requestRuntime(origin, component === 'runtime' ? '/internal/health' : '/', 'GET',
@@ -1254,11 +1488,13 @@ export async function startRuntimeIngressGateway(options: {
       const upstream = await requestRuntime(runtimeOrigin, url.pathname, request.method, { 'content-type': request.headers['content-type'] ?? 'application/json', ...(organizationAccess ? { 'x-agent-runlab-runtime-unit': assignment.unitId, 'x-agent-runlab-ingress-secret': options.ingressSecret } : {}) }, body, options.runtimeTls)
       response.writeHead(upstream.status, { 'content-type': upstream.contentType, 'cache-control': 'no-store' });response.end(upstream.body);return
     }
-    if (url.pathname === '/auth/executor-invites' && request.method === 'POST') {
+    const managedInvite = /^\/auth\/executor-invites\/([^/]+)(?:\/(regenerate|revoke))?$/u.exec(url.pathname)
+    if (url.pathname === '/auth/executor-invites' && request.method === 'POST'
+      || managedInvite && (request.method === 'POST' && Boolean(managedInvite[2]) || request.method === 'DELETE' && !managedInvite[2])) {
       if (!requireSameOriginWhenPresent(request, response)) return
       if (organizationAccess && !permits(organizationAccess.membership.role, 'workspace:manage')) { response.writeHead(403, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify({ error: 'forbidden', requiredPermission: 'workspace:manage' })); return }
       const body = await readRequestBody(request)
-      const upstream = await requestRuntime(runtimeOrigin, url.pathname, 'POST', {
+      const upstream = await requestRuntime(runtimeOrigin, url.pathname, request.method!, {
           'content-type': request.headers['content-type'] ?? 'application/json',
           'x-agent-runlab-runtime-unit': assignment.unitId,
           'x-agent-runlab-ingress-secret': options.ingressSecret,
@@ -1270,10 +1506,19 @@ export async function startRuntimeIngressGateway(options: {
           } : {}),
         }, body, options.runtimeTls)
       let text = upstream.body.toString('utf8')
+      if (managedInvite && (upstream.status >= 200 && upstream.status < 300 || upstream.status === 404)) {
+        await options.directory.revokeExecutorInviteBinding?.(decodeURIComponent(managedInvite[1]!), assignment.unitId,
+          managedInvite[2] === 'revoke' || managedInvite[2] === 'regenerate')
+      }
       if (upstream.status >= 200 && upstream.status < 300) {
-        const invite = JSON.parse(text) as { inviteToken?: string }
-        if (invite.inviteToken) await options.directory.bindExecutorInvite(invite.inviteToken, assignment.unitId)
-        text = JSON.stringify({ ...invite, installerOrigin: publicUrl.port === '0' ? `http://127.0.0.1:${port}` : publicUrl.origin })
+        if (text) {
+          const invite = JSON.parse(text) as { inviteToken?: string; id?: string; expiresAt?: string }
+          if (invite.inviteToken) {
+            if (invite.id && invite.expiresAt) await options.directory.bindExecutorInvite(invite.inviteToken, assignment.unitId, { id: invite.id, expiresAt: invite.expiresAt })
+            else await options.directory.bindExecutorInvite(invite.inviteToken, assignment.unitId)
+          }
+          text = JSON.stringify({ ...invite, ...(invite.inviteToken ? { installerOrigin: publicUrl.port === '0' ? `http://127.0.0.1:${port}` : publicUrl.origin } : {}) })
+        }
       }
       response.writeHead(upstream.status, { 'content-type': upstream.contentType, 'cache-control': 'no-store' })
       response.end(text)
@@ -1300,6 +1545,10 @@ export async function startRuntimeIngressGateway(options: {
     // Service-authenticated endpoint, never a browser-cookie or Runtime proxy route.
     if (request.url?.split('?')[0] === '/internal/background-authority') {
       void handleBackgroundAuthority(request, response, options.ingressSecret, options.backgroundAuthority)
+      return
+    }
+    if (['/internal/settings/model-management/policy', '/internal/settings/operational-resource', '/internal/settings/executor-admission'].includes(request.url?.split('?')[0] ?? '')) {
+      void handleModelPolicyRead(request, response, options.ingressSecret, options.modelPolicyReader)
       return
     }
     const access = validatePublicRequest(publicUrls!, request.headers.host, typeof request.headers.origin === 'string' ? request.headers.origin : undefined)

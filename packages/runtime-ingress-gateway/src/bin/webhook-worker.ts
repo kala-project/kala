@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { pathToFileURL } from 'node:url'
 import { createConfiguredSecretResolver, createSecretEnvironmentReader, type SecretResolver } from '@agent-kernel/shared/secret-resolver'
+import { schema } from '@agent-kernel/shared'
 import { createOnlineTelemetryFromEnv } from '@agent-kernel/shared/node-telemetry'
 import { loadGatewayProductDeployment } from '../config/product-deployment.js'
 import { assertControlPlaneSchema, createPostgresControlPlaneDatabase, readControlPlaneMigrations } from '../persistence/postgres.js'
@@ -12,9 +13,9 @@ import { assertWebhookInstallation, assertWebhookWorkerPrivileges } from '../web
 
 export function scopedWebhookSecrets(resolver: SecretResolver) {
   return async (reference: unknown, organizationId: string, signal: AbortSignal): Promise<string> => {
-    if (!/^[a-zA-Z0-9_-]{1,128}$/u.test(organizationId) || !reference || typeof reference !== 'object'
+    if (!reference || typeof reference !== 'object'
       || !('ref' in reference) || typeof reference.ref !== 'string'
-      || !reference.ref.startsWith(`bao:organizations/${organizationId}/webhooks/`)) throw new Error('Webhook secret reference denied')
+      || !schema.validOrganizationWebhookSecretReference(reference.ref, organizationId)) throw new Error('Webhook secret reference denied')
     return resolver.resolve(reference.ref, signal)
   }
 }

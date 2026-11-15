@@ -57,6 +57,8 @@ import type {
   ExecutorMcpConfigStatusAck,
   ExecutorMcpConfigureAck,
   ExecutorMcpConfigureRequest,
+  ExecutorMcpPatchRequest,
+  ExecutorMcpPatchAck,
   ExecutorServerToClientEvents,
   ExecutionCancelAck,
   ExecutionCancelRequest,
@@ -216,6 +218,7 @@ export type ExecutorRegistry = ToolDispatcher & ExecutorLookup & {
   measureLatency(workspaceId: string): Promise<{ rttMs?: number; error?: string }>
   mcpConfigStatus(workspaceId: string, target: ExecutorMcpTarget, requestId: string): Promise<ExecutorMcpConfigStatusAck>
   configureMcp(workspaceId: string, target: ExecutorMcpTarget, payload: ExecutorMcpConfigureRequest): Promise<ExecutorMcpConfigureAck>
+  patchMcp(workspaceId: string, target: ExecutorMcpTarget, payload: ExecutorMcpPatchRequest): Promise<ExecutorMcpPatchAck>
   renameWorkspace(workspaceId: string, workspaceName: string): AttachedExecutor | undefined
   onChange(listener: ExecutorChangeListener): () => void
   /** Wait at a planned pre-dispatch checkpoint until its bound Executor is online. */
@@ -584,8 +587,8 @@ export function createExecutorRegistry(
 
   async function emitMcpManagement<T>(
     bind: Bind,
-    event: 'executor:mcp_configure' | 'executor:mcp_config_status',
-    payload: ExecutorMcpConfigureRequest | { requestId: string },
+    event: 'executor:mcp_configure' | 'executor:mcp_config_status' | 'executor:mcp_patch',
+    payload: ExecutorMcpConfigureRequest | ExecutorMcpPatchRequest | { requestId: string },
     onUnavailable: () => T,
   ): Promise<T> {
     const authorization = authorizeCurrent(bind)
@@ -600,7 +603,7 @@ export function createExecutorRegistry(
         resolve(value)
       }
       const timer = setTimeout(() => finish(onUnavailable()), MCP_MANAGEMENT_ACK_TIMEOUT_MS)
-      const ack = (result: ExecutorMcpConfigureAck | ExecutorMcpConfigStatusAck): void => {
+      const ack = (result: ExecutorMcpConfigureAck | ExecutorMcpConfigStatusAck | ExecutorMcpPatchAck): void => {
         const current = byExecutor.get(bind.announcement.executorId)
         if (current !== bind || !bind.socket.connected) {
           finish(onUnavailable())
@@ -610,6 +613,8 @@ export function createExecutorRegistry(
       }
       if (event === 'executor:mcp_configure') {
         bind.socket.emit(event, payload as ExecutorMcpConfigureRequest, ack)
+      } else if (event === 'executor:mcp_patch') {
+        bind.socket.emit(event, payload as ExecutorMcpPatchRequest, ack)
       } else {
         bind.socket.emit(event, payload as { requestId: string }, ack)
       }
@@ -788,6 +793,12 @@ export function createExecutorRegistry(
         { requestId },
         () => ({ ok: false, error: 'managed executor unavailable' }),
       )
+    },
+    async patchMcp(workspaceId, target, payload) {
+      const bind = findMcpBind(workspaceId, target)
+      if (!bind) return { ok: false, error: 'workspace_offline' }
+      if (bind.announcement.capabilities?.mcpConfigProtocol !== 'patch-v1') return { ok: false, error: 'mcp_patch_unsupported' }
+      return await emitMcpManagement<ExecutorMcpPatchAck>(bind, 'executor:mcp_patch', payload, () => ({ ok: false, error: 'outcome_unknown' }))
     },
     async configureMcp(workspaceId, target, payload) {
       const bind = findMcpBind(workspaceId, target)

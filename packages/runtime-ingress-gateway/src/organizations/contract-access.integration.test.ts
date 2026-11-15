@@ -3,15 +3,15 @@ import { handleBackgroundAuthority } from '../edge/background-authority.js'
 import { PostgresBackgroundAuthority } from './background-authority.js'
 import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
 import { promisify } from 'node:util'
+import { fileURLToPath } from 'node:url'
 
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import { ServiceAccountService } from '../api/service-accounts.js'
 import { inviteKey } from '../assignments/store.js'
-import type { SqlExecutor } from '../persistence/postgres.js'
+import { createPostgresControlPlaneDatabase, migrateControlPlane, readControlPlaneMigrations, type SqlExecutor } from '../persistence/postgres.js'
 import { PostgresOrganizationStore } from './postgres-store.js'
 
 const { Pool } = pg
@@ -30,7 +30,7 @@ integrationDescribe('Private Cloud contract authorization on real PostgreSQL', (
   const accountToken = 'ak_sa_contract-test'
 
   beforeAll(async () => {
-    await docker('docker', ['run', '--detach', '--rm', '--name', container,
+    await docker('docker', ['run', '--pull', 'never', '--detach', '--rm', '--name', container,
       '--label', `dev.kala.test.project=${id}`,
       '--tmpfs', '/var/lib/postgresql/data:rw,noexec,nosuid,size=256m',
       '--env', `POSTGRES_PASSWORD=${password}`, '--publish', '127.0.0.1::5432', 'postgres:16-alpine'])
@@ -42,9 +42,11 @@ integrationDescribe('Private Cloud contract authorization on real PostgreSQL', (
         await new Promise((resolve) => setTimeout(resolve, 250))
       }
     }
-    for (const migration of ['0001_control_plane.sql', '0002_service_accounts_webhooks.sql']) {
-      await pool.query(await readFile(new URL(`../../migrations/${migration}`, import.meta.url), 'utf8'))
-    }
+    const migrationDatabase = createPostgresControlPlaneDatabase({
+      connectionString: `postgresql://postgres:${password}@127.0.0.1:${stdout.trim()}/postgres`,
+    })
+    try { await migrateControlPlane(migrationDatabase, await readControlPlaneMigrations(fileURLToPath(new URL('../../migrations', import.meta.url)))) }
+    finally { await migrationDatabase.close() }
     await pool.query(`INSERT INTO organizations(id,name,status,runtime_unit_id) VALUES('org_contract','Contract test','active','tenant_contract')`)
     await pool.query(`INSERT INTO principals(id,kind,issuer,subject,email) VALUES('prn_owner','human',$1,$2,$3),('prn_service','service_account',NULL,NULL,NULL)`, [owner.issuer, owner.subject, owner.email])
     await pool.query(`INSERT INTO organization_memberships(organization_id,principal_id,role) VALUES('org_contract','prn_owner','owner')`)

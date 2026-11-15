@@ -5,6 +5,7 @@ import { COPILOT_AGENT_RUNTIME_CAPABILITIES, DEDICATED_DEPLOYMENT, FULL_RUNTIME_
 import { io as clientIO, type Socket } from 'socket.io-client'
 
 import { SettingsDialog } from './SettingsDialog.js'
+import { SocketAdminSection } from './sections/SocketAdminSection.js'
 import { i18n } from '../../i18n/index.js'
 
 const payload: ServerSettingsPayload = {
@@ -107,6 +108,34 @@ describe('SettingsDialog', () => {
     vi.unstubAllGlobals()
   })
 
+  it('keeps new diagnostics refresh on its projection rather than loading the full settings snapshot', async () => {
+    const changed = vi.fn()
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ socketConnections: payload.socketConnections }), { status: 200 }))
+    render(<SocketAdminSection payload={{ ...payload, deployment: { product: 'dedicated', deployment: DEDICATED_DEPLOYMENT, capabilities: FULL_RUNTIME_CAPABILITIES } }}
+      onPayloadChange={changed} snapshotPath="/settings/sections/diagnostics" />)
+    fireEvent.click(screen.getByTestId('settings-socket-refresh'))
+    await waitFor(() => expect(changed).toHaveBeenCalledWith({ socketConnections: payload.socketConnections }))
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith('/settings/sections/diagnostics', expect.objectContaining({ cache: 'no-store' }))
+  })
+
+  it('shows a device persistence error and retains the existing preference until an explicit retry succeeds', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(payload), { status: 200 }))
+    render(<SettingsDialog open initialSection="interface" onOpenChange={() => {}} />)
+    const toggle = await screen.findByTestId('settings-toggle-tool-call-tab')
+    const storage = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('Storage unavailable', 'QuotaExceededError') })
+    try {
+      fireEvent.click(toggle)
+      expect(screen.getByTestId('settings-preference-error').getAttribute('role')).toBe('alert')
+      expect(toggle.getAttribute('aria-checked')).toBe('true')
+      expect(localStorage.getItem('ak-show-tool-call-tab')).toBeNull()
+      storage.mockRestore()
+      fireEvent.click(toggle)
+      expect(screen.queryByTestId('settings-preference-error')).toBeNull()
+      expect(toggle.getAttribute('aria-checked')).toBe('false')
+      expect(localStorage.getItem('ak-show-tool-call-tab')).toBe('0')
+    } finally { storage.mockRestore() }
+  })
+
   it.each(['member', 'viewer', undefined] as const)('keeps administrator tabs out of desktop and mobile settings for role %s', async organizationRole => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
       ...payload,
@@ -152,8 +181,8 @@ describe('SettingsDialog', () => {
     expect(screen.queryByTestId('settings-socket-connections')).toBeNull()
     fireEvent.click(screen.getByTestId('settings-tab-management'))
     expect(screen.getByTestId('settings-management-tools').querySelectorAll('section')).toHaveLength(4)
-    expect(screen.getByTestId('settings-open-silo').getAttribute('href')).toBe('/silo/')
-    expect(screen.getByText('Manage object storage in SILO. Requires a separate SILO administrator login.')).toBeTruthy()
+    expect(screen.getByTestId('settings-open-silo').getAttribute('href')).toBe('/auth/silo/open')
+    expect(screen.queryByText('Manage object storage in SILO. Requires a separate SILO administrator login.')).toBeNull()
     expect(screen.getByRole('link', { name: 'Open Socket.IO Admin' }).getAttribute('href')).toBe('/admin/socket.io')
     expect(screen.getByRole('link', { name: 'Open identity administration' }).getAttribute('href')).toBe('/ui/console/instance')
     expect(screen.getByTestId('settings-native-aspire').textContent).toContain('http://127.0.0.1:28888')

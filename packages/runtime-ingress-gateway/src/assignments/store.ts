@@ -16,11 +16,13 @@ export type RuntimeAssignment = {
   readonly unitId: string
   readonly identity: AuthenticatedIdentity
 }
+export type ExecutorInviteBinding = { id: string; expiresAt: string }
 
 export interface RuntimeAssignmentStore {
   getOrCreateForIdentity(identity: AuthenticatedIdentity): Promise<RuntimeAssignment>
   findByIdentity(identity: AuthenticatedIdentity): Promise<RuntimeAssignment | undefined>
-  bindExecutorInvite(inviteToken: string, unitId: string): Promise<void>
+  bindExecutorInvite(inviteToken: string, unitId: string, binding?: ExecutorInviteBinding): Promise<void>
+  revokeExecutorInviteBinding?(inviteId: string, unitId: string, revokeEnrolled: boolean): Promise<void>
   findUnitByExecutorInvite(inviteToken: string): Promise<string | undefined>
   findUnitByExecutorRouteHint(inviteHash: string): Promise<string | undefined>
 }

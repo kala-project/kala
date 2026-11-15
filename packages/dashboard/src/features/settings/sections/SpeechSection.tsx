@@ -15,9 +15,11 @@ import {
 } from '../../voice/speech-api.js'
 import { SectionHeader, Toggle } from '../controls.js'
 import { responseError } from '../section-utils.js'
+import { useSettingsRequest } from '../configuration-request.js'
 
-export function SpeechSection(): JSX.Element {
+export function SpeechSection({ readOnly = false, onSaved }: { readOnly?: boolean; onSaved?(): void } = {}): JSX.Element {
   const { t, i18n } = useTranslation()
+  const request = useSettingsRequest()
   const [settings, setSettings] = useState<SpeechSettings | null>(null)
   const [endpoint, setEndpoint] = useState(DEFAULT_AZURE_SPEECH_ENDPOINT)
   const [apiKey, setApiKey] = useState('')
@@ -32,7 +34,7 @@ export function SpeechSection(): JSX.Element {
 
   useEffect(() => {
     let cancelled = false
-    void loadSpeechSettings().then((next) => {
+    void loadSpeechSettings(request).then((next) => {
       if (cancelled) return
       setSettings(next)
       setEndpoint(next.endpoint)
@@ -55,7 +57,7 @@ export function SpeechSection(): JSX.Element {
     setError(null)
     setMessage(null)
     try {
-      const response = await fetch('/settings/speech', {
+      const response = await request('/settings/speech', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -75,6 +77,7 @@ export function SpeechSection(): JSX.Element {
       setAfterRecordingMaxMinutes(speechMaxMinutes(next.afterRecordingMaxMinutes))
       setApiKey('')
       setMessage(t('settings.speech.saved'))
+      onSaved?.()
       window.dispatchEvent(new Event(SPEECH_SETTINGS_CHANGED_EVENT))
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : String(saveError))
@@ -88,7 +91,7 @@ export function SpeechSection(): JSX.Element {
     setError(null)
     setMessage(null)
     try {
-      const response = await fetch('/settings/speech/test', { method: 'POST' })
+      const response = await request('/settings/speech/test', { method: 'POST' })
       if (!response.ok) throw new Error(await responseError(response))
       setMessage(t('settings.speech.testSucceeded'))
     } catch (testError) {
@@ -103,7 +106,7 @@ export function SpeechSection(): JSX.Element {
     setError(null)
     setMessage(null)
     try {
-      const response = await fetch('/settings/speech', { method: 'DELETE' })
+      const response = await request('/settings/speech', { method: 'DELETE' })
       if (!response.ok) throw new Error(await responseError(response))
       const next = (await response.json()) as SpeechSettings
       setSettings(next)
@@ -156,7 +159,7 @@ export function SpeechSection(): JSX.Element {
             </div>
           </div>
 
-          <form className="space-y-4 rounded-xl border border-border/60 bg-card/60 p-4" onSubmit={(event) => { void save(event) }}>
+          {!readOnly && settings ? <form className="space-y-4 rounded-xl border border-border/60 bg-card/60 p-4" onSubmit={(event) => { void save(event) }}>
             <label className="block text-sm font-medium" htmlFor="settings-speech-provider">
               {t('settings.speech.provider')}
             </label>
@@ -237,7 +240,7 @@ export function SpeechSection(): JSX.Element {
                 </Button>
               ) : null}
             </div>
-          </form>
+          </form> : null}
 
           {error ? <p className="text-sm text-destructive" role="alert">{t('settings.speech.requestFailed', { error })}</p> : null}
           {message ? <p className="text-sm text-emerald-600 dark:text-emerald-400" role="status">{message}</p> : null}

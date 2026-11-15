@@ -6,6 +6,8 @@ import { useTranslation } from 'react-i18next'
 import { Button } from '../../../components/ui/button.js'
 import { HelpHint } from '../../../components/ui/help-hint.js'
 import { EmptyRow, SectionHeader } from '../controls.js'
+import { McpPatchEditor, type McpPatchSettings } from './McpPatchEditor.js'
+import { useSettingsRequest } from '../configuration-request.js'
 
 type McpServer = {
   name: string
@@ -18,6 +20,10 @@ type McpSettings = {
   note?: string
   workspaceId: string
   servers: Array<{ name: string }>
+  editProtocol?: 'patch-v1' | 'legacy-replacement'
+  revision?: string
+  requestId?: string
+  editToken?: string
 }
 
 type ServerDraft = {
@@ -54,8 +60,9 @@ function draftsFromServers(servers: readonly { name: string }[]): ServerDraft[] 
   return servers.map(({ name }) => ({ name, command: '', args: '[]' }))
 }
 
-export function McpSection({ executors = [], token }: { executors?: readonly AttachedExecutor[]; token?: string }): JSX.Element {
+export function McpSection({ executors = [], token, initialWorkspaceId }: { executors?: readonly AttachedExecutor[]; token?: string; initialWorkspaceId?: string }): JSX.Element {
   const { t } = useTranslation()
+  const request = useSettingsRequest()
   const workspaces = useMemo(() => {
     const unique = new Map<string, string>()
     for (const executor of executors) {
@@ -63,7 +70,7 @@ export function McpSection({ executors = [], token }: { executors?: readonly Att
     }
     return [...unique].map(([id, name]) => ({ id, name }))
   }, [executors])
-  const [workspaceId, setWorkspaceId] = useState(() => workspaces[0]?.id ?? '')
+  const [workspaceId, setWorkspaceId] = useState(() => initialWorkspaceId ?? workspaces[0]?.id ?? '')
   const [settings, setSettings] = useState<McpSettings | null>(null)
   const [drafts, setDrafts] = useState<ServerDraft[]>([])
   const [loading, setLoading] = useState(false)
@@ -71,11 +78,13 @@ export function McpSection({ executors = [], token }: { executors?: readonly Att
   const [issue, setIssue] = useState<RequestIssue | null>(null)
   const [saved, setSaved] = useState(false)
   const [confirmed, setConfirmed] = useState(false)
+  const [refresh, setRefresh] = useState(0)
 
   useEffect(() => {
+    if (initialWorkspaceId) return
     if (workspaces.some((workspace) => workspace.id === workspaceId)) return
     setWorkspaceId(workspaces[0]?.id ?? '')
-  }, [workspaces, workspaceId])
+  }, [workspaces, workspaceId, initialWorkspaceId])
 
   useEffect(() => {
     if (!workspaceId) {
@@ -95,7 +104,7 @@ export function McpSection({ executors = [], token }: { executors?: readonly Att
       setSaved(false)
       setConfirmed(false)
       try {
-        const response = await fetch(`/settings/mcp?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        const response = await request(`/settings/mcp?workspaceId=${encodeURIComponent(workspaceId)}`, {
           cache: 'no-store',
           ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
           signal: controller.signal,
@@ -118,7 +127,7 @@ export function McpSection({ executors = [], token }: { executors?: readonly Att
     }
     void load()
     return () => controller.abort()
-  }, [workspaceId, token])
+  }, [workspaceId, token, refresh])
 
   const updateDraft = (index: number, field: keyof ServerDraft, value: string): void => {
     setDrafts((current) => current.map((draft, draftIndex) => draftIndex === index ? { ...draft, [field]: value } : draft))
@@ -149,7 +158,7 @@ export function McpSection({ executors = [], token }: { executors?: readonly Att
     setIssue(null)
     setSaved(false)
     try {
-      const response = await fetch('/settings/mcp', {
+      const response = await request('/settings/mcp', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({ workspaceId, servers }),
@@ -215,9 +224,12 @@ export function McpSection({ executors = [], token }: { executors?: readonly Att
             </div>
           ) : null}
 
-          {!loading && settings?.supported ? (
+          {!loading && settings?.supported && settings.editProtocol === 'patch-v1' && settings.revision && settings.requestId && settings.editToken
+            ? <McpPatchEditor key={settings.requestId} settings={settings as McpPatchSettings} token={token} onSaved={() => setRefresh(value => value + 1)} />
+            : !loading && settings?.supported ? (
             <form className="min-w-0 space-y-4" onSubmit={(event) => { void save(event) }}>
               <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-4 text-sm" data-testid="settings-mcp-warning">
+                <p className="mb-2 font-semibold">{t('unifiedSettings.mcp.legacy')}</p>
                 <div className="font-semibold text-foreground">{t('settings.mcp.warningTitle')}</div>
                 <p className="mt-1 text-muted-foreground">{t('settings.mcp.warning')}</p>
               </div>

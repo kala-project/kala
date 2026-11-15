@@ -69,8 +69,8 @@ export function SectionHeader({
     return () => setMobileHelp?.(undefined)
   }, [setMobileHelp, subtitle])
   return (
-    <div className="hidden min-w-0 md:mb-7 md:block">
-      <h3 className="sr-only text-xl font-semibold tracking-[-0.02em] text-foreground md:not-sr-only md:text-2xl">
+    <div className="mb-5 min-w-0 md:mb-7">
+      <h3 className="text-lg font-semibold tracking-[-0.02em] text-foreground md:text-2xl">
         {title} {subtitle ? <HelpHint label={title}>{subtitle}</HelpHint> : null}
       </h3>
     </div>
@@ -229,7 +229,7 @@ export function SettingsRecordField({
   )
 }
 
-export function CopyButton({ value }: { value: string }): JSX.Element {
+export function CopyButton({ value, label }: { value: string; label?: string }): JSX.Element {
   const { t } = useTranslation()
   const [copied, setCopied] = useState(false)
   const copy = async (): Promise<void> => {
@@ -247,8 +247,9 @@ export function CopyButton({ value }: { value: string }): JSX.Element {
       type="button"
       variant="ghost"
       size="icon"
-      className="h-6 w-6 flex-none text-zinc-400 hover:bg-white/10 hover:text-zinc-50"
-      aria-label={copied ? t('settings.copy.copied') : t('settings.copy.copyValue')}
+      className="h-8 w-8 flex-none text-muted-foreground hover:bg-accent hover:text-foreground"
+      aria-label={copied ? t('settings.copy.copied') : label ?? t('settings.copy.copyValue')}
+      title={label ?? t('settings.copy.copyValue')}
       onClick={() => {
         void copy()
       }}

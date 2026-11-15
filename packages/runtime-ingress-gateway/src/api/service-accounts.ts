@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
-import type { SqlExecutor } from '../persistence/postgres.js'
+import type { ControlPlaneDatabase, SqlExecutor } from '../persistence/postgres.js'
 import { ACTIVE_CONTRACT_SQL } from '../organizations/contract-access.js'
+import { settingsPageCursor, type SettingsPageRequest } from '../organizations/settings-view.js'
 
 export type ServiceAccountScope = 'organization:read' | 'organization:write' | 'workspace:read' | 'workspace:write' | 'audit:read'
 const SERVICE_ACCOUNT_SCOPES = new Set<ServiceAccountScope>(['organization:read', 'organization:write', 'workspace:read', 'workspace:write', 'audit:read'])
@@ -19,7 +20,7 @@ export interface ServiceAccountRecord {
 export class ServiceAccountInputError extends Error {}
 
 export class ServiceAccountService {
-  constructor(private readonly database: SqlExecutor, private readonly options: {
+  constructor(private readonly database: SqlExecutor & Partial<Pick<ControlPlaneDatabase, 'transaction'>>, private readonly options: {
     maxActiveServiceAccounts?: number
     defaultExpirationMs?: number
     maxExpirationMs?: number
@@ -33,6 +34,11 @@ export class ServiceAccountService {
     if (defaultExpirationMs > maxExpirationMs) throw new Error('defaultExpirationMs must not exceed maxExpirationMs')
   }
 
+  limits(): { scopes: readonly ServiceAccountScope[]; defaultExpirationMs: number; maxExpirationMs: number; maxNameLength: number } {
+    return { scopes: [...SERVICE_ACCOUNT_SCOPES], defaultExpirationMs: this.options.defaultExpirationMs ?? DEFAULT_EXPIRATION_MS,
+      maxExpirationMs: this.options.maxExpirationMs ?? MAX_EXPIRATION_MS, maxNameLength: 200 }
+  }
+
   async create(input: { organizationId: string; name: string; scopes: readonly ServiceAccountScope[]; expiresAt?: string }): Promise<ServiceAccountRecord & { token: string }> {
     const name = input.name.trim()
     const scopes = [...new Set(input.scopes)]
@@ -43,17 +49,28 @@ export class ServiceAccountService {
       : parseExpiration(input.expiresAt)
     if (expiresAt.getTime() <= createdAt.getTime()) throw new ServiceAccountInputError('expiration must be in the future')
     if (expiresAt.getTime() - createdAt.getTime() > (this.options.maxExpirationMs ?? MAX_EXPIRATION_MS)) throw new ServiceAccountInputError('expiration exceeds the maximum lifetime')
-    if (this.options.maxActiveServiceAccounts !== undefined) {
-      const active = await this.database.query<{ count: string }>('SELECT COUNT(*)::text AS count FROM service_account_tokens WHERE organization_id=$1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now())', [input.organizationId])
-      if (Number(active.rows[0]?.count ?? 0) >= this.options.maxActiveServiceAccounts) throw new ServiceAccountInputError('service account quota exceeded')
-    }
     const id = `prn_${randomBytes(16).toString('base64url')}`, token = `ak_sa_${randomBytes(32).toString('base64url')}`
-    await this.database.query(`INSERT INTO principals(id,kind,display_name) VALUES($1,'service_account',$2)`, [id, name])
-    await this.database.query(`INSERT INTO service_account_tokens(id,organization_id,principal_id,token_hash,scopes,created_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7)`, [`sat_${randomBytes(16).toString('base64url')}`, input.organizationId, id, hash(token), scopes, createdAt, expiresAt])
+    const persist = async (database: SqlExecutor): Promise<void> => {
+      if (this.database.transaction) await database.query('SELECT id FROM organizations WHERE id=$1 FOR UPDATE', [input.organizationId])
+      if (this.options.maxActiveServiceAccounts !== undefined) {
+        const active = await database.query<{ count: string }>('SELECT COUNT(*)::text AS count FROM service_account_tokens WHERE organization_id=$1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>now())', [input.organizationId])
+        if (Number(active.rows[0]?.count ?? 0) >= this.options.maxActiveServiceAccounts) throw new ServiceAccountInputError('service account quota exceeded')
+      }
+      await database.query(`INSERT INTO principals(id,kind,display_name) VALUES($1,'service_account',$2)`, [id, name])
+      await database.query(`INSERT INTO service_account_tokens(id,organization_id,principal_id,token_hash,scopes,created_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7)`, [`sat_${randomBytes(16).toString('base64url')}`, input.organizationId, id, hash(token), scopes, createdAt, expiresAt])
+    }
+    if (this.database.transaction) await this.database.transaction(persist)
+    else await persist(this.database)
     return { id, token, name, scopes, createdAt: createdAt.toISOString(), expiresAt: expiresAt.toISOString(), revokedAt: null }
   }
 
-  async list(organizationId: string): Promise<ServiceAccountRecord[]> {
+  async listPage(organizationId: string, page: SettingsPageRequest): Promise<{ items: ServiceAccountRecord[]; nextCursor?: string }> {
+    const records = await this.list(organizationId, page)
+    const items = records.slice(0, page.limit), last = items.at(-1)
+    return { items, ...(records.length > page.limit && last ? { nextCursor: settingsPageCursor(organizationId, 'service-accounts', last.createdAt, last.id) } : {}) }
+  }
+
+  async list(organizationId: string, page?: SettingsPageRequest): Promise<ServiceAccountRecord[]> {
     const result = await this.database.query<{
       id: string
       name: string
@@ -67,8 +84,10 @@ export class ServiceAccountService {
       FROM service_account_tokens AS tokens
       JOIN principals ON principals.id = tokens.principal_id
       WHERE tokens.organization_id=$1
-      ORDER BY tokens.created_at DESC, tokens.principal_id
-    `, [organizationId])
+      ${page ? 'AND ($2::timestamptz IS NULL OR tokens.created_at<$2::timestamptz OR (tokens.created_at=$2::timestamptz AND tokens.principal_id>$3))' : ''}
+      ORDER BY tokens.created_at DESC, tokens.principal_id ASC
+      ${page ? 'LIMIT $4' : ''}
+    `, page ? [organizationId, page.after?.[0] ?? null, page.after?.[1] ?? null, page.limit + 1] : [organizationId])
     return result.rows.map((row) => ({
       id: row.id,
       name: row.name,

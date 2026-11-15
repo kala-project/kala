@@ -9,11 +9,13 @@ import { Button } from '../../../components/ui/button.js'
 import { HelpHint } from '../../../components/ui/help-hint.js'
 import { ScrollArea } from '../../../components/ui/scroll-area.js'
 import { CopyButton, EmptyRow, SectionHeader } from '../controls.js'
+import { useSettingsRequest } from '../configuration-request.js'
 
 type DashboardSocket = Socket<DashboardServerToClientEvents, DashboardClientToServerEvents>
 
-export function SocketAdminSection({ payload, onPayloadChange, socket }: { payload: ServerSettingsPayload; onPayloadChange(payload: ServerSettingsPayload): void; socket?: DashboardSocket }): JSX.Element {
+export function SocketAdminSection({ payload, onPayloadChange, socket, snapshotPath = '/settings', host }: { payload: ServerSettingsPayload; onPayloadChange(payload: ServerSettingsPayload): void; socket?: DashboardSocket; snapshotPath?: '/settings' | '/settings/sections/diagnostics'; host?: string }): JSX.Element {
   const { t } = useTranslation()
+  const request = useSettingsRequest()
   const queryClient = useQueryClient()
   const [password, setPassword] = useState('')
   const [mode, setMode] = useState<'development' | 'production'>(payload.socketAdmin?.configuredMode ?? payload.socketAdmin?.runtimeMode ?? 'development')
@@ -24,7 +26,7 @@ export function SocketAdminSection({ payload, onPayloadChange, socket }: { paylo
   }, [payload.socketAdmin?.configuredMode, payload.socketAdmin?.runtimeMode])
   const init = useMutation({
     mutationFn: async (): Promise<ServerSettingsPayload> => {
-      const res = await fetch('/settings/socket-admin/init', {
+      const res = await request('/settings/socket-admin/init', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ password, mode }),
@@ -43,7 +45,7 @@ export function SocketAdminSection({ payload, onPayloadChange, socket }: { paylo
   })
   const updateMode = useMutation({
     mutationFn: async (nextMode: 'development' | 'production'): Promise<ServerSettingsPayload> => {
-      const res = await fetch('/settings/socket-admin/mode', {
+      const res = await request('/settings/socket-admin/mode', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ mode: nextMode }),
@@ -91,13 +93,13 @@ export function SocketAdminSection({ payload, onPayloadChange, socket }: { paylo
     }, [socket])
     const refresh = useMutation({
       mutationFn: async () => {
-        const response = await fetch('/settings', { cache: 'no-store', signal: AbortSignal.timeout(10_000) })
+        const response = await request(snapshotPath, { cache: 'no-store', signal: AbortSignal.timeout(10_000) })
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         const next = await response.json() as ServerSettingsPayload
         if (!next.socketConnections) throw new Error(t('settings.socketAdmin.snapshotUnavailable'))
         return next
       },
-      onSuccess: onPayloadChange,
+      onSuccess: next => onPayloadChange(next),
     })
     const ping = useMutation({
       mutationFn: async () => {
@@ -122,7 +124,7 @@ export function SocketAdminSection({ payload, onPayloadChange, socket }: { paylo
                 <CopyButton value={new URL(payload.socketAdmin.path, window.location.origin).href} />
               </div>
             </div>
-            <Button size="sm" className="flex-none" asChild><a href={payload.socketAdmin.path} target="_blank" rel="noreferrer" data-testid="settings-open-socket-admin"><ExternalLink className="mr-1.5 h-4 w-4" aria-hidden />{t('settings.socketAdmin.open')}</a></Button>
+            <Button size="sm" className="flex-none" asChild><a href={host ? new URL(payload.socketAdmin.path, host).href : payload.socketAdmin.path} target="_blank" rel="noreferrer" data-testid="settings-open-socket-admin"><ExternalLink className="mr-1.5 h-4 w-4" aria-hidden />{t('settings.socketAdmin.open')}</a></Button>
           </div>
         ) : null}
         {payload.socketAdmin?.authentication === 'gateway-owner' && !payload.socketAdmin.active ? <p role="alert" className="text-destructive">{payload.socketAdmin.unavailableReason ?? t('settings.socketAdmin.unavailable')}</p> : null}
@@ -200,7 +202,7 @@ export function SocketAdminSection({ payload, onPayloadChange, socket }: { paylo
       </div>
     )
   }
-  const origin = typeof window === 'undefined' ? '' : window.location.origin
+  const origin = host ?? (typeof window === 'undefined' ? '' : window.location.origin)
   const href = `${origin}${admin.path}`
   const configuredMode = admin.configuredMode
   return (

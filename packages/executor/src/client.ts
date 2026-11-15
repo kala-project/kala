@@ -59,7 +59,7 @@ import { failureForToolError } from './tool-failure.js'
 import { analyzeShellCommand, formatShellSafetyBlock } from './tools/shell-ast-safety.js'
 import { McpClientManager, type McpToolDescriptor } from './mcp-client.js'
 import { parseDashboardMcpServers, type DashboardMcpServerConfig, type McpServerConfig } from './mcp-config.js'
-import { readDashboardMcpServers, writeDashboardMcpServers } from './mcp-managed-config.js'
+import { ManagedMcpSettingsProtocol, type McpCandidate } from './mcp-settings-protocol.js'
 import { ComputerUseManager, computerUseTools } from './computer-use/manager.js'
 import { attachmentTransferOwnerMatches, createAttachmentTransferTool } from './tools/attachment-transfer.js'
 
@@ -243,6 +243,12 @@ function dashboardServersRequest(value: unknown): DashboardMcpServerConfig[] {
 
 export function startExecutor(options: ExecutorOptions): ExecutorHandle {
   const logger = options.logger ?? noopLogger
+  const managedMcp = options.managedMcpConfig
+  const dashboardMcpAllowed = Boolean(managedMcp && managedMcp.configurationSource === 'managed-config'
+    && (managedMcp.installationSource === 'dashboard-native'
+      ? managedMcp.installationId.length > 0 && managedMcp.installationId === options.installId
+      : managedMcp.workspaceId.length > 0 && managedMcp.workspaceId === options.workspaceId)
+    && managedMcp.path.length > 0)
   const sandboxRoots = options.sandboxRoots ?? []
   const sandbox: Sandbox = createSandbox({ roots: sandboxRoots })
   const computer = desktopManager ??= new ComputerUseManager()
@@ -321,7 +327,7 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
     ...(options.installId ? { installId: options.installId } : {}),
     executorVersion: executorReleaseVersion(),
     build: executorBuildInfo(),
-    capabilities: executorCapabilities(tools, sandboxRoots),
+    capabilities: executorCapabilities(tools, sandboxRoots, dashboardMcpAllowed),
     workspaceId,
     workspaceName,
     tools: [...tools.keys()],
@@ -785,15 +791,9 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
 
   socket.on('executor:health_ping', (_sentAt, ack) => ack(Date.now()))
 
-  const managedMcp = options.managedMcpConfig
-  const dashboardMcpAllowed = Boolean(
-    managedMcp &&
-    managedMcp.configurationSource === 'managed-config' &&
-    (managedMcp.installationSource === 'dashboard-native'
-      ? managedMcp.installationId.length > 0 && managedMcp.installationId === options.installId
-      : (managedMcp.installationSource === 'private-cloud-invite' || managedMcp.installationSource === 'enrolled-config') && managedMcp.workspaceId.length > 0 && managedMcp.workspaceId === options.workspaceId) &&
-    managedMcp.path.length > 0,
-  )
+  const mcpSettingsProtocol = dashboardMcpAllowed && managedMcp
+    ? new ManagedMcpSettingsProtocol(managedMcp.path, workspaceId, managedMcp.installationSource === 'dashboard-native' ? managedMcp.installationId : managedMcp.workspaceId)
+    : undefined
   let mcpConfigQueue: Promise<void> = Promise.resolve()
   let executorClosing = false
   const serializedMcpConfig = <T>(operation: () => Promise<T>): Promise<T> => {
@@ -810,14 +810,51 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
       }
       try {
         strictRequest(payload, ['requestId'])
-        const servers = readDashboardMcpServers(managedMcp.path)
-        ack({ ok: true, servers: servers.map(({ name }) => ({ name })) })
+        ack(await mcpSettingsProtocol!.status())
       } catch {
         ack({ ok: false, error: 'managed Executor MCP config is invalid or unsafe' })
       }
     })
   })
 
+  const prepareManagedMcp = async (servers: DashboardMcpServerConfig[]): Promise<McpCandidate> => {
+    const candidate = createMcpManager(servers, true)
+    let initializationTimer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        candidate.manager.initialize(),
+        new Promise<never>((_resolve, reject) => {
+          initializationTimer = setTimeout(() => reject(new Error('MCP initialization deadline exceeded')), 30_000)
+        }),
+      ])
+    } catch {
+      allMcpManagers.delete(candidate.manager)
+      await candidate.manager.close()
+      throw new Error('one or more MCP servers could not be initialized')
+    } finally { if (initializationTimer) clearTimeout(initializationTimer) }
+    return {
+      async close() { allMcpManagers.delete(candidate.manager); await candidate.manager.close() },
+      activate() {
+        const retired = activeMcp
+        activeMcp = candidate.manager
+        const catalog = candidate.catalog()
+        applyMcpCatalog(catalog.tools, catalog.descriptors)
+        void retired.closeWhenIdle().finally(() => allMcpManagers.delete(retired))
+      },
+    }
+  }
+  socket.on('executor:mcp_patch', (payload, ack) => {
+    void serializedMcpConfig(async () => {
+      if (!mcpSettingsProtocol || executorClosing) { ack({ ok: false, error: 'mcp_patch_unavailable' }); return }
+      try { ack(await mcpSettingsProtocol.patch(payload, prepareManagedMcp)) }
+      catch (error) {
+        const message = error instanceof Error ? error.message : ''
+        const safe = ['configuration_conflict', 'mcp_server_not_found', 'deduplication_capacity_exceeded', 'edit_ticket_reused_with_different_request',
+          'expired_or_foreign_edit_ticket', 'invalid_edit_ticket', 'mcp_configuration_locked', 'mcp_integrity_key_missing']
+        ack({ ok: false, error: safe.includes(message) ? message : 'mcp_configuration_failed' })
+      }
+    })
+  })
   socket.on('executor:mcp_configure', (payload, ack) => {
     void serializedMcpConfig(async () => {
       if (!dashboardMcpAllowed || !managedMcp || executorClosing) {
@@ -833,39 +870,12 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
         return
       }
 
-      const candidate = createMcpManager(servers, true)
-      let initializationTimer: ReturnType<typeof setTimeout> | undefined
       try {
-        await Promise.race([
-          candidate.manager.initialize(),
-          new Promise<never>((_resolve, reject) => {
-            initializationTimer = setTimeout(() => reject(new Error('MCP initialization deadline exceeded')), 30_000)
-          }),
-        ])
-      } catch {
-        allMcpManagers.delete(candidate.manager)
-        await candidate.manager.close()
-        ack({ ok: false, error: 'one or more MCP servers could not be initialized' })
-        return
-      } finally {
-        if (initializationTimer) clearTimeout(initializationTimer)
+        ack(await mcpSettingsProtocol!.replace(servers, prepareManagedMcp))
+      } catch (error) {
+        ack({ ok: false, error: error instanceof Error && error.message === 'one or more MCP servers could not be initialized'
+          ? error.message : 'managed Executor MCP config could not be persisted safely' })
       }
-
-      try {
-        writeDashboardMcpServers(managedMcp.path, servers)
-      } catch {
-        allMcpManagers.delete(candidate.manager)
-        await candidate.manager.close()
-        ack({ ok: false, error: 'managed Executor MCP config could not be persisted safely' })
-        return
-      }
-
-      const retired = activeMcp
-      activeMcp = candidate.manager
-      const catalog = candidate.catalog()
-      applyMcpCatalog(catalog.tools, catalog.descriptors)
-      void retired.closeWhenIdle().finally(() => allMcpManagers.delete(retired))
-      ack({ ok: true })
     })
   })
 
@@ -969,9 +979,10 @@ export function startExecutor(options: ExecutorOptions): ExecutorHandle {
   }
 }
 
-function executorCapabilities(tools: ReadonlyMap<string, Tool>, sandboxRoots: readonly string[]): ExecutorAnnounce['capabilities'] {
+function executorCapabilities(tools: ReadonlyMap<string, Tool>, sandboxRoots: readonly string[], managedMcp: boolean): ExecutorAnnounce['capabilities'] {
   return {
     schemaVersion: 1,
+    ...(managedMcp ? { mcpConfigProtocol: 'patch-v1' } : {}),
     features: {
       backgroundShell: tools.has('bash_output') && tools.has('kill_shell'),
       filePicker: tools.has('__fs_list_dirs') && tools.has('__fs_list_files') && tools.has('__workspace_read_binary'),

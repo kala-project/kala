@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHookRunner } from './extensions/hooks.js'
 
 import { createConfig } from '@agent-kernel/kernel'
 import type { AgentConfig } from '@agent-kernel/kernel'
@@ -8508,13 +8509,15 @@ describe('wire protocol', () => {
     expect(seenPrompts.some((prompt) => prompt.includes('beaconed'))).toBe(true)
   })
 
-  it('fires session_start and session_end lifecycle hooks around create/delete', async () => {
+  it('executes native session_start and session_end lifecycle hooks around create/delete', async () => {
     const sessionId = 'wire-lifecycle-hooks'
     await server.close()
     const http = createServer()
     await new Promise<void>((resolve) => http.listen(0, resolve))
     const port = (http.address() as AddressInfo).port
     const calls: Array<{ event: string; sessionId: string }> = []
+    const runner = createHookRunner()
+    const command = `"${process.execPath}" -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>process.stdout.write(d))"`
     server = await startHostServer({
       port,
       sessionsDir: dir,
@@ -8523,14 +8526,17 @@ describe('wire protocol', () => {
       toolTimeoutMs: 2000,
       llm: scriptedLlm(),
       hooks: [
-        { event: 'session_start', command: 'true' },
-        { event: 'session_end', command: 'true' },
-        { event: 'session_start', command: 'true', match: 'nope' },
+        { event: 'session_start', command },
+        { event: 'session_end', command },
+        { event: 'session_start', command, match: 'nope' },
       ],
       hookRunner: {
         async run(hook, payload) {
-          calls.push({ event: hook.event, sessionId: payload.sessionId })
-          return { ok: true, exitCode: 0, stdout: '', stderr: '' }
+          const outcome = await runner.run(hook, payload)
+          expect(outcome.ok).toBe(true)
+          const received = JSON.parse(outcome.stdout)
+          calls.push({ event: received.event, sessionId: received.sessionId })
+          return outcome
         },
       },
     })
@@ -8557,20 +8563,17 @@ describe('wire protocol', () => {
       workspaceName: 'life-box',
     })
     await created
-    // Wait one tick so the async lifecycle hook has a chance to run.
-    await new Promise((r) => setTimeout(r, 50))
-    expect(calls).toEqual([{ event: 'session_start', sessionId }])
+    await vi.waitFor(() => expect(calls).toEqual([{ event: 'session_start', sessionId }]))
 
     const deleted = new Promise<{ sessionId: string }>((resolve) => {
       dashboard.on('server:session_deleted', resolve)
     })
     await new Promise<void>((resolve, reject) => dashboard.emit('client:delete_session', { operationId: 'delete-lifecycle-op', sessionId }, (ack) => ack.ok ? resolve() : reject(new Error(ack.error))))
     await deleted
-    await new Promise((r) => setTimeout(r, 50))
-    expect(calls).toEqual([
+    await vi.waitFor(() => expect(calls).toEqual([
       { event: 'session_start', sessionId },
       { event: 'session_end', sessionId },
-    ])
+    ]))
 
     dashboard.close()
   })

@@ -83,6 +83,7 @@ export const BuildMetadataSchema = z.object({
 
 export const ExecutorCapabilitiesSchema = z.object({
   schemaVersion: z.literal(1),
+  mcpConfigProtocol: z.literal('patch-v1').optional(),
   features: z.object({
     backgroundShell: z.boolean(),
     filePicker: z.boolean(),

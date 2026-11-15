@@ -69,6 +69,7 @@ export async function startLoopbackHostRuntimeUnit(
   }
   state = 'ready'
   let closed = false
+  let draining: Promise<void> | undefined
   let interruptDrain: (() => void) | undefined
   return {
     id,
@@ -77,20 +78,24 @@ export async function startLoopbackHostRuntimeUnit(
     server,
     ...(executor ? { executor } : {}),
     purgeOrganizationSessions: async (params) => await server.store.purgeOrganizationSessions(params),
-    async drain() {
-      if (closed || state === 'draining') return
+    drain() {
+      if (draining) return draining
+      if (closed) return Promise.reject(new Error(`Runtime Unit ${id} is closed`))
       state = 'draining'
       server.loop.beginDrain('checkpoint')
       const sessions = server.store.list()
       const interrupted = new Promise<never>((_resolve, reject) => {
         interruptDrain = () => reject(new Error(`Runtime Unit ${id} closed before drain checkpoint`))
       })
-      try {
-        await Promise.race([interrupted, Promise.all(sessions.map(async (session) => {
-          const snapshot = server.loop.drainSnapshot(session.sessionId)
-          if (!snapshot.safe) await server.loop.waitForCheckpoint(session.sessionId)
-        }))])
-      } finally { interruptDrain = undefined }
+      draining = (async () => {
+        try {
+          await Promise.race([interrupted, Promise.all(sessions.map(async (session) => {
+            const snapshot = server.loop.drainSnapshot(session.sessionId)
+            if (!snapshot.safe) await server.loop.waitForCheckpoint(session.sessionId)
+          }))])
+        } finally { interruptDrain = undefined }
+      })()
+      return draining
     },
     async close() {
       if (closed) return

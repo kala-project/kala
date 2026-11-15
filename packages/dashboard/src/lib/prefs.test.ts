@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { act, renderHook } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   DASHBOARD_PREFERENCES,
@@ -13,9 +14,14 @@ import {
   PREF_SHOW_PINNED_MESSAGE,
   dashboardPreferenceDefinitions,
   numberPreferenceOptions,
+  useBooleanPref,
+  useNumberPref,
+  useStringPref,
+  usePreferencePersistenceFailure,
 } from './prefs.js'
 
 describe('dashboard preference registry', () => {
+  afterEach(() => vi.restoreAllMocks())
   it('keeps storage keys unique', () => {
     const keys = dashboardPreferenceDefinitions().map((definition) => definition.key)
     expect(new Set(keys).size).toBe(keys.length)
@@ -47,5 +53,41 @@ describe('dashboard preference registry', () => {
 
   it('derives number hook bounds from number definitions', () => {
     expect(numberPreferenceOptions(DASHBOARD_PREFERENCES.sessionViewCacheMaxMb)).toEqual({ min: 0, max: 4096 })
+  })
+
+  it('retains persisted boolean, number and string values on storage failure, and clears each error only after that key succeeds', () => {
+    localStorage.setItem('test-pref-flag', '0')
+    localStorage.setItem('test-pref-count', '2')
+    localStorage.setItem('test-pref-label', 'original')
+    const { result } = renderHook(() => ({
+      flag: useBooleanPref('test-pref-flag', false),
+      otherFlag: useBooleanPref('test-pref-flag', false),
+      count: useNumberPref('test-pref-count', 1),
+      label: useStringPref('test-pref-label', 'default'),
+      failed: usePreferencePersistenceFailure(),
+    }))
+    const storage = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new DOMException('Storage unavailable', 'QuotaExceededError') })
+    act(() => {
+      result.current.flag[1](true)
+      result.current.count[1](3)
+      result.current.label[1]('changed')
+    })
+    expect(result.current.flag[0]).toBe(false)
+    expect(result.current.otherFlag[0]).toBe(false)
+    expect(result.current.count[0]).toBe(2)
+    expect(result.current.label[0]).toBe('original')
+    expect(result.current.failed).toBe(true)
+    storage.mockRestore()
+    act(() => result.current.flag[1](true))
+    expect(result.current.flag[0]).toBe(true)
+    expect(result.current.otherFlag[0]).toBe(true)
+    expect(result.current.failed).toBe(true)
+    act(() => {
+      result.current.count[1](3)
+      result.current.label[1]('changed')
+    })
+    expect(result.current.failed).toBe(false)
+    expect(localStorage.getItem('test-pref-count')).toBe('3')
+    expect(localStorage.getItem('test-pref-label')).toBe('changed')
   })
 })

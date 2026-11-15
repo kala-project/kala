@@ -14,7 +14,7 @@ export type PublicBrowserSession = {
   expiresAt: string
 }
 
-export function AccountCenter({ profile, organization, onClose }: { profile: AccountProfile; organization?: AccountOrganization; onClose(): void }): JSX.Element {
+export function AccountCenter({ profile, organization, onClose, embedded = false }: { profile: AccountProfile; organization?: AccountOrganization; onClose(): void; embedded?: boolean }): JSX.Element {
   const { t } = useTranslation()
   const [sessions, setSessions] = useState<PublicBrowserSession[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -36,12 +36,12 @@ export function AccountCenter({ profile, organization, onClose }: { profile: Acc
     await load()
   }
   return (
-    <ScrollArea className="fixed inset-0 z-[70] bg-background" data-testid="account-center" contentClassName="min-h-full">
-      <header className="sticky top-0 z-10 flex min-h-14 items-center justify-between bg-card/95 px-4 backdrop-blur">
+    <ScrollArea className={embedded ? 'min-w-0' : 'fixed inset-0 z-[70] bg-background'} data-testid="account-center" contentClassName="min-h-full">
+      {!embedded ? <header className="sticky top-0 z-10 flex min-h-14 items-center justify-between bg-card/95 px-4 backdrop-blur">
         <div><h1 className="flex items-center gap-1 text-base font-semibold">{t('account.title')}<HelpHint label={t('account.title')}>{t('account.subtitle')}</HelpHint></h1></div>
         <Button type="button" variant="ghost" onClick={onClose} className="h-11" data-testid="account-center-close">{t('common.close')}</Button>
-      </header>
-      <main className="mx-auto grid max-w-3xl gap-6 px-4 py-6">
+      </header> : null}
+      <main className={embedded ? 'grid min-w-0 gap-6' : 'mx-auto grid max-w-3xl gap-6 px-4 py-6'}>
         <section className="rounded-lg bg-card/70 p-4 shadow-sm"><h2 className="font-semibold">{t('account.profile')}</h2><div className="mt-3 flex items-center gap-3"><span className="grid h-11 w-11 place-items-center rounded-full bg-primary/15 font-semibold text-primary">{profile.initials}</span><div><div className="font-medium">{profile.displayName}</div>{profile.email ? <div className="text-sm text-muted-foreground">{profile.email}</div> : null}{organization ? <div className="mt-1 text-xs text-muted-foreground">{organization.name} · {organization.role}</div> : null}</div></div><p className="mt-3 text-xs text-muted-foreground">{t('account.identityManaged')}</p></section>
         <section className="rounded-lg border border-border/50 p-4"><h2 className="font-semibold">{t('account.devices')}</h2><p className="mt-1 text-xs text-muted-foreground">{t('account.devicesDescription')}</p>{loading ? <div className="mt-4 text-sm text-muted-foreground" role="status">{t('account.loading')}</div> : error ? <div className="mt-4 text-sm text-destructive" role="alert">{error} <button type="button" onClick={() => void load()} className="underline">{t('account.retry')}</button></div> : <div className="mt-4 grid gap-2" data-testid="account-session-list">{sessions.map((session) => <div key={session.id} className="flex items-start justify-between gap-3 rounded-md bg-muted/30 p-3" data-testid={`account-session-${session.id}`}><div><div className="text-sm font-medium">{session.device.label}{session.current ? ` · ${t('account.currentDevice')}` : ''}</div><div className="mt-1 text-xs text-muted-foreground">{t('account.activity', { last: new Date(session.lastSeenAt).toLocaleString(), expires: new Date(session.expiresAt).toLocaleString() })}</div></div><button type="button" onClick={() => void revoke(session)} className="min-h-10 rounded border border-border/50 px-3 text-xs text-destructive hover:bg-destructive/10">{t('account.signOut')}</button></div>)}</div>}</section>
         <section className="rounded-lg border border-border/50 p-4"><h2 className="font-semibold">{t('account.productLegal')}</h2><div className="mt-3 flex flex-wrap gap-3 text-sm"><a href="#/docs" className="text-primary underline">{t('account.help')}</a><a href="/privacy" className="text-primary underline">{t('account.privacy')}</a><a href="/terms" className="text-primary underline">{t('account.terms')}</a></div></section>

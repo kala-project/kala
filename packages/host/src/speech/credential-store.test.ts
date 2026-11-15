@@ -121,4 +121,20 @@ describe('LocalAzureSpeechCredentialStore', () => {
       expect(() => normalizeAzureSpeechEndpoint(endpoint)).toThrow()
     }
   })
+
+  it('rejects stale partial edits before changing key or metadata and preserves the key on a conditional update', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'azure-speech-cas-'))
+    roots.push(root)
+    const first = new LocalAzureSpeechCredentialStore(root)
+    const second = new LocalAzureSpeechCredentialStore(root)
+    const input = { endpoint: DEFAULT_AZURE_SPEECH_ENDPOINT, enabled: true, mode: 'realtime' as const }
+    expect((await first.configuration()).revision).toBe('1')
+    await first.set({ ...input, apiKey: TEST_KEY, realtimeMaxMinutes: 7 }, { expectedRevision: '1' })
+    await expect(second.set({ ...input, apiKey: 'stale-key' }, { expectedRevision: '1' })).rejects.toThrow('configuration_conflict')
+    expect(await first.get()).toMatchObject({ apiKey: TEST_KEY, realtimeMaxMinutes: 7 })
+    await second.set({ ...input, enabled: false }, { expectedRevision: '2' })
+    expect(await first.get()).toMatchObject({ apiKey: TEST_KEY, enabled: false, realtimeMaxMinutes: 7 })
+    expect((await second.configuration()).revision).toBe('3')
+    expect(JSON.stringify(await second.configuration())).not.toContain(TEST_KEY)
+  })
 })

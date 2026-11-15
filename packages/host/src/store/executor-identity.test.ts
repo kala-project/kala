@@ -38,6 +38,19 @@ describe('ExecutorIdentityStore invite expiry', () => {
     if (first.ok) expect(store.resolveToken(first.token)?.workspaceId).toBe('workspace-first')
   })
 
+  it('retains the non-secret enrollment association across reconstruction and device credential rotation', () => {
+    const file = path(), store = new ExecutorIdentityStore(file)
+    const invite = store.createInvite()
+    const bound = store.consumeInvite(invite.inviteToken, 'workspace-pool')
+    if (!bound.ok) throw new Error('fixture invitation was not accepted')
+    const association = hashToken(invite.inviteToken).slice('sha256:'.length)
+    const reconstructed = new ExecutorIdentityStore(file); reconstructed.load()
+    expect(reconstructed.resolveToken(bound.token)?.enrollmentHash).toBe(association)
+    const rotated = reconstructed.rotateWorkspaceCredential('workspace-pool')
+    expect(reconstructed.resolveToken(rotated)?.enrollmentHash).toBe(association)
+    expect(readFileSync(file, 'utf8')).not.toContain(invite.inviteToken)
+  })
+
   it('recovers an empty primary file from the previous durable snapshot', () => {
     const file = path(), store = new ExecutorIdentityStore(file)
     const token = store.provisionWorkspace('workspace', 'Executor')

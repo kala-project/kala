@@ -22,6 +22,23 @@ function settings(required = false): ServerSettingsPayload {
 }
 
 describe('desktop authorization settings', () => {
+  it('shows execution policy to readers without offering any writable toggle', () => {
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    render(<QueryClientProvider client={new QueryClient()}>
+      <SecuritySection readOnly payload={{ ...settings(), desktopAccess: {
+        manualAuthorizationRequired: true, computerUseEnabled: true, desktopPreviewEnabled: true,
+      } }} onPayloadChange={vi.fn()} />
+    </QueryClientProvider>)
+    for (const id of ['settings-computer-use', 'settings-desktop-preview', 'settings-desktop-manual-authorization']) {
+      const toggle = screen.getByTestId(id)
+      expect(toggle.hasAttribute('disabled')).toBe(true)
+      expect(toggle.getAttribute('aria-checked')).toBe('true')
+      fireEvent.click(toggle)
+    }
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it('keeps preview opt-in separate when enabling Computer Use', async () => {
     const initial = { ...settings(), desktopAccess: { manualAuthorizationRequired: false, computerUseEnabled: false, desktopPreviewEnabled: false } }
     const next = { ...initial, desktopAccess: { ...initial.desktopAccess, computerUseEnabled: true } }

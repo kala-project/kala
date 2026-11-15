@@ -12,7 +12,7 @@ afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recur
 describe('control-plane migrations', () => {
   it('keeps release migrations uniquely numbered so a fresh installation can start', async () => {
     const migrations = await readControlPlaneMigrations(join(import.meta.dirname, '../../migrations'))
-    expect(migrations.map(({ version }) => version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+    expect(migrations.map(({ version }) => version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
     expect(migrations[1]?.name).toBe('0002_service_accounts_webhooks.sql')
     expect(migrations[2]?.name).toBe('0003_workspace_entitlement.sql')
     expect(migrations[5]?.name).toBe('0006_oidc_login_states.sql')
@@ -63,18 +63,46 @@ describe('control-plane migrations', () => {
     await expect(assertControlPlaneSchema(new FakeDatabase(new Map([[1, 'a'], [2, 'b']])), migrations))
       .resolves.toBe(2)
   })
+
+  it('accepts only exact reviewed 12–17 bridge histories and rejects gaps, modified checksums and future versions', async () => {
+    const migrations = await readControlPlaneMigrations(join(import.meta.dirname, '../../migrations'))
+    for (const version of [12, 13, 14, 15, 16, 17]) {
+      const applied = migrations.slice(0, version)
+      const database = new FakeDatabase(new Map(applied.map(migration => [migration.version, migration.checksum])))
+      for (const migration of applied) database.names.set(migration.version, migration.name)
+      await expect(assertControlPlaneSchema(database, migrations)).resolves.toBe(version)
+      database.names.set(1, 'renamed.sql')
+      await expect(assertControlPlaneSchema(database, migrations)).rejects.toThrow('reviewed Settings bridge')
+      await expect(migrateControlPlane(database, migrations)).rejects.toThrow('not a known release prefix')
+      database.names.set(1, migrations[0]!.name)
+      database.applied.set(1, 'changed')
+      await expect(assertControlPlaneSchema(database, migrations)).rejects.toThrow('reviewed Settings bridge')
+      database.applied.set(1, migrations[0]!.checksum)
+      database.applied.delete(2)
+      await expect(assertControlPlaneSchema(database, migrations)).rejects.toThrow('reviewed Settings bridge')
+    }
+    await expect(assertControlPlaneSchema(new FakeDatabase(new Map([[11, 'old']])), migrations)).rejects.toThrow('schema version 11')
+    await expect(assertControlPlaneSchema(new FakeDatabase(new Map([[18, 'future']])), migrations)).rejects.toThrow('schema version 18')
+  })
 })
 
 class FakeDatabase implements ControlPlaneDatabase, SqlExecutor {
   readonly executed: string[] = []
   transactionCount = 0
-  constructor(readonly applied = new Map<number, string>()) {}
+  readonly names = new Map<number, string>()
+  constructor(readonly applied = new Map<number, string>()) {
+    this.names.set(1, '0001_one.sql')
+    this.names.set(2, '0002_two.sql')
+  }
   async query<Row extends Record<string, unknown> = Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<SqlQueryResult<Row>> {
     const normalized = text.trim()
     if (normalized.startsWith('CREATE TABLE IF NOT EXISTS control_plane_schema_migrations')) return result([])
     if (normalized.startsWith('SELECT version, checksum')) return result([...this.applied].map(([version, checksum]) => ({ version, checksum })) as unknown as Row[])
+    if (normalized.startsWith('SELECT version, name, checksum')) return result([...this.applied].map(([version, checksum]) => ({ version, name: this.names.get(version), checksum })) as unknown as Row[])
     if (normalized.startsWith('INSERT INTO control_plane_schema_migrations')) {
-      this.applied.set(Number(values?.[0]), String(values?.[2])); return result([])
+      this.applied.set(Number(values?.[0]), String(values?.[2]))
+      this.names.set(Number(values?.[0]), String(values?.[1]))
+      return result([])
     }
     if (!normalized.startsWith('SET LOCAL') && !normalized.startsWith('SELECT pg_advisory')) this.executed.push(normalized)
     return result([])

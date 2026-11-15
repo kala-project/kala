@@ -16,6 +16,10 @@ export type TenantRuntimeService = {
   drain(): Promise<void>
   markRoutable(unitId: string, organizationId?: string): Promise<void>
   suspendUnit(unitId: string): Promise<void>
+  /** Withdraw this Unit, await its existing graceful checkpoint, then retire it. */
+  quiesceUnit(unitId: string, operationId?: string): Promise<void>
+  /** Explicit maintenance resume; ordinary catalog reconciliation cannot undo a fence. */
+  resumeUnit(unitId: string, organizationId?: string, operationId?: string): Promise<void>
   /** Scan one authoritative page and schedule bounded, independent Unit recovery. */
   reconcile(): Promise<void>
   close(): Promise<void>
@@ -36,6 +40,7 @@ export async function startTenantRuntimeService(options: {
   /** Opt-in composition-root authority; legacy/local services keep their existing lifecycle. */
   catalog?: RuntimeUnitMaterializationCatalog
   requiresPlacement?: (unitId: TenantRuntimeUnitId) => boolean
+  beforeRoutable?(unitId: TenantRuntimeUnitId, organizationId?: string): Promise<void>
   tls?: {
     key: string | Buffer
     cert: string | Buffer
@@ -52,6 +57,9 @@ export async function startTenantRuntimeService(options: {
   const retiring = new Map<TenantRuntimeUnitId, Promise<void>>()
   const activating = new Map<TenantRuntimeUnitId, Promise<void>>()
   const reconcilingUnits = new Map<TenantRuntimeUnitId, Promise<void>>()
+  const maintenance = new Map<TenantRuntimeUnitId, Promise<void>>()
+  const maintenanceOwners = new Map<TenantRuntimeUnitId, string | undefined>()
+  const resuming = new Map<TenantRuntimeUnitId, Promise<void>>()
   let state: 'ready' | 'draining' | 'closed' = 'ready'
   let scan: Promise<void> | undefined
   let after: TenantRuntimeUnitId | undefined
@@ -132,8 +140,9 @@ export async function startTenantRuntimeService(options: {
   options.placementOwnership?.setLeaseLostHandler(retire)
   options.replicaMembership?.setLeaseLostHandler(retire)
 
-  function markRoutable(rawId: string, organizationId?: string): Promise<void> {
+  function markRoutable(rawId: string, organizationId?: string, permit?: Promise<void>): Promise<void> {
     const unitId = parseTenantRuntimeUnitId(rawId)
+    if (maintenance.has(unitId) && maintenance.get(unitId) !== permit) return Promise.reject(new Error('Runtime Unit is fenced for maintenance'))
     const existing = activating.get(unitId)
     if (existing) return existing
     const operation = Promise.resolve().then(async () => {
@@ -164,16 +173,73 @@ export async function startTenantRuntimeService(options: {
             throw new Error(`Runtime Unit ${unitId} membership is unavailable`)
           }
         }
-        if (state !== 'ready' || (epochs.get(unitId) ?? 0) !== epoch) throw new Error(`Runtime Unit ${unitId} activation was withdrawn`)
+        await options.beforeRoutable?.(unitId, organizationId)
+        if (options.replicaMembership && requiresPlacement(unitId) && !options.replicaMembership.activeLease(unitId, organizationId!)) {
+          throw new Error(`Runtime Unit ${unitId} membership changed during startup`)
+        }
+        if (state !== 'ready' || (maintenance.has(unitId) && maintenance.get(unitId) !== permit)
+          || (epochs.get(unitId) ?? 0) !== epoch) throw new Error(`Runtime Unit ${unitId} activation was withdrawn`)
         if (current) generations.set(unitId, current.generation)
         allowedUnits.add(unitId)
       } catch (error) {
-        await retire(unitId)
+        // Maintenance owns graceful teardown; an activation racing its fence
+        // must not turn a pending checkpoint into a lease-loss-style hard close.
+        if (!maintenance.has(unitId)) await retire(unitId)
         throw error
       }
     })
     activating.set(unitId, operation)
     const forget = (): void => { if (activating.get(unitId) === operation) activating.delete(unitId) }
+    void operation.then(forget, forget)
+    return operation
+  }
+
+  function quiesceUnit(rawId: string, operationId?: string): Promise<void> {
+    const unitId = parseTenantRuntimeUnitId(rawId)
+    const existing = maintenance.get(unitId)
+    if (existing && maintenanceOwners.get(unitId) !== operationId) return Promise.reject(new Error('Runtime Unit maintenance belongs to another operation'))
+    const resume = resuming.get(unitId)
+    if (existing && !resume) return existing
+    allowedUnits.delete(unitId)
+    epochs.set(unitId, (epochs.get(unitId) ?? 0) + 1)
+    const operation = Promise.resolve().then(async () => {
+      await resume?.catch(() => undefined)
+      await activating.get(unitId)?.catch(() => undefined)
+      await units.drain(unitId)
+      await retire(unitId)
+    })
+    // Keep successful and failed fences until an explicit, successful resume.
+    maintenance.set(unitId, operation)
+    maintenanceOwners.set(unitId, operationId)
+    return operation
+  }
+
+  function resumeUnit(rawId: string, organizationId?: string, operationId?: string): Promise<void> {
+    const unitId = parseTenantRuntimeUnitId(rawId)
+    if (maintenance.has(unitId) && maintenanceOwners.get(unitId) !== operationId) return Promise.reject(new Error('Runtime Unit maintenance belongs to another operation'))
+    const existing = resuming.get(unitId)
+    if (existing) return existing
+    const pending = maintenance.get(unitId)
+    const operation = Promise.resolve().then(async () => {
+      if (pending) await pending
+      if (maintenance.get(unitId) !== pending) throw new Error('Runtime Unit maintenance changed before resume')
+      try {
+        if (pending) await units.resume(unitId)
+        await markRoutable(unitId, organizationId, pending)
+        if (maintenance.get(unitId) !== pending) throw new Error('Runtime Unit maintenance changed during resume')
+        maintenance.delete(unitId)
+        maintenanceOwners.delete(unitId)
+      } catch (error) {
+        allowedUnits.delete(unitId)
+        if (maintenance.get(unitId) === pending) {
+          await units.drain(unitId)
+          await retire(unitId)
+        }
+        throw error
+      }
+    })
+    resuming.set(unitId, operation)
+    const forget = (): void => { if (resuming.get(unitId) === operation) resuming.delete(unitId) }
     void operation.then(forget, forget)
     return operation
   }
@@ -237,7 +303,9 @@ export async function startTenantRuntimeService(options: {
     port,
     units,
     status: () => ({ state, units: units.list().map((unit) => ({ id: unit.id, state: unit.state, origin: unit.origin })) }),
-    markRoutable,
+    markRoutable: (unitId, organizationId) => markRoutable(unitId, organizationId),
+    quiesceUnit,
+    resumeUnit,
     reconcile,
     suspendUnit: (rawId) => retire(parseTenantRuntimeUnitId(rawId)),
     async drain() {

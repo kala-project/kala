@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { ConnectionStatus, ConnectionStatusEntry, ConnectionStatusProvider, connectionHealthSocket, connectionStatusForTransport } from './app.js'
+import { ConnectionStatus, ConnectionStatusEntry, ConnectionStatusProvider, PersonalConnectionPanel, connectionHealthSocket, connectionStatusForTransport } from './app.js'
 import { SidebarBrand } from './app-shell/AppShellNav.js'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from './components/ui/dialog.js'
 
@@ -58,6 +58,7 @@ function timedOutSocket() {
 
 describe('ConnectionStatus', () => {
   afterEach(() => {
+    vi.useRealTimers()
     vi.restoreAllMocks()
   })
 
@@ -78,8 +79,13 @@ describe('ConnectionStatus', () => {
     expect(within(popover).queryByText('Diagnostics')).toBeNull()
     expect(within(popover).queryByText('Reachability and round-trip latency')).toBeNull()
     expect(screen.queryByText('Reachability and round-trip latency')).toBeNull()
+    expect(screen.queryByText(/Independent application RTTs/u)).toBeNull()
+    expect(screen.queryByTestId('connection-sample-freshness')).toBeNull()
     fireEvent.click(screen.getByTestId('connection-health-help'))
-    expect(screen.getByRole('tooltip').textContent).toBe('Reachability and round-trip latency')
+    expect(screen.getByRole('tooltip').textContent).toContain('Reachability and round-trip latency')
+    expect(screen.getByRole('tooltip').textContent).toContain('Independent application RTTs')
+    expect(screen.getByRole('tooltip').textContent).toContain('This open panel samples')
+    expect(within(screen.getByRole('tooltip')).getByTestId('connection-sample-freshness')).toBeTruthy()
     const row = within(screen.getByTestId('connection-transport-row'))
     expect(row.getByText('Transport · websocket')).toBeTruthy()
     expect(row.getByRole('button', { name: 'Copy' })).toBeTruthy()
@@ -112,7 +118,7 @@ describe('ConnectionStatus', () => {
     expect(indicator.getAttribute('data-compact')).toBe('true')
     expect(indicator.textContent).toBe('')
     expect(indicator.querySelector('.bg-emerald-500')).not.toBeNull()
-    await waitFor(() => expect(indicator.getAttribute('title')).toBe('Connected · 12 ms'))
+    await waitFor(() => expect(indicator.getAttribute('title')).toBe('Connected · Device → Service: 12 ms'))
     expect(screen.queryByTestId('connection-headline-latency')).toBeNull()
     fireEvent.click(indicator)
     expect(screen.getByTestId('connection-status-popover')).toBeTruthy()
@@ -158,7 +164,7 @@ describe('ConnectionStatus', () => {
     view.rerender(<ConnectionStatus socket={next as never} workspaceId="w1" status="ready" cursor={2} executorConnected onResync={() => {}} />)
     expect(screen.getByTestId('connection-status-popover')).toBeTruthy()
     expect(screen.getAllByTestId('connection-health-host-marker').length).toBeGreaterThan(0)
-    expect(screen.getByTestId('connection-headline-latency').textContent).toBe('46 ms')
+    expect(screen.getByTestId('connection-headline-latency').textContent).toBe('12 ms')
   })
 
   it('keeps Workspace health on the control connection while a new Session route connects', () => {
@@ -177,7 +183,7 @@ describe('ConnectionStatus', () => {
     expect(retained).toBe(control)
     expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('ready')
     expect(screen.getByTestId('connection-status-popover')).toBeTruthy()
-    expect(screen.getByTestId('connection-headline-latency').textContent).toBe('46 ms')
+    expect(screen.getByTestId('connection-headline-latency').textContent).toBe('12 ms')
     expect(screen.getByText('Session sync').closest('div')?.textContent).toContain('Disconnected')
     expect(connectionHealthSocket(control, nextSession, true)).toBe(nextSession)
   })
@@ -188,7 +194,7 @@ describe('ConnectionStatus', () => {
     render(<ConnectionStatus socket={control as never} executorSocket={session as never}
       status="ready" sessionSyncStatus="ready" cursor={1} workspaceId="w1" executorConnected onResync={() => {}} />)
 
-    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('32 ms'))
+    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('8 ms'))
     expect(control.timeout.mock.calls.map(([timeout]) => timeout)).toEqual([3000])
     expect(session.timeout.mock.calls.map(([timeout]) => timeout)).toEqual([3500])
     fireEvent.click(screen.getByTestId('connection-status'))
@@ -211,16 +217,18 @@ describe('ConnectionStatus', () => {
 
     view.rerender(<ConnectionStatus socket={control as never} executorSocket={route as never}
       status="ready" sessionSyncStatus="ready" cursor={2} workspaceId="w1" executorConnected onResync={() => {}} />)
-    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('32 ms'))
+    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('8 ms'))
     expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('ready')
     expect(route.timeout.mock.calls.map(([timeout]) => timeout)).toEqual([3500])
   })
 
-  it('presents the complete Device to Service to Executor RTT as the headline', async () => {
+  it('presents only the Device to Service RTT as the headline, never a sum of independent samples', async () => {
     const socket = socketWithRtt()
     render(<ConnectionStatus socket={socket as never} status="ready" transport="websocket" cursor={9} workspaceId="w1" executorConnected onResync={() => {}} />)
 
-    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('46 ms'))
+    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('12 ms'))
+    expect(screen.getByTestId('connection-status').getAttribute('title')).toContain('Device → Service: 12 ms')
+    expect(screen.queryByText('46 ms')).toBeNull()
     fireEvent.click(screen.getByTestId('connection-status'))
     const path = within(screen.getByTestId('connection-path'))
     expect(screen.getByTestId('connection-segment-device-service').getAttribute('title')).toContain('Device → Service')
@@ -228,16 +236,16 @@ describe('ConnectionStatus', () => {
     expect(path.getByText('Device')).toBeTruthy()
     expect(path.getByText('Service')).toBeTruthy()
     expect(path.getByText('Executor')).toBeTruthy()
-    expect(screen.getByText('12 ms')).toBeTruthy()
+    expect(within(path.getByTestId('connection-segment-device-service')).getByText('12 ms')).toBeTruthy()
     expect(screen.getByText('34 ms')).toBeTruthy()
     expect(screen.queryByText(/cursor/i)).toBeNull()
   })
 
-  it('does not present a partial segment as complete latency while Executor measurement is unavailable', async () => {
+  it('retains the independent service RTT without pretending the unavailable Executor was measured', async () => {
     const socket = socketWithRtt(12, null)
     render(<ConnectionStatus socket={socket as never} status="ready" transport="websocket" cursor={9} workspaceId="w1" executorConnected onResync={() => {}} />)
 
-    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('—'))
+    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('12 ms'))
     expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('connecting')
     fireEvent.click(screen.getByTestId('connection-status'))
     expect(screen.queryByText('Healthy')).toBeNull()
@@ -310,7 +318,7 @@ describe('ConnectionStatus', () => {
     await waitFor(() => expect(socket.timeout).toHaveBeenCalledTimes(1))
     fireEvent.focus(window)
     fireEvent(document, new Event('visibilitychange'))
-    await waitFor(() => expect(socket.timeout).toHaveBeenCalledTimes(2))
+    expect(socket.timeout).toHaveBeenCalledTimes(1)
     expect(ordinary.getAttribute('data-status')).toBe('error')
     expect(desktop.getAttribute('data-status')).toBe('error')
     expect(mobile.getAttribute('data-status')).toBe('error')
@@ -380,20 +388,20 @@ describe('ConnectionStatus', () => {
     expect(resync).toHaveBeenCalledOnce()
   })
 
-  it('marks the overall connection as failed after repeated latency probe timeouts', async () => {
+  it('does not infer transport disconnection from repeated latency probe timeouts', async () => {
     render(<ConnectionStatus socket={timedOutSocket() as never} status="ready" transport="websocket" cursor={9} workspaceId="w1" executorConnected onResync={() => {}} />)
 
     await waitFor(() => expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('connecting'))
     fireEvent.click(screen.getByTestId('connection-status'))
     expect(screen.queryByText('Connection issue')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Measure again' }))
-    await waitFor(() => expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('error'))
-    expect(screen.getAllByText('Connection issue').length).toBeGreaterThanOrEqual(1)
+    await waitFor(() => expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('connecting'))
+    expect(screen.queryByText('Connection issue')).toBeNull()
     expect(screen.getByTestId('connection-headline-latency').textContent).toBe('—')
 
     expect(screen.getByTestId('connection-segment-device-service').getAttribute('title')).toContain('Timed out')
     expect(screen.getByTestId('connection-segment-service-executor').getAttribute('title')).toContain('Timed out')
-    expect(screen.getAllByText('Connection issue').length).toBeGreaterThanOrEqual(2)
+    expect(screen.getByText('Synchronized')).toBeTruthy()
   })
 
   it('keeps a rolling 10 minute curve instead of only the latest measurement', async () => {
@@ -403,7 +411,7 @@ describe('ConnectionStatus', () => {
 
     render(<ConnectionStatus socket={socket as never} status="ready" transport="websocket" cursor={9} workspaceId="w1" executorConnected onResync={() => {}} />)
 
-    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('30 ms'))
+    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('10 ms'))
     fireEvent.click(screen.getByTestId('connection-status'))
     const initialSampleCount = await waitFor(() => {
       const count = Number(screen.getByTestId('connection-health-curve').getAttribute('data-sample-count'))
@@ -428,7 +436,7 @@ describe('ConnectionStatus', () => {
 
     render(<ConnectionStatus socket={socket as never} status="ready" transport="websocket" cursor={9} workspaceId="w1" executorConnected onResync={() => {}} />)
 
-    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('1100 ms'))
+    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('100 ms'))
     fireEvent.click(screen.getByTestId('connection-status'))
     const initialSampleCount = await waitFor(() => {
       const count = Number(screen.getByTestId('connection-health-curve').getAttribute('data-sample-count'))
@@ -460,7 +468,7 @@ describe('ConnectionStatus', () => {
 
     render(<ConnectionStatus socket={socket as never} status="ready" transport="websocket" cursor={9} workspaceId="w1" executorConnected onResync={() => {}} />)
 
-    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('1100 ms'))
+    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('100 ms'))
     fireEvent.click(screen.getByTestId('connection-status'))
     wallClock = 30_000
     fireEvent.click(screen.getByRole('button', { name: 'Measure again' }))
@@ -475,7 +483,7 @@ describe('ConnectionStatus', () => {
     const socket = socketWithRttSeries([100, 200], [1000, 2000])
 
     render(<ConnectionStatus socket={socket as never} status="ready" cursor={9} workspaceId="w1" executorConnected onResync={() => {}} />)
-    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('1100 ms'))
+    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('100 ms'))
     fireEvent.click(screen.getByTestId('connection-status'))
     wallClock = 30_000
     fireEvent.click(screen.getByRole('button', { name: 'Measure again' }))
@@ -504,7 +512,7 @@ describe('ConnectionStatus', () => {
 
     render(<ConnectionStatus socket={socket as never} status="ready" transport="websocket" cursor={9} workspaceId="w1" executorConnected onResync={() => {}} />)
 
-    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('174 ms'))
+    await waitFor(() => expect(screen.getByTestId('connection-headline-latency').textContent).toBe('89 ms'))
     fireEvent.click(screen.getByTestId('connection-status'))
 
     const hit = await waitFor(() => {
@@ -545,5 +553,173 @@ describe('ConnectionStatus', () => {
     expect(screen.getByTestId('connection-health-unmeasured').textContent).toBe('Waiting for the first measurement…')
     expect(screen.queryByRole('group', { name: 'Last 10 minutes connection health chart' })).toBeNull()
     expect(screen.queryByTestId('connection-health-sample-hit')).toBeNull()
+  })
+
+  it('does not poll while closed and marks the retained sample stale without changing transport status', () => {
+    vi.useFakeTimers()
+    const socket = socketWithRtt()
+    render(<ConnectionStatus socket={socket as never} status="ready" cursor={0} executorConnected={false} onResync={() => {}} />)
+    expect(socket.timeout).toHaveBeenCalledTimes(1)
+    act(() => vi.advanceTimersByTime(10 * 60_000))
+    expect(socket.timeout).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('ready')
+    expect(screen.getByTestId('connection-headline-latency').textContent).toBe('12 ms · Stale')
+    fireEvent.click(screen.getByTestId('connection-status'))
+    fireEvent.click(screen.getByTestId('connection-health-help'))
+    expect(screen.getByTestId('connection-sample-freshness').querySelector('[data-freshness="stale"]')).toBeTruthy()
+    act(() => vi.advanceTimersByTime(5_000))
+    expect(socket.timeout).toHaveBeenCalledTimes(2)
+    expect(screen.getByTestId('connection-sample-freshness').querySelector('[data-freshness="fresh"]')).toBeTruthy()
+    fireEvent.click(screen.getByTestId('connection-status'))
+    act(() => vi.advanceTimersByTime(4 * 60_000))
+    expect(socket.timeout).toHaveBeenCalledTimes(2)
+  })
+
+  it('shares one five-second schedule and a two-minute budget across all visible indicators', () => {
+    vi.useFakeTimers()
+    const socket = socketWithRtt()
+    render(<ConnectionStatusProvider socket={socket as never} status="ready" cursor={0} workspaceId="w1" executorConnected onResync={() => {}}>
+      <ConnectionStatusEntry triggerId="topbar" />
+      <ConnectionStatusEntry appearance="brand" triggerId="sidebar" />
+    </ConnectionStatusProvider>)
+    expect(socket.timeout).toHaveBeenCalledTimes(2)
+    fireEvent.click(screen.getByTestId('connection-status'))
+    act(() => vi.advanceTimersByTime(60_000))
+    expect(socket.timeout).toHaveBeenCalledTimes(26)
+    fireEvent.click(screen.getByTestId('sidebar-connection-status'))
+    act(() => vi.advanceTimersByTime(120_000))
+    expect(socket.timeout).toHaveBeenCalledTimes(48)
+    fireEvent.click(screen.getByRole('button', { name: 'Measure again' }))
+    expect(socket.timeout).toHaveBeenCalledTimes(50)
+    act(() => vi.advanceTimersByTime(120_000))
+    expect(socket.timeout).toHaveBeenCalledTimes(50)
+    fireEvent.click(screen.getByTestId('sidebar-connection-status'))
+    fireEvent.click(screen.getByTestId('sidebar-connection-status'))
+    act(() => vi.advanceTimersByTime(5_000))
+    expect(socket.timeout).toHaveBeenCalledTimes(52)
+  })
+
+  it('stops sampling on hidden and requires an explicit reopening to restart', () => {
+    vi.useFakeTimers()
+    const socket = socketWithRtt()
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+    render(<ConnectionStatus socket={socket as never} status="ready" cursor={0} executorConnected={false} onResync={() => {}} />)
+    fireEvent.click(screen.getByTestId('connection-status'))
+    act(() => vi.advanceTimersByTime(5_000))
+    expect(socket.timeout).toHaveBeenCalledTimes(2)
+    hidden.mockReturnValue(true)
+    fireEvent(document, new Event('visibilitychange'))
+    act(() => vi.advanceTimersByTime(30_000))
+    expect(socket.timeout).toHaveBeenCalledTimes(2)
+    hidden.mockReturnValue(false)
+    fireEvent(document, new Event('visibilitychange'))
+    fireEvent.focus(window)
+    act(() => vi.advanceTimersByTime(5_000))
+    expect(socket.timeout).toHaveBeenCalledTimes(2)
+    fireEvent.click(screen.getByTestId('connection-status'))
+    fireEvent.click(screen.getByTestId('connection-status'))
+    act(() => vi.advanceTimersByTime(5_000))
+    expect(socket.timeout).toHaveBeenCalledTimes(3)
+  })
+
+  it('stops automatic measurements after a failed sample, without treating it as disconnection', () => {
+    vi.useFakeTimers()
+    const socket = timedOutSocket()
+    render(<ConnectionStatus socket={socket as never} status="ready" cursor={0} executorConnected={false} onResync={() => {}} />)
+    fireEvent.click(screen.getByTestId('connection-status'))
+    act(() => vi.advanceTimersByTime(120_000))
+    expect(socket.timeout).toHaveBeenCalledTimes(2)
+    expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('connecting')
+    expect(screen.queryByText('Connection issue')).toBeNull()
+    fireEvent.click(screen.getByTestId('connection-health-help'))
+    expect(screen.getByTestId('connection-sample-freshness').querySelector('[data-freshness="failed"]')).toBeTruthy()
+  })
+
+  it('does not overlap pending probes, publish hidden ACKs or keep polling a disconnected transport', () => {
+    vi.useFakeTimers()
+    const callbacks: Array<(...args: unknown[]) => void> = []
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+    const socket = { connected: true, timeout: vi.fn(() => ({
+      emit: (_event: string, _arg: unknown, callback: (...args: unknown[]) => void) => callbacks.push(callback),
+    })) }
+    const view = render(<ConnectionStatus socket={socket as never} status="ready" cursor={0} executorConnected={false} onResync={() => {}} />)
+    fireEvent.click(screen.getByTestId('connection-status'))
+    act(() => vi.advanceTimersByTime(10_000))
+    expect(socket.timeout).toHaveBeenCalledTimes(1)
+    hidden.mockReturnValue(true)
+    fireEvent(document, new Event('visibilitychange'))
+    act(() => callbacks[0]!(null))
+    expect(screen.queryByTestId('connection-health-host-marker')).toBeNull()
+    hidden.mockReturnValue(false)
+    fireEvent(document, new Event('visibilitychange'))
+    fireEvent.click(screen.getByTestId('connection-status'))
+    fireEvent.click(screen.getByTestId('connection-status'))
+    act(() => vi.advanceTimersByTime(5_000))
+    expect(socket.timeout).toHaveBeenCalledTimes(2)
+    socket.connected = false
+    view.rerender(<ConnectionStatus socket={socket as never} status="disconnected" cursor={0} executorConnected={false} onResync={() => {}} />)
+    act(() => callbacks[1]!(null))
+    act(() => vi.advanceTimersByTime(120_000))
+    expect(socket.timeout).toHaveBeenCalledTimes(2)
+    expect(screen.getByTestId('connection-status').getAttribute('data-status')).toBe('disconnected')
+    expect(screen.queryByTestId('connection-health-host-marker')).toBeNull()
+  })
+
+  it('stops sampling when the expanded entry is unmounted while its shared Provider survives', () => {
+    vi.useFakeTimers()
+    const socket = socketWithRtt()
+    const props = { socket: socket as never, status: 'ready', cursor: 0, executorConnected: false, onResync() {} }
+    const view = render(<ConnectionStatusProvider {...props}><ConnectionStatusEntry triggerId="drawer" /></ConnectionStatusProvider>)
+    fireEvent.click(screen.getByTestId('connection-status'))
+    act(() => vi.advanceTimersByTime(5_000))
+    expect(socket.timeout).toHaveBeenCalledTimes(2)
+    view.rerender(<ConnectionStatusProvider {...props}><span>Settings</span></ConnectionStatusProvider>)
+    act(() => vi.advanceTimersByTime(30_000))
+    expect(socket.timeout).toHaveBeenCalledTimes(2)
+    expect(screen.queryByTestId('connection-status-popover')).toBeNull()
+  })
+
+  it('samples the visible Personal panel without opening a dialog, shares its schedule and stops on route unmount', () => {
+    vi.useFakeTimers()
+    const control = socketWithRtt()
+    const executor = socketWithRtt(0, 37)
+    const props = { socket: control as never, executorSocket: executor as never, status: 'ready',
+      sessionSyncStatus: 'ready', cursor: 0, workspaceId: 'w1', executorConnected: true, onResync() {} }
+    const view = render(<ConnectionStatusProvider {...props}>
+      <ConnectionStatusEntry triggerId="sidebar" /><PersonalConnectionPanel />
+    </ConnectionStatusProvider>)
+    expect(screen.queryByTestId('connection-status-popover')).toBeNull()
+    expect(within(screen.getByTestId('personal-connection-panel')).getByTestId('connection-segment-device-service')).toBeTruthy()
+    expect(within(screen.getByTestId('personal-connection-panel')).getByTestId('connection-segment-service-executor')).toHaveProperty('textContent', '37 ms')
+    act(() => vi.advanceTimersByTime(27_000))
+    expect(control.timeout).toHaveBeenCalledTimes(6)
+    expect(executor.timeout).toHaveBeenCalledTimes(6)
+    fireEvent.click(screen.getByTestId('connection-status'))
+    act(() => vi.advanceTimersByTime(5_000))
+    expect(control.timeout).toHaveBeenCalledTimes(7)
+    expect(executor.timeout).toHaveBeenCalledTimes(7)
+    fireEvent.click(screen.getByTestId('connection-status'))
+    view.rerender(<ConnectionStatusProvider {...props}><ConnectionStatusEntry triggerId="sidebar" /></ConnectionStatusProvider>)
+    act(() => vi.advanceTimersByTime(30_000))
+    expect(control.timeout).toHaveBeenCalledTimes(7)
+    expect(executor.timeout).toHaveBeenCalledTimes(7)
+  })
+
+  it('bounds cold-entry Personal sampling to the control leg and preserves hidden-tab stop behavior', () => {
+    vi.useFakeTimers()
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+    const control = socketWithRtt()
+    render(<ConnectionStatusProvider socket={control as never} status="ready" sessionSelected={false}
+      cursor={0} executorConnected={false} onResync={() => {}}><PersonalConnectionPanel /></ConnectionStatusProvider>)
+    expect(screen.queryByTestId('connection-segment-service-executor')).toBeNull()
+    act(() => vi.advanceTimersByTime(27_000))
+    expect(control.timeout).toHaveBeenCalledTimes(6)
+    hidden.mockReturnValue(true)
+    fireEvent(document, new Event('visibilitychange'))
+    act(() => vi.advanceTimersByTime(30_000))
+    hidden.mockReturnValue(false)
+    fireEvent(document, new Event('visibilitychange'))
+    act(() => vi.advanceTimersByTime(120_000))
+    expect(control.timeout).toHaveBeenCalledTimes(6)
   })
 })

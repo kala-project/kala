@@ -97,6 +97,30 @@ describe('PostgreSQL migrations', () => {
     await expect(assertPostgresSchemaCurrent(client)).rejects.toThrow('does not match this release')
   })
 
+  it('accepts only exact complete schema33/34/35 bridge histories, including metadata drift checks', async () => {
+    const client = new FakeClient()
+    await runPostgresMigrations(pool(client))
+    const complete = client.applied.map((row) => ({ ...row }))
+    for (const version of [33, 34, 35]) {
+      client.applied.splice(0, client.applied.length, ...complete.slice(0, version).map(row => ({ ...row })))
+      await expect(assertPostgresSchemaCurrent(client)).resolves.toBe(version)
+    }
+    client.applied.splice(33)
+    await expect(assertPostgresSchemaCurrent(client)).resolves.toBe(33)
+    expect(client.applied[32]).toEqual({
+      version: 33, name: 'stored_session_list_summaries',
+      checksum: '8c2ba7454860aa668508858485cd34020df4b9bcf419dab3e4831d1dd9641bd3',
+    })
+    client.applied.splice(32)
+    await expect(assertPostgresSchemaCurrent(client)).rejects.toThrow('not current')
+    client.applied.splice(0, client.applied.length, ...complete)
+    client.applied[33]!.name = 'unexpected expansion'
+    await expect(assertPostgresSchemaCurrent(client)).rejects.toThrow('does not match')
+    client.applied[33] = complete[33]!
+    client.applied.push({ version: 36, name: 'unreviewed', checksum: 'unreviewed' })
+    await expect(assertPostgresSchemaCurrent(client)).rejects.toThrow('newer')
+  })
+
   it('upgrades v7 with the additive prompt table and lossless native counter widening', async () => {
     const client = new FakeClient()
     await runPostgresMigrations(pool(client))

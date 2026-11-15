@@ -1,7 +1,10 @@
 import { createHash, randomBytes } from 'node:crypto'
 
-import type { AuthenticatedIdentity } from '../assignments/store.js'
+import type { AuthenticatedIdentity, ExecutorInviteBinding } from '../assignments/store.js'
 import { identityKey, inviteKey } from '../assignments/store.js'
+import type { OrganizationSettingsSection, OrganizationSettingsValue } from '@agent-kernel/shared'
+import type { SettingsPageRequest } from './settings-view.js'
+import { assertControlSettingsWrite, type ControlSettingsWriteOptions } from '../settings/control-revisions.js'
 
 export type OrganizationRole = 'owner' | 'admin' | 'member' | 'viewer'
 export type OrganizationPermission = 'runtime:read' | 'runtime:write' | 'workspace:manage' | 'organization:manage' | 'policy:manage'
@@ -13,6 +16,10 @@ export type OrganizationMembership = { organizationId: string; identity: Authent
 export type OrganizationAccess = { organization: Organization; membership: OrganizationMembership }
 export type OrganizationInvite = { id: string; organizationId: string; email: string; role: Exclude<OrganizationRole, 'owner'>; createdAt: string; expiresAt: string; acceptedAt?: string; revokedAt?: string }
 export type CreatedOrganizationInvite = { invite: OrganizationInvite; token: string }
+export type RetentionConfiguration = {
+  revision: string
+  value: { sessionDays: number; artifactDays: number; auditDays: number; deletedResourceGraceDays: number }
+}
 
 export interface OrganizationStore {
   getOrCreateForIdentity(identity: AuthenticatedIdentity): Promise<OrganizationAccess>
@@ -26,12 +33,16 @@ export interface OrganizationStore {
   listInvites?(organizationId: string): Promise<readonly OrganizationInvite[]>
   revokeInvite?(organizationId: string, inviteId: string): Promise<void>
   acceptInvite?(inviteTokenHash: string, identity: AuthenticatedIdentity): Promise<OrganizationAccess>
-  bindExecutorInvite(inviteToken: string, unitId: string): Promise<void>
+  bindExecutorInvite(inviteToken: string, unitId: string, binding?: ExecutorInviteBinding): Promise<void>
+  revokeExecutorInviteBinding?(inviteId: string, unitId: string, revokeEnrolled: boolean): Promise<void>
   findUnitByExecutorInvite(inviteToken: string): Promise<string | undefined>
   findUnitByExecutorRouteHint(inviteHash: string): Promise<string | undefined>
   administrationSnapshot?(organizationId: string): Promise<Record<string, unknown>>
-  updateRetentionPolicy?(organizationId: string, policy: { sessionDays: number; artifactDays: number; auditDays: number; deletedResourceGraceDays: number }): Promise<void>
-  updateAttachmentLimit?(organizationId: string, maxBytes: number, actor: AuthenticatedIdentity): Promise<void>
+  settingsView?(organizationId: string, section: OrganizationSettingsSection, page: SettingsPageRequest): Promise<OrganizationSettingsValue>
+  retentionConfiguration?(organizationId: string): Promise<RetentionConfiguration>
+  updateRetentionPolicy?(organizationId: string, policy: { sessionDays: number; artifactDays: number; auditDays: number; deletedResourceGraceDays: number }, write?: ControlSettingsWriteOptions & { actor?: AuthenticatedIdentity }): Promise<void>
+  attachmentConfiguration?(organizationId: string): Promise<{ revision?: string; value: { maxBytes: number } }>
+  updateAttachmentLimit?(organizationId: string, maxBytes: number, actor: AuthenticatedIdentity, write?: ControlSettingsWriteOptions): Promise<void>
 }
 
 const ROLE_PERMISSIONS: Record<OrganizationRole, ReadonlySet<OrganizationPermission>> = {
@@ -46,6 +57,7 @@ export function permits(role: OrganizationRole, permission: OrganizationPermissi
 }
 
 export class MemoryOrganizationStore implements OrganizationStore {
+  private readonly attachmentRevisions = new Map<string, bigint>()
   protected readonly organizations = new Map<string, Organization>()
   protected readonly memberships = new Map<string, OrganizationMembership>()
   protected readonly executorInviteUnits = new Map<string, string>()
@@ -68,11 +80,21 @@ export class MemoryOrganizationStore implements OrganizationStore {
     return membership && organization ? { organization, membership } : undefined
   }
 
-  async updateAttachmentLimit(organizationId: string, maxBytes: number): Promise<void> {
+  async attachmentConfiguration(organizationId: string) {
+    const organization = this.organizations.get(organizationId)
+    if (!organization) throw new Error('organization not found')
+    return { revision: (this.attachmentRevisions.get(organizationId) ?? 1n).toString(),
+      value: { maxBytes: organization.attachmentMaxBytes ?? DEFAULT_ATTACHMENT_LIMIT } }
+  }
+
+  async updateAttachmentLimit(organizationId: string, maxBytes: number, _actor?: AuthenticatedIdentity, write: ControlSettingsWriteOptions = {}): Promise<void> {
     if (!isAllowedAttachmentLimit(maxBytes)) throw new Error('invalid_attachment_limit')
     const organization = this.organizations.get(organizationId)
     if (!organization) throw new Error('organization not found')
+    const revision = this.attachmentRevisions.get(organizationId) ?? 1n
+    assertControlSettingsWrite(organizationId, 'attachment-policy', revision.toString(), write)
     this.organizations.set(organizationId, { ...organization, attachmentMaxBytes: maxBytes })
+    this.attachmentRevisions.set(organizationId, revision + 1n)
   }
 
   async listMembers(organizationId: string): Promise<readonly OrganizationMembership[]> {

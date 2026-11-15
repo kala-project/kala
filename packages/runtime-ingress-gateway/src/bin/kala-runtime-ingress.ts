@@ -11,6 +11,7 @@ import { JsonOrganizationStore } from '../organizations/json-store.js'
 import { PostgresBackgroundAuthority } from '../organizations/background-authority.js'
 import { PostgresOrganizationStore } from '../organizations/postgres-store.js'
 import { startRuntimeIngressGateway, type GatewayAuthentication } from '../edge/server.js'
+import { PostgresModelPolicyReader } from '../settings/model-policy-reader.js'
 import { createOidcClient } from '../auth/oidc-client.js'
 import { readRequiredSecretEnv } from '../config/secret-env.js'
 import { FileLoginStateStore, resolveLoginStateStoreKind } from '../auth/login-state-store.js'
@@ -37,6 +38,9 @@ import { createPostgresRuntimeResourceOwnerResolver } from '../runtime-origin/po
 import { RuntimeRoutingTicketResolver } from '../runtime-origin/runtime-routing-ticket-resolver.js'
 import { loadGatewayProductDeployment } from '../config/product-deployment.js'
 import { DedicatedOidcOwnerService } from '../auth/dedicated-oidc-owner.js'
+import { controlSettingsWriteProtocol } from '../settings/control-revisions.js'
+import { PostgresWebhookSettingsStore } from '../webhooks/settings-store.js'
+import { assertWebhookInstallation } from '../webhooks/worker-authority.js'
 
 interface RecoveryCheckpoint { installation_id: string; checkpoint_id: string; key_sha256: string }
 async function assertPostgresInstallationClaim(connectionString: string, installationId: string, label: string): Promise<RecoveryCheckpoint> {
@@ -65,6 +69,7 @@ async function assertPostgresInstallationClaim(connectionString: string, install
 }
 
 async function main(): Promise<void> {
+  const settingsWriteProtocol = controlSettingsWriteProtocol()
   const deployment = await loadGatewayProductDeployment(process.env.KALA_DEPLOYMENT_CONFIG)
   const dedicated = deployment.variant === 'dedicated'
   const telemetry = createOnlineTelemetryFromEnv('kala-gateway')
@@ -152,6 +157,7 @@ async function main(): Promise<void> {
   if (dedicated && process.env.KALA_INGRESS_REQUIRE_INSTALLATION_CLAIM !== '1') {
     throw new Error('Dedicated Gateway requires the installation claim')
   }
+  let modelPolicyReader: PostgresModelPolicyReader | undefined
   if (process.env.KALA_INGRESS_REQUIRE_INSTALLATION_CLAIM !== undefined) {
     if (process.env.KALA_INGRESS_REQUIRE_INSTALLATION_CLAIM !== '1' || controlPlane.kind !== 'postgres' || !runtimeReader) {
       throw new Error('Gateway installation claim requires control and Runtime PostgreSQL')
@@ -164,6 +170,7 @@ async function main(): Promise<void> {
     if (controlCheckpoint.checkpoint_id !== runtimeCheckpoint.checkpoint_id || controlCheckpoint.key_sha256 !== runtimeCheckpoint.key_sha256) {
       throw new Error('Control and Runtime PostgreSQL recovery checkpoints disagree; mixed recovery sets cannot be served')
     }
+    if (database) modelPolicyReader = new PostgresModelPolicyReader(database, installationId, { executorRegistryRequired: !dedicated })
   }
   const runtimeOriginResolver = runtimePlacementConfig && runtimeReader
     ? createPostgresRuntimeOriginResolver({
@@ -253,18 +260,39 @@ async function main(): Promise<void> {
     ...(siloConsoleEnabled ? { siloConsolePath: '/silo/' as const } : {}),
     ...(aspireTokenFile ? { readObservabilityToken: () => readRequiredSecretEnv('KALA_ASPIRE_BROWSER_TOKEN') } : {}),
   } : undefined
+  const webhookManagement = process.env.KALA_WEBHOOK_MANAGEMENT_ENABLED ?? '0'
+  if (!['0', '1'].includes(webhookManagement)) throw new Error('KALA_WEBHOOK_MANAGEMENT_ENABLED must be 0 or 1')
+  let webhooks: PostgresWebhookSettingsStore | undefined
+  if (webhookManagement === '1') {
+    if (dedicated || !database) throw new Error('Webhook management requires opt-in Private Cloud PostgreSQL')
+    if ((await database.health()).schemaVersion < 15) throw new Error('Webhook management requires the immutable binding migration')
+    const installationId = (await readFile(process.env.KALA_INSTALLATION_ID_FILE ?? '', 'utf8')).trim()
+    await assertWebhookInstallation(database, installationId)
+    webhooks = new PostgresWebhookSettingsStore(database, {
+      publicOrigin: new URL(publicOrigin).origin,
+      allowedOrigins: process.env.KALA_WEBHOOK_ALLOWED_ORIGINS?.split(',').map(value => value.trim()).filter(Boolean) ?? [],
+      allowLoopbackHttp: process.env.KALA_WEBHOOK_ALLOW_LOOPBACK_HTTP === '1',
+    })
+  }
   const gateway = await startRuntimeIngressGateway({
+    modelPolicyReader,
     port,
     telemetry,
     listenHost: process.env.KALA_INGRESS_LISTEN_HOST ?? '127.0.0.1',
     authentication,
     singleTenantOwner: dedicated,
+    settingsLayout: process.env.KALA_SETTINGS_LAYOUT === 'unified' ? 'unified' : 'legacy',
+    settingsWriteProtocol,
+    ...(webhooks ? { webhooks } : {}),
     ...(operatorServices ? { operatorServices } : {}),
     organizations,
     directory: {
       getOrCreateForIdentity: async (identity) => { const access = await organizations.getOrCreateForIdentity(identity); return { unitId: access.organization.unitId, identity } },
       findByIdentity: async (identity) => { const access = await organizations.findAccess(identity); return access ? { unitId: access.organization.unitId, identity } : undefined },
-      bindExecutorInvite: (token, unitId) => organizations.bindExecutorInvite(token, unitId),
+      bindExecutorInvite: (token, unitId, binding) => organizations.bindExecutorInvite(token, unitId, binding),
+      ...('revokeExecutorInviteBinding' in organizations ? {
+        revokeExecutorInviteBinding: organizations.revokeExecutorInviteBinding.bind(organizations),
+      } : {}),
       findUnitByExecutorInvite: (token) => organizations.findUnitByExecutorInvite(token),
       findUnitByExecutorRouteHint: (inviteHash) => organizations.findUnitByExecutorRouteHint(inviteHash),
     },

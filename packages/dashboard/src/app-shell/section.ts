@@ -14,9 +14,9 @@
 
 import { useEffect, useState } from 'react'
 
-export type AppSection = 'agent' | 'operations' | 'artifacts' | 'pipeline' | 'docs' | 'memo'
+export type AppSection = 'agent' | 'operations' | 'artifacts' | 'pipeline' | 'docs' | 'memo' | 'settings'
 
-const SECTIONS: readonly AppSection[] = ['agent', 'operations', 'artifacts', 'pipeline', 'docs', 'memo']
+const SECTIONS: readonly AppSection[] = ['agent', 'operations', 'artifacts', 'pipeline', 'docs', 'memo', 'settings']
 
 function parseHash(hash: string): AppSection {
   const cleaned = hash.replace(/^#\/?/, '').split('/')[0]?.toLowerCase() ?? ''
@@ -28,12 +28,21 @@ export function useAppSection(): [AppSection, (next: AppSection) => void] {
     typeof window === 'undefined' ? 'agent' : parseHash(window.location.hash),
   )
   useEffect(() => {
+    let previousHash = window.location.hash
     const onHash = (): void => {
+      const event = new CustomEvent<string>('kala:settings-navigation', { cancelable: true, detail: window.location.hash })
+      if (!window.dispatchEvent(event)) {
+        window.history.replaceState(window.history.state, '', `${window.location.pathname}${window.location.search}${previousHash}`)
+        return
+      }
+      previousHash = window.location.hash
       const next = parseHash(window.location.hash)
       setSection(next)
     }
     window.addEventListener('hashchange', onHash)
-    return () => window.removeEventListener('hashchange', onHash)
+    const restored = (): void => { previousHash = window.location.hash }
+    window.addEventListener('kala:settings-route-accepted', restored)
+    return () => { window.removeEventListener('hashchange', onHash); window.removeEventListener('kala:settings-route-accepted', restored) }
   }, [])
   const go = (next: AppSection): void => {
     if (typeof window === 'undefined') {

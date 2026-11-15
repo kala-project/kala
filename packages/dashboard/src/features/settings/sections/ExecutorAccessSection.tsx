@@ -9,6 +9,7 @@ import { HelpHint } from '../../../components/ui/help-hint.js'
 import { cn } from '../../../lib/utils.js'
 import { CopyButton, EmptyRow, SectionHeader } from '../controls.js'
 import { executorSetupCommand, formatDate, meaningfulInviteLabel, responseError } from '../section-utils.js'
+import { useSettingsRequest } from '../configuration-request.js'
 
 export function ExecutorAccessSection({ executors = [], canManage = true, cacheNamespace = 'default' }: { executors?: readonly AttachedExecutor[]; canManage?: boolean; cacheNamespace?: string }): JSX.Element {
   const { t } = useTranslation()
@@ -24,6 +25,7 @@ export function ExecutorAccessSection({ executors = [], canManage = true, cacheN
 
 function ExecutorInviteManagement({ executors, cacheNamespace }: { executors: readonly AttachedExecutor[]; cacheNamespace: string }): JSX.Element {
   const { t } = useTranslation()
+  const request = useSettingsRequest()
   const queryClient = useQueryClient()
   const [label, setLabel] = useState('')
   const [workspaceId, setWorkspaceId] = useState('')
@@ -35,7 +37,7 @@ function ExecutorInviteManagement({ executors, cacheNamespace }: { executors: re
   const invitesQuery = useQuery({
     queryKey: ['executor-invites', cacheNamespace],
     queryFn: async (): Promise<ServerExecutorInvitesPayload> => {
-      const res = await fetch('/auth/executor-invites', { cache: 'no-store' })
+      const res = await request('/auth/executor-invites', { cache: 'no-store' })
       const body = await res.json() as ServerExecutorInvitesPayload | { error?: string }
       if (!res.ok) throw new Error('error' in body && body.error ? body.error : `HTTP ${res.status}`)
       return body as ServerExecutorInvitesPayload
@@ -45,7 +47,7 @@ function ExecutorInviteManagement({ executors, cacheNamespace }: { executors: re
   const createInvite = useMutation({
     mutationFn: async (): Promise<ServerExecutorInvitePayload> => {
       const input = { ...(label.trim() ? { label: label.trim() } : {}), ...(workspaceId.trim() ? { workspaceId: workspaceId.trim() } : {}) }
-      const res = await fetch('/auth/executor-invites', {
+      const res = await request('/auth/executor-invites', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(input),
@@ -67,7 +69,7 @@ function ExecutorInviteManagement({ executors, cacheNamespace }: { executors: re
 
   const patchInvite = useMutation({
     mutationFn: async (input: { id: string; label: string }): Promise<void> => {
-      const res = await fetch(`/auth/executor-invites/${encodeURIComponent(input.id)}`, {
+      const res = await request(`/auth/executor-invites/${encodeURIComponent(input.id)}`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ label: input.label }),
@@ -83,7 +85,7 @@ function ExecutorInviteManagement({ executors, cacheNamespace }: { executors: re
 
   const revokeInvite = useMutation({
     mutationFn: async (id: string): Promise<void> => {
-      const res = await fetch(`/auth/executor-invites/${encodeURIComponent(id)}/revoke`, { method: 'POST' })
+      const res = await request(`/auth/executor-invites/${encodeURIComponent(id)}/revoke`, { method: 'POST' })
       if (!res.ok) throw new Error(await responseError(res))
     },
     onSuccess: () => {
@@ -96,7 +98,7 @@ function ExecutorInviteManagement({ executors, cacheNamespace }: { executors: re
 
   const deleteInvite = useMutation({
     mutationFn: async (id: string): Promise<void> => {
-      const res = await fetch(`/auth/executor-invites/${encodeURIComponent(id)}`, { method: 'DELETE' })
+      const res = await request(`/auth/executor-invites/${encodeURIComponent(id)}`, { method: 'DELETE' })
       if (!res.ok) throw new Error(await responseError(res))
     },
     onSuccess: () => {
@@ -108,7 +110,7 @@ function ExecutorInviteManagement({ executors, cacheNamespace }: { executors: re
 
   const regenerateInvite = useMutation({
     mutationFn: async (id: string): Promise<ServerExecutorInvitePayload> => {
-      const res = await fetch(`/auth/executor-invites/${encodeURIComponent(id)}/regenerate`, { method: 'POST' })
+      const res = await request(`/auth/executor-invites/${encodeURIComponent(id)}/regenerate`, { method: 'POST' })
       const body = await res.json() as ServerExecutorInvitePayload | { error?: string }
       if (!res.ok) throw new Error('error' in body && body.error ? body.error : `HTTP ${res.status}`)
       return body as ServerExecutorInvitePayload

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, readdir, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import process from 'node:process'
@@ -12,10 +12,17 @@ import { createScheduledPrincipalAuthorizer } from '../src/scheduled-tasks/autho
 import { startLoopbackHostRuntimeUnit } from '../src/tenant-runtime/loopback-host-unit.js'
 import { resolveBuiltinAgentModule } from '../src/builtin-tools.js'
 import type { DashboardActor } from '../src/auth-control.js'
+import type { SettingsWriteOptions } from '../src/settings-concurrency.js'
 import { PostgresAgentPromptSettingsStore } from '../src/tenant-runtime/postgres-agent-settings.js'
 import { loadRuntimeHooks } from '../src/tenant-runtime/runtime-hooks.js'
+import { provisionRuntimeHooks } from '../src/tenant-runtime/runtime-hooks-provisioning.js'
 import { ExplicitLLMClientFactory } from '../src/llm/client-factory.js'
 import { DedicatedModelSettings } from '../src/llm/dedicated-model-settings.js'
+import { ORGANIZATION_MODEL_SETTINGS_CREDENTIAL, OrganizationModelSettings } from '../src/llm/organization-model-settings.js'
+import { ModelPolicyClient, ModelPolicyUnavailable } from '../src/tenant-runtime/model-policy-client.js'
+import { PostgresSettingsServingSet } from '../src/tenant-runtime/settings-serving-set.js'
+import { RuntimeModelPolicyState } from '../src/tenant-runtime/model-policy-state.js'
+import { RuntimeModelPolicyControl, type LoadedModelPolicySnapshot } from '../src/tenant-runtime/model-policy-control.js'
 import { startTenantRuntimeService } from '../src/tenant-runtime/service.js'
 import { readRequiredSecretEnv } from '../src/config/secret-env.js'
 import { createRuntimeProviderRuntime, FileSecretResolver, loadRuntimeProviderCatalog } from '../src/llm/runtime-provider-catalog.js'
@@ -28,6 +35,7 @@ import { PostgresRuntimeReplicaMembership } from '../src/tenant-runtime/runtime-
 import { RuntimeResourceOwnershipManager } from '../src/tenant-runtime/runtime-resource-ownership.js'
 import { RuntimeSessionOwnership } from '../src/tenant-runtime/runtime-session-ownership.js'
 import { attachTenantRuntimeControlApi } from '../src/tenant-runtime/control-api.js'
+import { PostgresWorkspaceReferenceAuthority } from '../src/tenant-runtime/workspace-references.js'
 import { LocalWebSearchCredentialStore, PostgresWebSearchCredentialStore } from '../src/web-search/credential-store.js'
 import { KalaStateStore } from '../src/store/state-store.js'
 import { LocalAzureSpeechCredentialStore, PostgresAzureSpeechCredentialStore } from '../src/speech/credential-store.js'
@@ -79,6 +87,7 @@ async function main(): Promise<void> {
   const experimentalStateMasterKey = experimentalStorage
     ? await loadPostgresStateMasterKey(experimentalStorage.stateMasterKeyFile)
     : undefined
+  let verifiedInstallationId: string | undefined
   if (process.env.KALA_RUNTIME_REQUIRE_INSTALLATION_CLAIM !== undefined) {
     if (process.env.KALA_RUNTIME_REQUIRE_INSTALLATION_CLAIM !== '1' || !experimentalStorage || experimentalStorage.schemaManagement !== 'external') {
       throw new Error('Runtime installation claim requires externally migrated PostgreSQL/S3 storage')
@@ -95,6 +104,7 @@ async function main(): Promise<void> {
         throw new Error('Runtime recovery checkpoint does not match installation or state master key')
       }
       assertRecoveryCheckpoint(s3Checkpoint, pgCheckpoint, 'S3')
+      verifiedInstallationId = installationId
     } finally {
       await pool.end()
       s3.destroy?.()
@@ -184,6 +194,19 @@ async function main(): Promise<void> {
         new ExplicitLLMClientFactory(providerSecrets),
       )
     : await createEnvironmentRuntimeProvider()
+  const modelPolicyClient = product === 'private-cloud' && verifiedInstallationId
+    ? new ModelPolicyClient({ installationId: verifiedInstallationId, origin: required('KALA_RUNTIME_AUTHORITY_ORIGIN'), serviceSecret: ingressSecret })
+    : undefined
+  const operationalPolicyClient = modelPolicyClient ?? (verifiedInstallationId && process.env.KALA_RUNTIME_AUTHORITY_ORIGIN
+    ? new ModelPolicyClient({ installationId: verifiedInstallationId, origin: process.env.KALA_RUNTIME_AUTHORITY_ORIGIN, serviceSecret: ingressSecret })
+    : undefined)
+  const modelPolicyStore = verifiedInstallationId && experimentalStorage
+    ? createPostgresHotStateStore({ connectionString: experimentalStorage.connectionString, applicationName: 'kala-runtime-settings-control', telemetry })
+    : undefined
+  const modelPolicyConsumers = new Map<string, () => Promise<LoadedModelPolicySnapshot>>()
+  const settingsServingProbes = new Map<string, () => Promise<void>>()
+  replicaMembership?.setObservationHandler(async id => { await settingsServingProbes.get(id)?.() })
+  let modelPolicyControl: RuntimeModelPolicyControl | undefined
   const agentModule = resolveBuiltinAgentModule()
   const maxArtifactBytes = positiveIntegerEnv('KALA_RUNTIME_UNIT_MAX_ARTIFACT_BYTES', 10 * 1024 * 1024 * 1024)
   const resourceGovernor = new UnitResourceGovernor({
@@ -212,6 +235,9 @@ async function main(): Promise<void> {
     requireProvisioning: true,
     maxLoadedUnits: product === 'dedicated' ? 1 : Number(process.env.KALA_RUNTIME_HOST_MAX_LOADED_UNITS ?? 100),
     countsTowardCapacity: (unitId) => unitId !== publicInstallerUnitId,
+    beforeRoutable: async (unitId, organizationId) => {
+      if (unitId !== publicInstallerUnitId) await modelPolicyControl?.beforeRoutable(unitId, organizationId)
+    },
     ...(experimentalStorage ? { catalog } : {}),
     ...(placementOwnership ? {
       placementOwnership,
@@ -264,6 +290,16 @@ async function main(): Promise<void> {
       // A loopback Executor's workspace and execution receipts are durable
       // authorities and cannot safely live in this Pod's tmpfs.
       if (!experimentalStorage) await mkdir(workspaceDir, { recursive: true, mode: 0o700 })
+      if (process.env.KALA_RUNTIME_HOOKS_MANIFEST && process.env.KALA_RUNTIME_HOOKS_CONFIG) {
+        throw new Error('KALA_RUNTIME_HOOKS_MANIFEST and KALA_RUNTIME_HOOKS_CONFIG are mutually exclusive')
+      }
+      const provisionedHooks = process.env.KALA_RUNTIME_HOOKS_MANIFEST && organizationId && id !== publicInstallerUnitId
+        ? provisionRuntimeHooks({ unitRoot, unitId: id, organizationId, manifestPath: process.env.KALA_RUNTIME_HOOKS_MANIFEST })
+        : undefined
+      if (process.env.KALA_RUNTIME_HOOKS_MANIFEST && !organizationId && id !== publicInstallerUnitId) {
+        throw new Error('Runtime hook provisioning requires a trusted organization/Unit binding')
+      }
+      const runtimeHooks = loadRuntimeHooks({ unitRoot, product, ...(id !== publicInstallerUnitId && process.env.KALA_RUNTIME_HOOKS_CONFIG ? { configPath: process.env.KALA_RUNTIME_HOOKS_CONFIG } : {}) })
       const sessionOwnership = sessionOwnershipFlag === '1' && replicaStore && replicaMembership && organizationId && experimentalStorage
         ? new RuntimeSessionOwnership(organizationId, id, replicaMembership,
             new RuntimeResourceOwnershipManager(replicaStore, {
@@ -285,10 +321,23 @@ async function main(): Promise<void> {
             placementLease, maxArtifactBytes, telemetry, nativeFsLimits, sessionOwnership, replicaStore)
         : undefined
       const agentSettings = persistentStorage?.agentSettings
+      const modelPolicy = modelPolicyClient && organizationId && id !== publicInstallerUnitId
+        ? await modelPolicyClient.read(organizationId, id).catch(async error => { await persistentStorage?.close(); throw error }) : undefined
+      const modelPolicyState = modelPolicy && persistentStorage && verifiedInstallationId
+        ? new RuntimeModelPolicyState({ installationId: verifiedInstallationId, state: persistentStorage.tenantState,
+          unitId: id, policy: modelPolicyClient!, operatorModelReferences: runtimeProvider.models.map(model => model.ref ?? model.id) })
+        : undefined
+      if (modelPolicy && !modelPolicyState) throw new ModelPolicyUnavailable('model_policy_storage_unavailable')
       const modelSettings = product === 'dedicated' && persistentStorage && organizationId && runtimeCatalog
         ? new DedicatedModelSettings(persistentStorage.tenantState, organizationId, runtimeCatalog, providerSecrets)
-        : undefined
+        : modelPolicy?.effectiveManagement === 'dashboard' && modelPolicyState && persistentStorage && organizationId
+          ? new OrganizationModelSettings(persistentStorage.tenantState, organizationId, {
+            assertCallAllowed: () => modelPolicyState.assertSnapshot(modelPolicy),
+            assertMutationAllowed: tx => modelPolicyState.assertSnapshot(modelPolicy, tx),
+            assertInitializationAllowed: async () => { throw new ModelPolicyUnavailable('organization_catalog_reconciliation_required') },
+          }) : undefined
       try {
+        if (modelPolicy && modelPolicyState) await modelPolicyState.assertSnapshot(modelPolicy, undefined, true)
         await modelSettings?.load()
       } catch (error) {
         await modelSettings?.close().catch(() => undefined)
@@ -299,7 +348,17 @@ async function main(): Promise<void> {
         ? await createRuntimeProviderRuntime(runtimeCatalog, new ExplicitLLMClientFactory(providerSecrets))
         : runtimeProvider
       const currentModels = () => modelSettings?.models ?? unitProvider.models
-      const currentDefaultModel = () => modelSettings?.defaultModel ?? unitProvider.defaultModel
+      const currentDefaultModel = () => modelSettings ? modelSettings.defaultModel : unitProvider.defaultModel
+      const policyLoadedAt = new Date().toISOString()
+      const consumer = modelPolicy && persistentStorage ? async (): Promise<LoadedModelPolicySnapshot> => ({
+        policyRevision: modelPolicy.effectiveRevision, management: modelPolicy.effectiveManagement,
+        catalogRevision: modelSettings ? modelSettings.effectiveRevision ?? '0'
+          : await persistentStorage.tenantState.withCredentialLock(ORGANIZATION_MODEL_SETTINGS_CREDENTIAL, async tx =>
+            await persistentStorage.tenantState.getCredential(ORGANIZATION_MODEL_SETTINGS_CREDENTIAL, tx)
+              ? await persistentStorage.tenantState.credentialRevision(ORGANIZATION_MODEL_SETTINGS_CREDENTIAL, tx) ?? '0' : '0'),
+        synchronization: modelSettings?.synchronization ?? 'ready', observedAt: modelSettings?.observationTime ?? policyLoadedAt,
+      }) : undefined
+      if (consumer) modelPolicyConsumers.set(id, consumer)
       let currentAgentSettings = persistentStorage?.initialAgentSettings
       const assertActorOrganization = (actor?: DashboardActor): void => {
         if (actor?.kind === 'ingress' && actor.organizationId !== organizationId) {
@@ -328,8 +387,8 @@ async function main(): Promise<void> {
             join(unitRoot, 'session-artifacts'),
             join(unitRoot, 'message-attachments'),
           ])
-      const runtimeHooks = loadRuntimeHooks({ unitRoot, product, ...(id !== publicInstallerUnitId && process.env.KALA_RUNTIME_HOOKS_CONFIG ? { configPath: process.env.KALA_RUNTIME_HOOKS_CONFIG } : {}) })
       const makeSettings = async (actor: DashboardActor): Promise<ServerSettingsPayload> => {
+        if (modelPolicy && modelPolicyState) await modelPolicyState.assertSnapshot(modelPolicy)
         const prompt = await refreshAgentSettings(actor)
         const objectUsage = await persistentStorage?.objectStorage.resourceArtifactUsageSnapshot()
         const [identities, invites] = persistentStorage
@@ -340,7 +399,7 @@ async function main(): Promise<void> {
             id: provider.id, label: provider.label ?? provider.id, wire: provider.wire, baseUrl: provider.baseUrl,
             models: currentModels().filter(model => model.providerId === provider.id),
           })) ?? [],
-          defaultModel: currentDefaultModel(), hooks: runtimeHooks.hooks.map(({ event, command, match }) => ({ event, command, ...(match ? { match } : {}) })),
+          defaultModel: currentDefaultModel() ?? '', hooks: runtimeHooks.hooks.map(({ event, command, match }) => ({ event, command, ...(match ? { match } : {}) })),
           modelConfiguration: modelSettings ? { management: 'dashboard' } : { management: 'operator', ...(catalogPath ? { providerCatalogPath: catalogPath } : {}) },
           versions: { host: packageJson.version, protocol: PROTOCOL_VERSION },
           agentModule: currentAgentModule().metadata,
@@ -371,11 +430,26 @@ async function main(): Promise<void> {
       resourceGovernor.reconcile(id, { artifactBytes: await resourceArtifactUsage() })
       const webSearchCredentialStore = persistentStorage?.webSearchCredentialStore ?? localWebSearchCredentialStore
       const speechCredentialStore = persistentStorage?.speechCredentialStore ?? localSpeechCredentialStore
-      return startLoopbackHostRuntimeUnit(id, {
+      const settingsServingSet = persistentStorage && organizationId && replicaMembership ? new PostgresSettingsServingSet({
+        database: persistentStorage.tenantState.database, organizationId, unitId: id,
+        membership: () => replicaMembership.activeLease(id, organizationId),
+      }) : undefined
+      let publishSettings = async (): Promise<void> => undefined
+      let stopModelObservation: (() => void) | undefined
+      let observationTail = Promise.resolve(), observerClosed = false
+      const unit = await startLoopbackHostRuntimeUnit(id, {
         telemetry,
+        ...(settingsServingSet ? { settingsServingSet, onAgentApplicationChange: () => { void publishSettings().catch(() => undefined) } } : {}),
         hooks: runtimeHooks.hooks,
         hookRunner: runtimeHooks.hookRunner,
         requireIngressIdentity: true,
+        ...(operationalPolicyClient && organizationId && id !== publicInstallerUnitId ? {
+          executorAdmission: async (executor: { executorId: string; workspaceId: string; enrollmentHash?: string }) => {
+            if (!(await operationalPolicyClient.executor(organizationId, id, executor)).admitted) {
+              throw new ModelPolicyUnavailable('executor_resource_admission_denied')
+            }
+          },
+        } : {}),
         ...(organizationId ? { executorManagementOrganizationId: organizationId } : {}),
         authorizeScheduledPrincipal: createScheduledPrincipalAuthorizer({
           origin: process.env.KALA_RUNTIME_AUTHORITY_ORIGIN,
@@ -424,13 +498,27 @@ async function main(): Promise<void> {
           executorIdentityStore: persistentStorage.executorIdentityStore,
           pushStore: persistentStorage.pushStore,
           vapidKeys: persistentStorage.vapidKeys,
-          closeResource: async () => { await modelSettings?.close(); await persistentStorage.close() },
+          closeResource: async () => {
+            observerClosed = true
+            stopModelObservation?.()
+            if (settingsServingProbes.get(id) === publishSettings) settingsServingProbes.delete(id)
+            await observationTail.catch(() => undefined)
+            if (settingsServingSet) {
+              await Promise.allSettled(['models', 'agent'].map(kind => settingsServingSet.publish(
+                { kind, id: kind === 'models' ? 'catalog' : 'runtime' }, { revision: null, synchronization: 'disconnected' })))
+            }
+            if (modelPolicyConsumers.get(id) === consumer) modelPolicyConsumers.delete(id)
+            await modelSettings?.close(); await persistentStorage.close()
+          },
         } : {}),
         ...(!persistentStorage && id !== publicInstallerUnitId ? {
           workspaceDir,
           executorIdentityStorePath: join(unitRoot, 'executor-identities.json'),
         } : {}),
-        llm: modelSettings?.llm ?? unitProvider.llm,
+        llm: modelSettings?.llm ?? (modelPolicy && modelPolicyState ? {
+          name: 'policy-fenced-operator-models',
+          call: async params => { await modelPolicyState.assertSnapshot(modelPolicy); return unitProvider.llm.call(params) },
+        } : unitProvider.llm),
         defaultConfig: () => currentAgentModule().config,
         ...(agentSettings ? {
           desktopFeaturePolicy: (actor?: DashboardActor) => {
@@ -445,40 +533,49 @@ async function main(): Promise<void> {
             await refreshAgentSettings(actor)
             return currentAgentModule().systemPrompt
           },
-          updateAgentPrompt: async (input: Parameters<typeof agentSettings.save>[0], actor: DashboardActor) => {
+          updateAgentPrompt: async (input: Parameters<typeof agentSettings.save>[0], actor: DashboardActor, write?: SettingsWriteOptions) => {
             assertActorOrganization(actor)
-            const current = await agentSettings.load()
-            await agentSettings.save({ ...current, ...input, desktopManualAuthorizationRequired: current.desktopManualAuthorizationRequired ?? false,
-              computerUseEnabled: current.computerUseEnabled ?? false, desktopPreviewEnabled: current.desktopPreviewEnabled ?? false })
+            await agentSettings.update((current) => ({ ...current, ...input, desktopManualAuthorizationRequired: current.desktopManualAuthorizationRequired ?? false,
+              computerUseEnabled: current.computerUseEnabled ?? false, desktopPreviewEnabled: current.desktopPreviewEnabled ?? false }), write)
             return makeSettings(actor)
           },
-          updateDesktopAccess: async (input: { manualAuthorizationRequired: boolean; computerUseEnabled?: boolean; desktopPreviewEnabled?: boolean }, actor: DashboardActor) => {
+          updateDesktopAccess: async (input: { manualAuthorizationRequired: boolean; computerUseEnabled?: boolean; desktopPreviewEnabled?: boolean }, actor: DashboardActor, write?: SettingsWriteOptions) => {
             assertActorOrganization(actor)
-            const current = await agentSettings.load()
-            await agentSettings.save({ ...current, desktopManualAuthorizationRequired: input.manualAuthorizationRequired,
+            await agentSettings.update((current) => ({ ...current, desktopManualAuthorizationRequired: input.manualAuthorizationRequired,
               computerUseEnabled: input.computerUseEnabled ?? current.computerUseEnabled ?? false,
-              desktopPreviewEnabled: input.desktopPreviewEnabled ?? current.desktopPreviewEnabled ?? false })
+              desktopPreviewEnabled: input.desktopPreviewEnabled ?? current.desktopPreviewEnabled ?? false }), write)
             return makeSettings(actor)
           },
         } : {}),
         ...(modelSettings ? {
           onModelCatalogChange: (listener) => modelSettings.onChange(listener),
-          addManualProvider: async (input, actor) => { await modelSettings.addProvider(input, actor); return makeSettings(actor) },
-          updateManualProvider: async (input, actor) => { await modelSettings.updateProvider(input, actor); return makeSettings(actor) },
-          deleteManualProvider: async (input, actor) => { await modelSettings.deleteProvider(input, actor); return makeSettings(actor) },
-          addManualModel: async (input, actor) => { await modelSettings.addModel(input, actor); return makeSettings(actor) },
-          updateManualModel: async (input, actor) => { await modelSettings.updateModel(input, actor); return makeSettings(actor) },
-          deleteManualModel: async (input, actor) => { await modelSettings.deleteModel(input, actor); return makeSettings(actor) },
-          setDefaultModel: async (input, actor) => { await modelSettings.setDefault(input, actor); return makeSettings(actor) },
+          addManualProvider: async (input, actor, write) => { await modelSettings.addProvider(input, actor, write); return makeSettings(actor) },
+          updateManualProvider: async (input, actor, write) => { await modelSettings.updateProvider(input, actor, write); return makeSettings(actor) },
+          deleteManualProvider: async (input, actor, write) => { await modelSettings.deleteProvider(input, actor, write); return makeSettings(actor) },
+          addManualModel: async (input, actor, write) => { await modelSettings.addModel(input, actor, write); return makeSettings(actor) },
+          updateManualModel: async (input, actor, write) => { await modelSettings.updateModel(input, actor, write); return makeSettings(actor) },
+          deleteManualModel: async (input, actor, write) => { await modelSettings.deleteModel(input, actor, write); return makeSettings(actor) },
+          setDefaultModel: async (input, actor, write) => { await modelSettings.setDefault(input, actor, write); return makeSettings(actor) },
+        } : {}),
+        ...(agentSettings && organizationId ? {
+          onAgentSettingsChange: (listener, onState) => agentSettings.subscribe(
+            () => listener({ kind: 'ingress', principal: 'system', organizationId, role: 'admin' }), onState),
         } : {}),
         models: currentModels,
         defaultModel: currentDefaultModel,
+        settingsRevision: async (resource, actor) => {
+          assertActorOrganization(actor)
+          if (resource === 'models') return modelSettings?.desiredRevision()
+          if (resource === 'agent') return agentSettings?.revision()
+          return undefined
+        },
         deployment,
         capabilities,
         webSearchCredentials: webSearchCredentialStore,
         webSearchCredentialStatus: () => webSearchCredentialStore.status(),
-        setWebSearchCredential: (provider, key) => webSearchCredentialStore.set(provider, key),
-        deleteWebSearchCredential: (provider) => webSearchCredentialStore.delete(provider),
+        webSearchCredentialConfiguration: () => webSearchCredentialStore.configuration(),
+        setWebSearchCredential: (provider, key, write) => webSearchCredentialStore.set(provider, key, write),
+        deleteWebSearchCredential: (provider, write) => webSearchCredentialStore.delete(provider, write),
         speechCredentials: speechCredentialStore,
         stateStore,
         resourceGovernor,
@@ -488,9 +585,148 @@ async function main(): Promise<void> {
         ...(docsDir ? { docsRootDir: resolve(docsDir) } : {}),
         ...(releaseAssetsDir ? { releaseAssetsDir: resolve(releaseAssetsDir) } : {}),
         settings: makeSettings,
+        assertSettingsReady: async actor => {
+          assertActorOrganization(actor)
+          if (modelPolicy && modelPolicyState) await modelPolicyState.assertSnapshot(modelPolicy)
+        },
+        settingsConfiguration: async (section, actor) => {
+          assertActorOrganization(actor)
+          if (modelPolicy && modelPolicyState) await modelPolicyState.assertSnapshot(modelPolicy)
+          if (section === 'models' && modelSettings) {
+            const snapshot = await modelSettings.configuration()
+            const manager = actor.kind === 'ingress' && ['owner', 'admin'].includes(actor.role)
+            const membership = organizationId ? replicaMembership?.activeLease(id, organizationId) : undefined
+            return {
+              resource: { kind: 'models', id: 'catalog', ...(organizationId ? { organizationId } : {}) },
+              revision: snapshot.revision, capabilities: [],
+              value: { providers: snapshot.providers.map((provider) => {
+                if (manager) return provider
+                const { baseUrl: _baseUrl, ...publicProvider } = provider
+                return publicProvider
+              }), defaultModel: snapshot.defaultModel, modelConfiguration: { management: 'dashboard' } },
+              application: { state: 'unknown', desiredRevision: snapshot.revision,
+                effectiveRevision: modelSettings.effectiveRevision, applyMode: 'immediate', scope: 'unit',
+                reasonCode: 'local_replica_observation_only',
+                observations: membership ? [{
+                  unitId: id, replicaId: membership.replicaId, revision: modelSettings.effectiveRevision,
+                  observedAt: modelSettings.observationTime, synchronization: modelSettings.synchronization,
+                }] : [],
+              },
+            }
+          }
+          if ((section === 'agent' || section === 'execution') && agentSettings) {
+            const snapshot = await agentSettings.configuration()
+            const prompt = snapshot.value
+            return {
+              resource: { kind: 'agent', id: 'runtime', ...(organizationId ? { organizationId } : {}) },
+              revision: snapshot.revision, capabilities: [],
+              value: section === 'agent'
+                ? { agentPrompt: { ...prompt, configPath: agentSettings.configPath } }
+                : { agentSettingsResourceId: agentSettings.configPath, desktopAccess: {
+                  manualAuthorizationRequired: prompt.desktopManualAuthorizationRequired ?? false,
+                  computerUseEnabled: prompt.computerUseEnabled ?? false, desktopPreviewEnabled: prompt.desktopPreviewEnabled ?? false,
+                } },
+              application: { state: 'unknown', desiredRevision: snapshot.revision, effectiveRevision: null,
+                applyMode: 'next-turn', scope: 'unit', reasonCode: 'session_application_not_observed',
+                observations: organizationId && replicaMembership?.activeLease(id, organizationId) ? [{
+                  unitId: id, replicaId: replicaMembership.activeLease(id, organizationId)!.replicaId,
+                  revision: null, observedAt: new Date().toISOString(), synchronization: 'synchronizing',
+                }] : [],
+              },
+            }
+          }
+          return undefined
+        },
+        settingsSection: async (section, actor) => {
+          assertActorOrganization(actor)
+          if (section === 'models') {
+            const manager = actor.kind === 'ingress' && ['owner', 'admin'].includes(actor.role)
+            return {
+              providers: manager ? modelSettings?.providers ?? runtimeCatalog?.providers.map(provider => ({
+                id: provider.id, label: provider.label ?? provider.id, wire: provider.wire, baseUrl: provider.baseUrl,
+                models: currentModels().filter(model => model.providerId === provider.id),
+              })) ?? [] : runtimeCatalog?.providers.map(provider => ({
+                id: provider.id, label: provider.label ?? provider.id, wire: provider.wire,
+                models: currentModels().filter(model => model.providerId === provider.id),
+              })) ?? [],
+              defaultModel: currentDefaultModel(),
+              modelConfiguration: modelSettings ? { management: 'dashboard' } : { management: 'operator' },
+            }
+          }
+          if (section === 'agent' || section === 'execution') {
+            const prompt = await refreshAgentSettings(actor)
+            return section === 'agent'
+              ? { agentModule: currentAgentModule().metadata, ...(prompt && agentSettings ? { agentPrompt: { ...prompt, configPath: agentSettings.configPath } } : {}) }
+              : { ...(prompt && agentSettings ? { agentSettingsResourceId: agentSettings.configPath, desktopAccess: { manualAuthorizationRequired: prompt.desktopManualAuthorizationRequired ?? false,
+                computerUseEnabled: prompt.computerUseEnabled ?? false, desktopPreviewEnabled: prompt.desktopPreviewEnabled ?? false } } : {}) }
+          }
+          if (section === 'hooks') return {
+            hooksSummary: { sourceRef: provisionedHooks ? 'mounted-unit-hooks-manifest' : 'runtime-hooks',
+              loadState: 'loaded', events: runtimeHooks.hooks.map(({ event }) => event),
+              loadedAt: runtimeHooks.loadedAt, ...(provisionedHooks ? { version: provisionedHooks.revision } : {}), applyMode: 'restart' },
+          }
+          if (section === 'storage') {
+            const usage = await persistentStorage?.objectStorage.resourceArtifactUsageSnapshot()
+            return usage && organizationId ? { storage: { kind: 'postgres-s3', organizationId,
+              objectBytes: usage.storedBytes + usage.reservedBytes, objectLimitBytes: maxArtifactBytes, usage } } : {}
+          }
+          if (section === 'services') {
+            const observedAt = new Date().toISOString()
+            return { versions: { host: packageJson.version, protocol: PROTOCOL_VERSION }, configurationSources: [
+              { id: 'models', sourceRef: modelSettings ? 'runtime.encrypted-tenant-model-catalog' : 'deployment.operator-model-catalog',
+                management: modelSettings ? 'dashboard' : 'protected-maintenance',
+                revision: modelSettings ? await modelSettings.desiredRevision() ?? null : null,
+                effectiveRevision: modelSettings?.effectiveRevision ?? null, observedAt,
+                ...(!modelSettings ? { maintenance: 'runtime-operator' as const } : {}) },
+              { id: 'agent', sourceRef: agentSettings ? 'runtime.postgres-agent-settings' : 'runtime.unit-agent-settings',
+                management: 'dashboard', revision: await agentSettings?.revision() ?? null,
+                effectiveRevision: null, observedAt },
+              { id: 'credentials', sourceRef: persistentStorage ? 'runtime.encrypted-postgres' : 'runtime.encrypted-sqlite',
+                management: 'protected-maintenance', revision: null, effectiveRevision: null, observedAt },
+              { id: 'hooks', sourceRef: 'runtime.loaded-protected-hooks', management: 'protected-maintenance',
+                revision: null, effectiveRevision: null, observedAt },
+            ] }
+          }
+          if (section === 'integrations') return { integrationStatus: [
+            { id: 'secrets', component: 'runtime', configured: true, health: 'unknown',
+              sourceRef: persistentStorage ? 'organization-encrypted-postgres' : 'unit-encrypted-sqlite',
+              observedAt: new Date().toISOString(), reasonCode: 'authority_installed_health_not_probed' },
+          ] }
+          return {}
+        },
       })
+      if (settingsServingSet) {
+        publishSettings = () => {
+          const task = observationTail.catch(() => undefined).then(async () => {
+            if (observerClosed) return
+            if (modelSettings) await settingsServingSet.publish({ kind: 'models', id: 'catalog' }, {
+              revision: modelSettings.effectiveRevision, synchronization: modelSettings.synchronization,
+            })
+            if (agentSettings) {
+              const revision = await agentSettings.revision()
+              if (revision) await settingsServingSet.publish({ kind: 'agent', id: 'runtime' },
+                unit.server.agentSettingsObservation(revision, organizationId))
+            }
+          })
+          observationTail = task
+          return task
+        }
+        settingsServingProbes.set(id, publishSettings)
+        stopModelObservation = modelSettings?.onObservationChange(() => { void publishSettings().catch(() => undefined) })
+        await publishSettings()
+      }
+      return unit
     },
   })
+  if (modelPolicyClient && modelPolicyStore && verifiedInstallationId && experimentalStateMasterKey && replicaMembership && replicaStore) {
+    modelPolicyControl = new RuntimeModelPolicyControl({ installationId: verifiedInstallationId,
+      database: modelPolicyStore.database, masterKey: experimentalStateMasterKey, policy: modelPolicyClient,
+      catalog, service: host, membership: replicaMembership, replicas: replicaStore,
+      operatorModelReferences: runtimeProvider.models.map(model => model.ref ?? model.id),
+      operatorCatalogRevision: createHash('sha256').update(JSON.stringify(runtimeCatalog ?? runtimeProvider.models)).digest('hex'),
+      loadedSnapshot: async unitId => await modelPolicyConsumers.get(unitId)?.(),
+    })
+  }
   if (experimentalStorage) {
     // Node readiness is not tenant availability. Recover eligible Units from
     // bounded authoritative pages continuously, including after live lease loss.
@@ -507,7 +743,12 @@ async function main(): Promise<void> {
     }
   }
   if (releaseAssetsDir) await host.markRoutable(publicInstallerUnitId)
-  attachTenantRuntimeControlApi({ http: host.http, serviceSecret: ingressSecret, service: host, store: catalog, dataRoot, capabilities })
+  attachTenantRuntimeControlApi({ http: host.http, serviceSecret: ingressSecret, service: host, store: catalog, dataRoot, capabilities,
+    modelPolicy: modelPolicyControl,
+    ...(modelPolicyStore && verifiedInstallationId ? { workspaceReferences: new PostgresWorkspaceReferenceAuthority({
+      database: modelPolicyStore.database, installationId: verifiedInstallationId, policy: operationalPolicyClient,
+    }) } : {}),
+  })
   process.stdout.write(`${JSON.stringify({ event: 'tenant_runtime_service_ready', port: host.port, dataRoot })}\n`)
   let shuttingDown: Promise<void> | undefined
   const shutdown = (): Promise<void> => {
@@ -519,7 +760,8 @@ async function main(): Promise<void> {
         exitCode = 1
         process.stderr.write(`${JSON.stringify({ event: 'tenant_runtime_shutdown_failed', reason: error instanceof Error ? error.name : 'unknown' })}\n`)
       } finally {
-        await Promise.allSettled([catalog.close(), placementStore?.close() ?? Promise.resolve(), replicaStore?.close() ?? Promise.resolve()])
+        await Promise.allSettled([catalog.close(), placementStore?.close() ?? Promise.resolve(), replicaStore?.close() ?? Promise.resolve(),
+          modelPolicyStore?.close() ?? Promise.resolve()])
         await telemetry?.close()
       }
       process.exit(exitCode)

@@ -1,6 +1,9 @@
+import { settingsEnglish, settingsChinese } from './settings.js'
+
 export const resources = {
   en: {
     translation: {
+      unifiedSettings: settingsEnglish,
       deploymentCenter: {
         nav: 'Management',
         title: 'Management tools', scope: 'Dedicated Owner entry points. External consoles may require their own login and permissions.',
@@ -145,6 +148,7 @@ export const resources = {
           pipeline: 'Pipeline',
           docs: 'Docs',
           memo: 'Memo',
+          settings: 'Settings',
           evaluation: 'Open standalone evaluation platform',
         },
         account: { trigger: 'Account: {{name}}', loading: 'Loading account', loadingLong: 'Loading account…', help: 'Help & documentation', details: 'Account details', administration: 'Organization administration', routing: 'Privacy-safe tenant routing', signOut: 'Sign out' },
@@ -2210,6 +2214,7 @@ export const resources = {
   },
   zh: {
     translation: {
+      unifiedSettings: settingsChinese,
       deploymentCenter: {
         nav: '管理中心',
         title: '管理工具', scope: 'Dedicated Owner 管理入口。外部控制台可能还需要独立登录和授权。',
@@ -2354,6 +2359,7 @@ export const resources = {
           pipeline: '流程',
           docs: '文档',
           memo: '备忘',
+          settings: '设置',
           evaluation: '打开独立评测平台',
         },
         account: { trigger: '账户：{{name}}', loading: '正在加载账户', loadingLong: '正在加载账户…', help: '帮助与文档', details: '账户详情', administration: '组织管理', routing: '隐私安全的租户路由', signOut: '退出登录' },

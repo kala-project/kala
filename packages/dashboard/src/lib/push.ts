@@ -11,9 +11,8 @@
  * - Unsubscribing on the browser AND on the server so we don't leave stale
  *   endpoints receiving pushes forever.
  *
- * All requests use fetch(...) with credentials:'same-origin' — the server
- * cookies (github oauth session, etc.) travel with the subscribe/unsub
- * call so a per-user ownerId can be attached in a later revision.
+ * Settings supplies its immutable target transport; other callers retain
+ * the current-Origin fetch transport.
  */
 
 import type {
@@ -47,8 +46,10 @@ function isIos(): boolean {
   return /iPad|iPhone|iPod/.test(ua) && !(navigator as { MSStream?: unknown }).MSStream
 }
 
-async function fetchVapidPublicKey(): Promise<string | null> {
-  const res = await fetch('/push/vapid-public-key', { credentials: 'same-origin', cache: 'no-store' })
+type PushRequest = (path: string, init?: RequestInit) => Promise<Response>
+
+async function fetchVapidPublicKey(request: PushRequest): Promise<string | null> {
+  const res = await request('/push/vapid-public-key', { credentials: 'same-origin', cache: 'no-store' })
   if (!res.ok) return null
   const body = (await res.json()) as PushVapidKeyResponse
   return body.publicKey ?? null
@@ -77,13 +78,13 @@ export async function ensureNotificationPermission(): Promise<NotificationPermis
   return Notification.requestPermission()
 }
 
-export async function subscribeToPush(kinds: readonly DesktopNotificationKind[]): Promise<
+export async function subscribeToPush(kinds: readonly DesktopNotificationKind[], request: PushRequest = fetch): Promise<
   | { ok: true; endpoint: string }
   | { ok: false; reason: 'permission_denied' | 'no_vapid' | 'subscribe_failed' | 'server_rejected'; detail?: string }
 > {
   const permission = await ensureNotificationPermission()
   if (permission !== 'granted') return { ok: false, reason: 'permission_denied' }
-  const publicKey = await fetchVapidPublicKey()
+  const publicKey = await fetchVapidPublicKey(request)
   if (!publicKey) return { ok: false, reason: 'no_vapid' }
 
   const registration = await navigator.serviceWorker.ready
@@ -110,7 +111,7 @@ export async function subscribeToPush(kinds: readonly DesktopNotificationKind[])
     deviceName: describeCurrentDevice(),
     userAgent: typeof navigator === 'undefined' ? undefined : navigator.userAgent,
   }
-  const res = await fetch('/push/subscribe', {
+  const res = await request('/push/subscribe', {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'content-type': 'application/json' },
@@ -127,7 +128,7 @@ function describeCurrentDevice(): string {
   return `${browser} on ${platform}`
 }
 
-export async function unsubscribeFromPush(): Promise<boolean> {
+export async function unsubscribeFromPush(request: PushRequest = fetch): Promise<boolean> {
   if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return false
   const registration = await navigator.serviceWorker.getRegistration()
   if (!registration) return false
@@ -139,7 +140,7 @@ export async function unsubscribeFromPush(): Promise<boolean> {
   // already gone, and the server will drop the endpoint on next dispatch
   // failure anyway.
   try {
-    await fetch('/push/unsubscribe', {
+    await request('/push/unsubscribe', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'content-type': 'application/json' },

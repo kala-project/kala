@@ -23,6 +23,7 @@ import {
 import { DASHBOARD_PREFERENCES, PREF_APP_BADGE_ENABLED, useBooleanPref } from '../../../lib/prefs.js'
 import { pushDeviceId } from '../../../lib/push-activity.js'
 import { InterfaceToggle, SectionHeader, Toggle } from '../controls.js'
+import { useSettingsRequest } from '../configuration-request.js'
 
 export function NotificationsSection(): JSX.Element {
   const { t } = useTranslation()
@@ -73,6 +74,7 @@ function NativeNotificationsSettings(): JSX.Element {
 
 function SystemNotificationsSettings(): JSX.Element {
   const { t } = useTranslation()
+  const request = useSettingsRequest()
   const [enabled, setEnabled] = useBooleanPref(PREF_DESKTOP_NOTIFICATIONS_ENABLED, false)
   const [permission, setPermission] = useState<NotificationPermission | 'unsupported'>(() => notificationPermission())
   const [support] = useState<PushSupport>(() => detectPushSupport())
@@ -85,7 +87,7 @@ function SystemNotificationsSettings(): JSX.Element {
 
   const refreshDevices = async (): Promise<void> => {
     try {
-      const res = await fetch(`/push/devices?currentDeviceId=${encodeURIComponent(currentDeviceId)}`, { credentials: 'same-origin', cache: 'no-store' })
+      const res = await request(`/push/devices?currentDeviceId=${encodeURIComponent(currentDeviceId)}`, { credentials: 'same-origin', cache: 'no-store' })
       if (res.ok) setDevices(((await res.json()) as { devices?: PushDevice[] }).devices ?? [])
     } catch {}
   }
@@ -101,7 +103,7 @@ function SystemNotificationsSettings(): JSX.Element {
 
   const syncBackgroundDelivery = async (): Promise<void> => {
     if (!support.supported || permission !== 'granted') return
-    const result = await subscribeToPush(collectEnabledKinds())
+    const result = await subscribeToPush(collectEnabledKinds(), request)
     if (result.ok) setEndpoint(result.endpoint)
   }
 
@@ -111,7 +113,7 @@ function SystemNotificationsSettings(): JSX.Element {
     try {
       if (!next) {
         setEnabled(false)
-        await unsubscribeFromPush()
+        await unsubscribeFromPush(request)
         setEndpoint(null)
         return
       }
@@ -124,7 +126,7 @@ function SystemNotificationsSettings(): JSX.Element {
       }
       setEnabled(true)
       if (support.supported) {
-        const result = await subscribeToPush(collectEnabledKinds())
+        const result = await subscribeToPush(collectEnabledKinds(), request)
         if (result.ok) setEndpoint(result.endpoint)
         else setError(backgroundDeliveryFailure(result.reason, t))
       }
@@ -138,7 +140,7 @@ function SystemNotificationsSettings(): JSX.Element {
     setTestResult(null)
     setError(null)
     try {
-      const res = await fetch('/push/test', { method: 'POST', credentials: 'same-origin' })
+      const res = await request('/push/test', { method: 'POST', credentials: 'same-origin' })
       if (!res.ok) setTestResult(t('settings.notifications.testFailed'))
       else {
         const body = (await res.json()) as { delivered?: number }
@@ -247,22 +249,23 @@ function NotificationDeviceRow({ device, busy, onRefresh, onTestResult }: {
   onTestResult(value: string): void
 }): JSX.Element {
   const { t } = useTranslation()
+  const request = useSettingsRequest()
   const update = async (enabled: boolean): Promise<void> => {
-    await fetch('/push/device', {
+    await request('/push/device', {
       method: 'PATCH', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ deviceId: device.deviceId, enabled }),
     })
     await onRefresh()
   }
   const remove = async (): Promise<void> => {
-    await fetch('/push/device', {
+    await request('/push/device', {
       method: 'DELETE', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ deviceId: device.deviceId }),
     })
     await onRefresh()
   }
   const test = async (): Promise<void> => {
-    const res = await fetch('/push/test', {
+    const res = await request('/push/test', {
       method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ deviceId: device.deviceId }),
     })

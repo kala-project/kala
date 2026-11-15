@@ -10,6 +10,20 @@ const authoritativePayload = {
 }
 
 describe('loadRuntimeDeployment', () => {
+  it('uses the selected Portable credential and only its authoritative layout choice, never a hosted Runtime layout override', async () => {
+    const fetcher = vi.fn(async () => Response.json({
+      product: 'portable', deployment: { schemaVersion: 1, architecture: 'portable', runtimeProfile: 'full' },
+      capabilities: authoritativePayload.capabilities, settingsLayout: 'unified',
+    }))
+    const result = await loadRuntimeDeployment('http://portable-target.test', undefined, fetcher, 'fictional-profile-token')
+    expect(result).toMatchObject({ product: 'portable', settingsLayout: 'unified', loaded: true })
+    expect(fetcher).toHaveBeenCalledWith('http://portable-target.test/runtime/capabilities',
+      expect.objectContaining({ headers: { authorization: 'Bearer fictional-profile-token' }, cache: 'no-store' }))
+    fetcher.mockImplementation(async () => Response.json({ ...authoritativePayload, settingsLayout: 'unified' }))
+    expect(await loadRuntimeDeployment('http://host', undefined, fetcher)).not.toHaveProperty('settingsLayout')
+    fetcher.mockImplementation(async () => Response.json({ ...authoritativePayload, settingsLayout: 'unknown-layout' }))
+    expect((await loadRuntimeDeployment('http://host', undefined, fetcher)).product).toBeNull()
+  })
   it('accepts a valid authoritative payload', async () => {
     const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       product: 'private-cloud',

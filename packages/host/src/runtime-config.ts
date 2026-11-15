@@ -19,16 +19,20 @@
 
 import { execSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import process from 'node:process'
 
 import type { ManualModelInput, ManualProviderInput, ModelInfo, ModelSource, ProviderWire } from '@agent-kernel/shared'
+import { schema } from '@agent-kernel/shared'
 
 import { DEFAULT_KALA_SYSTEM_PROMPT } from './builtin-tools.js'
 import type { HookConfig, HookEvent } from './extensions/hooks.js'
 import { knownContextWindow } from './model-capabilities.js'
+import { KalaStateStore } from './store/state-store.js'
+import { SettingsFile, type SettingsFileSnapshot } from './store/settings-file.js'
+import type { SettingsWriteOptions } from './settings-concurrency.js'
 
 export { knownContextWindow } from './model-capabilities.js'
 
@@ -50,6 +54,7 @@ export type RuntimeConfig = {
   manualProviders: readonly ManualProviderInput[]
   manualModels: readonly ManualModelInput[]
   manualDefaultModel?: string
+  manualSettingsRevision?: string
 }
 
 export type AgentPromptSlotId = 'slot-1' | 'slot-2' | 'slot-3'
@@ -80,6 +85,7 @@ export type LoadRuntimeConfigOptions = {
   codexConfigPath?: string
   codexAuthPath?: string
   manualModelsPath?: string
+  settingsState?: KalaStateStore
 }
 
 export type AnthropicCliDefaults = {
@@ -107,7 +113,8 @@ export function loadRuntimeConfig(
   if (claude) providers.push(claude)
   const codex = loadCodexProviders(codexPath, codexAuthPath)
   providers.push(...codex.providers)
-  const manualConfig = loadManualConfig(manualPath)
+  const manualSnapshot = manualConfigSnapshot(manualPath, opts.settingsState)
+  const manualConfig = manualSnapshot.value ?? { providers: [], models: [] }
   const manualProviders = manualConfig.providers.filter((p) => !providers.some((existing) => existing.id === p.id))
   providers.push(...manualProviders.map(providerSpecFromManual))
   const discoveredModels = new Map(providers.map((p) => [p.id, new Set(p.models)]))
@@ -136,7 +143,8 @@ export function loadRuntimeConfig(
     models,
   ) ?? models[0]?.ref ?? models[0]?.id ?? ''
 
-  return { providers, models, defaultModel, manualProviders, manualModels, ...(manualConfig.defaultModel ? { manualDefaultModel: manualConfig.defaultModel } : {}) }
+  return { providers, models, defaultModel, manualProviders, manualModels, manualSettingsRevision: manualSnapshot.revision,
+    ...(manualConfig.defaultModel ? { manualDefaultModel: manualConfig.defaultModel } : {}) }
 }
 
 export function modelInfo(
@@ -363,24 +371,43 @@ export type ManualConfigFile = {
   models: readonly ManualModelInput[]
 }
 
-export function loadManualConfig(path: string): ManualConfigFile {
-  const raw = tryReadFile(path)
-  if (raw === undefined) return { providers: [], models: [] }
-  try {
-    const parsed = JSON.parse(raw) as Partial<ManualModelsFile>
-    const providers = Array.isArray(parsed.providers)
-      ? parsed.providers.filter(isManualProviderInput)
-      : []
-    const models = Array.isArray(parsed.models)
-      ? parsed.models.filter(isManualModelInput)
-      : []
-    return {
-      ...(typeof parsed.defaultModel === 'string' && parsed.defaultModel.trim().length > 0 ? { defaultModel: parsed.defaultModel.trim() } : {}),
-      providers,
-      models,
+export function loadManualConfig(path: string, state?: KalaStateStore): ManualConfigFile {
+  return manualConfigSnapshot(path, state).value ?? { providers: [], models: [] }
+}
+
+export function manualConfigSnapshot(path: string, state?: KalaStateStore): SettingsFileSnapshot<ManualConfigFile> {
+  return withSettingsFile(path, 'models', parseManualConfig, state, (file) => file.read())
+}
+
+export function updateManualConfig(
+  path: string, change: (current: ManualConfigFile) => ManualConfigFile,
+  state?: KalaStateStore, options: SettingsWriteOptions = {},
+): SettingsFileSnapshot<ManualConfigFile> {
+  return withSettingsFile(path, 'models', parseManualConfig, state,
+    (file) => file.update((current) => change(current ?? { providers: [], models: [] }), options))
+}
+
+export function parseManualConfig(value: unknown): ManualConfigFile {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid manual models configuration')
+  const parsed = value as Partial<ManualModelsFile>
+  if (parsed.providers !== undefined && (!Array.isArray(parsed.providers) || !parsed.providers.every(isManualProviderInput))) {
+    throw new Error('invalid manual provider configuration')
+  }
+  if (!Array.isArray(parsed.models) || !parsed.models.every(isManualModelInput)) throw new Error('invalid manual model configuration')
+  const providers = (parsed.providers ?? []).map((provider) => schema.ManualProviderInputSchema.strict().parse(provider))
+  const models = parsed.models.map((model) => schema.ManualModelInputSchema.strict().parse(model))
+  if (new Set(providers.map((provider) => provider.id)).size !== providers.length ||
+    new Set(models.map((model) => JSON.stringify([model.providerId, model.id]))).size !== models.length) throw new Error('duplicate manual configuration identity')
+  for (const provider of providers) {
+    const url = new URL(provider.baseUrl)
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+      throw new Error('invalid manual provider base URL')
     }
-  } catch {
-    return { providers: [], models: [] }
+  }
+  return {
+    ...(typeof parsed.defaultModel === 'string' && parsed.defaultModel.trim().length > 0 ? { defaultModel: parsed.defaultModel.trim() } : {}),
+    providers,
+    models,
   }
 }
 
@@ -388,12 +415,15 @@ export function loadManualModels(path: string): readonly ManualModelInput[] {
   return loadManualConfig(path).models
 }
 
-export function writeManualModels(path: string, models: readonly ManualModelInput[]): void {
-  writeManualConfig(path, { providers: loadManualConfig(path).providers, models })
+export function writeManualModels(path: string, models: readonly ManualModelInput[], state?: KalaStateStore): void {
+  withSettingsFile(path, 'models', parseManualConfig, state, (file) => file.update((current) => ({
+    ...current, providers: current?.providers ?? [], models,
+  })))
 }
 
-export function writeManualConfig(path: string, config: ManualConfigFile): void {
-  mkdirSync(dirname(path), { recursive: true })
+export function writeManualConfig(
+  path: string, config: ManualConfigFile, state?: KalaStateStore, options: SettingsWriteOptions = {},
+): void {
   const normalizedProviders = config.providers.map((p) => ({
     id: p.id,
     ...(p.label ? { label: p.label } : {}),
@@ -407,11 +437,12 @@ export function writeManualConfig(path: string, config: ManualConfigFile): void 
     ...(m.label ? { label: m.label } : {}),
     ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
   }))
-  writeFileSync(path, `${JSON.stringify({
+  const value = {
     ...(config.defaultModel ? { defaultModel: config.defaultModel } : {}),
     providers: normalizedProviders,
     models: normalized,
-  }, null, 2)}\n`, 'utf8')
+  }
+  withSettingsFile(path, 'models', parseManualConfig, state, (file) => file.update(() => value, options))
 }
 
 function providerSpecFromManual(input: ManualProviderInput): ProviderSpec {
@@ -450,37 +481,60 @@ export function defaultAgentRuntimeSettings(): AgentRuntimeSettings {
   }
 }
 
-export function loadAgentRuntimeSettings(path = defaultAgentSettingsPath()): AgentRuntimeSettings {
-  const raw = tryReadFile(path)
-  if (raw === undefined) return defaultAgentRuntimeSettings()
+export function loadAgentRuntimeSettings(path = defaultAgentSettingsPath(), state?: KalaStateStore): AgentRuntimeSettings {
   try {
-    const parsed = JSON.parse(raw) as unknown
-    const settings = parseAgentRuntimeSettings(parsed)
-    if (settings) return settings
-    if (isLegacyAgentRuntimeSettings(parsed)) {
-      const migrated = defaultAgentRuntimeSettings()
-      migrated.selectedSlotId = parsed.systemPromptPreset === 'claude-code'
-        ? 'slot-2'
-        : parsed.systemPromptPreset === 'custom'
-          ? 'slot-3'
-          : 'slot-1'
-      writeAgentRuntimeSettings(path, migrated)
-      return migrated
-    }
+    return agentSettingsSnapshot(path, state).value ?? defaultAgentRuntimeSettings()
   } catch (error) {
     if (error instanceof InvalidAgentRuntimeSettingsError) throw error
     throw new InvalidAgentRuntimeSettingsError(path, { cause: error })
   }
-  throw new InvalidAgentRuntimeSettingsError(path)
 }
 
-export function writeAgentRuntimeSettings(path: string, settings: AgentRuntimeSettings): void {
-  const normalized = parseAgentRuntimeSettings(settings)
-  if (!normalized) throw new Error('invalid agent prompt settings')
-  mkdirSync(dirname(path), { recursive: true })
-  const temporaryPath = `${path}.${process.pid}.${Date.now()}.tmp`
-  writeFileSync(temporaryPath, `${JSON.stringify(normalized, null, 2)}\n`, 'utf8')
-  renameSync(temporaryPath, path)
+export function agentSettingsSnapshot(path: string, state?: KalaStateStore): SettingsFileSnapshot<AgentRuntimeSettings> {
+  return withSettingsFile(path, 'agent', parseAgentSettingsFile, state, (file) => file.read())
+}
+
+export function writeAgentRuntimeSettings(
+  path: string, settings: AgentRuntimeSettings, state?: KalaStateStore, options: SettingsWriteOptions = {},
+): void {
+  withSettingsFile(path, 'agent', parseAgentSettingsFile, state, (file) => file.update(() => settings, options))
+}
+
+export function updateAgentRuntimeSettings(
+  path: string, change: (current: AgentRuntimeSettings) => AgentRuntimeSettings,
+  state?: KalaStateStore, options: SettingsWriteOptions = {},
+): SettingsFileSnapshot<AgentRuntimeSettings> {
+  return withSettingsFile(path, 'agent', parseAgentSettingsFile, state,
+    (file) => file.update((current) => change(current ?? defaultAgentRuntimeSettings()), options))
+}
+
+export function importSettingsFile(
+  path: string, resource: 'models' | 'agent', input: unknown, state: KalaStateStore,
+): { revision: string } {
+  if (resource === 'models') return withSettingsFile(path, resource, parseManualConfig, state, (file) => file.import(input))
+  return withSettingsFile(path, resource, parseAgentSettingsFile, state, (file) => file.import(input))
+}
+
+function parseAgentSettingsFile(value: unknown): AgentRuntimeSettings {
+  const settings = parseAgentRuntimeSettings(value)
+  if (settings) return settings
+  if (isLegacyAgentRuntimeSettings(value)) {
+    const migrated = defaultAgentRuntimeSettings()
+    migrated.selectedSlotId = value.systemPromptPreset === 'claude-code' ? 'slot-2' : value.systemPromptPreset === 'custom' ? 'slot-3' : 'slot-1'
+    return migrated
+  }
+  throw new Error('invalid agent prompt settings')
+}
+
+function withSettingsFile<T extends Record<string, unknown>, R>(
+  path: string, kind: 'models' | 'agent', validate: (input: unknown) => T, authority: KalaStateStore | undefined,
+  operation: (file: SettingsFile<T>) => R,
+): R {
+  const state = authority ?? new KalaStateStore(dirname(path))
+  try {
+    const id = kind === 'models' ? 'catalog' : basename(dirname(path)) === 'agent-organizations' ? `runtime:${basename(path, '.json')}` : 'runtime'
+    return operation(new SettingsFile(path, state, { kind, id }, validate))
+  } finally { if (!authority) state.close() }
 }
 
 export function parseAgentRuntimeSettings(value: unknown): AgentRuntimeSettings | undefined {

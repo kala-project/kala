@@ -13,7 +13,7 @@ async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'control-api-')); roots.push(root); const http = createServer(); servers.push(http)
   const purgeOrganizationSessions = vi.fn(async () => ({ sessions: 1, sessionIds: ['expired-session'] }))
   const units = { getOrLoad: vi.fn(async (id: string) => ({ id, state: 'ready', origin: 'http://unit', purgeOrganizationSessions, drain: vi.fn(), close: vi.fn() })) }
-  const service = { http, port: 0, units: units as never, status: () => ({ state: 'ready' as const, units: [] }), drain: vi.fn(), markRoutable: vi.fn(), suspendUnit: vi.fn(), close: vi.fn() } satisfies TenantRuntimeService
+  const service = { http, port: 0, units: units as never, status: () => ({ state: 'ready' as const, units: [] }), drain: vi.fn(), markRoutable: vi.fn(), suspendUnit: vi.fn(), quiesceUnit: vi.fn(), resumeUnit: vi.fn(), reconcile: vi.fn(), close: vi.fn() } satisfies TenantRuntimeService
   const store = new RuntimeUnitMaterializationStore(join(root, 'catalog.json')); attachTenantRuntimeControlApi({ http, serviceSecret: 'secret', service, store, dataRoot: root, capabilities: AGENT_RUNTIME_CAPABILITIES })
   await new Promise<void>((r) => http.listen(0, '127.0.0.1', r)); const port = (http.address() as { port: number }).port
   return { root, port, service, store, purgeOrganizationSessions }
@@ -30,6 +30,10 @@ describe('tenant runtime control API', () => {
     const { port, service, store } = await setup(); const command = async (body: unknown) => call(port, '/internal/runtime-units', body, true)
     expect(await command({ unitId: 'a', operationId: 'p1', generation: 1 })).toBe(200); expect(service.markRoutable).toHaveBeenCalledWith('a', undefined); expect(store.list()).toHaveLength(1)
     expect(await command({ unitId: 'a', operationId: 's2', generation: 2, action: 'suspend' })).toBe(200); expect(service.suspendUnit).toHaveBeenCalledWith('a')
+    service.markRoutable.mockClear()
+    expect(await command({ unitId: 'a', operationId: 'r3', generation: 3, action: 'resume' })).toBe(200)
+    expect(service.resumeUnit).toHaveBeenCalledWith('a', undefined)
+    expect(service.markRoutable).not.toHaveBeenCalled()
     expect(await command({ unitId: 'a', operationId: 'stale', generation: 1 })).toBe(400)
   })
   it('returns unavailable instead of routing a ready materialization when placement acquire fails', async () => {

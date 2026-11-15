@@ -5,6 +5,10 @@ import { nativeFsSchemaStatements, type NativeFsTables } from './store/native-se
 import { agentSettingsSchemaStatements } from './tenant-runtime/postgres-agent-settings.js'
 import { nativePosixSchemaStatements } from './store/native-posix-fs.js'
 import { nativeFsAdmissionSchemaStatements } from './store/native-fs-admission.js'
+import { sessionSummarySchemaStatements } from './store/postgres-session-summary.js'
+import { settingsRevisionSchemaStatements } from './tenant-runtime/settings-revisions.js'
+import { modelPolicySchemaStatements } from './tenant-runtime/model-policy-state.js'
+import { operationalSettingsSchemaStatements } from './tenant-runtime/operational-settings-schema.js'
 
 export type PostgresSchemaManagement = 'initialize' | 'external'
 
@@ -1152,9 +1156,33 @@ const migrations: readonly PostgresMigration[] = [
       `REVOKE ALL ON FUNCTION ${schema}.kala_record_learning_effect_finalization() FROM PUBLIC`,
     ],
   },
+  {
+    version: 33,
+    name: 'stored_session_list_summaries',
+    statements: sessionSummarySchemaStatements,
+  },
+  {
+    version: 34,
+    name: 'authoritative_settings_resource_versions',
+    statements: settingsRevisionSchemaStatements,
+  },
+  {
+    version: 35,
+    name: 'durable_organization_model_policy_transitions',
+    statements: modelPolicySchemaStatements,
+  },
+  {
+    version: 36,
+    name: 'durable_operational_settings_consumers',
+    statements: operationalSettingsSchemaStatements,
+  },
 ]
 
 export const LATEST_POSTGRES_SCHEMA_VERSION = migrations.at(-1)?.version ?? 0
+
+export function postgresMigrationHistory(): readonly { version: number; name: string; checksum: string }[] {
+  return migrations.map((migration) => ({ version: migration.version, name: migration.name, checksum: migrationChecksum(migration) }))
+}
 
 export type PostgresMigrationResult = {
   previousVersion: number
@@ -1374,7 +1402,7 @@ export async function grantPostgresRuntimePrivileges(
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    await assertPostgresSchemaCurrent(client, { schema: schemaName })
+    const installedVersion = await assertPostgresSchemaCurrent(client, { schema: schemaName })
     const privilege = await client.query<{
       can_create: boolean; can_create_db: boolean; owns_schema: boolean; owns_table: boolean
       elevated: boolean; migration_write: boolean
@@ -1396,10 +1424,14 @@ export async function grantPostgresRuntimePrivileges(
     await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${role}`)
     await client.query(`GRANT SELECT ON TABLE ${schema}.${quoteIdentifier(POSTGRES_MIGRATION_TABLE)} TO ${role}`)
     await client.query(`REVOKE UPDATE, DELETE ON TABLE ${schema}.tenant_runtime_arena_non_admissions FROM ${role}`)
-    for (const table of postgresRuntimeTables()) {
+    for (const table of ['settings_model_policy_transitions', 'settings_model_policy_replica_receipts']) {
+      if (installedVersion >= 35) await client.query(`REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE ${schema}.${table} FROM ${role}`)
+    }
+    for (const table of postgresRuntimeTables(installedVersion)) {
       const privileges = table === RUNTIME_UNIT_PROTOCOL_GATE_TABLE ? 'SELECT'
         : table === 'tenant_runtime_arena_reconciliations' || table === 'tenant_runtime_arena_non_admissions' ? 'SELECT, INSERT'
-          : 'SELECT, INSERT, UPDATE, DELETE'
+          : table === 'settings_model_policy_transitions' || table === 'settings_model_policy_replica_receipts' ? 'SELECT, INSERT'
+            : 'SELECT, INSERT, UPDATE, DELETE'
       await client.query(`GRANT ${privileges} ON TABLE ${schema}.${quoteIdentifier(table)} TO ${role}`)
     }
     await grantInstallationClaimReadIfPresent(client, role, roleName)
@@ -1432,14 +1464,17 @@ async function grantInstallationClaimReadIfPresent(client: PostgresMigrationClie
   await client.query(`GRANT SELECT ON TABLE kala_installation_claim.marker, kala_installation_claim.recovery_checkpoint TO ${role}`)
 }
 
-function postgresRuntimeTables(): string[] {
+function postgresRuntimeTables(throughVersion = LATEST_POSTGRES_SCHEMA_VERSION): string[] {
   const tables = new Set<string>()
   tables.add('tenant_runtime_arena_non_admissions')
   const schema = '"__kala_schema__"'
   for (const migration of migrations) {
+    if (migration.version > throughVersion) continue
     for (const statement of migration.statements(schema)) {
-      if (!statement.startsWith(`CREATE TABLE IF NOT EXISTS ${schema}.`)) continue
-      const tableToken = statement.slice(`CREATE TABLE IF NOT EXISTS ${schema}.`.length)
+      const prefix = statement.startsWith(`CREATE TABLE IF NOT EXISTS ${schema}.`) ? `CREATE TABLE IF NOT EXISTS ${schema}.`
+        : statement.startsWith(`CREATE TABLE ${schema}.`) ? `CREATE TABLE ${schema}.` : undefined
+      if (!prefix) continue
+      const tableToken = statement.slice(prefix.length)
         .match(/^(?:"([A-Za-z_][A-Za-z0-9_]*)"|([A-Za-z_][A-Za-z0-9_]*))/u)
       const table = tableToken?.[1] ?? tableToken?.[2]
       if (!table) throw new Error(`cannot determine Runtime table for migration ${migration.version}`)
@@ -1528,7 +1563,9 @@ export async function runPostgresMigrations(
   }
 }
 
-/** Runtime-safe check: performs SELECT only and fails closed for missing, old, future, gapped, or modified migrations. */
+export const SETTINGS_BRIDGE_RUNTIME_SCHEMA_VERSIONS: readonly number[] = [33, 34, 35, 36]
+
+/** SELECT-only bridge check; every accepted head still requires its complete reviewed history. */
 export async function assertPostgresSchemaCurrent(
   executor: PostgresMigrationExecutor,
   options: { schema?: string } = {},
@@ -1547,8 +1584,8 @@ export async function assertPostgresSchemaCurrent(
   }
   verifyAppliedMigrations(applied)
   const version = applied.at(-1)?.version ?? 0
-  if (version !== LATEST_POSTGRES_SCHEMA_VERSION) {
-    throw new Error(`PostgreSQL schema version ${version} is not current; expected ${LATEST_POSTGRES_SCHEMA_VERSION}`)
+  if (!SETTINGS_BRIDGE_RUNTIME_SCHEMA_VERSIONS.includes(version)) {
+    throw new Error(`PostgreSQL schema version ${version} is not current; expected one of ${SETTINGS_BRIDGE_RUNTIME_SCHEMA_VERSIONS.join(', ')}`)
   }
   return version
 }

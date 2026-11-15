@@ -1,4 +1,4 @@
-import { PREF_HOST_ENDPOINT } from './lib/prefs.js'
+import { PREF_HOST_ENDPOINT, writeDashboardPreference } from './lib/prefs.js'
 import { isDesktopClient } from './lib/desktop.js'
 
 const STORAGE_KEY = PREF_HOST_ENDPOINT
@@ -40,14 +40,9 @@ export function getStoredHostEndpoint(): string | null {
   }
 }
 
-export function setStoredHostEndpoint(url: string | null): void {
-  if (typeof window === 'undefined') return
-  try {
-    if (url === null || url.trim() === '') {
-      window.localStorage.removeItem(STORAGE_KEY)
-    } else {
-      window.localStorage.setItem(STORAGE_KEY, normalize(url))
-    }
-    window.dispatchEvent(new CustomEvent('agent-kernel:host-endpoint-changed'))
-  } catch {}
+export function setStoredHostEndpoint(url: string | null): boolean {
+  if (typeof window === 'undefined') return false
+  if (!writeDashboardPreference(STORAGE_KEY, url === null || url.trim() === '' ? null : normalize(url))) return false
+  window.dispatchEvent(new CustomEvent('agent-kernel:host-endpoint-changed'))
+  return true
 }

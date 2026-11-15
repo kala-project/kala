@@ -1004,6 +1004,11 @@ export const ServerSettingsPayloadSchema = z.object({
   providers: z.array(SettingsProviderSummarySchema),
   defaultModel: z.string(),
   hooks: z.array(SettingsHookSummarySchema),
+  hooksSummary: z.object({
+    sourceRef: z.string(), loadState: z.enum(['loaded', 'unknown', 'failed']), events: z.array(z.string()),
+    loadedAt: z.string().datetime().optional(), version: z.string().regex(/^[1-9]\d*$/u).optional(),
+    applyMode: z.literal('restart').optional(),
+  }).optional(),
   versions: z
     .object({
       host: z.string(),

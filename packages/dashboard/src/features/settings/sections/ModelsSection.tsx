@@ -7,6 +7,7 @@ import { useTranslation } from 'react-i18next'
 import { Button } from '../../../components/ui/button.js'
 import { HelpHint } from '../../../components/ui/help-hint.js'
 import { EmptyRow, SectionHeader } from '../controls.js'
+import { useSettingsRequest } from '../configuration-request.js'
 
 export function ModelsSection({
   payload,
@@ -14,14 +15,17 @@ export function ModelsSection({
   onModelsChanged,
   mode = 'configuration',
   onOpenProviders,
+  onDirtyChange,
 }: {
   payload: ServerSettingsPayload
   onPayloadChange(payload: ServerSettingsPayload): void
   onModelsChanged?(): void
   mode?: 'catalog' | 'configuration'
   onOpenProviders?(): void
+  onDirtyChange?(dirty: boolean): void
 }): JSX.Element {
   const { t } = useTranslation()
+  const request = useSettingsRequest()
   const [providerId, setProviderId] = useState(payload.providers[0]?.id ?? '')
   const [newProviderId, setNewProviderId] = useState('')
   const [newProviderLabel, setNewProviderLabel] = useState('')
@@ -35,6 +39,9 @@ export function ModelsSection({
   const [label, setLabel] = useState('')
   const [contextWindow, setContextWindow] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const hasDraft = Boolean(providerFormOpen || editingModel || modelId || label || contextWindow
+    || newProviderId || newProviderLabel || newProviderBaseUrl || newProviderApiKey)
+  useEffect(() => { onDirtyChange?.(hasDraft) }, [hasDraft, onDirtyChange])
 
   useEffect(() => {
     if (!payload.providers.some((p) => p.id === providerId)) {
@@ -44,7 +51,7 @@ export function ModelsSection({
 
   const addModel = useMutation({
     mutationFn: async (input: { providerId: string; id: string; label?: string; contextWindow?: number }): Promise<ServerSettingsPayload> => {
-      const res = await fetch('/settings/models', {
+      const res = await request('/settings/models', {
         method: editingModel ? 'PATCH' : 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(input),
@@ -66,7 +73,7 @@ export function ModelsSection({
 
   const addProvider = useMutation({
     mutationFn: async (input: { id: string; label?: string; wire: 'anthropic' | 'openai'; baseUrl: string; apiKey: string }): Promise<ServerSettingsPayload> => {
-      const res = await fetch('/settings/providers', {
+      const res = await request('/settings/providers', {
         method: editingProviderId ? 'PATCH' : 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(editingProviderId ? {
@@ -95,7 +102,7 @@ export function ModelsSection({
   const deleteProvider = useMutation({
     mutationFn: async (input: { providerId: string }): Promise<ServerSettingsPayload> => {
       const params = new URLSearchParams({ providerId: input.providerId })
-      const res = await fetch(`/settings/providers?${params.toString()}`, { method: 'DELETE' })
+      const res = await request(`/settings/providers?${params.toString()}`, { method: 'DELETE' })
       const body = await res.json() as ServerSettingsPayload | { error?: string }
       if (!res.ok) throw new Error('error' in body && body.error ? body.error : `HTTP ${res.status}`)
       return body as ServerSettingsPayload
@@ -110,7 +117,7 @@ export function ModelsSection({
   const deleteModel = useMutation({
     mutationFn: async (input: { providerId: string; id: string }): Promise<ServerSettingsPayload> => {
       const params = new URLSearchParams({ providerId: input.providerId, id: input.id })
-      const res = await fetch(`/settings/models?${params.toString()}`, { method: 'DELETE' })
+      const res = await request(`/settings/models?${params.toString()}`, { method: 'DELETE' })
       const body = await res.json() as ServerSettingsPayload | { error?: string }
       if (!res.ok) throw new Error('error' in body && body.error ? body.error : `HTTP ${res.status}`)
       return body as ServerSettingsPayload
@@ -124,7 +131,7 @@ export function ModelsSection({
 
   const setDefaultModel = useMutation({
     mutationFn: async (input: { model: string }): Promise<ServerSettingsPayload> => {
-      const res = await fetch('/settings/default-model', {
+      const res = await request('/settings/default-model', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(input),

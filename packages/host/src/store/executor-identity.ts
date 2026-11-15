@@ -10,6 +10,8 @@ export type StoredExecutorIdentity = {
   createdAt: string
   lastSeenAt?: string
   credentialVersion?: number
+  enrollmentHash?: string
+  enrollmentInviteId?: string
   revokedAt?: string
 }
 
@@ -180,6 +182,8 @@ export class ExecutorIdentityStore implements ExecutorIdentityStorage {
     const identity: StoredExecutorIdentity = {
       tokenHash: hashToken(token),
       workspaceId,
+      enrollmentHash: invite.inviteHash.slice('sha256:'.length),
+      enrollmentInviteId: invite.id,
       ...(label ? { label } : {}),
       createdAt: new Date().toISOString(),
       lastSeenAt: new Date().toISOString(),
@@ -255,7 +259,7 @@ export class ExecutorIdentityStore implements ExecutorIdentityStorage {
     if (!current) throw new Error('executor identity not found')
     current.revokedAt = new Date().toISOString()
     const token = `ak_exec_${randomBytes(32).toString('base64url')}`
-    this.identities.push({ tokenHash: hashToken(token), workspaceId, ...(current.installId ? { installId: current.installId } : {}), ...(current.label ? { label: current.label } : {}), createdAt: new Date().toISOString(), credentialVersion: (current.credentialVersion ?? 1) + 1 })
+    this.identities.push({ tokenHash: hashToken(token), workspaceId, ...(current.installId ? { installId: current.installId } : {}), ...(current.label ? { label: current.label } : {}), ...(current.enrollmentHash ? { enrollmentHash: current.enrollmentHash } : {}), ...(current.enrollmentInviteId ? { enrollmentInviteId: current.enrollmentInviteId } : {}), createdAt: new Date().toISOString(), credentialVersion: (current.credentialVersion ?? 1) + 1 })
     this.save()
     return token
   }

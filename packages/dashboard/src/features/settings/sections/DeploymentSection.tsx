@@ -10,18 +10,20 @@ import packageJson from '../../../../package.json'
 import { HelpHint } from '../../../components/ui/help-hint.js'
 import { Button } from '../../../components/ui/button.js'
 import { forcePwaRefresh } from '../../../lib/pwa.js'
+import { useSettingsRequest } from '../configuration-request.js'
 
 const DASHBOARD_VERSION = packageJson.version
 
-export function DeploymentSection({ payload, host, token }: { payload: ServerSettingsPayload; host: string; token?: string }): JSX.Element {
+export function DeploymentSection({ payload, host, token, cacheNamespace }: { payload: ServerSettingsPayload; host: string; token?: string; cacheNamespace?: string }): JSX.Element {
   const { t } = useTranslation()
+  const request = useSettingsRequest()
   const statusQuery = useQuery({
-    queryKey: ['dedicated-deployment-status', host],
+    queryKey: ['dedicated-deployment-status', cacheNamespace ?? host, host],
     queryFn: async (): Promise<DedicatedDeploymentStatus | ExternalDeploymentHealth | null> => {
-      const response = await fetch(`${host.replace(/\/$/u, '')}/runtime/deployment/status`, { cache: 'no-store', credentials: 'include', signal: AbortSignal.timeout(10_000), headers: token ? { authorization: `Bearer ${token}` } : undefined })
+      const response = await request(`${host.replace(/\/$/u, '')}/runtime/deployment/status`, { cache: 'no-store', credentials: 'include', signal: AbortSignal.timeout(10_000), headers: token ? { authorization: `Bearer ${token}` } : undefined })
       if (response.status === 404) {
         if (payload.runtimeManagement !== 'external') return null
-        const health = await fetch(`${host.replace(/\/$/u, '')}/runtime/deployment/health`, { cache: 'no-store', credentials: 'include', signal: AbortSignal.timeout(10_000), headers: token ? { authorization: `Bearer ${token}` } : undefined })
+        const health = await request(`${host.replace(/\/$/u, '')}/runtime/deployment/health`, { cache: 'no-store', credentials: 'include', signal: AbortSignal.timeout(10_000), headers: token ? { authorization: `Bearer ${token}` } : undefined })
         if (health.status === 404) return null
         if (!health.ok) throw new Error(`HTTP ${health.status}`)
         return await health.json() as ExternalDeploymentHealth
@@ -86,12 +88,12 @@ export function DeploymentSection({ payload, host, token }: { payload: ServerSet
   )
 }
 
-export function ManagementSection({ payload, host, token, services }: { payload: ServerSettingsPayload; host: string; token?: string; services: DeploymentServices }): JSX.Element {
+export function ManagementSection({ payload, host, token, services, includeSilo = true }: { payload: ServerSettingsPayload; host: string; token?: string; services: DeploymentServices; includeSilo?: boolean }): JSX.Element {
   const { t } = useTranslation()
   const tools = [
     { name: t('deploymentCenter.identity'), description: t('deploymentCenter.identityHelp'), url: services.identityConsoleUrl },
     { name: 'Socket.IO Admin', description: t('deploymentCenter.socketHelp'), url: payload.socketAdmin?.active ? payload.socketAdmin.path : undefined },
-    { name: 'SILO Console', description: t('deploymentCenter.siloHelp'), url: services.siloConsolePath },
+    ...(includeSilo ? [{ name: t('unifiedSettings.silo.title'), description: t('deploymentCenter.siloHelp'), url: services.siloConsolePath ? '/auth/silo/open' : undefined }] : []),
     { name: 'Aspire', description: t('deploymentCenter.aspireHelp'), url: services.observabilityUrl },
   ]
   return <div data-testid="settings-management-tools">
@@ -99,10 +101,9 @@ export function ManagementSection({ payload, host, token, services }: { payload:
     <div className="grid gap-3 sm:grid-cols-2">
       {tools.map(tool => <section key={tool.name} className="flex min-w-0 flex-col gap-3 rounded-lg border border-border/50 bg-card/60 p-4">
         <div className="min-w-0 flex-1">
-          <h4 className="font-semibold">{tool.name}</h4>
-          <p className="mt-1 text-sm text-muted-foreground">{tool.description}</p>
+          <h4 className="flex items-center gap-1 font-semibold">{tool.name}<HelpHint label={tool.name}>{tool.description}</HelpHint></h4>
         </div>
-        {tool.url ? <Button asChild variant="outline" className="self-start"><a href={tool.url} target="_blank" rel="noreferrer" data-testid={tool.name === 'SILO Console' ? 'settings-open-silo' : undefined}>{tool.name === t('deploymentCenter.identity') ? t('deploymentCenter.openIdentity') : `${t('settings.socketAdmin.open')} ${tool.name}`}</a></Button>
+        {tool.url ? <Button asChild variant="outline" className="self-start"><a href={tool.url === '/auth/silo/open' ? tool.url : host && tool.url.startsWith('/') ? new URL(tool.url, host).href : tool.url} target="_blank" rel="noreferrer" data-testid={tool.url === '/auth/silo/open' ? 'settings-open-silo' : undefined}>{tool.name === t('deploymentCenter.identity') ? t('deploymentCenter.openIdentity') : `${t('settings.socketAdmin.open')} ${tool.name}`}</a></Button>
           : <p className="text-sm text-muted-foreground">{t('deploymentCenter.unavailable')}</p>}
         {tool.name === 'Aspire' && tool.url ? <div data-testid="settings-native-aspire">
           <div className="flex min-w-0 items-center gap-2"><code className="min-w-0 break-all text-xs">{tool.url}</code><CopyButton value={tool.url} /></div>
@@ -116,6 +117,7 @@ export function ManagementSection({ payload, host, token, services }: { payload:
 
 function AspireLoginToken({ host, token }: { host: string; token?: string }): JSX.Element {
   const { t } = useTranslation()
+  const request = useSettingsRequest()
   const [value, setValue] = useState<string>()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(false)
@@ -132,7 +134,7 @@ function AspireLoginToken({ host, token }: { host: string; token?: string }): JS
     setLoading(true)
     setError(false)
     try {
-      const response = await fetch(`${host.replace(/\/$/u, '')}/auth/aspire/login-token`, {
+      const response = await request(`${host.replace(/\/$/u, '')}/auth/aspire/login-token`, {
         method: 'POST', cache: 'no-store', credentials: 'include', signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]),
         headers: token ? { authorization: `Bearer ${token}` } : undefined,
       })

@@ -5,6 +5,7 @@ import { Button } from '../../../components/ui/button.js'
 import { HelpHint } from '../../../components/ui/help-hint.js'
 import { SectionHeader } from '../controls.js'
 import { responseError } from '../section-utils.js'
+import { useSettingsRequest } from '../configuration-request.js'
 
 type WebSearchSettings = {
   configured: boolean
@@ -12,8 +13,9 @@ type WebSearchSettings = {
   updatedAt?: string
 }
 
-export function WebSearchSection(): JSX.Element {
+export function WebSearchSection({ readOnly = false, onSaved }: { readOnly?: boolean; onSaved?(): void } = {}): JSX.Element {
   const { t, i18n } = useTranslation()
+  const request = useSettingsRequest()
   const [settings, setSettings] = useState<WebSearchSettings | null>(null)
   const [apiKey, setApiKey] = useState('')
   const [loading, setLoading] = useState(true)
@@ -27,7 +29,7 @@ export function WebSearchSection(): JSX.Element {
       setLoading(true)
       setError(null)
       try {
-        const response = await fetch('/settings/web-search', { cache: 'no-store' })
+        const response = await request('/settings/web-search', { cache: 'no-store' })
         if (!response.ok) throw new Error(await responseError(response))
         const next = (await response.json()) as WebSearchSettings
         if (!cancelled) setSettings(next)
@@ -48,15 +50,16 @@ export function WebSearchSection(): JSX.Element {
     setError(null)
     setMessage(null)
     try {
-      const response = await fetch('/settings/web-search', {
+      const response = await request('/settings/web-search', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ provider: 'serper', apiKey: apiKey.trim() }),
       })
       if (!response.ok) throw new Error(await responseError(response))
-      setSettings({ configured: true, provider: 'serper' })
+      setSettings(response.status === 204 ? { configured: true, provider: 'serper' } : await response.json() as WebSearchSettings)
       setApiKey('')
       setMessage(t('settings.webSearch.saved'))
+      onSaved?.()
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : String(saveError))
     } finally {
@@ -69,7 +72,7 @@ export function WebSearchSection(): JSX.Element {
     setError(null)
     setMessage(null)
     try {
-      const response = await fetch('/settings/web-search/test', { method: 'POST' })
+      const response = await request('/settings/web-search/test', { method: 'POST' })
       if (!response.ok) throw new Error(await responseError(response))
       setMessage(t('settings.webSearch.testSucceeded'))
     } catch (testError) {
@@ -84,11 +87,12 @@ export function WebSearchSection(): JSX.Element {
     setError(null)
     setMessage(null)
     try {
-      const response = await fetch('/settings/web-search', { method: 'DELETE' })
+      const response = await request('/settings/web-search', { method: 'DELETE' })
       if (!response.ok) throw new Error(await responseError(response))
-      setSettings({ configured: false, provider: 'serper' })
+      setSettings(response.status === 204 ? { configured: false, provider: 'serper' } : await response.json() as WebSearchSettings)
       setApiKey('')
       setMessage(t('settings.webSearch.removed'))
+      onSaved?.()
     } catch (removeError) {
       setError(removeError instanceof Error ? removeError.message : String(removeError))
     } finally {
@@ -106,14 +110,14 @@ export function WebSearchSection(): JSX.Element {
           <div className="rounded-md border border-border/50 bg-card/60 px-4 py-3 text-sm">
             <div className="font-medium">{t('settings.webSearch.status')}</div>
             <p className="mt-1 text-sm text-muted-foreground" data-testid="settings-web-search-status">
-              {settings?.configured ? t('settings.webSearch.configured') : t('settings.webSearch.notConfigured')}
+              {!settings ? t('unifiedSettings.unknown') : settings.configured ? t('settings.webSearch.configured') : t('settings.webSearch.notConfigured')}
               {settings?.updatedAt
                 ? ` · ${t('settings.webSearch.updatedAt', { date: new Date(settings.updatedAt).toLocaleString(i18n.language) })}`
                 : ''}
             </p>
           </div>
 
-          <form className="space-y-4 rounded-md border border-border/50 bg-card/60 p-4" onSubmit={(event) => { void save(event) }}>
+          {!readOnly && settings ? <form className="space-y-4 rounded-md border border-border/50 bg-card/60 p-4" onSubmit={(event) => { void save(event) }}>
             <label className="block text-sm font-medium" htmlFor="settings-web-search-provider">
               {t('settings.webSearch.provider')}
             </label>
@@ -149,7 +153,7 @@ export function WebSearchSection(): JSX.Element {
                 </Button>
               ) : null}
             </div>
-          </form>
+          </form> : null}
 
           {error ? <p className="text-sm text-destructive" role="alert">{t('settings.webSearch.requestFailed', { error })}</p> : null}
           {message ? <p className="text-sm text-emerald-600 dark:text-emerald-400" role="status">{message}</p> : null}

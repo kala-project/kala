@@ -1,4 +1,4 @@
-import { PREF_VSCODE_THEME } from '../lib/prefs.js'
+import { PREF_VSCODE_THEME, writeDashboardPreference } from '../lib/prefs.js'
 
 export type VSCodeThemeKind = 'light' | 'dark' | 'hc' | 'hcLight'
 
@@ -113,12 +113,10 @@ export function readStoredVSCodeTheme(): StoredVSCodeTheme | null {
   }
 }
 
-export function writeStoredVSCodeTheme(theme: StoredVSCodeTheme | null): void {
-  try {
-    if (theme) localStorage.setItem(VSCODE_THEME_STORAGE_KEY, JSON.stringify(theme))
-    else localStorage.removeItem(VSCODE_THEME_STORAGE_KEY)
-  } catch {}
+export function writeStoredVSCodeTheme(theme: StoredVSCodeTheme | null): boolean {
+  if (!writeDashboardPreference(VSCODE_THEME_STORAGE_KEY, theme ? JSON.stringify(theme) : null)) return false
   window.dispatchEvent(new Event(VSCODE_THEME_CHANGE_EVENT))
+  return true
 }
 
 export function builtinThemeForScheme(scheme: 'dark' | 'light'): StoredVSCodeTheme {

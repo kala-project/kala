@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "rootDir": "../..", "noEmit": true, "declaration": false, "declarationMap": false },
+  "include": ["src/settings/model-policy.integration.test.ts", "src/settings/action-matrix.integration.test.ts"],
+  "exclude": []
+}
