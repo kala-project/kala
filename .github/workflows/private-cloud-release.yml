@@ -305,12 +305,33 @@ jobs:
           mkdir -p "${{ runner.temp }}/image-vulnerability-reports"
           scan() {
             component="$1"; image="$2"
-            grype "$image" -o json > "${{ runner.temp }}/image-vulnerability-reports/$component-grype.json" || return 1
-            trivy image --scanners vuln --format json --output "${{ runner.temp }}/image-vulnerability-reports/$component-trivy.json" "$image" || return 1
+            grype "$image" -o json > "${{ runner.temp }}/image-vulnerability-reports/$component-grype.json" || {
+              echo "::error title=Grype execution failed::$component image scanning failed before vulnerability policy evaluation; inspect the scanner log."
+              return 1
+            }
+            trivy image --scanners vuln --format json --output "${{ runner.temp }}/image-vulnerability-reports/$component-trivy.json" "$image" || {
+              echo "::error title=Trivy execution failed::$component image scanning failed before vulnerability policy evaluation; inspect the scanner log."
+              return 1
+            }
             node scripts/security/check-vulnerabilities.mjs \
               --grype "${{ runner.temp }}/image-vulnerability-reports/$component-grype.json" \
               --trivy "${{ runner.temp }}/image-vulnerability-reports/$component-trivy.json" \
-              --output "${{ runner.temp }}/image-vulnerability-reports/$component-normalized.json"
+              --output "${{ runner.temp }}/image-vulnerability-reports/$component-normalized.json" || {
+                node --input-type=module - "${{ runner.temp }}/image-vulnerability-reports/$component-normalized.json" "$component" <<'NODE'
+          import { existsSync, readFileSync } from 'node:fs'
+          const [path, component] = process.argv.slice(2)
+          const escape = (value) => String(value).replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')
+          if (!existsSync(path)) {
+            console.log(`::error title=Vulnerability policy failed::${escape(component)} report validation failed; inspect the policy log.`)
+          } else {
+            const report = JSON.parse(readFileSync(path, 'utf8'))
+            for (const finding of report.findings.filter((item) => ['HIGH', 'CRITICAL'].includes(item.severity) && !item.excepted)) {
+              console.log(`::error title=Blocking image vulnerability::${escape(`${component}: ${finding.scanner} ${finding.vulnerabilityId} ${finding.package}@${finding.installedVersion} ${finding.severity}; fixed: ${finding.fixedVersion || 'not available'}`)}`)
+            }
+          }
+          NODE
+                return 1
+              }
           }
           # Gather all three reports, but never turn a scanner/policy failure into a passing job.
           failed=0

@@ -106,6 +106,16 @@ test('Windows acceptance builds real workspace dependencies instead of a quoted 
   assert.match(workflow, /\$assets = @\([\s\S]*?'install-executor\.ps1'\s*\)/u)
 })
 
+test('release qualification bounds heavy test concurrency and exposes fail-closed image scan diagnostics', () => {
+  const release = readFileSync(join(import.meta.dirname, '../../.github/workflows/release.yml'), 'utf8')
+  assert.match(release, /name: Configure test workers\n\s+env:\n\s+KALA_TEST_MAX_WORKERS: 2\n\s+run: node scripts\/testing\/configure-test-workers\.mjs/u)
+  const cloud = readFileSync(join(import.meta.dirname, '../../.github/workflows/private-cloud-release.yml'), 'utf8')
+  assert.match(cloud, /::error title=Grype execution failed::/u)
+  assert.match(cloud, /::error title=Trivy execution failed::/u)
+  assert.match(cloud, /::error title=Blocking image vulnerability::/u)
+  assert.match(cloud, /scan runtime[\s\S]*scan ingress[\s\S]*scan dashboard[\s\S]*exit "\$failed"/u)
+})
+
 test('Private Cloud Windows invite fixture uses the same OIDC authentication contract as the Gateway', () => {
   const fixture = readFileSync(join(import.meta.dirname, '../product-e2e/verify-private-cloud-windows-invite.mjs'), 'utf8')
   assert.match(fixture, /authentication: \{\s*kind: 'oidc',\s*loginStates: new MemoryLoginStates\(\),\s*secretBox: createSessionSecretBox\([\s\S]*oidc: \{/u)
